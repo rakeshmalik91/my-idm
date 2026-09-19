@@ -1,0 +1,14 @@
+# My-IDM — Download Manager
+
+## One URL per line. Lines starting with # are comments.
+## Supports HTTP/HTTPS URLs and magnet links.
+
+# Example HTTP downloads:
+# https://example.com/file.zip
+# https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso
+
+# Example magnet links:
+# magnet:?xt=urn:btih:EXAMPLE_HASH&dn=example_file
+
+# Example .torrent file paths:
+# D:\Torrents\example.torrent
