@@ -26,6 +26,7 @@ class Colors:
     ORANGE = "#d29922"
     RED = "#f85149"
     PURPLE = "#bc8cff"
+    CYAN = "#39c5bb"
 
     # Progress bar colors
     PROGRESS_BG = "#21262d"
@@ -346,5 +347,52 @@ QGroupBox::title {{
     left: 12px;
     padding: 0 4px;
     color: {Colors.TEXT_SECONDARY};
+}}
+
+/* ---- Tab Widget ---- */
+QTabWidget::pane {{
+    border: 1px solid {Colors.BORDER};
+    background-color: {Colors.BG_MID};
+    border-radius: 4px;
+}}
+
+QTabBar::tab {{
+    background-color: {Colors.BG_DARK};
+    color: {Colors.TEXT_SECONDARY};
+    border: 1px solid {Colors.BORDER};
+    border-bottom: none;
+    padding: 6px 14px;
+    margin-right: 2px;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+    font-weight: 500;
+}}
+
+QTabBar::tab:selected {{
+    background-color: {Colors.BG_MID};
+    color: {Colors.ACCENT};
+    border-bottom: 2px solid {Colors.ACCENT};
+}}
+
+QTabBar::tab:hover:!selected {{
+    background-color: {Colors.BG_HOVER};
+    color: {Colors.TEXT};
+}}
+
+/* ---- Splitter ---- */
+QSplitter::handle {{
+    background-color: {Colors.BORDER};
+}}
+
+QSplitter::handle:vertical {{
+    height: 4px;
+}}
+
+QSplitter::handle:horizontal {{
+    width: 4px;
+}}
+
+QSplitter::handle:hover {{
+    background-color: {Colors.ACCENT};
 }}
 """

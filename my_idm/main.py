@@ -16,11 +16,13 @@ from my_idm.styles import DARK_STYLESHEET
 
 
 DEFAULT_BACKLOG = APP_DIR / "backlog.txt"
-LOG_FILE = APP_DIR / "my-idm.log"
+LOGS_DIR = APP_DIR / "logs"
+LOG_FILE = LOGS_DIR / "my-idm.log"
 
 
 def setup_logging(verbose: bool = False):
     APP_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     level = logging.DEBUG if verbose else logging.INFO
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -69,12 +71,25 @@ def main():
     log = logging.getLogger("my_idm")
     log.info("Starting My-IDM v1.0.0")
 
+    # Windows taskbar icon integration
+    if sys.platform == "win32":
+        import ctypes
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("myidm.downloadmanager.app.1")
+        except Exception:
+            pass
+
     # Qt Application
     app = QApplication(sys.argv)
     app.setApplicationName("My-IDM")
     app.setApplicationVersion("1.0.0")
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_STYLESHEET)
+
+    from my_idm.resources import get_app_icon
+    app_icon = get_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
 
     # Database
     db = Database()
@@ -83,6 +98,9 @@ def main():
     # Manager
     manager = DownloadManager(db)
     manager.start()
+
+    # Wire clean shutdown on application quit
+    app.aboutToQuit.connect(manager.stop)
 
     # Main window
     window = MainWindow(manager)
@@ -93,12 +111,6 @@ def main():
     if Path(backlog_path).exists():
         count = manager.load_backlog(backlog_path)
         log.info("Loaded %d downloads from backlog: %s", count, backlog_path)
-
-    # Resume incomplete downloads from history
-    for entry in db.get_all_downloads():
-        if entry.status in ("downloading", "queued"):
-            log.info("Auto-resuming: %s (%s)", entry.filename or entry.url, entry.id)
-            manager.resume_download(entry.id)
 
     # Run
     exit_code = app.exec()

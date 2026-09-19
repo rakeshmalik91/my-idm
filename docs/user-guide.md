@@ -9,6 +9,11 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 - [Getting Started](#getting-started)
 - [Adding Downloads](#adding-downloads)
 - [Managing Downloads](#managing-downloads)
+- [Bottom Details Panel](#bottom-details-panel)
+- [Preferences & Settings](#preferences--settings)
+- [Dedicated Feature Guides](#dedicated-feature-guides)
+- [VPN & Network Settings](#vpn--network-settings)
+- [Antivirus & Malware Scanning](#antivirus--malware-scanning)
 - [Backlog Files](#backlog-files)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Command-Line Options](#command-line-options)
@@ -50,7 +55,7 @@ The main window opens with an empty download list. The status bar at the bottom 
 1. Click **➕ Add Download** in the toolbar (or press **Ctrl+N**)
 2. The dialog **automatically detects and prefills** any valid URL, magnet link, or `.torrent` file path found in your clipboard (with the text pre-selected for quick replacement).
 3. For `.torrent` files, you can paste the file path directly or click the built-in **Browse .torrent …** button (or use File → **Add Torrent File…** / **Ctrl+T**).
-4. Choose a save directory (defaults to `~/Downloads`)
+4. Choose a save directory (prefilled with your configured default or last used directory). Check **"Set as default download folder"** to permanently save this folder as your new default.
 5. Set the number of segments for parallel downloading (1–32, default 8 for HTTP)
 6. Click **Download** (or press Enter)
 
@@ -127,6 +132,149 @@ Right-click any download to access all actions (Pause, Resume, Recheck, Move, Op
 
 ---
 
+## Bottom Details Panel
+
+My-IDM includes a rich, collapsible bottom details panel separated from the main download table by an interactively resizable vertical divider (`QSplitter`).
+
+### Opening and Toggling the Panel
+
+- Press **F4** to toggle the panel on or off.
+- Click **📋 Details Panel** on the toolbar or select **View → 📋 Details Panel** from the menu.
+- Click **✕** in the top-right corner of the panel to close it.
+- Your splitter sizes and open/closed visibility state are automatically remembered between app sessions.
+
+### Tab Breakdown
+
+When any download is selected in the main table, the panel updates dynamically across five dedicated tabs:
+
+1. **📋 Overview**:
+   - **Status & Progress**: Color-coded download state with error details and completion percentage.
+   - **Size Metrics**: Exact downloaded bytes vs. total size formatted with human-readable binary units (KiB, MiB, GiB).
+   - **Live Speeds**: Real-time download speed and upload speed indicators.
+   - **ETA & Time Elapsed**: Precise remaining time calculation.
+   - **Swarm & Transfer Breakdown**: Number of connected seeds and swarm peers (for torrents) or active parallel segments (for HTTP).
+   - **Directory & Hash**: File path with an **Open Folder** shortcut, content hash, or torrent info-hash.
+   - **Malware & Security Status**: Results of pre-download safety inspection or post-download antivirus scan.
+
+2. **📁 Files**:
+   - Inspect individual files included within multi-file BitTorrent transfers (or the target file for HTTP).
+   - Columns: `#`, `File Name`, `Size`, `Progress Bar`, `Priority`, `Status`.
+   - **Interactive Priority Control**: Change torrent file priorities on the fly via the dropdown:
+     - **High** (priority 7) — Downloads first
+     - **Normal** (priority 4) — Standard download priority
+     - **Low** (priority 1) — Lower transfer priority
+     - **Don't Download** (priority 0) — Skips downloading this file entirely
+
+3. **👥 Peers & Swarm**:
+   - Live peer list for BitTorrent transfers.
+   - Columns: `IP Address : Port`, `Client Software` (e.g. qBittorrent, Transmission, libtorrent), `Peer Progress %`, `Download Speed`, `Upload Speed`, and swarm `Flags`.
+
+4. **📡 Trackers**:
+   - Complete list of announced BitTorrent trackers.
+   - Columns: `Tier`, `Tracker URL`, `Status` (Working, Updating, Error), and `Send Stats`.
+
+5. **🧩 Segments**:
+   - HTTP parallel segment breakdown.
+   - Columns: `Segment #`, `Byte Range` (start byte to end byte), `Downloaded Bytes`, `Progress Bar`, and `Status` (downloading, completed, pending).
+
+---
+
+## Preferences & Settings
+
+Open the comprehensive preferences dialog anytime via:
+- Toolbar: **⚙️ Preferences** button
+- Menu: **Tools → ⚙️ Preferences…**
+- Shortcut: **Ctrl+,**
+
+The settings popup is organized into three tabs:
+
+### 1. General & Downloads Tab
+
+- **Default Download Location**:
+  - Sets your permanent default download directory.
+  - Click **Browse …** to choose any folder on your computer.
+  - Click **📁 Open Folder** to open the current download directory directly in File Explorer.
+  - **Remember last used folder when adding downloads**: When enabled, if you select a different directory in the Add Download dialog, My-IDM remembers that folder for subsequent downloads.
+- **Download Performance & Engine Defaults**:
+  - **Default parallel connections (segments)**: Configure the default number of HTTP segments (1–32, default 8).
+  - **Maximum concurrent active downloads**: Limit simultaneous active downloads (1–20, default 3) to prevent saturating bandwidth.
+  - **Maximum automatic retries**: Number of automatic reconnection attempts before marking a download as errored (1–10, default 5).
+- **Application Behavior**:
+  - **Automatically resume incomplete downloads when application starts**: Interrupted or actively downloading items resume immediately on launch.
+  - **Show desktop / status notification when a download completes**: Notifies you when files finish.
+
+### 2. Network & VPN Tab
+Access adapter binding, kill switch, and HTTP/SOCKS5 proxy settings directly from the unified preferences window.
+
+### 3. Antivirus & Security Tab
+Configure pre-download safety checks, executable warnings, double-extension blocking, VirusTotal API key, and post-download antivirus scanning engines.
+
+---
+
+## Dedicated Feature Guides
+
+For deep-dive documentation on specific features, refer to the dedicated feature guides:
+
+- [**VPN Interface Binding & Kill Switch Guide**](vpn.md) — Hardware-level interface binding, leak prevention, kill switch monitoring, and proxy routing.
+- [**Tor Network Privacy Guide**](tor.md) — One-click Tor activation, automatic background `tor.exe` lifecycle management, SOCKS5 traffic routing, and diagnostic alerting.
+- [**Antivirus & Malware Protection Guide**](antivirus.md) — Pre-download URL safety heuristics, VirusTotal API, post-download Windows Defender & custom CLI scanner integration, and threat remediation.
+- [**BitTorrent Swarm Engine Guide**](torrent.md) — Magnet & `.torrent` handling, multi-peer pipelining, fastresume caching, interactive file prioritization, and swarm inspection.
+
+---
+
+## VPN & Network Settings
+
+My-IDM includes native support for binding downloads to specific VPN network interfaces (e.g. WireGuard, OpenVPN, NordLynx, Tailscale) with an automatic **Kill Switch**, as well as optional **SOCKS5/HTTP proxy** routing for both usual HTTP downloads and BitTorrent.
+
+### Accessing Network Settings
+
+- Click the network badge in the status bar (e.g., `🌐 Net: Default` or `🛡️ VPN: [Adapter]`), or
+- Select **Tools → 🌐 VPN & Network Settings…** from the menu bar.
+
+### Network Adapter / VPN Binding
+
+1. **Adapter Selection**: Choose from automatically detected local adapters (VPNs are automatically badged with `🛡️ VPN`).
+2. **Kill Switch Protection**: When enabled, My-IDM ensures that downloads will never leak over your default physical connection if the VPN disconnects. Downloads will halt with status `"VPN / Bound interface disconnected (Kill switch active)"` and wait for the VPN to reconnect.
+3. **HTTP & Torrent Enforcement**:
+   - **HTTP Downloads**: Bound via OS TCP connector directly to the selected adapter's local IP address.
+   - **Torrents**: Libtorrent's `listen_interfaces` and `outgoing_interfaces` are locked strictly to the adapter's address.
+
+### Proxy Support
+
+- Supports **HTTP** and **SOCKS5** proxies (including optional user/password authentication).
+- Routes both segmented HTTP streams and BitTorrent peer/tracker communication through the proxy.
+- Built-in **🧪 Test Connection** button verifies proxy and adapter reachability before saving.
+
+---
+
+## Antivirus & Malware Scanning
+
+My-IDM provides two-layer threat protection: **pre-download URL inspection** to protect against malicious sources before bytes are transferred, and **post-download antivirus scanning** to verify file integrity with your local antivirus engine.
+
+Open the settings at **Tools → 🛡️ Antivirus & Security Settings…**.
+
+### 1. Pre-Download Safety Inspection
+
+Before initiating an HTTP download or torrent metadata fetch, My-IDM evaluates the target for known attack patterns and deceptive file naming:
+
+- **Executable & Script Warning**: Alerts you when downloading `.exe`, `.msi`, `.bat`, `.vbs`, `.scr`, `.iso`, `.cmd`, `.ps1`, or other high-risk payload types.
+- **Deceptive Double Extension Detection**: Automatically flags or blocks social-engineering tricks such as `invoice.pdf.exe` or `photo.jpg.scr`.
+- **VirusTotal Online Reputation (Optional)**: If you enter your free VirusTotal API key, My-IDM can query 70+ online security engines for threat verdicts prior to downloading.
+
+### 2. Post-Download Antivirus Scanning
+
+Once a download finishes (for both HTTP segmented transfers and BitTorrent downloads):
+
+- **Automatic Scan**: The download immediately transitions to **Scanning 🛡️** in the background without blocking the UI.
+- **Windows Defender Integration**: On Windows systems, My-IDM automatically discovers and invokes `MpCmdRun.exe` (no extra configuration required).
+- **Custom Antivirus Scanner Support**: Configure any third-party command-line antivirus scanner (e.g. ClamAV `clamscan.exe`, Malwarebytes, ESET) with custom argument templates using the `%file%` placeholder.
+- **Action on Threat Detection**:
+  - **Alert user (keep file)**: Flags status as **Threat Detected ⚠** and displays a security alert dialog with scanner diagnostics.
+  - **Alert user and quarantine/delete**: Automatically isolates the malicious file (renames with `.quarantine_malware` extension or deletes) to prevent accidental execution.
+- **Manual On-Demand Scan**: Right-click any completed download in the table and select **🛡️ Scan with Antivirus** to rescan at any time.
+
+---
+
 ## The Download List
 
 The main table shows 12 columns of information for each download:
@@ -153,7 +301,9 @@ The main table shows 12 columns of information for each download:
 | Queued | Gray | Waiting to start or queued for retry |
 | Downloading | Blue | Actively downloading |
 | Paused | Orange | Paused by the user |
-| Completed | Green | Successfully finished |
+| Scanning 🛡️ | Cyan | Antivirus scan actively running on completed file |
+| Completed | Green | Successfully finished and verified clean |
+| Threat Detected ⚠ | Red | Antivirus detected malware or threat in file |
 | Seeding | Purple | Torrent is seeding (uploading to others) |
 | Error ⚠ | Red | Failed (hover for error details) |
 | Checking | Orange | Rechecking file integrity |
@@ -162,9 +312,10 @@ The main table shows 12 columns of information for each download:
 
 The progress bar changes color based on status:
 - 🔵 **Blue** — Downloading
-- 🟢 **Green** — Completed
+- 🔵 **Cyan** — Scanning with antivirus
+- 🟢 **Green** — Completed (clean)
 - 🟠 **Orange** — Paused
-- 🔴 **Red** — Error
+- 🔴 **Red** — Error or Threat Detected
 - 🟣 **Purple** — Seeding
 
 ### Sorting the List
@@ -236,6 +387,7 @@ Duplicate URLs are automatically skipped. See [backlog.txt.example](../backlog.t
 | **Enter** | Open downloaded file |
 | **Ctrl+O** | Open containing folder |
 | **Ctrl+L** | Load backlog file |
+| **Ctrl+,** | Open Preferences / Settings |
 | **Ctrl+A** | Select all downloads |
 | **Ctrl+Q** | Quit the application |
 

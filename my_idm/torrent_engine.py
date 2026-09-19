@@ -8,7 +8,9 @@ import time
 from pathlib import Path
 from typing import Optional, Callable
 
+from my_idm.config import TorConfig
 from my_idm.database import Database, DownloadEntry
+from my_idm.network import NetworkConfig, is_interface_active
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,8 @@ class TorrentEngine:
     def __init__(self, db: Database):
         self._db = db
         self._session: Optional[object] = None  # lt.session
+        self._network_config: Optional[NetworkConfig] = None
+        self._tor_config: Optional[TorConfig] = None
         self._handles: dict[str, object] = {}   # download_id → lt.torrent_handle
         self._progress_cb: Optional[ProgressCallback] = None
         self._status_cb: Optional[StatusCallback] = None
@@ -81,6 +85,7 @@ class TorrentEngine:
             | lt.alert_category.storage
         )
         self._session = lt.session(params)
+        self._apply_all_settings()
 
         FASTRESUME_DIR.mkdir(parents=True, exist_ok=True)
         self._running = True
@@ -100,6 +105,94 @@ class TorrentEngine:
         self._handles.clear()
         log.info("Torrent engine stopped")
 
+    @property
+    def network_config(self) -> Optional[NetworkConfig]:
+        return self._network_config
+
+    @property
+    def tor_config(self) -> Optional[TorConfig]:
+        return self._tor_config
+
+    def apply_tor_config(self, config: TorConfig):
+        """Apply Tor SOCKS5 proxy settings to libtorrent if routing torrents."""
+        self._tor_config = config
+        self._apply_all_settings()
+
+    def apply_network_config(self, config: NetworkConfig):
+        """Apply network interface binding and proxy settings to libtorrent."""
+        self._network_config = config
+        self._apply_all_settings()
+
+    def _apply_all_settings(self):
+        if not _HAS_LIBTORRENT or not self._session:
+            return
+
+        try:
+            sett = self._session.get_settings()
+
+            # 1. Interface binding
+            if self._network_config and self._network_config.is_interface_bound:
+                sett["listen_interfaces"] = f"{self._network_config.interface_ip}:6881"
+                sett["outgoing_interfaces"] = self._network_config.interface_ip
+                log.info(
+                    "TorrentEngine bound to interface %s (%s)",
+                    self._network_config.interface_name,
+                    self._network_config.interface_ip,
+                )
+            else:
+                sett["listen_interfaces"] = "0.0.0.0:6881,[::]:6881"
+                sett["outgoing_interfaces"] = ""
+
+            # 2. Proxy configuration (Tor takes priority if enabled and routing torrents)
+            if self._tor_config and self._tor_config.enabled and self._tor_config.route_torrent:
+                sett["proxy_hostname"] = self._tor_config.proxy_host
+                sett["proxy_port"] = self._tor_config.proxy_port
+                sett["proxy_username"] = ""
+                sett["proxy_password"] = ""
+                sett["proxy_type"] = lt.proxy_type_t.socks5
+                sett["force_proxy"] = True
+                sett["proxy_peer_connections"] = True
+                sett["proxy_tracker_connections"] = True
+                log.info(
+                    "TorrentEngine routed through Tor SOCKS5 proxy: %s:%d",
+                    self._tor_config.proxy_host, self._tor_config.proxy_port,
+                )
+            elif self._network_config and self._network_config.proxy_enabled and self._network_config.proxy_host:
+                sett["proxy_hostname"] = self._network_config.proxy_host
+                sett["proxy_port"] = self._network_config.proxy_port
+                sett["proxy_username"] = self._network_config.proxy_username
+                sett["proxy_password"] = self._network_config.proxy_password
+
+                pt = self._network_config.proxy_type.lower()
+                if pt == "socks5":
+                    sett["proxy_type"] = (
+                        lt.proxy_type_t.socks5_pw
+                        if self._network_config.proxy_username
+                        else lt.proxy_type_t.socks5
+                    )
+                elif pt == "http":
+                    sett["proxy_type"] = (
+                        lt.proxy_type_t.http_pw
+                        if self._network_config.proxy_username
+                        else lt.proxy_type_t.http
+                    )
+                sett["force_proxy"] = True
+                sett["proxy_peer_connections"] = True
+                sett["proxy_tracker_connections"] = True
+                log.info(
+                    "TorrentEngine proxy configured: %s://%s:%d",
+                    pt, self._network_config.proxy_host, self._network_config.proxy_port,
+                )
+            else:
+                sett["proxy_type"] = lt.proxy_type_t.none
+                sett["proxy_hostname"] = ""
+                sett["proxy_port"] = 0
+                sett["force_proxy"] = False
+
+            self._session.apply_settings(sett)
+        except Exception as exc:
+            log.warning("Failed to apply network settings to libtorrent: %s", exc)
+
     # -- public API ----------------------------------------------------------
 
     def add_torrent(self, entry: DownloadEntry) -> bool:
@@ -111,6 +204,31 @@ class TorrentEngine:
             log.error("Cannot add torrent — libtorrent not available")
             return False
 
+        if entry.id in self._handles:
+            log.warning("Torrent %s already added to session, resuming instead", entry.id)
+            self.resume(entry.id)
+            return True
+
+        # Kill switch check: verify bound VPN/interface is active before starting
+        if (
+            self._network_config
+            and self._network_config.kill_switch
+            and self._network_config.is_interface_bound
+        ):
+            if not is_interface_active(
+                self._network_config.interface_name,
+                self._network_config.interface_ip,
+            ):
+                err = (
+                    f"VPN / Bound interface '{self._network_config.interface_name}' "
+                    "disconnected (Kill switch active)"
+                )
+                log.warning(err)
+                self._db.update_status(entry.id, "error", err)
+                if self._status_cb:
+                    self._status_cb(entry.id, "error", err)
+                return False
+
         url = entry.url
         save_path = entry.save_path
 
@@ -119,27 +237,39 @@ class TorrentEngine:
 
         # Load fastresume if available
         resume_path = FASTRESUME_DIR / f"{entry.id}.fastresume"
+        resume_bytes = None
         if resume_path.exists():
             try:
                 with open(resume_path, "rb") as f:
-                    params.resume_data = list(f.read())
-                log.info("Loaded fastresume for %s", entry.id)
+                    resume_bytes = f.read()
             except Exception as exc:
-                log.warning("Failed to load fastresume: %s", exc)
+                log.warning("Failed to read fastresume: %s", exc)
 
         if url.startswith("magnet:"):
             params = lt.parse_magnet_uri(url)
             params.save_path = save_path
-            # Re-apply fastresume after magnet parse
-            if resume_path.exists():
+            if resume_bytes and hasattr(lt, "read_resume_data"):
                 try:
-                    with open(resume_path, "rb") as f:
-                        params.resume_data = list(f.read())
-                except Exception:
-                    pass
+                    params = lt.read_resume_data(resume_bytes)
+                    params.save_path = save_path
+                    log.info("Loaded fastresume for %s", entry.id)
+                except Exception as exc:
+                    log.warning("Failed to parse fastresume: %s", exc)
         elif os.path.isfile(url):
-            ti = lt.torrent_info(url)
-            params.ti = ti
+            if resume_bytes and hasattr(lt, "read_resume_data"):
+                try:
+                    params = lt.read_resume_data(resume_bytes)
+                    params.save_path = save_path
+                    log.info("Loaded fastresume for %s", entry.id)
+                except Exception as exc:
+                    log.warning("Failed to parse fastresume: %s", exc)
+                    params = lt.add_torrent_params()
+                    params.ti = lt.torrent_info(url)
+                    params.save_path = save_path
+            else:
+                params = lt.add_torrent_params()
+                params.ti = lt.torrent_info(url)
+                params.save_path = save_path
         else:
             log.error("Invalid torrent source: %s", url)
             return False
@@ -195,6 +325,7 @@ class TorrentEngine:
     def recheck(self, download_id: str):
         handle = self._handles.get(download_id)
         if handle:
+            self._db.update_status(download_id, "checking")
             handle.force_recheck()
             log.info("Rechecking torrent %s", download_id)
 
@@ -294,7 +425,7 @@ class TorrentEngine:
                     status["upload_speed"],
                 )
 
-            # Check for completion
+            # Check for completion or state transition out of checking
             state = status["state"]
             if state in ("finished", "seeding"):
                 if entry.status != "completed" and entry.status != "seeding":
@@ -302,6 +433,144 @@ class TorrentEngine:
                     if self._status_cb:
                         self._status_cb(download_id, "completed", "")
                     self._save_resume_data(download_id, handle)
+            elif entry.status == "checking" and state not in ("checking_files", "queued_for_checking"):
+                if status["total_size"] > 0 and status["downloaded"] >= status["total_size"]:
+                    new_status = "completed"
+                else:
+                    try:
+                        is_paused = handle.status().is_paused
+                    except Exception:
+                        is_paused = False
+                    new_status = "paused" if is_paused else "downloading"
+                self._db.update_status(download_id, new_status)
+                if self._status_cb:
+                    self._status_cb(download_id, new_status, "")
+            elif entry.status == "completed" and state not in ("finished", "seeding", "checking_files", "queued_for_checking"):
+                # Download was marked completed, but actual progress from recheck is incomplete
+                if status["total_size"] > 0 and status["downloaded"] < status["total_size"]:
+                    try:
+                        is_paused = handle.status().is_paused
+                    except Exception:
+                        is_paused = False
+                    new_status = "paused" if is_paused else "downloading"
+                    self._db.update_status(download_id, new_status)
+                    if self._status_cb:
+                        self._status_cb(download_id, new_status, "")
+
+    # -- details queries -----------------------------------------------------
+
+    def get_torrent_files(self, download_id: str) -> list[dict]:
+        """Returns details for each file in the torrent."""
+        handle = self._handles.get(download_id)
+        if not handle or not _HAS_LIBTORRENT:
+            return []
+
+        try:
+            if not handle.is_valid():
+                return []
+            ti = handle.torrent_file()
+            if not ti:
+                return []
+
+            num_files = ti.num_files()
+            files_info = ti.files()
+            progress_list = handle.file_progress()
+            priorities = handle.get_file_priorities()
+
+            result = []
+            for i in range(num_files):
+                f_size = files_info.file_size(i)
+                f_path = files_info.file_path(i)
+                f_prog = progress_list[i] if i < len(progress_list) else 0
+                f_prio = priorities[i] if i < len(priorities) else 4
+                pct = (f_prog / f_size * 100.0) if f_size > 0 else 100.0
+                result.append({
+                    "index": i,
+                    "path": f_path,
+                    "name": os.path.basename(f_path),
+                    "size": f_size,
+                    "progress": min(pct, 100.0),
+                    "downloaded": f_prog,
+                    "priority": f_prio,
+                })
+            return result
+        except Exception as exc:
+            log.debug("Failed to get torrent files for %s: %s", download_id, exc)
+            return []
+
+    def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:
+        """Sets priority for a specific file (0 = do not download, 1 = low, 4 = normal, 7 = high)."""
+        handle = self._handles.get(download_id)
+        if not handle or not _HAS_LIBTORRENT:
+            return False
+
+        try:
+            if not handle.is_valid():
+                return False
+            handle.file_priority(file_index, priority)
+            return True
+        except Exception as exc:
+            log.warning("Failed to set file priority for %s[%d]: %s", download_id, file_index, exc)
+            return False
+
+    @staticmethod
+    def _safe_str(val: Any, default: str = "") -> str:
+        if val is None:
+            return default
+        if isinstance(val, bytes):
+            return val.decode("utf-8", errors="replace")
+        return str(val)
+
+
+    def get_torrent_peers(self, download_id: str) -> list[dict]:
+        """Returns connected peers information."""
+        handle = self._handles.get(download_id)
+        if not handle or not _HAS_LIBTORRENT:
+            return []
+
+        try:
+            if not handle.is_valid():
+                return []
+            peer_info_list = handle.get_peer_info()
+            peers = []
+            for p in peer_info_list:
+                ip_str = f"{p.ip[0]}:{p.ip[1]}" if isinstance(p.ip, (tuple, list)) else str(p.ip)
+                client_str = self._safe_str(getattr(p, "client", "Unknown"), default="Unknown")
+                flags_str = self._safe_str(getattr(p, "flags", ""))
+                peers.append({
+                    "ip": ip_str,
+                    "client": client_str,
+                    "progress": float(getattr(p, "progress", 0.0)),
+                    "down_speed": getattr(p, "down_speed", 0),
+                    "up_speed": getattr(p, "up_speed", 0),
+                    "flags": flags_str,
+                })
+            return peers
+        except Exception as exc:
+            log.debug("Failed to get torrent peers for %s: %s", download_id, exc)
+            return []
+
+    def get_torrent_trackers(self, download_id: str) -> list[dict]:
+        """Returns tracker status information."""
+        handle = self._handles.get(download_id)
+        if not handle or not _HAS_LIBTORRENT:
+            return []
+
+        try:
+            if not handle.is_valid():
+                return []
+            trackers_list = handle.trackers()
+            trackers = []
+            for t in trackers_list:
+                trackers.append({
+                    "url": self._safe_str(getattr(t, "url", "")),
+                    "tier": getattr(t, "tier", 0),
+                    "send_stats": getattr(t, "send_stats", False),
+                })
+            return trackers
+        except Exception as exc:
+            log.debug("Failed to get torrent trackers for %s: %s", download_id, exc)
+            return []
 
     # -- internal ------------------------------------------------------------
 

@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-DEFAULT_SAVE_PATH = str(Path.home() / "Downloads")
+from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR
+
+DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
 
 class AddDownloadDialog(QDialog):
@@ -32,9 +34,13 @@ class AddDownloadDialog(QDialog):
         self.setMinimumWidth(550)
         self.setModal(True)
 
+        from my_idm.resources import get_app_icon
+        self.setWindowIcon(get_app_icon())
+
+        self._config = GeneralConfig.load()
         self._url = ""
-        self._save_path = DEFAULT_SAVE_PATH
-        self._num_segments = 8
+        self._save_path = self._config.get_effective_save_path()
+        self._num_segments = self._config.default_segments
 
         self._setup_ui()
         self._prefill_url(initial_url)
@@ -65,14 +71,20 @@ class AddDownloadDialog(QDialog):
 
         # Save location
         save_group = QGroupBox("Save Location")
-        save_layout = QHBoxLayout(save_group)
+        save_layout = QVBoxLayout(save_group)
+        save_layout.setSpacing(6)
 
+        path_row = QHBoxLayout()
         self._save_edit = QLineEdit(self._save_path)
-        save_layout.addWidget(self._save_edit)
+        path_row.addWidget(self._save_edit, 1)
 
         save_browse_btn = QPushButton("Browse …")
         save_browse_btn.clicked.connect(self._browse_save_path)
-        save_layout.addWidget(save_browse_btn)
+        path_row.addWidget(save_browse_btn)
+        save_layout.addLayout(path_row)
+
+        self._set_as_default_cb = QCheckBox("Set as default download folder")
+        save_layout.addWidget(self._set_as_default_cb)
 
         layout.addWidget(save_group)
 
@@ -83,7 +95,7 @@ class AddDownloadDialog(QDialog):
         options_layout.addWidget(QLabel("Segments:"))
         self._seg_spin = QSpinBox()
         self._seg_spin.setRange(1, 32)
-        self._seg_spin.setValue(8)
+        self._seg_spin.setValue(self._num_segments)
         self._seg_spin.setToolTip(
             "Number of parallel connections for HTTP downloads"
         )
@@ -152,6 +164,13 @@ class AddDownloadDialog(QDialog):
         self._save_path = self._save_edit.text().strip()
         self._num_segments = self._seg_spin.value()
         if self._url:
+            if self._save_path:
+                if self._set_as_default_cb.isChecked():
+                    self._config.default_save_path = self._save_path
+                    self._config.last_save_path = self._save_path
+                elif self._config.remember_last_save_path:
+                    self._config.last_save_path = self._save_path
+                self._config.save()
             self.accept()
 
     @property

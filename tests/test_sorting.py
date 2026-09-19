@@ -223,6 +223,31 @@ class TestMainWindowSorting(unittest.TestCase):
 
             win._set_sort_order(Qt.SortOrder.AscendingOrder)
             self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+
+            # Switching back to Added column defaults to Descending order
+            win._sort_by_column(Col.ADDED)
+            self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
+            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+        finally:
+            win.close()
+            db.close()
+
+    def test_main_window_header_section_clicked_added_defaults_descending(self):
+        """Clicking Date Added column header switches to it in descending order."""
+        db = Database(":memory:")
+        db.open()
+        mgr = DownloadManager(db)
+        win = MainWindow(mgr)
+        try:
+            # Change to Name column ascending
+            win._table.sortByColumn(Col.NAME, Qt.SortOrder.AscendingOrder)
+            win._last_sort_section = Col.NAME
+            self.assertEqual(win._table.horizontalHeader().sortIndicatorSection(), Col.NAME)
+
+            # Simulate clicking Added column header
+            win._on_header_section_clicked(Col.ADDED)
+            self.assertEqual(win._table.horizontalHeader().sortIndicatorSection(), Col.ADDED)
+            self.assertEqual(win._table.horizontalHeader().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
         finally:
             win.close()
             db.close()

@@ -165,6 +165,11 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_segments_download ON segments(download_id);
             CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(url);
             CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash);
+
+            CREATE TABLE IF NOT EXISTS ui_state (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         self._conn.commit()
 
@@ -317,6 +322,46 @@ class Database:
             "DELETE FROM segments WHERE download_id = ?", (download_id,)
         )
         self._conn.commit()
+
+    # -- UI & Window state ---------------------------------------------------
+
+    def set_ui_state(self, key: str, value: Any):
+        """Store a JSON-serializable UI state value."""
+        val_str = json.dumps(value)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO ui_state (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, val_str)
+            )
+
+    def get_ui_state(self, key: str, default: Any = None) -> Any:
+        """Retrieve a JSON-serialized UI state value."""
+        row = self._conn.execute(
+            "SELECT value FROM ui_state WHERE key = ?", (key,)
+        ).fetchone()
+        if row and row["value"]:
+            try:
+                return json.loads(row["value"])
+            except Exception:
+                return default
+        return default
+
+    def save_window_state(self, state: dict):
+        """Store entire window geometry, location, maximized state, column lengths, etc."""
+        self.set_ui_state("window_state", state)
+
+    def get_window_state(self) -> dict:
+        """Retrieve stored window geometry, location, maximized state, column lengths, etc."""
+        return self.get_ui_state("window_state", default={})
+
+    def save_preferences_window_size(self, width: int, height: int):
+        """Store preferences dialog window dimensions."""
+        self.set_ui_state("preferences_dialog_size", {"width": int(width), "height": int(height)})
+
+    def get_preferences_window_size(self) -> dict:
+        """Retrieve stored preferences dialog window dimensions."""
+        return self.get_ui_state("preferences_dialog_size", default={})
 
     # -- helpers -------------------------------------------------------------
 

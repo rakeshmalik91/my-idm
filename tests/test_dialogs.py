@@ -15,6 +15,15 @@ app = QApplication.instance() or QApplication([])
 
 class TestAddDownloadDialogClipboard(unittest.TestCase):
 
+    def setUp(self):
+        clipboard = QGuiApplication.clipboard()
+        self._orig_clipboard = clipboard.text() if clipboard else ""
+
+    def tearDown(self):
+        clipboard = QGuiApplication.clipboard()
+        if clipboard:
+            clipboard.setText(self._orig_clipboard)
+
     def test_prefill_http_url_from_clipboard(self):
         """HTTP URL in clipboard is automatically prefilled."""
         clipboard = QGuiApplication.clipboard()
@@ -34,7 +43,7 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
     def test_prefill_magnet_link_from_clipboard(self):
         """Magnet link in clipboard is automatically prefilled."""
         clipboard = QGuiApplication.clipboard()
-        magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=test"
+        magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=sample_download_dialog_test"
         clipboard.setText(magnet)
 
         dlg = AddDownloadDialog()

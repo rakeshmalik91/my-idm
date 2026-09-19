@@ -33,12 +33,47 @@ class TestResizableColumns(unittest.TestCase):
         """Every column in the table must have ResizeMode.Interactive so users can drag borders."""
         header = self.win._table.horizontalHeader()
         self.assertFalse(header.stretchLastSection())
+        self.assertFalse(header.cascadingSectionResizes(), "Cascading resizes must be False so resizing shifts subsequent columns")
         for col in range(Col.COUNT):
             mode = header.sectionResizeMode(col)
             self.assertEqual(
                 mode, QHeaderView.ResizeMode.Interactive,
                 f"Column {col} ({Col.HEADERS[col]}) should be Interactive, got {mode}"
             )
+
+    def test_resizing_column_shifts_subsequent_columns(self):
+        """Resizing a column must shift all subsequent columns right/left without compressing them."""
+        header = self.win._table.horizontalHeader()
+        self.win.show()
+
+        # Record initial widths and positions
+        initial_widths = [header.sectionSize(i) for i in range(Col.COUNT)]
+        pos_col1_before = header.sectionViewportPosition(Col.SIZE)
+        pos_col2_before = header.sectionViewportPosition(Col.PROGRESS)
+
+        # Enlarge Col.NAME by 100px
+        delta = 100
+        new_name_w = initial_widths[Col.NAME] + delta
+        header.resizeSection(Col.NAME, new_name_w)
+
+        # Col.NAME should be enlarged
+        self.assertEqual(header.sectionSize(Col.NAME), new_name_w)
+        # Col.SIZE and Col.PROGRESS must retain their exact widths (NOT shrunk)
+        self.assertEqual(header.sectionSize(Col.SIZE), initial_widths[Col.SIZE])
+        self.assertEqual(header.sectionSize(Col.PROGRESS), initial_widths[Col.PROGRESS])
+        # Col.SIZE and Col.PROGRESS positions must have shifted by delta
+        self.assertEqual(header.sectionViewportPosition(Col.SIZE), pos_col1_before + delta)
+        self.assertEqual(header.sectionViewportPosition(Col.PROGRESS), pos_col2_before + delta)
+
+    def test_toolbar_has_no_logo(self):
+        """Toolbar must not contain a logo widget."""
+        from PySide6.QtWidgets import QToolBar, QLabel
+        toolbars = self.win.findChildren(QToolBar)
+        self.assertTrue(len(toolbars) > 0)
+        main_tb = toolbars[0]
+        # Verify no QLabel with pixmap in toolbar
+        labels = main_tb.findChildren(QLabel)
+        self.assertEqual(len(labels), 0, "Toolbar should not have a logo QLabel widget")
 
     def test_column_width_can_be_resized(self):
         """Resizing a column changes its width properly."""
@@ -62,6 +97,42 @@ class TestResizableColumns(unittest.TestCase):
         win2 = MainWindow(self.manager)
         try:
             self.assertEqual(win2._table.columnWidth(Col.NAME), 380)
+        finally:
+            win2.close()
+
+    def test_window_geometry_location_maximized_columns_in_db(self):
+        """Window size, location, maximized state, and column lengths are persisted and restored via DB."""
+        # Set size and location
+        self.win.resize(1280, 720)
+        self.win.move(150, 120)
+
+        # Set column lengths
+        self.win._table.setColumnWidth(Col.NAME, 360)
+        self.win._table.setColumnWidth(Col.SIZE, 130)
+
+        # Save to DB
+        self.win._save_ui_state_to_db()
+
+        # Verify DB directly
+        db_state = self.db.get_window_state()
+        self.assertIsNotNone(db_state)
+        self.assertEqual(db_state["width"], 1280)
+        self.assertEqual(db_state["height"], 720)
+        self.assertEqual(db_state["x"], 150)
+        self.assertEqual(db_state["y"], 120)
+        self.assertFalse(db_state["is_maximized"])
+        self.assertEqual(db_state["column_widths"][str(Col.NAME)], 360)
+        self.assertEqual(db_state["column_widths"][str(Col.SIZE)], 130)
+
+        # Create a second window backed by the same database and verify restoration
+        win2 = MainWindow(self.manager)
+        try:
+            self.assertEqual(win2.width(), 1280)
+            self.assertEqual(win2.height(), 720)
+            self.assertEqual(win2.x(), 150)
+            self.assertEqual(win2.y(), 120)
+            self.assertEqual(win2._table.columnWidth(Col.NAME), 360)
+            self.assertEqual(win2._table.columnWidth(Col.SIZE), 130)
         finally:
             win2.close()
 

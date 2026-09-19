@@ -13,7 +13,10 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 
+from my_idm.config import TorConfig
 from my_idm.database import Database, DownloadEntry, SegmentEntry
+from my_idm.network import NetworkConfig, is_interface_active
+from my_idm.utils import get_unique_filename
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +46,12 @@ class HTTPEngine:
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._network_config: Optional[NetworkConfig] = None
+        self._tor_config: Optional[TorConfig] = None
         self._progress_cb: Optional[ProgressCallback] = None
         self._status_cb: Optional[StatusCallback] = None
         self._filename_cb: Optional[FilenameCallback] = None
+        self._last_progress_emit: dict[str, float] = {}
 
     # -- public API ----------------------------------------------------------
 
@@ -56,14 +62,134 @@ class HTTPEngine:
         self._status_cb = status_cb
         self._filename_cb = filename_cb
 
+    def set_network_config_sync(self, config: NetworkConfig):
+        """Set network config synchronously prior to start or in tests."""
+        self._network_config = config
+
+    async def set_network_config(self, config: NetworkConfig):
+        """Update network config at runtime and recreate the client session."""
+        self._network_config = config
+        await self._safe_recreate_session()
+
+    @property
+    def network_config(self) -> Optional[NetworkConfig]:
+        return self._network_config
+
+    @property
+    def tor_config(self) -> Optional[TorConfig]:
+        return self._tor_config
+
+    def set_tor_config_sync(self, config: TorConfig):
+        """Set Tor config synchronously prior to start or in tests."""
+        self._tor_config = config
+
+    async def set_tor_config(self, config: TorConfig):
+        """Update Tor config at runtime and recreate the client session."""
+        old_tor = (
+            self._tor_config.enabled and self._tor_config.route_http
+            if self._tor_config else False
+        )
+        new_tor = config.enabled and config.route_http
+        self._tor_config = config
+
+        # If routing didn't change and session exists, no need to recreate session
+        if old_tor == new_tor and self._session and not self._session.closed:
+            return
+
+        await self._safe_recreate_session()
+
+    async def _safe_recreate_session(self):
+        """Safely recreate the client session without leaving orphaned download tasks."""
+        # Collect currently active downloads
+        active_entries: list[DownloadEntry] = []
+        for did, task in list(self._tasks.items()):
+            if task and not task.done():
+                entry = self._db.get_download(did)
+                if entry and entry.status in ("downloading", "checking"):
+                    active_entries.append(entry)
+                evt = self._cancel_events.get(did)
+                if evt:
+                    evt.set()
+                task.cancel()
+
+        # Wait for all running tasks to cleanly finish saving their progress
+        running = [t for t in self._tasks.values() if not t.done()]
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+
+        self._tasks.clear()
+        self._cancel_events.clear()
+
+        # Recreate session with the updated network/Tor connector
+        await self._recreate_session()
+
+        # Seamlessly restart active downloads with the fresh session
+        for entry in active_entries:
+            fresh = self._db.get_download(entry.id) or entry
+            if fresh.status in ("downloading", "queued"):
+                log.info("Resuming download %s after network routing change", entry.id)
+                await self.add(fresh)
+
     async def start(self):
+        await self._recreate_session()
+
+    async def _recreate_session(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+        connector = None
+        # Check if Tor is enabled and routing HTTP downloads
+        if self._tor_config and self._tor_config.enabled and self._tor_config.route_http:
+            try:
+                from aiohttp_socks import ProxyConnector
+                connector = ProxyConnector.from_url(self._tor_config.tor_socks_url)
+                log.info("HTTPEngine routing through Tor SOCKS5 proxy: %s", self._tor_config.tor_socks_url)
+            except Exception as e:
+                log.warning("Could not create Tor ProxyConnector: %s", e)
+        elif self._network_config and self._network_config.is_interface_bound:
+            try:
+                connector = aiohttp.TCPConnector(
+                    local_addr=(self._network_config.interface_ip, 0)
+                )
+                log.info(
+                    "HTTPEngine TCPConnector bound to interface %s (%s)",
+                    self._network_config.interface_name,
+                    self._network_config.interface_ip,
+                )
+            except Exception as e:
+                log.warning(
+                    "Could not bind TCPConnector to %s: %s",
+                    self._network_config.interface_ip,
+                    e,
+                )
+
         timeout = aiohttp.ClientTimeout(
             connect=CONNECT_TIMEOUT, sock_read=READ_TIMEOUT
         )
         self._session = aiohttp.ClientSession(
+            connector=connector,
             timeout=timeout,
             headers={"User-Agent": "My-IDM/1.0"},
         )
+
+    def _request_kwargs(self, headers: Optional[dict] = None) -> dict:
+        kwargs: dict = {}
+        if headers:
+            kwargs["headers"] = headers
+
+        tor_routing_http = (
+            self._tor_config
+            and self._tor_config.enabled
+            and self._tor_config.route_http
+        )
+        if (
+            not tor_routing_http
+            and self._network_config
+            and self._network_config.proxy_enabled
+            and self._network_config.proxy_url
+        ):
+            kwargs["proxy"] = self._network_config.proxy_url
+        return kwargs
 
     async def stop(self):
         for did in list(self._tasks):
@@ -84,6 +210,11 @@ class HTTPEngine:
 
     async def add(self, entry: DownloadEntry):
         """Start (or resume) an HTTP download."""
+        existing = self._tasks.get(entry.id)
+        if existing and not existing.done():
+            log.warning("Download %s is already active in HTTPEngine, skipping duplicate add", entry.id)
+            return
+
         cancel_evt = asyncio.Event()
         self._cancel_events[entry.id] = cancel_evt
         task = asyncio.create_task(self._run_download(entry, cancel_evt))
@@ -123,6 +254,28 @@ class HTTPEngine:
     async def _run_download(self, entry: DownloadEntry,
                             cancel_evt: asyncio.Event):
         download_id = entry.id
+
+        # Kill switch check: verify bound VPN/interface is active before starting
+        if (
+            self._network_config
+            and self._network_config.kill_switch
+            and self._network_config.is_interface_bound
+        ):
+            if not is_interface_active(
+                self._network_config.interface_name,
+                self._network_config.interface_ip,
+            ):
+                err = (
+                    f"VPN / Bound interface '{self._network_config.interface_name}' "
+                    "disconnected (Kill switch active)"
+                )
+                log.warning(err)
+                entry.status = "error"
+                entry.error_message = err
+                self._db.update_status(download_id, "error", err)
+                self._emit_status(download_id, "error", err)
+                return
+
         try:
             self._db.update_status(download_id, "downloading")
             self._emit_status(download_id, "downloading")
@@ -138,17 +291,23 @@ class HTTPEngine:
             if etag and not entry.etag:
                 entry.etag = etag
 
-            resolved = filename or entry.filename or self._filename_from_url(entry.url)
-            if resolved and resolved != entry.filename:
-                entry.filename = resolved
-                entry.file_path = str(
-                    Path(entry.save_path) / entry.filename
-                )
-                self._emit_filename(entry.id, entry.filename)
-            elif not entry.file_path and entry.filename:
-                entry.file_path = str(
-                    Path(entry.save_path) / entry.filename
-                )
+            candidate = filename or entry.filename or self._filename_from_url(entry.url)
+            if candidate:
+                existing_entries = self._db.get_all_downloads()
+                reserved = {
+                    d.filename for d in existing_entries
+                    if d.id != entry.id and d.save_path == entry.save_path and d.filename
+                }
+                # If entry already created its own file_path on disk and is resuming, preserve it
+                if entry.file_path and Path(entry.file_path).exists() and entry.filename == candidate:
+                    unique_fn = entry.filename
+                else:
+                    unique_fn = get_unique_filename(entry.save_path, candidate, reserved_names=reserved)
+
+                if unique_fn != entry.filename or not entry.file_path:
+                    entry.filename = unique_fn
+                    entry.file_path = str(Path(entry.save_path) / unique_fn)
+                    self._emit_filename(entry.id, entry.filename)
             self._db.update_download(entry)
 
             if cancel_evt.is_set():
@@ -196,7 +355,7 @@ class HTTPEngine:
 
         try:
             async with self._session.head(
-                url, allow_redirects=True
+                url, allow_redirects=True, **self._request_kwargs()
             ) as resp:
                 if resp.status == 200:
                     total_size = int(
@@ -271,6 +430,13 @@ class HTTPEngine:
             for t in tasks:
                 if not t.done():
                     t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        except (asyncio.CancelledError, Exception):
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
     async def _download_one_segment(
@@ -294,7 +460,7 @@ class HTTPEngine:
                     "Range": f"bytes={current_start}-{seg.end_byte}"
                 }
                 async with self._session.get(
-                    entry.url, headers=headers
+                    entry.url, **self._request_kwargs(headers)
                 ) as resp:
                     if resp.status == 416:
                         raise _FallbackToSingle("416 Range Not Satisfiable")
@@ -355,6 +521,11 @@ class HTTPEngine:
 
             except _FallbackToSingle:
                 raise
+            except asyncio.CancelledError:
+                self._db.update_segment(
+                    seg.id, seg.downloaded_bytes, "pending"
+                )
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
                 log.warning(
@@ -414,8 +585,17 @@ class HTTPEngine:
             if cancel_evt.is_set():
                 return
             try:
+                # Refresh existing size on disk for accurate resume and headers on each attempt
+                existing_size = file_path.stat().st_size if file_path.exists() else 0
+                headers = {}
+                if existing_size > 0:
+                    headers["Range"] = f"bytes={existing_size}-"
+
+                start_time = time.monotonic()
+                start_downloaded = existing_size
+
                 async with self._session.get(
-                    entry.url, headers=headers
+                    entry.url, **self._request_kwargs(headers)
                 ) as resp:
                     if resp.status == 416:
                         # 416 Range Not Satisfiable: file may already be complete
@@ -424,6 +604,7 @@ class HTTPEngine:
                             return
                         # Or range is stale: restart from byte 0
                         existing_size = 0
+                        start_downloaded = 0
                         headers.pop("Range", None)
                         continue
                     if resp.status not in (200, 206):
@@ -434,6 +615,7 @@ class HTTPEngine:
                     if resp.status == 200:
                         # Server doesn't support resume, start over
                         existing_size = 0
+                        start_downloaded = 0
                         mode = "wb"
                     else:
                         mode = "ab"
@@ -450,12 +632,19 @@ class HTTPEngine:
                         resp.headers, str(resp.url)
                     )
                     if get_filename and get_filename != entry.filename:
-                        entry.filename = get_filename
-                        entry.file_path = str(
-                            Path(entry.save_path) / entry.filename
-                        )
-                        file_path = Path(entry.file_path)
-                        self._emit_filename(entry.id, entry.filename)
+                        existing_entries = self._db.get_all_downloads()
+                        reserved = {
+                            d.filename for d in existing_entries
+                            if d.id != entry.id and d.save_path == entry.save_path and d.filename
+                        }
+                        unique_fn = get_unique_filename(entry.save_path, get_filename, reserved_names=reserved)
+                        if unique_fn != entry.filename:
+                            entry.filename = unique_fn
+                            entry.file_path = str(
+                                Path(entry.save_path) / entry.filename
+                            )
+                            file_path = Path(entry.file_path)
+                            self._emit_filename(entry.id, entry.filename)
 
                     self._db.update_download(entry)
                     downloaded = existing_size
@@ -473,7 +662,7 @@ class HTTPEngine:
 
                             elapsed = time.monotonic() - start_time
                             speed = (
-                                (downloaded - existing_size) / elapsed
+                                (downloaded - start_downloaded) / elapsed
                                 if elapsed > 0 else 0
                             )
                             remaining = (
@@ -491,6 +680,10 @@ class HTTPEngine:
                     self._db.update_progress(entry.id, downloaded)
                     return
 
+            except asyncio.CancelledError:
+                if file_path.exists():
+                    self._db.update_progress(entry.id, file_path.stat().st_size)
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
                 log.warning(
@@ -554,8 +747,15 @@ class HTTPEngine:
 
     def _emit_progress(self, download_id: str, downloaded: int,
                        total: int, speed: float, eta: float):
-        if self._progress_cb:
-            self._progress_cb(download_id, downloaded, total, speed, eta)
+        if not self._progress_cb:
+            return
+        now = time.monotonic()
+        last = self._last_progress_emit.get(download_id, 0.0)
+        # Throttle to at most 10 emits/sec (100ms interval) unless download is finished
+        if now - last < 0.1 and (total <= 0 or downloaded < total):
+            return
+        self._last_progress_emit[download_id] = now
+        self._progress_cb(download_id, downloaded, total, speed, eta)
 
     def _emit_status(self, download_id: str, status: str,
                      error_msg: str = ""):

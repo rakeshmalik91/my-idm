@@ -15,13 +15,23 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from PySide6.QtCore import QObject, Signal, QTimer
 
-from my_idm.database import Database, DownloadEntry, _now_iso
+from my_idm.database import Database, DownloadEntry, SegmentEntry, _now_iso
 from my_idm.http_engine import HTTPEngine
+from my_idm.config import GeneralConfig, TorConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
+from my_idm.tor_service import TorServiceManager, find_tor_executable
+from my_idm.network import NetworkConfig, is_interface_active
+from my_idm.security import (
+    SecurityConfig,
+    check_url_safety,
+    quarantine_or_delete_file,
+    scan_file,
+)
 from my_idm.torrent_engine import TorrentEngine
+from my_idm.utils import get_unique_filename
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SAVE_PATH = str(Path.home() / "Downloads")
+DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
 
 class DownloadManager(QObject):
@@ -36,12 +46,31 @@ class DownloadManager(QObject):
     download_added = Signal(str)          # download_id
     download_removed = Signal(str)        # download_id
     download_moved = Signal(str)          # download_id
+    general_config_changed = Signal(object)   # GeneralConfig
+    network_config_changed = Signal(object)  # NetworkConfig
+    security_config_changed = Signal(object)  # SecurityConfig
+    tor_config_changed = Signal(object)       # TorConfig
+    threat_detected = Signal(str, str)       # download_id, report
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
         self._db = db
+        self._general_config = GeneralConfig.load()
+        self._network_config = NetworkConfig.load()
+        self._security_config = SecurityConfig.load()
+        self._tor_config = TorConfig.load()
+        # Enforce that Tor is only enabled on startup if auto_start_at_startup is True
+        if not self._tor_config.auto_start_at_startup:
+            self._tor_config.enabled = False
+        self._tor_service = TorServiceManager(self._tor_config)
+        self._stopped = False
+        self._starting_downloads: set[str] = set()
         self._http = HTTPEngine(db)
         self._torrent = TorrentEngine(db)
+        self._http.set_network_config_sync(self._network_config)
+        self._http.set_tor_config_sync(self._tor_config)
+        self._torrent.apply_network_config(self._network_config)
+        self._torrent.apply_tor_config(self._tor_config)
 
         # asyncio event loop runs in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -91,10 +120,30 @@ class DownloadManager(QObject):
         self._torrent_timer.start()
         self._retry_timer.start()
 
+        # Check if Tor should be activated at startup
+        if self._tor_config.auto_start_at_startup:
+            self.toggle_tor(True)
+        else:
+            if self._tor_config.enabled:
+                self._tor_config.enabled = False
+                self._http.set_tor_config_sync(self._tor_config)
+                self._torrent.apply_tor_config(self._tor_config)
+
+        # Auto-resume interrupted downloads if configured
+        if self._general_config.auto_resume_startup:
+            for entry in self._db.get_all_downloads():
+                if entry.status in ("downloading", "checking"):
+                    log.info("Auto-resuming interrupted download on startup: %s", entry.id)
+                    self.resume_download(entry.id)
+
         log.info("DownloadManager started")
 
     def stop(self):
         """Shut down everything cleanly."""
+        if getattr(self, "_stopped", False):
+            return
+        self._stopped = True
+
         self._torrent_timer.stop()
         self._retry_timer.stop()
 
@@ -104,20 +153,117 @@ class DownloadManager(QObject):
                 self._http.stop(), self._loop
             )
             try:
-                future.result(timeout=10)
+                future.result(timeout=5)
             except Exception:
                 pass
 
         # Stop torrent engine
         self._torrent.stop()
 
+        # Stop Tor background service
+        self._tor_service.stop()
+
+        # If Tor was active on exit but auto-start is False, ensure enabled is saved as False
+        if not self._tor_config.auto_start_at_startup and self._tor_config.enabled:
+            self._tor_config.enabled = False
+            self._tor_config.save()
+
         # Stop asyncio loop
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=3)
 
         log.info("DownloadManager stopped")
+
+    @property
+    def tor_config(self) -> TorConfig:
+        return self._tor_config
+
+    @property
+    def tor_service(self) -> TorServiceManager:
+        return self._tor_service
+
+    def set_tor_config(self, config: TorConfig):
+        """Update Tor routing and SOCKS5 proxy configuration."""
+        self._tor_config = config
+        self._tor_service._config = config
+        config.save()
+
+        if self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._http.set_tor_config(config), self._loop
+                )
+            except Exception as e:
+                log.warning("Failed to update HTTP engine Tor config: %s", e)
+        else:
+            self._http.set_tor_config_sync(config)
+
+        self._torrent.apply_tor_config(config)
+        self.tor_config_changed.emit(config)
+
+    def toggle_tor(self, enable: Optional[bool] = None) -> tuple[bool, str]:
+        """Toggle or set Tor activation status, starting background service if needed."""
+        target = (not self._tor_config.enabled) if enable is None else bool(enable)
+
+        if target:
+            success, msg = self._tor_service.start(timeout=15.0)
+            if not success:
+                self._tor_config.enabled = False
+                self.set_tor_config(self._tor_config)
+                return False, msg
+
+            self._tor_config.enabled = True
+            self.set_tor_config(self._tor_config)
+            return True, msg
+        else:
+            self._tor_service.stop()
+            self._tor_config.enabled = False
+            self.set_tor_config(self._tor_config)
+            return True, "Tor deactivated"
+
+    @property
+    def network_config(self) -> NetworkConfig:
+        return self._network_config
+
+    def set_network_config(self, config: NetworkConfig):
+        """Update network interface binding, VPN kill switch, or proxy settings."""
+        self._network_config = config
+        config.save()
+
+        if self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._http.set_network_config(config), self._loop
+                )
+            except Exception as e:
+                log.warning("Failed to update HTTP engine network config: %s", e)
+        else:
+            self._http.set_network_config_sync(config)
+
+        self._torrent.apply_network_config(config)
+        self.network_config_changed.emit(config)
+
+    @property
+    def security_config(self) -> SecurityConfig:
+        return self._security_config
+
+    def set_security_config(self, config: SecurityConfig):
+        """Update antivirus and security configuration."""
+        self._security_config = config
+        config.save()
+        self.security_config_changed.emit(config)
+
+    @property
+    def general_config(self) -> GeneralConfig:
+        return self._general_config
+
+    def set_general_config(self, config: GeneralConfig):
+        """Update general download and application preferences."""
+        self._general_config = config
+        config.save()
+        self.general_config_changed.emit(config)
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
@@ -132,8 +278,20 @@ class DownloadManager(QObject):
         if not url:
             return None
 
+        # Pre-download security check
+        is_safe, risk_level, sec_details = check_url_safety(url, self._security_config)
+        if not is_safe and self._security_config.block_dangerous_urls:
+            log.warning(
+                "Download blocked by pre-download security policy: %s (%s)",
+                url, sec_details,
+            )
+            return None
+
         if not save_path:
-            save_path = DEFAULT_SAVE_PATH
+            save_path = self._general_config.get_effective_save_path()
+
+        if num_segments <= 0:
+            num_segments = self._general_config.default_segments
 
         download_type = self._detect_type(url)
 
@@ -173,6 +331,15 @@ class DownloadManager(QObject):
             except Exception:
                 pass
 
+        # Auto-number filename if already taken on disk or by another download in DB
+        if filename:
+            existing_downloads = self._db.get_all_downloads()
+            reserved = {
+                d.filename for d in existing_downloads
+                if d.save_path == save_path and d.filename
+            }
+            filename = get_unique_filename(save_path, filename, reserved_names=reserved)
+
         # Create new entry
         entry = DownloadEntry(
             id=str(uuid.uuid4()),
@@ -185,6 +352,8 @@ class DownloadManager(QObject):
             added_at=_now_iso(),
             status="queued",
         )
+        if risk_level != "clean":
+            entry.metadata = {"security_warning": sec_details}
 
         self._db.add_download(entry)
         self.download_added.emit(entry.id)
@@ -196,6 +365,25 @@ class DownloadManager(QObject):
 
     def _start_entry(self, entry: DownloadEntry):
         """Dispatch download to the right engine."""
+        # Kill switch check
+        if (
+            self._network_config
+            and self._network_config.kill_switch
+            and self._network_config.is_interface_bound
+        ):
+            if not is_interface_active(
+                self._network_config.interface_name,
+                self._network_config.interface_ip,
+            ):
+                err = (
+                    f"VPN / Bound interface '{self._network_config.interface_name}' "
+                    "disconnected (Kill switch active)"
+                )
+                log.warning(err)
+                self._db.update_status(entry.id, "error", err)
+                self.status_changed.emit(entry.id, "error", err)
+                return
+
         if entry.download_type == "http":
             if self._loop:
                 asyncio.run_coroutine_threadsafe(
@@ -217,6 +405,7 @@ class DownloadManager(QObject):
     # -- pause / resume / delete ---------------------------------------------
 
     def pause_download(self, download_id: str):
+        self._starting_downloads.discard(download_id)
         entry = self._db.get_download(download_id)
         if not entry:
             return
@@ -239,6 +428,11 @@ class DownloadManager(QObject):
 
         if entry.status == "completed":
             return
+
+        if download_id in self._starting_downloads:
+            log.warning("Download %s is already starting, skipping duplicate resume", download_id)
+            return
+        self._starting_downloads.add(download_id)
 
         # Reset retries and error state so manual or auto-resume always gets fresh attempts
         entry.status = "queued"
@@ -351,31 +545,67 @@ class DownloadManager(QObject):
             return
 
         if entry.download_type == "torrent":
+            self._db.update_status(download_id, "checking")
             self._torrent.recheck(download_id)
             self.status_changed.emit(download_id, "checking", "")
         else:
-            # HTTP: compare file size vs expected
+            # HTTP: the engine pre-allocates the full file via truncate(), so
+            # st_size is always == total_size even when the download is partial.
+            # Use the segment downloaded_bytes sum (or entry.downloaded_size from
+            # the DB) as the true measure of how much data was actually written.
             fp = Path(entry.file_path)
-            if fp.exists():
-                actual_size = fp.stat().st_size
-                if entry.total_size > 0 and actual_size >= entry.total_size:
-                    self._db.update_status(download_id, "completed")
-                    self._db.update_progress(download_id, actual_size)
-                    self.status_changed.emit(download_id, "completed", "")
-                else:
-                    entry.downloaded_size = actual_size
-                    self._db.update_download(entry)
-                    self.status_changed.emit(
-                        download_id, entry.status,
-                        f"File size: {actual_size} / {entry.total_size}",
-                    )
-            else:
-                # File doesn't exist — reset progress
+            if not fp.exists():
+                # File doesn't exist at all — full reset
                 entry.downloaded_size = 0
                 entry.status = "queued"
                 self._db.update_download(entry)
                 self._db.delete_segments(download_id)
                 self.status_changed.emit(download_id, "queued", "File not found")
+                self.progress_updated.emit(
+                    download_id, 0, entry.total_size,
+                    0.0, 0.0, 0, 0, 0.0,
+                )
+            else:
+                # File exists — use actual written bytes from segment records
+                segments = self._db.get_segments(download_id)
+                if segments:
+                    actual_downloaded = sum(s.downloaded_bytes for s in segments)
+                    all_complete = all(s.status == "completed" for s in segments)
+                else:
+                    # No segment records (e.g. single-stream / non-segmented);
+                    # fall back to entry.downloaded_size stored in the DB.
+                    actual_downloaded = entry.downloaded_size
+                    all_complete = (
+                        entry.total_size > 0
+                        and actual_downloaded >= entry.total_size
+                    )
+
+                if all_complete or (
+                    entry.total_size > 0
+                    and actual_downloaded >= entry.total_size
+                ):
+                    # Fully written — confirm completed
+                    self._db.update_status(download_id, "completed")
+                    self._db.update_progress(download_id, actual_downloaded)
+                    self.status_changed.emit(download_id, "completed", "")
+                    self.progress_updated.emit(
+                        download_id, actual_downloaded, entry.total_size,
+                        0.0, 0.0, 0, 0, 0.0,
+                    )
+                else:
+                    # Partial — update size and reset to paused
+                    entry.downloaded_size = actual_downloaded
+                    if entry.status in ("completed", "downloading"):
+                        entry.status = "paused"
+                    self._db.update_download(entry)
+                    self.status_changed.emit(
+                        download_id, entry.status,
+                        f"Downloaded: {actual_downloaded} / {entry.total_size}",
+                    )
+                    self.progress_updated.emit(
+                        download_id, actual_downloaded, entry.total_size,
+                        0.0, 0.0, 0, 0, 0.0,
+                    )
 
     # -- backlog -------------------------------------------------------------
 
@@ -416,7 +646,11 @@ class DownloadManager(QObject):
 
     def _on_http_status(self, download_id: str, status: str,
                         error_msg: str):
-        self.status_changed.emit(download_id, status, error_msg)
+        self._starting_downloads.discard(download_id)
+        if status == "completed" and self._security_config.scan_after_download:
+            self._handle_completed_scan(download_id)
+        else:
+            self.status_changed.emit(download_id, status, error_msg)
 
     def _on_torrent_progress(self, download_id: str, downloaded: int,
                              total: int, speed: float, eta: float,
@@ -428,7 +662,147 @@ class DownloadManager(QObject):
 
     def _on_torrent_status(self, download_id: str, status: str,
                            error_msg: str):
+        self._starting_downloads.discard(download_id)
+        if (
+            status in ("finished", "seeding")
+            and self._security_config.scan_after_download
+        ):
+            entry = self._db.get_download(download_id)
+            if entry and not entry.metadata.get("antivirus_scanned"):
+                self._handle_completed_scan(download_id, is_torrent=True)
+                return
         self.status_changed.emit(download_id, status, error_msg)
+
+    def _handle_completed_scan(self, download_id: str, is_torrent: bool = False):
+        entry = self._db.get_download(download_id)
+        if not entry or not entry.file_path:
+            final_status = "completed" if not is_torrent else "seeding"
+            self.status_changed.emit(download_id, final_status, "")
+            return
+
+        self._db.update_status(download_id, "scanning")
+        self.status_changed.emit(download_id, "scanning", "Scanning file for malware...")
+
+        def _do_scan():
+            is_clean, report = scan_file(entry.file_path, self._security_config)
+            meta = entry.metadata
+            meta["antivirus_scanned"] = True
+            meta["antivirus_report"] = report
+
+            if is_clean:
+                final_status = "completed" if not is_torrent else "seeding"
+                entry.metadata = meta
+                self._db.update_download(entry)
+                self._db.update_status(download_id, final_status)
+                self.status_changed.emit(download_id, final_status, report)
+            else:
+                meta["threat_detected"] = True
+                if self._security_config.action_on_threat == "delete":
+                    quarantine_or_delete_file(entry.file_path)
+                    report += " (Infected file deleted)"
+                entry.metadata = meta
+                self._db.update_download(entry)
+                self._db.update_status(download_id, "threat_detected", report)
+                self.status_changed.emit(download_id, "threat_detected", report)
+                self.threat_detected.emit(download_id, report)
+
+        threading.Thread(
+            target=_do_scan, daemon=True, name=f"scan-{download_id}"
+        ).start()
+
+    def scan_download_file(self, download_id: str):
+        """Perform on-demand antivirus scan of a downloaded file."""
+        entry = self._db.get_download(download_id)
+        if not entry or not entry.file_path:
+            return
+
+        original_status = entry.status
+        self._db.update_status(download_id, "scanning")
+        self.status_changed.emit(download_id, "scanning", "Scanning file for malware...")
+
+        def _do_scan():
+            is_clean, report = scan_file(entry.file_path, self._security_config)
+            meta = entry.metadata
+            meta["antivirus_scanned"] = True
+            meta["antivirus_report"] = report
+
+            if is_clean:
+                entry.metadata = meta
+                self._db.update_download(entry)
+                target_status = original_status if original_status in ("paused", "queued", "downloading", "seeding") else "completed"
+                if entry.total_size > 0 and entry.downloaded_size < entry.total_size and target_status == "completed":
+                    target_status = "paused"
+                self._db.update_status(download_id, target_status)
+                self.status_changed.emit(download_id, target_status, report)
+            else:
+                meta["threat_detected"] = True
+                if self._security_config.action_on_threat == "delete":
+                    quarantine_or_delete_file(entry.file_path)
+                    report += " (Infected file deleted)"
+                entry.metadata = meta
+                self._db.update_download(entry)
+                self._db.update_status(download_id, "threat_detected", report)
+                self.status_changed.emit(download_id, "threat_detected", report)
+                self.threat_detected.emit(download_id, report)
+
+        threading.Thread(
+            target=_do_scan, daemon=True, name=f"scan-ondemand-{download_id}"
+        ).start()
+
+    # -- inspection & details queries ---------------------------------------
+
+    def get_download_files(self, download_id: str) -> list[dict]:
+        """Return files for a download. For torrents, queries TorrentEngine. For HTTP, returns single target."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return []
+        if entry.download_type == "torrent":
+            return self._torrent.get_torrent_files(download_id)
+        # HTTP single file representation
+        name = entry.filename or os.path.basename(entry.file_path) if entry.file_path else "file"
+        pct = (entry.downloaded_size / entry.total_size) if entry.total_size > 0 else 0.0
+        return [{
+            "index": 0,
+            "path": name,
+            "size": entry.total_size,
+            "downloaded": entry.downloaded_size,
+            "progress": pct,
+            "priority": 4,
+            "priority_label": "Normal",
+            "status": entry.status,
+        }]
+
+    def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:
+        """Update file download priority for a torrent."""
+        return self._torrent.set_torrent_file_priority(download_id, file_index, priority)
+
+    def get_torrent_peers(self, download_id: str) -> list[dict]:
+        """Return active swarm peers for a torrent."""
+        return self._torrent.get_torrent_peers(download_id)
+
+    def get_torrent_trackers(self, download_id: str) -> list[dict]:
+        """Return trackers and their status for a torrent."""
+        return self._torrent.get_torrent_trackers(download_id)
+
+    def get_download_segments(self, download_id: str) -> list[SegmentEntry]:
+        """Return segmented download chunks from the database for HTTP downloads."""
+        return self._db.get_segments(download_id)
+
+    def save_ui_state(self, state: dict):
+        """Persist window geometry, position, maximized state, and column widths to database."""
+        self._db.save_window_state(state)
+
+    def get_ui_state(self) -> dict:
+        """Retrieve persisted window geometry, position, maximized state, and column widths from database."""
+        return self._db.get_window_state()
+
+    def save_preferences_window_size(self, width: int, height: int):
+        """Persist preferences dialog window dimensions to database."""
+        self._db.save_preferences_window_size(width, height)
+
+    def get_preferences_window_size(self) -> dict:
+        """Retrieve persisted preferences dialog window dimensions from database."""
+        return self._db.get_preferences_window_size()
 
     def _on_filename_resolved(self, download_id: str, filename: str):
         self.filename_resolved.emit(download_id, filename)
@@ -440,6 +814,18 @@ class DownloadManager(QObject):
 
     def _process_retry_queue(self):
         """Re-start any downloads that are queued for retry."""
+        if (
+            self._network_config
+            and self._network_config.kill_switch
+            and self._network_config.is_interface_bound
+        ):
+            if not is_interface_active(
+                self._network_config.interface_name,
+                self._network_config.interface_ip,
+            ):
+                log.debug("Skipping retry queue: VPN/interface is disconnected")
+                return
+
         for entry in self._db.get_all_downloads():
             if entry.status == "queued" and entry.retry_count > 0:
                 if entry.retry_count < entry.max_retries:

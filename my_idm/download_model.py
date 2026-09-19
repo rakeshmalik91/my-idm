@@ -15,6 +15,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor
 
+from my_idm.config import TorConfig
 from my_idm.database import DownloadEntry
 from my_idm.styles import Colors
 
@@ -50,6 +51,8 @@ _STATUS_COLORS = {
     "error":       QColor(Colors.RED),
     "queued":      QColor(Colors.TEXT_DIM),
     "checking":    QColor(Colors.ORANGE),
+    "scanning":    QColor(Colors.CYAN),
+    "threat_detected": QColor(Colors.RED),
 }
 
 
@@ -93,6 +96,37 @@ class DownloadTableModel(QAbstractTableModel):
         self._id_to_row: dict[str, int] = {}
         self._sort_column: int = Col.ADDED
         self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
+        self._tor_config: Optional[TorConfig] = None
+
+    @property
+    def tor_config(self) -> Optional[TorConfig]:
+        return self._tor_config
+
+    def set_tor_config(self, config: Optional[TorConfig]):
+        """Update Tor configuration and notify view to repaint rows immediately."""
+        self._tor_config = config
+        if self._entries:
+            left = self.index(0, 0)
+            right = self.index(len(self._entries) - 1, Col.COUNT - 1)
+            self.dataChanged.emit(
+                left,
+                right,
+                [
+                    Qt.ItemDataRole.DisplayRole,
+                    Qt.ItemDataRole.ForegroundRole,
+                    Qt.ItemDataRole.ToolTipRole,
+                ],
+            )
+
+    def is_tor_active_for(self, entry: DownloadEntry) -> bool:
+        """Return True if this download is actively transferring over Tor right now."""
+        if not self._tor_config or not self._tor_config.enabled:
+            return False
+        if entry.download_type == "http":
+            return entry.status == "downloading" and self._tor_config.route_http
+        if entry.download_type == "torrent":
+            return entry.status in ("downloading", "seeding") and self._tor_config.route_torrent
+        return False
 
     @property
     def sort_column(self) -> int:
@@ -130,8 +164,10 @@ class DownloadTableModel(QAbstractTableModel):
 
     # -- sorting -------------------------------------------------------------
 
-    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+    def sort(self, column: int, order: Optional[Qt.SortOrder] = None):
         """Sort the model by the specified column and order."""
+        if order is None:
+            order = Qt.SortOrder.DescendingOrder if column == Col.ADDED else Qt.SortOrder.AscendingOrder
         self._sort_column = column
         self._sort_order = order
         if not self._entries:
@@ -206,7 +242,11 @@ class DownloadTableModel(QAbstractTableModel):
             return (0, 0)
 
         if col == Col.ADDED:
-            return entry.added_at or ""
+            has_time = bool(entry.added_at)
+            if ascending:
+                return (0, entry.added_at) if has_time else (1, "")
+            else:
+                return (1, entry.added_at) if has_time else (0, "")
 
         if col == Col.LAST_TRIED:
             has_time = bool(entry.last_tried_at)
@@ -264,6 +304,16 @@ class DownloadTableModel(QAbstractTableModel):
             if 0 <= r < len(self._entries)
         ]
 
+    @property
+    def entries(self) -> list[DownloadEntry]:
+        return self._entries
+
+    def get_aggregate_speeds(self) -> tuple[float, float]:
+        """Returns (total_download_speed, total_upload_speed) in B/s."""
+        down = sum(e.speed for e in self._entries if e.status == "downloading")
+        up = sum(e.upload_speed for e in self._entries if e.status in ("downloading", "seeding"))
+        return down, up
+
     # -- progress updates (called from manager signals) ---------------------
 
     def update_progress(self, download_id: str, downloaded: int,
@@ -274,6 +324,17 @@ class DownloadTableModel(QAbstractTableModel):
         if row is None:
             return
         entry = self._entries[row]
+        # Guard against minor backwards jitter during active download from out-of-order signals
+        if (
+            downloaded < entry.downloaded_size
+            and entry.status == "downloading"
+            and entry.total_size > 0
+            and total == entry.total_size
+            and (entry.downloaded_size - downloaded < 1024 * 1024)
+            and downloaded > 0
+        ):
+            return
+
         entry.downloaded_size = downloaded
         if total > 0:
             entry.total_size = total
@@ -301,10 +362,15 @@ class DownloadTableModel(QAbstractTableModel):
             entry.speed = 0
             entry.eta_seconds = 0
 
-        idx = self.index(row, Col.STATUS)
+        left = self.index(row, 0)
+        right = self.index(row, Col.COUNT - 1)
         self.dataChanged.emit(
-            idx, self.index(row, Col.COUNT - 1),
-            [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ForegroundRole],
+            left, right,
+            [
+                Qt.ItemDataRole.DisplayRole,
+                Qt.ItemDataRole.ForegroundRole,
+                Qt.ItemDataRole.ToolTipRole,
+            ],
         )
 
     def update_filename(self, download_id: str, filename: str):
@@ -365,13 +431,26 @@ class DownloadTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.ForegroundRole:
             if col == Col.STATUS:
+                if self.is_tor_active_for(entry):
+                    return QColor(Colors.PURPLE)
                 return _STATUS_COLORS.get(entry.status, QColor(Colors.TEXT))
 
         if role == Qt.ItemDataRole.ToolTipRole:
+            is_tor = self.is_tor_active_for(entry)
+            tor_note = ""
+            if is_tor and self._tor_config:
+                tor_note = f"🧅 Active Tor Route: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
+
             if col == Col.NAME:
-                return entry.file_path or entry.url
-            if col == Col.STATUS and entry.error_message:
-                return entry.error_message
+                base = entry.file_path or entry.url
+                return f"{tor_note}\n{base}".strip() if tor_note else base
+            if col == Col.STATUS:
+                if entry.error_message:
+                    return f"{tor_note}\n{entry.error_message}".strip() if tor_note else entry.error_message
+                if is_tor and self._tor_config:
+                    return f"Active Tor Transfer: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
+            if col == Col.TYPE and is_tor:
+                return f"Traffic routed via Tor SOCKS5 proxy ({self._tor_config.socks5_url})"
 
         return None
 
@@ -385,7 +464,10 @@ class DownloadTableModel(QAbstractTableModel):
 
     def _display_data(self, entry: DownloadEntry, col: int) -> Any:
         if col == Col.NAME:
-            return entry.filename or entry.url[:60]
+            raw_name = entry.filename or entry.url[:60]
+            if self.is_tor_active_for(entry):
+                return f"🧅 {raw_name}"
+            return raw_name
 
         if col == Col.SIZE:
             if entry.total_size > 0:
@@ -400,14 +482,24 @@ class DownloadTableModel(QAbstractTableModel):
             }
 
         if col == Col.STATUS:
+            if entry.status == "threat_detected":
+                return "Threat Detected ⚠"
+            if entry.status == "scanning":
+                return "Scanning 🛡️"
             s = entry.status.capitalize()
             if entry.status == "error" and entry.error_message:
                 s += f" ⚠"
             if entry.status == "queued" and entry.retry_count > 0:
                 s += f" (retry {entry.retry_count})"
+            if self.is_tor_active_for(entry):
+                s += " (Tor 🧅)"
             return s
 
         if col == Col.SPEED:
+            if entry.download_type == "torrent":
+                if entry.status in ("downloading", "seeding"):
+                    return f"↓ {_format_speed(entry.speed)}  ↑ {_format_speed(entry.upload_speed)}"
+                return "—"
             if entry.status == "downloading":
                 return _format_speed(entry.speed)
             if entry.status == "seeding":
@@ -420,7 +512,10 @@ class DownloadTableModel(QAbstractTableModel):
             return "—"
 
         if col == Col.TYPE:
-            return entry.download_type.upper()
+            t = entry.download_type.upper()
+            if self.is_tor_active_for(entry):
+                return f"🧅 {t}"
+            return t
 
         if col == Col.SEEDS_PEERS:
             if entry.download_type == "torrent":

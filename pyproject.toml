@@ -8,6 +8,7 @@ requires-python = ">=3.11"
 dependencies = [
     "PySide6>=6.7",
     "aiohttp>=3.9",
+    "aiohttp-socks>=0.10.0",
     "aiosqlite>=0.20",
     "humanize>=4.9",
     "libtorrent>=2.0",
