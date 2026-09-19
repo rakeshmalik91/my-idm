@@ -244,6 +244,34 @@ class TestManagerVPNIntegration(unittest.TestCase):
         self.assertEqual(received[0].interface_name, "WireGuard")
         self.assertEqual(self.manager.network_config.interface_name, "WireGuard")
 
+    def test_manager_bandwidth_limits_and_allocation(self):
+        """Manager sets global limits and per-download allocation correctly."""
+        limits_received = []
+        self.manager.bandwidth_limits_changed.connect(lambda dl, ul: limits_received.append((dl, ul)))
+
+        self.manager.set_bandwidth_limits(102400, 51200)
+        self.assertEqual(len(limits_received), 1)
+        self.assertEqual(limits_received[0], (102400, 51200))
+        self.assertEqual(self.manager.network_config.download_limit, 102400)
+        self.assertEqual(self.manager.network_config.upload_limit, 51200)
+        self.assertEqual(self.manager._http._download_limit, 102400)
+
+        entry = DownloadEntry(
+            id="bw-test-http",
+            url="https://example.com/file.dat",
+            filename="file.dat",
+            status="paused",
+        )
+        self.db.add_download(entry)
+
+        # Set allocation
+        self.manager.set_download_bandwidth_allocation("bw-test-http", "medium")
+        self.assertEqual(self.manager.get_download_bandwidth_allocation("bw-test-http"), "medium")
+
+        # Verify effective rate limit for medium (50%) of 102400 is 51200
+        eff = self.manager._http._get_effective_download_limit(self.db.get_download("bw-test-http"))
+        self.assertEqual(eff, 51200)
+
 
 class TestNetworkSettingsDialog(unittest.TestCase):
 

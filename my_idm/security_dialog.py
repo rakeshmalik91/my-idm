@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -46,6 +48,16 @@ class SecuritySettingsDialog(QDialog):
 
         self._setup_ui()
         self._populate_fields()
+
+    @staticmethod
+    def _wrap_scrollable(content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(content)
+        return scroll
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -118,7 +130,7 @@ class SecuritySettingsDialog(QDialog):
 
         pre_layout.addWidget(vt_group)
         pre_layout.addStretch()
-        tabs.addTab(pre_tab, "🔍 Pre-Download Safety")
+        tabs.addTab(self._wrap_scrollable(pre_tab), "🔍 Pre-Download Safety")
 
         # Tab 2: Post-Download Antivirus Scan
         post_tab = QWidget()
@@ -187,7 +199,7 @@ class SecuritySettingsDialog(QDialog):
 
         post_layout.addWidget(action_group)
         post_layout.addStretch()
-        tabs.addTab(post_tab, "🛡️ Post-Download Antivirus")
+        tabs.addTab(self._wrap_scrollable(post_tab), "🛡️ Post-Download Antivirus")
 
         layout.addWidget(tabs)
 

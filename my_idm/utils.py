@@ -65,3 +65,31 @@ def get_unique_filename(
         if not is_taken(candidate):
             return candidate
         counter += 1
+
+
+def normalize_path(path: str | Path | None) -> str:
+    """Standardize file and directory paths with forward slash separators."""
+    if not path:
+        return ""
+    p_str = str(path).strip()
+    if not p_str:
+        return ""
+    return p_str.replace("\\", "/")
+
+
+def create_emoji_icon(emoji: str, size: int = 32):
+    """Create a high-DPI QIcon containing the specified emoji."""
+    from PySide6.QtCore import Qt, QRect
+    from PySide6.QtGui import QIcon, QPixmap, QPainter, QFont
+
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    font = QFont(["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", "sans-serif"])
+    font.setPixelSize(int(size * 0.65))
+    p.setFont(font)
+    p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
+    p.end()
+    return QIcon(pix)

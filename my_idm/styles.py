@@ -11,7 +11,7 @@ class Colors:
     BG_MID = "#161b22"
     BG_LIGHT = "#21262d"
     BG_HOVER = "#30363d"
-    BG_SELECTED = "#1f6feb33"
+    BG_SELECTED = "rgba(46, 160, 67, 0.22)"
 
     BORDER = "#30363d"
     BORDER_LIGHT = "#484f58"

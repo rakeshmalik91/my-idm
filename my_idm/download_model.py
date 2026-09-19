@@ -18,6 +18,14 @@ from PySide6.QtGui import QColor
 from my_idm.config import TorConfig
 from my_idm.database import DownloadEntry
 from my_idm.styles import Colors
+from my_idm.utils import create_emoji_icon, normalize_path
+
+_ICON_CACHE: dict[str, Any] = {}
+
+def _get_icon(emoji: str):
+    if emoji not in _ICON_CACHE:
+        _ICON_CACHE[emoji] = create_emoji_icon(emoji, size=24)
+    return _ICON_CACHE[emoji]
 
 
 # Column definitions
@@ -29,16 +37,15 @@ class Col:
     STATUS = 4
     SPEED = 5
     ETA = 6
-    TYPE = 7
-    SEEDS_PEERS = 8
-    ADDED = 9
-    LAST_TRIED = 10
-    COMPLETED = 11
-    SAVE_PATH = 12
+    SEEDS_PEERS = 7
+    ADDED = 8
+    LAST_TRIED = 9
+    COMPLETED = 10
+    SAVE_PATH = 11
 
     HEADERS = [
         "#", "Name", "Size", "Progress", "Status", "Speed", "ETA",
-        "Type", "Seeds / Peers", "Added", "Last Tried", "Completed",
+        "Seeds / Peers", "Added", "Last Tried", "Completed",
         "Save Path",
     ]
     COUNT = len(HEADERS)
@@ -57,6 +64,10 @@ _STATUS_COLORS = {
     "fetching_metadata": QColor(Colors.CYAN),
     "file_not_found":    QColor(Colors.RED),
     "stalled":           QColor(Colors.ORANGE),
+}
+
+ACTIVE_QUEUE_STATUSES = {
+    "queued", "downloading", "fetching_metadata", "stalled", "checking", "scanning"
 }
 
 
@@ -209,7 +220,12 @@ class DownloadTableModel(QAbstractTableModel):
 
     def _entry_sort_key(self, entry: DownloadEntry, col: int, ascending: bool) -> Any:
         if col == Col.QUEUE:
-            return entry.queue_order if entry.queue_order > 0 else 999999
+            is_active = entry.status in ACTIVE_QUEUE_STATUSES
+            val = entry.queue_order if entry.queue_order > 0 else 999999
+            if ascending:
+                return (0, val) if is_active else (1, val)
+            else:
+                return (1, val) if is_active else (0, val)
 
         if col == Col.NAME:
             return (entry.filename or entry.url or "").lower()
@@ -237,9 +253,6 @@ class DownloadTableModel(QAbstractTableModel):
                 return (0, entry.eta_seconds) if has_eta else (1, 0.0)
             else:
                 return (1, entry.eta_seconds) if has_eta else (0, 0.0)
-
-        if col == Col.TYPE:
-            return (entry.download_type or "").lower()
 
         if col == Col.SEEDS_PEERS:
             if entry.download_type == "torrent":
@@ -379,6 +392,13 @@ class DownloadTableModel(QAbstractTableModel):
                 Qt.ItemDataRole.ToolTipRole,
             ],
         )
+        # Refresh QUEUE column across rows so continuous numbering updates immediately
+        if len(self._entries) > 1:
+            self.dataChanged.emit(
+                self.index(0, Col.QUEUE),
+                self.index(len(self._entries) - 1, Col.QUEUE),
+                [Qt.ItemDataRole.DisplayRole],
+            )
 
     def update_filename(self, download_id: str, filename: str):
         """Update filename when resolved from server headers or metadata."""
@@ -437,6 +457,29 @@ class DownloadTableModel(QAbstractTableModel):
             if col == Col.QUEUE:
                 return int(Qt.AlignmentFlag.AlignCenter)
 
+        if role == Qt.ItemDataRole.DecorationRole:
+            if col == Col.NAME:
+                if self.is_tor_active_for(entry):
+                    return _get_icon("🧅")
+                if entry.download_type == "torrent":
+                    return _get_icon("🧲")
+                ext = Path(entry.filename or entry.url).suffix.lower()
+                if ext in (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".7zip"):
+                    return _get_icon("📦")
+                if ext in (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv"):
+                    return _get_icon("🎬")
+                if ext in (".mp3", ".flac", ".wav", ".m4a", ".ogg", ".aac"):
+                    return _get_icon("🎵")
+                if ext in (".iso", ".img", ".dmg", ".vhd"):
+                    return _get_icon("💿")
+                if ext in (".exe", ".msi", ".apk", ".deb", ".rpm", ".bat", ".cmd"):
+                    return _get_icon("⚙️")
+                if ext in (".pdf", ".doc", ".docx", ".epub", ".txt", ".odt"):
+                    return _get_icon("📄")
+                if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"):
+                    return _get_icon("🖼️")
+                return _get_icon("🌐")
+
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_data(entry, col)
 
@@ -453,15 +496,14 @@ class DownloadTableModel(QAbstractTableModel):
                 tor_note = f"🧅 Active Tor Route: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
 
             if col == Col.NAME:
-                base = entry.file_path or entry.url
+                type_tag = f"[{entry.download_type.upper()}] " if entry.download_type else ""
+                base = f"{type_tag}{normalize_path(entry.file_path) or entry.url}"
                 return f"{tor_note}\n{base}".strip() if tor_note else base
             if col == Col.STATUS:
                 if entry.error_message:
                     return f"{tor_note}\n{entry.error_message}".strip() if tor_note else entry.error_message
                 if is_tor and self._tor_config:
                     return f"Active Tor Transfer: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
-            if col == Col.TYPE and is_tor:
-                return f"Traffic routed via Tor SOCKS5 proxy ({self._tor_config.socks5_url})"
 
         return None
 
@@ -475,12 +517,16 @@ class DownloadTableModel(QAbstractTableModel):
 
     def _display_data(self, entry: DownloadEntry, col: int) -> Any:
         if col == Col.QUEUE:
-            if entry.status in ("completed", "seeding"):
+            if entry.status not in ACTIVE_QUEUE_STATUSES:
                 return ""
-            if entry.queue_order > 0:
-                return str(entry.queue_order)
             row = self._id_to_row.get(entry.id)
-            return str((row + 1) if row is not None else "")
+            if row is None:
+                return ""
+            count = 0
+            for i in range(row + 1):
+                if self._entries[i].status in ACTIVE_QUEUE_STATUSES:
+                    count += 1
+            return str(count)
 
         if col == Col.NAME:
             raw_name = entry.filename or entry.url[:60]
@@ -536,30 +582,11 @@ class DownloadTableModel(QAbstractTableModel):
                 return _format_eta(entry.eta_seconds)
             return "—"
 
-        if col == Col.TYPE:
-            t = entry.download_type.upper()
-            if self.is_tor_active_for(entry):
-                return f"🧅 {t}"
-            return t
-
-        if col == Col.SEEDS_PEERS:
-            if entry.download_type == "torrent":
-                return f"S:{entry.seeds}  P:{entry.peers}"
-            if entry.download_type == "http":
-                return f"{entry.num_segments} seg"
-            return "—"
-
-        if col == Col.ADDED:
-            return _format_time(entry.added_at)
-
-        if col == Col.LAST_TRIED:
-            return _format_time(entry.last_tried_at)
-
         if col == Col.COMPLETED:
             return _format_time(entry.completed_at)
 
         if col == Col.SAVE_PATH:
-            return entry.save_path or "—"
+            return normalize_path(entry.save_path) or "—"
 
         return None
 

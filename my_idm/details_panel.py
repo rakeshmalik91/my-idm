@@ -40,18 +40,38 @@ from my_idm.styles import Colors
 
 
 _TORRENT_PRIORITY_MAP = {
-    7: "High",
-    4: "Normal",
-    1: "Low",
+    7: "Max (100%)",
+    6: "High (75%)",
+    4: "Medium (50%)",
+    1: "Low (25%)",
     0: "Don't Download",
 }
 
 _PRIORITY_TO_VAL = {
-    "High": 7,
-    "Normal": 4,
-    "Low": 1,
+    "Max (100%)": 7,
+    "High (75%)": 6,
+    "Medium (50%)": 4,
+    "Low (25%)": 1,
     "Don't Download": 0,
+    # Compatibility aliases
+    "Max": 7,
+    "High": 6,
+    "Normal": 4,
+    "Medium": 4,
+    "Low": 1,
 }
+
+
+def _priority_to_label(prio: int) -> str:
+    if prio >= 7:
+        return "Max (100%)"
+    if prio >= 6:
+        return "High (75%)"
+    if prio >= 3:
+        return "Medium (50%)"
+    if prio >= 1:
+        return "Low (25%)"
+    return "Don't Download"
 
 
 def _to_str(val: Any) -> str:
@@ -326,6 +346,8 @@ class DetailsPanel(QWidget):
         """)
 
         self._tree_files.itemChanged.connect(self._on_tree_item_changed)
+        self._tree_files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._tree_files.customContextMenuRequested.connect(self._show_files_context_menu)
         self._table_files = self._tree_files
 
         layout.addWidget(self._tree_files)
@@ -624,13 +646,13 @@ class DetailsPanel(QWidget):
 
                     if is_torrent:
                         combo = QComboBox()
-                        for p_text in ["High", "Normal", "Low", "Don't Download"]:
+                        for p_text in ["Max (100%)", "High (75%)", "Medium (50%)", "Low (25%)", "Don't Download"]:
                             combo.addItem(p_text, _PRIORITY_TO_VAL[p_text])
-                        combo.setCurrentText("Normal")
+                        combo.setCurrentText("Medium (50%)")
                         combo.currentIndexChanged.connect(lambda idx, it=item: self._on_folder_priority_changed(it))
                         self._tree_files.setItemWidget(item, 3, combo)
                     else:
-                        item.setText(3, "Normal")
+                        item.setText(3, "Medium (50%)")
 
                     _create_items(item, node["children"])
                 else:
@@ -659,14 +681,14 @@ class DetailsPanel(QWidget):
 
                     if is_torrent:
                         combo = QComboBox()
-                        for p_text in ["High", "Normal", "Low", "Don't Download"]:
+                        for p_text in ["Max (100%)", "High (75%)", "Medium (50%)", "Low (25%)", "Don't Download"]:
                             combo.addItem(p_text, _PRIORITY_TO_VAL[p_text])
-                        prio_label = _TORRENT_PRIORITY_MAP.get(curr_prio, "Normal")
+                        prio_label = _priority_to_label(curr_prio)
                         combo.setCurrentText(prio_label)
                         combo.currentIndexChanged.connect(lambda idx, it=item: self._on_file_priority_combo_changed(it))
                         self._tree_files.setItemWidget(item, 3, combo)
                     else:
-                        item.setText(3, "Normal")
+                        item.setText(3, "Medium (50%)")
 
         _create_items(self._tree_files, root_nodes)
         self._tree_files.expandAll()
@@ -744,7 +766,7 @@ class DetailsPanel(QWidget):
                 combo.blockSignals(True)
                 if len(priorities) == 1:
                     p_val = next(iter(priorities))
-                    combo.setCurrentText(_TORRENT_PRIORITY_MAP.get(p_val, "Normal"))
+                    combo.setCurrentText(_priority_to_label(p_val))
                 else:
                     if combo.findText("Mixed") == -1:
                         combo.addItem("Mixed", -1)
@@ -790,7 +812,7 @@ class DetailsPanel(QWidget):
                 combo = self._tree_files.itemWidget(item, 3)
                 if isinstance(combo, QComboBox):
                     combo.blockSignals(True)
-                    combo.setCurrentText(_TORRENT_PRIORITY_MAP.get(curr_prio, "Normal"))
+                    combo.setCurrentText(_priority_to_label(curr_prio))
                     combo.blockSignals(False)
                 expected_state = Qt.CheckState.Checked if curr_prio > 0 else Qt.CheckState.Unchecked
                 if item.checkState(0) != expected_state:
@@ -833,7 +855,7 @@ class DetailsPanel(QWidget):
                     combo = self._tree_files.itemWidget(f_it, 3)
                     if isinstance(combo, QComboBox):
                         combo.blockSignals(True)
-                        combo.setCurrentText("Normal" if is_checked else "Don't Download")
+                        combo.setCurrentText("Medium (50%)" if is_checked else "Don't Download")
                         combo.blockSignals(False)
                     if f_idx is not None:
                         self._manager.set_torrent_file_priority(self._download_id, f_idx, prio)
@@ -845,7 +867,7 @@ class DetailsPanel(QWidget):
                 combo = self._tree_files.itemWidget(item, 3)
                 if isinstance(combo, QComboBox):
                     combo.blockSignals(True)
-                    combo.setCurrentText("Normal" if is_checked else "Don't Download")
+                    combo.setCurrentText("Medium (50%)" if is_checked else "Don't Download")
                     combo.blockSignals(False)
                 if f_idx is not None:
                     self._manager.set_torrent_file_priority(self._download_id, f_idx, prio)
@@ -907,7 +929,7 @@ class DetailsPanel(QWidget):
                 f_combo = self._tree_files.itemWidget(f_it, 3)
                 if isinstance(f_combo, QComboBox):
                     f_combo.blockSignals(True)
-                    f_combo.setCurrentText(_TORRENT_PRIORITY_MAP.get(prio_val, "Normal"))
+                    f_combo.setCurrentText(_priority_to_label(prio_val))
                     f_combo.blockSignals(False)
                 if f_idx is not None:
                     self._manager.set_torrent_file_priority(self._download_id, f_idx, prio_val)
@@ -916,6 +938,41 @@ class DetailsPanel(QWidget):
                 self._refresh_folder_aggregates(fld, is_torrent=True)
         finally:
             self._tree_updating = False
+
+    def _show_files_context_menu(self, pos):
+        item = self._tree_files.itemAt(pos)
+        if not item or not self._download_id:
+            return
+        entry = self._manager.get_entry(self._download_id)
+        if not entry or entry.download_type != "torrent":
+            return
+
+        menu = QMenu(self)
+        prio_menu = menu.addMenu("Bandwidth Allocation / Priority")
+        options = [
+            ("Max (100%)", 7),
+            ("High (75%)", 6),
+            ("Medium (50%)", 4),
+            ("Low (25%)", 1),
+            ("Don't Download", 0),
+        ]
+        combo = self._tree_files.itemWidget(item, 3)
+        curr_text = combo.currentText() if isinstance(combo, QComboBox) else ""
+
+        for text, val in options:
+            act = prio_menu.addAction(text)
+            act.setCheckable(True)
+            act.setChecked(curr_text == text)
+            act.triggered.connect(lambda checked=False, v=val, it=item: self._set_item_priority(it, v))
+
+        menu.exec(self._tree_files.viewport().mapToGlobal(pos))
+
+    def _set_item_priority(self, item: QTreeWidgetItem, priority_val: int):
+        combo = self._tree_files.itemWidget(item, 3)
+        if isinstance(combo, QComboBox):
+            idx = combo.findData(priority_val)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
 
     def _on_row_checkbox_toggled(self, row: int, checked: bool):
         if not self._download_id:

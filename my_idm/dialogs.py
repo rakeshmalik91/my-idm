@@ -15,12 +15,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
 )
 
-from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR, TorConfig
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
@@ -28,8 +29,12 @@ DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 class AddDownloadDialog(QDialog):
     """Dialog to add a new download (URL, magnet link, or .torrent file)."""
 
-    def __init__(self, parent=None, initial_url: str = ""):
+    def __init__(self, parent=None, initial_url: str = "", manager=None):
         super().__init__(parent)
+        self._manager = manager
+        if self._manager is None and parent and hasattr(parent, "_manager"):
+            self._manager = parent._manager
+
         self.setWindowTitle("Add Download")
         self.setMinimumWidth(550)
         self.setModal(True)
@@ -41,9 +46,20 @@ class AddDownloadDialog(QDialog):
         self._url = ""
         self._save_path = self._config.get_effective_save_path()
         self._num_segments = self._config.default_segments
+        self._tor_enabled = (
+            bool(self._manager.tor_config.enabled)
+            if (self._manager and hasattr(self._manager, "tor_config"))
+            else bool(TorConfig.load().enabled)
+        )
 
         self._setup_ui()
         self._prefill_url(initial_url)
+
+        if self._manager and hasattr(self._manager, "tor_config_changed"):
+            def _on_tor_changed(cfg):
+                self._tor_enabled = bool(cfg.enabled)
+                self._update_tor_btn()
+            self._manager.tor_config_changed.connect(_on_tor_changed)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -106,6 +122,13 @@ class AddDownloadDialog(QDialog):
 
         # Buttons
         btn_layout = QHBoxLayout()
+
+        self._tor_btn = QPushButton("🧅 Tor: OFF")
+        self._tor_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tor_btn.clicked.connect(self._on_toggle_tor)
+        self._update_tor_btn()
+        btn_layout.addWidget(self._tor_btn)
+
         btn_layout.addStretch()
 
         cancel_btn = QPushButton("Cancel")
@@ -119,6 +142,63 @@ class AddDownloadDialog(QDialog):
         btn_layout.addWidget(ok_btn)
 
         layout.addLayout(btn_layout)
+
+    def is_tor_enabled(self) -> bool:
+        return bool(self._tor_enabled)
+
+    def _update_tor_btn(self):
+        enabled = self.is_tor_enabled()
+        if enabled:
+            self._tor_btn.setText("🧅 Tor: ON")
+            self._tor_btn.setToolTip("Tor network privacy is active. Click to toggle OFF.")
+            self._tor_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1b472c;
+                    color: #50fa7b;
+                    border: 1px solid #50fa7b;
+                    border-radius: 4px;
+                    padding: 5px 12px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #235e3a;
+                }
+            """)
+        else:
+            self._tor_btn.setText("🧅 Tor: OFF")
+            self._tor_btn.setToolTip("Tor network privacy is inactive. Click to toggle ON.")
+            self._tor_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #21262d;
+                    color: #8b949e;
+                    border: 1px solid #30363d;
+                    border-radius: 4px;
+                    padding: 5px 12px;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background-color: #30363d;
+                    color: #c9d1d9;
+                }
+            """)
+
+    def _on_toggle_tor(self):
+        target = not self._tor_enabled
+        if self._manager and hasattr(self._manager, "toggle_tor"):
+            success, msg = self._manager.toggle_tor(target)
+            if not success and target:
+                QMessageBox.critical(
+                    self,
+                    "⚠️ Tor Connection Error",
+                    f"Unable to activate Tor network privacy:\n\n{msg}\n\n"
+                    "Please verify that Tor or Tor Browser is installed, or configure the path in Tools → Tor Network Settings.",
+                )
+                self._tor_enabled = False
+            else:
+                self._tor_enabled = target
+        else:
+            self._tor_enabled = target
+        self._update_tor_btn()
 
     def _browse_torrent(self):
         path, _ = QFileDialog.getOpenFileName(

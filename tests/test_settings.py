@@ -236,7 +236,8 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
 
             entry = mgr.get_entry(did)
             self.assertIsNotNone(entry)
-            self.assertEqual(entry.save_path, custom_dir)
+            from my_idm.utils import normalize_path
+            self.assertEqual(entry.save_path, normalize_path(custom_dir))
 
 
 if __name__ == "__main__":

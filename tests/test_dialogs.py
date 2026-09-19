@@ -116,6 +116,67 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
                 dlg.close()
 
 
+class TestAddDownloadDialogTorButton(unittest.TestCase):
+
+    def test_tor_button_initial_state_and_toggle(self):
+        """AddDownloadDialog contains Tor button reflecting state and toggling successfully."""
+        dlg = AddDownloadDialog()
+        try:
+            self.assertIsNotNone(dlg._tor_btn)
+            self.assertEqual(dlg._tor_btn.text(), "🧅 Tor: OFF")
+            self.assertIn("#21262d", dlg._tor_btn.styleSheet())
+            self.assertFalse(dlg.is_tor_enabled())
+
+            # Toggle Tor ON
+            dlg._on_toggle_tor()
+            self.assertEqual(dlg._tor_btn.text(), "🧅 Tor: ON")
+            self.assertIn("#50fa7b", dlg._tor_btn.styleSheet())
+            self.assertTrue(dlg.is_tor_enabled())
+
+            # Toggle Tor OFF
+            dlg._on_toggle_tor()
+            self.assertEqual(dlg._tor_btn.text(), "🧅 Tor: OFF")
+            self.assertFalse(dlg.is_tor_enabled())
+        finally:
+            dlg.close()
+
+
+class TestDialogsScrollable(unittest.TestCase):
+
+    def test_settings_dialog_tabs_are_scrollable(self):
+        """All tabs in SettingsDialog must be wrapped in QScrollArea with widgetResizable."""
+        from PySide6.QtWidgets import QScrollArea
+        from my_idm.settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog()
+        try:
+            self.assertEqual(dlg._tabs.count(), 4)
+            for i in range(dlg._tabs.count()):
+                widget = dlg._tabs.widget(i)
+                self.assertIsInstance(widget, QScrollArea)
+                self.assertTrue(widget.widgetResizable())
+        finally:
+            dlg.close()
+
+    def test_security_dialog_tabs_are_scrollable(self):
+        """All tabs in SecuritySettingsDialog must be wrapped in QScrollArea with widgetResizable."""
+        from PySide6.QtWidgets import QScrollArea
+        from my_idm.security import SecurityConfig
+        from my_idm.security_dialog import SecuritySettingsDialog
+
+        dlg = SecuritySettingsDialog(SecurityConfig.load())
+        try:
+            from PySide6.QtWidgets import QTabWidget
+            tab_widget = dlg.findChild(QTabWidget)
+            self.assertIsNotNone(tab_widget)
+            self.assertEqual(tab_widget.count(), 2)
+            for i in range(tab_widget.count()):
+                widget = tab_widget.widget(i)
+                self.assertIsInstance(widget, QScrollArea)
+                self.assertTrue(widget.widgetResizable())
+        finally:
+            dlg.close()
+
 
 if __name__ == "__main__":
     unittest.main()

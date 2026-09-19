@@ -172,11 +172,9 @@ class TestTorUIAndIndicator(unittest.TestCase):
 
         row_http = self.model._id_to_row["e_http"]
         name_http = self.model.data(self.model.index(row_http, Col.NAME), Qt.ItemDataRole.DisplayRole)
-        type_http = self.model.data(self.model.index(row_http, Col.TYPE), Qt.ItemDataRole.DisplayRole)
         status_http = self.model.data(self.model.index(row_http, Col.STATUS), Qt.ItemDataRole.DisplayRole)
 
         self.assertIn("🧅", name_http)
-        self.assertIn("🧅", type_http)
         self.assertIn("Tor 🧅", status_http)
 
     def test_tor_selective_routing(self):

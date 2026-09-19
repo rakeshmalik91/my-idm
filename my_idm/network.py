@@ -64,6 +64,10 @@ class NetworkConfig:
     proxy_username: str = ""
     proxy_password: str = ""
 
+    # Bandwidth limits (bytes/second, 0 = unlimited)
+    download_limit: int = 0
+    upload_limit: int = 0
+
     @property
     def is_interface_bound(self) -> bool:
         return bool(self.interface_name and self.interface_ip)
@@ -96,6 +100,8 @@ class NetworkConfig:
             proxy_port=int(data.get("proxy_port", 8080)),
             proxy_username=str(data.get("proxy_username", "")),
             proxy_password=str(data.get("proxy_password", "")),
+            download_limit=int(data.get("download_limit", 0)),
+            upload_limit=int(data.get("upload_limit", 0)),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -111,6 +117,8 @@ class NetworkConfig:
         settings.setValue("proxy_port", self.proxy_port)
         settings.setValue("proxy_username", self.proxy_username)
         settings.setValue("proxy_password", self.proxy_password)
+        settings.setValue("download_limit", self.download_limit)
+        settings.setValue("upload_limit", self.upload_limit)
         settings.endGroup()
 
     @classmethod
@@ -127,6 +135,8 @@ class NetworkConfig:
         proxy_port = settings.value("proxy_port", 8080, type=int)
         proxy_username = settings.value("proxy_username", "") or ""
         proxy_password = settings.value("proxy_password", "") or ""
+        download_limit = settings.value("download_limit", 0, type=int)
+        upload_limit = settings.value("upload_limit", 0, type=int)
         settings.endGroup()
 
         return cls(
@@ -139,6 +149,8 @@ class NetworkConfig:
             proxy_port=int(proxy_port),
             proxy_username=str(proxy_username),
             proxy_password=str(proxy_password),
+            download_limit=int(download_limit or 0),
+            upload_limit=int(upload_limit or 0),
         )
 
 

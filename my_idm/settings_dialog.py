@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -133,6 +135,10 @@ class SettingsDialog(QDialog):
                     if isinstance(w, int) and isinstance(h, int) and w > 0 and h > 0:
                         self.resize(max(w, 740), max(h, 560))
                         return
+                elif self._db is not None:
+                    # Explicit DB provided with no saved size yet; use default
+                    self.resize(820, 600)
+                    return
             settings = QSettings("MyIDM", "My-IDM")
             w = settings.value("preferences_dialog_width", type=int)
             h = settings.value("preferences_dialog_height", type=int)
@@ -172,16 +178,26 @@ class SettingsDialog(QDialog):
     # UI Setup
     # -----------------------------------------------------------------------
 
+    @staticmethod
+    def _wrap_scrollable(content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(content)
+        return scroll
+
     def _setup_ui(self):
         root_layout = QVBoxLayout(self)
         root_layout.setSpacing(14)
         root_layout.setContentsMargins(18, 18, 18, 18)
 
         # Tabs
-        self._tabs.addTab(self._create_general_tab(), "📁 General && Downloads")
-        self._tabs.addTab(self._create_network_tab(), "🌐 Network && VPN")
-        self._tabs.addTab(self._create_tor_tab(), "🧅 Tor Network")
-        self._tabs.addTab(self._create_security_tab(), "🛡️ Antivirus && Security")
+        self._tabs.addTab(self._wrap_scrollable(self._create_general_tab()), "📁 General && Downloads")
+        self._tabs.addTab(self._wrap_scrollable(self._create_network_tab()), "🌐 Network && VPN")
+        self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor Network")
+        self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus && Security")
         root_layout.addWidget(self._tabs)
 
         # Dialog Buttons

@@ -266,6 +266,7 @@ Central orchestrator connecting GUI, engines, and database.
 | `download_added` | `(str)` | `download_id` |
 | `download_removed` | `(str)` | `download_id` |
 | `download_moved` | `(str)` | `download_id` |
+| `bandwidth_limits_changed` | `(int, int)` | `download_limit, upload_limit` (bytes/s, 0 = unlimited) |
 
 #### Lifecycle
 
@@ -284,6 +285,9 @@ Central orchestrator connecting GUI, engines, and database.
 | `delete_download` | `(download_id, delete_files=False) → None` | Remove download and optionally delete files |
 | `move_download` | `(download_id, new_save_path) → None` | Move download to new directory |
 | `recheck_download` | `(download_id) → None` | Verify file integrity |
+| `set_bandwidth_limits` | `(download_limit, upload_limit) → None` | Set global down/up bandwidth limits in bytes/s |
+| `set_download_bandwidth_allocation` | `(download_id, allocation) → None` | Set download allocation ('low', 'medium', 'high', 'max') |
+| `get_download_bandwidth_allocation` | `(download_id) → str` | Get download allocation |
 | `load_backlog` | `(filepath) → int` | Load URLs from file, return count added |
 
 #### Query
@@ -390,11 +394,12 @@ class AddDownloadDialog(QDialog)
 
 Dialog for adding a new download.
 
-| Property | Type | Description |
-|----------|------|-------------|
+| Property / Method | Type | Description |
+|-------------------|------|-------------|
 | `url` | `str` | Entered URL, magnet link, or .torrent path |
 | `save_path` | `str` | Selected save directory |
 | `num_segments` | `int` | Selected segment count (1–32) |
+| `is_tor_enabled()` | `bool` | Current state of Tor privacy routing button |
 
 ### `MoveDownloadDialog`
 
@@ -434,7 +439,7 @@ Class containing all color constants used throughout the application.
 | `BG_MID` | `#161b22` | Toolbar, menus, headers |
 | `BG_LIGHT` | `#21262d` | Buttons, hover states |
 | `BG_HOVER` | `#30363d` | Hover highlight |
-| `BG_SELECTED` | `#1f6feb33` | Selected row (translucent blue) |
+| `BG_SELECTED` | `rgba(46, 160, 67, 0.22)` | Selected row (soft translucent green) |
 | `BORDER` | `#30363d` | General borders |
 | `BORDER_LIGHT` | `#484f58` | Lighter borders |
 | `TEXT` | `#e6edf3` | Primary text |

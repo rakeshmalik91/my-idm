@@ -9,7 +9,9 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QSettings
 
-DEFAULT_DOWNLOADS_DIR = str(Path.home() / "Downloads")
+from my_idm.utils import normalize_path
+
+DEFAULT_DOWNLOADS_DIR = normalize_path(Path.home() / "Downloads")
 
 
 @dataclass

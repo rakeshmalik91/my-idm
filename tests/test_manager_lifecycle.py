@@ -305,6 +305,44 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertAlmostEqual(prog_after["progress"], 0.0)
         self.assertEqual(model.data(model.index(row, Col.STATUS)), "Queued")
 
+    def test_delete_download_file_keeps_entry_and_resets_progress(self):
+        """delete_download_file deletes disk file, pauses download, and resets progress to 0 while keeping entry."""
+        test_file = Path(self.tmp_dir.name) / "to_delete.iso"
+        test_file.write_bytes(b"sample bytes data" * 100)
+        self.assertTrue(test_file.exists())
+
+        entry = DownloadEntry(
+            id="del-file-1",
+            url="https://example.com/to_delete.iso",
+            filename="to_delete.iso",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=1000,
+            downloaded_size=1000,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        self.manager.delete_download_file("del-file-1")
+
+        # File is gone from disk
+        self.assertFalse(test_file.exists())
+
+        # Entry remains in DB, paused, progress 0
+        updated = self.db.get_download("del-file-1")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.status, "paused")
+        self.assertEqual(updated.downloaded_size, 0)
+
+    def test_detect_type_web_torrent_url(self):
+        """Manager identifies http/https URLs pointing to .torrent files as torrent type."""
+        self.assertEqual(self.manager._detect_type("https://releases.ubuntu.com/22.04/ubuntu-22.04.iso.torrent"), "torrent")
+        self.assertEqual(self.manager._detect_type("http://example.org/download?file=debian.torrent"), "torrent")
+        self.assertEqual(self.manager._detect_type("ftp://ftp.example.com/pub/distro.torrent"), "torrent")
+        self.assertEqual(self.manager._detect_type("https://example.com/ubuntu-22.04.iso"), "http")
+        self.assertEqual(self.manager._detect_type("magnet:?xt=urn:btih:1234567890"), "torrent")
+
 
 if __name__ == "__main__":
     unittest.main()

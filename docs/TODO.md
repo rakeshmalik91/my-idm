@@ -6,7 +6,7 @@ commit after each features or set of fixes/enhancements
 
 ### CRITICAL BUG
 - [x] had 3 torrents, 1 completed, 2 downloading, everytime i restart the app, one of the downloading torrent gets replaced by the completed one 
-
+- [x] download going on even in paused state sometimes
 
 ### Fixes / Enhancements
 - [x] add download popup isnt picking default folder
@@ -32,16 +32,22 @@ commit after each features or set of fixes/enhancements
 - [x] Add force start button in context menu
 - [x] in details panel, show files with folder hierarchy
 - [x] hide details panel button has not icon/text
-- [x] BUG: download going on even in paused state sometimes
-- [ ] Use some Icon in Name column instead of a seperate Type column
-- [ ] add support for column ordering by dragging
-- [ ] Unify file path seperator in UI, db, code everywhere
-- [x] dont show download order for completed files
+- [x] Dont have test files like batch 1/2/3 or glitches etc.
+- [x] Use some Icon in Name column instead of a seperate Type column
+- [x] add support for column ordering by dragging
+- [x] Unify file path seperator in UI, db, code everywhere
+- [x] make the selected row light green, instead of so vibrant color
+- [x] dont show download order for Completed, Cancelled, Stopper, File not Found, Error etc. Visible numbers should be continuous.
+- [x] Add context menu item to just delete file, without removing the entry. Ask for confirmation. Should pause and set progress to 0.
 - [x] Recheck on completed file gets stuck at Checking
-
+- [x] manage leftover segment files. seeing leftover files often, not sure when they are not cleaned up. Check app close, entry deletion etc.
+- [x] If unchecked file is checked after download complete, update download status & percentage.
+- [x] Add Tor button in add download popup
+- [x] Make the settings page vertically scrollable, Antivirus page iputs are squeezed on default height
+- [x] Top taskbar menu items not indented correctly
+- [x] If a torrent file url is given treat it as torrent
 
 ----------------------
-
 ### Tor Support
 - [x] add support for activating tor, add as a button in toolbar. 
   - [x] make what to run inside tor configurable in settings, usual download or torrent etc. 
@@ -51,6 +57,11 @@ commit after each features or set of fixes/enhancements
   - [x] fix progressbar glitch when tor is turned on/off during download
   - [x] while connecting or disconnecting tor, show a progressbar on both toolbar and footer tor buttons. when ON make the buttons green.
   - [x] before tor start/stop pause all ongoing downloads, and resume on tor stop/start. ensure switching works seemslessly and doesnt mess up downloads data.
+
+----------------------
+### Bandwidth control
+- [x] Add support for bandwidth allocation of downloads and files in torrent downloads (Low - 25%, Medium - 50%, High - 75%, Max - 100%)
+- [x] Add support total Up/Down Bandwidth limit in footer speed context menu (1kbps, 2kbps, 5kbps, 10kbps, 50kbps, 100kbps, 200kbps, 500kbps, 1mbps, 2mbps, 5mbps, 10mbps, 100 mbps, Unlimited, Custom)
   
 ----------------------
 

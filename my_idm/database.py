@@ -6,10 +6,12 @@ import json
 import os
 import sqlite3
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from my_idm.utils import normalize_path
 
 
 APP_DIR = Path.home() / ".my-idm"
@@ -236,11 +238,18 @@ class Database:
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_queue_order ON downloads(queue_order)")
 
+        # Clean up any orphaned segment rows from deleted downloads
+        self._conn.execute("DELETE FROM segments WHERE download_id NOT IN (SELECT id FROM downloads)")
+
         self._conn.commit()
 
     # -- downloads -----------------------------------------------------------
 
     def add_download(self, entry: DownloadEntry) -> DownloadEntry:
+        if entry.save_path:
+            entry.save_path = normalize_path(entry.save_path)
+        if entry.file_path:
+            entry.file_path = normalize_path(entry.file_path)
         if not entry.id:
             entry.id = str(uuid.uuid4())
         if not entry.added_at:
@@ -456,9 +465,12 @@ class Database:
 
     @staticmethod
     def _row_to_entry(row: sqlite3.Row) -> DownloadEntry:
-        return DownloadEntry(**{
-            k: row[k] for k in _DOWNLOAD_DB_COLUMNS
-        })
+        d = {k: row[k] for k in _DOWNLOAD_DB_COLUMNS}
+        if d.get("save_path"):
+            d["save_path"] = normalize_path(d["save_path"])
+        if d.get("file_path"):
+            d["file_path"] = normalize_path(d["file_path"])
+        return DownloadEntry(**d)
 
     @staticmethod
     def _row_to_segment(row: sqlite3.Row) -> SegmentEntry:

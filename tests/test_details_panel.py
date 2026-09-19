@@ -217,10 +217,10 @@ class TestDetailsPanel(unittest.TestCase):
         # Check Priority Combo on file 1 (Col 3)
         combo_file1 = panel._tree_files.itemWidget(file1, 3)
         self.assertIsInstance(combo_file1, QComboBox)
-        self.assertEqual(combo_file1.currentText(), "High")
+        self.assertEqual(combo_file1.currentText(), "Max (100%)")
 
         # Change priority to Low (1) via combo
-        combo_file1.setCurrentText("Low")
+        combo_file1.setCurrentText("Low (25%)")
         self.manager._torrent.set_torrent_file_priority.assert_called_with("test-torrent-1", 1, 1)
 
         # Uncheck checkbox on file 1 -> priority becomes 0 (Don't Download)

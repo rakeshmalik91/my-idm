@@ -108,6 +108,51 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(down, 3000.0)
         self.assertEqual(up, 600.0)
 
+    def test_name_column_icon_decoration(self):
+        """Name column returns appropriate QIcon for DecorationRole."""
+        entry_http = DownloadEntry(id="h1", filename="video.mp4", download_type="http", status="downloading")
+        entry_torrent = DownloadEntry(id="t1", filename="linux.iso", download_type="torrent", status="downloading")
+        self.model.load_entries([entry_http, entry_torrent])
+
+        icon_http = self.model.data(self.model.index(0, Col.NAME), Qt.ItemDataRole.DecorationRole)
+        icon_torrent = self.model.data(self.model.index(1, Col.NAME), Qt.ItemDataRole.DecorationRole)
+
+        self.assertIsNotNone(icon_http)
+        self.assertIsNotNone(icon_torrent)
+
+    def test_continuous_queue_numbers_without_gaps(self):
+        """Inactive items (completed, paused, error) show no order, active items are continuous 1, 2, 3."""
+        items = [
+            DownloadEntry(id="1", filename="a.zip", status="downloading"),
+            DownloadEntry(id="2", filename="b.zip", status="completed"),
+            DownloadEntry(id="3", filename="c.zip", status="paused"),
+            DownloadEntry(id="4", filename="d.zip", status="queued"),
+            DownloadEntry(id="5", filename="e.zip", status="error"),
+            DownloadEntry(id="6", filename="f.zip", status="downloading"),
+        ]
+        self.model.load_entries(items)
+        # Row 0: downloading -> "1"
+        self.assertEqual(self.model.data(self.model.index(0, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
+        # Row 1: completed -> ""
+        self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
+        # Row 2: paused -> ""
+        self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
+        # Row 3: queued -> "2" (continuous, not 4!)
+        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+        # Row 4: error -> ""
+        self.assertEqual(self.model.data(self.model.index(4, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
+        # Row 5: downloading -> "3" (continuous, not 6!)
+        self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "3")
+
+    def test_save_path_normalized_forward_slashes(self):
+        """Save path column and data entries are unified with forward slashes."""
+        entry = DownloadEntry(id="p1", filename="test.zip", save_path="C:\\Users\\rakes\\Downloads")
+        self.model.load_entries([entry])
+        idx = self.model.index(0, Col.SAVE_PATH)
+        display_path = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
+        self.assertNotIn("\\", display_path)
+        self.assertIn("/", display_path)
+
     def test_delegate_progress_text_and_status_colors(self):
         """ProgressBarDelegate supports new lifecycle states and color definitions."""
         self.assertIn("fetching_metadata", ProgressBarDelegate._STATUS_COLORS)

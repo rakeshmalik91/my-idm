@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -59,6 +60,23 @@ from my_idm.settings_dialog import SettingsDialog
 from my_idm.styles import Colors
 
 log = logging.getLogger(__name__)
+
+SPEED_LIMIT_PRESETS = [
+    ("Unlimited", 0),
+    ("1 kbps", 1 * 1024),
+    ("2 kbps", 2 * 1024),
+    ("5 kbps", 5 * 1024),
+    ("10 kbps", 10 * 1024),
+    ("50 kbps", 50 * 1024),
+    ("100 kbps", 100 * 1024),
+    ("200 kbps", 200 * 1024),
+    ("500 kbps", 500 * 1024),
+    ("1 mbps", 1 * 1024 * 1024),
+    ("2 mbps", 2 * 1024 * 1024),
+    ("5 mbps", 5 * 1024 * 1024),
+    ("10 mbps", 10 * 1024 * 1024),
+    ("100 mbps", 100 * 1024 * 1024),
+]
 
 
 def _create_play_icon(size: int = 32) -> QIcon:
@@ -173,19 +191,20 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(False)
         header.setCascadingSectionResizes(False)
         header.setDefaultSectionSize(110)
+        header.setSectionsMovable(True)
+        header.setDragEnabled(True)
 
         self._model.set_tor_config(self._manager.tor_config)
         self._table.doubleClicked.connect(self._on_table_double_clicked)
 
         # Set specific default column widths
         self._table.setColumnWidth(Col.QUEUE, 45)
-        self._table.setColumnWidth(Col.NAME, 240)
+        self._table.setColumnWidth(Col.NAME, 270)
         self._table.setColumnWidth(Col.SIZE, 90)
         self._table.setColumnWidth(Col.PROGRESS, 160)
         self._table.setColumnWidth(Col.STATUS, 135)
         self._table.setColumnWidth(Col.SPEED, 110)
         self._table.setColumnWidth(Col.ETA, 80)
-        self._table.setColumnWidth(Col.TYPE, 80)
         self._table.setColumnWidth(Col.SEEDS_PEERS, 100)
         self._table.setColumnWidth(Col.ADDED, 130)
         self._table.setColumnWidth(Col.LAST_TRIED, 130)
@@ -212,12 +231,12 @@ class MainWindow(QMainWindow):
 
     def _setup_actions(self):
         """Create all QActions."""
-        self._act_add = QAction("➕ Add Download", self)
+        self._act_add = QAction(_create_emoji_icon("➕"), "Add Download", self)
         self._act_add.setShortcut(QKeySequence("Ctrl+N"))
         self._act_add.setToolTip("Add URL, Magnet Link, or .torrent file (Ctrl+N)")
         self._act_add.triggered.connect(self._on_add)
 
-        self._act_add_torrent = QAction("📦 Add Torrent File…", self)
+        self._act_add_torrent = QAction(_create_emoji_icon("📦"), "Add Torrent File…", self)
         self._act_add_torrent.setShortcut(QKeySequence("Ctrl+T"))
         self._act_add_torrent.setToolTip("Add .torrent file (Ctrl+T)")
         self._act_add_torrent.triggered.connect(self._on_add_torrent)
@@ -245,6 +264,10 @@ class MainWindow(QMainWindow):
         self._act_delete.setShortcut(QKeySequence("Delete"))
         self._act_delete.setToolTip("Delete selected downloads")
         self._act_delete.triggered.connect(self._on_delete)
+
+        self._act_delete_file = QAction(_create_emoji_icon("🗑"), "Delete File", self)
+        self._act_delete_file.setToolTip("Delete downloaded file from disk, keeping entry paused at 0%")
+        self._act_delete_file.triggered.connect(self._on_delete_file)
 
         self._act_move = QAction(_create_emoji_icon("📂"), "Move…", self)
         self._act_move.setToolTip("Move download to another directory")
@@ -316,10 +339,12 @@ class MainWindow(QMainWindow):
             lambda: self._act_toggle_details.setChecked(False)
         )
 
-        self._act_tor = QAction("🧅 Tor: OFF", self)
-        self._act_tor.setCheckable(True)
+        self._act_tor = QAction(_create_emoji_icon("🧅"), "Tor: OFF", self)
+        self._act_tor.setCheckable(False)
         self._act_tor.setToolTip("Toggle Tor network privacy routing (SOCKS5 proxy)")
-        self._act_tor.toggled.connect(self._on_toggle_tor)
+        self._act_tor.triggered.connect(
+            lambda: self._on_toggle_tor(not self._manager.tor_config.enabled)
+        )
 
     def _setup_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
@@ -392,7 +417,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._act_load_backlog)
         file_menu.addSeparator()
 
-        exit_act = QAction("Exit", self)
+        exit_act = QAction(_create_emoji_icon("🚪"), "Exit", self)
         exit_act.setShortcut(QKeySequence("Ctrl+Q"))
         exit_act.triggered.connect(self.close)
         file_menu.addAction(exit_act)
@@ -416,13 +441,14 @@ class MainWindow(QMainWindow):
         view_menu = menubar.addMenu("&View")
         view_menu.addAction(self._act_toggle_details)
         view_menu.addSeparator()
-        select_all_act = QAction("Select All", self)
+        select_all_act = QAction(_create_emoji_icon("☑️"), "Select All", self)
         select_all_act.setShortcut(QKeySequence("Ctrl+A"))
         select_all_act.triggered.connect(self._table.selectAll)
         view_menu.addAction(select_all_act)
 
         view_menu.addSeparator()
         sort_menu = view_menu.addMenu("&Sort By")
+        sort_menu.setIcon(_create_emoji_icon("↕️"))
         sort_columns = [
             ("Date Added (Default)", Col.ADDED),
             ("Name", Col.NAME),
@@ -467,13 +493,17 @@ class MainWindow(QMainWindow):
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
-        about_act = QAction("About My-IDM", self)
+        about_act = QAction(_create_emoji_icon("ℹ️"), "About My-IDM", self)
         about_act.triggered.connect(self._on_about)
         help_menu.addAction(about_act)
 
     def _setup_statusbar(self):
         self._status_label = QLabel("Ready")
         self._speed_label = QLabel("")
+        self._speed_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._speed_label.customContextMenuRequested.connect(self._show_speed_context_menu)
+        self._speed_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._speed_label.setToolTip("Total Transfer Speed (Right-click to set Download / Upload limits)")
         self._count_label = QLabel("0 Downloads, 0 Active")
 
         # Tor footer widget with button and embedded progress bar
@@ -542,6 +572,7 @@ class MainWindow(QMainWindow):
         self._manager.tor_status_changed.connect(self._on_tor_status_changed)
         self._manager.threat_detected.connect(self._on_threat_detected)
         self._manager.queue_order_changed.connect(self._on_queue_order_changed)
+        self._manager.bandwidth_limits_changed.connect(self._on_bandwidth_limits_changed)
 
         # Connect table selection to bottom details panel
         self._table.selectionModel().selectionChanged.connect(
@@ -612,7 +643,7 @@ class MainWindow(QMainWindow):
     # -- action handlers -----------------------------------------------------
 
     def _on_add(self):
-        dlg = AddDownloadDialog(self)
+        dlg = AddDownloadDialog(self, manager=self._manager)
         if dlg.exec() == AddDownloadDialog.DialogCode.Accepted:
             self._manager.add_download(
                 dlg.url, dlg.save_path, dlg.num_segments
@@ -646,6 +677,23 @@ class MainWindow(QMainWindow):
         if dlg.exec() == DeleteConfirmDialog.DialogCode.Accepted:
             for did in ids:
                 self._manager.delete_download(did, dlg.delete_files)
+
+    def _on_delete_file(self):
+        ids = self._selected_ids()
+        if not ids:
+            return
+        items_str = "this file" if len(ids) == 1 else f"the files for these {len(ids)} downloads"
+        ans = QMessageBox.question(
+            self,
+            "Delete File",
+            f"Are you sure you want to delete {items_str} from disk?\n\n"
+            "The download entry will be kept, paused, and progress reset to 0.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            for did in ids:
+                self._manager.delete_download_file(did)
 
     def _on_move(self):
         entry = self._first_selected_entry()
@@ -755,11 +803,33 @@ class MainWindow(QMainWindow):
         menu.addAction(self._act_recheck)
         menu.addAction(self._act_move)
         menu.addSeparator()
+        # Bandwidth Allocation Submenu
+        bw_menu = menu.addMenu("Bandwidth Allocation")
+        entry = self._first_selected_entry()
+        curr_alloc = (entry.metadata.get("bandwidth_allocation", "max") if entry and entry.metadata else "max").lower()
+        alloc_options = [
+            ("Low (25%)", "low"),
+            ("Medium (50%)", "medium"),
+            ("High (75%)", "high"),
+            ("Max (100%)", "max"),
+        ]
+        for label, val in alloc_options:
+            act = bw_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(curr_alloc == val)
+            act.triggered.connect(lambda checked=False, a=val: self._on_set_bandwidth_allocation(a))
+        menu.addSeparator()
         menu.addAction(self._act_open_file)
         menu.addAction(self._act_open_folder)
         menu.addSeparator()
+        menu.addAction(self._act_delete_file)
         menu.addAction(self._act_delete)
         menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _on_set_bandwidth_allocation(self, allocation: str):
+        for did in self._selected_ids():
+            self._manager.set_download_bandwidth_allocation(did, allocation)
+        self._table.viewport().update()
 
     # -- signal handlers from manager ----------------------------------------
 
@@ -814,7 +884,86 @@ class MainWindow(QMainWindow):
     def _update_speed_label(self):
         down, up = self._model.get_aggregate_speeds()
         from my_idm.download_model import _format_speed
-        self._speed_label.setText(f"↓ {_format_speed(down)}  ↑ {_format_speed(up)}")
+        net_cfg = self._manager.network_config
+        dl_lim = net_cfg.download_limit or 0
+        ul_lim = net_cfg.upload_limit or 0
+        dl_tag = f" [Limit: {_format_speed(dl_lim)}]" if dl_lim > 0 else ""
+        ul_tag = f" [Limit: {_format_speed(ul_lim)}]" if ul_lim > 0 else ""
+        self._speed_label.setText(f"↓ {_format_speed(down)}{dl_tag}  ↑ {_format_speed(up)}{ul_tag}")
+        self._speed_label.setToolTip(
+            f"Total Transfer Speed\n"
+            f"Download Limit: {_format_speed(dl_lim) if dl_lim > 0 else 'Unlimited'}\n"
+            f"Upload Limit: {_format_speed(ul_lim) if ul_lim > 0 else 'Unlimited'}\n"
+            f"Right-click to adjust limits"
+        )
+
+    def _on_bandwidth_limits_changed(self, download_limit: int, upload_limit: int):
+        self._update_speed_label()
+
+    def _show_speed_context_menu(self, pos):
+        menu = QMenu(self)
+        from my_idm.download_model import _format_speed
+        net_cfg = self._manager.network_config
+        curr_dl = net_cfg.download_limit or 0
+        curr_ul = net_cfg.upload_limit or 0
+
+        # Submenu for Download Speed Limit
+        dl_menu = menu.addMenu("Download Speed Limit")
+        preset_values = {val for _, val in SPEED_LIMIT_PRESETS}
+        for label, val in SPEED_LIMIT_PRESETS:
+            act = dl_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(curr_dl == val)
+            act.triggered.connect(lambda checked=False, v=val: self._set_speed_limit(v, is_upload=False))
+
+        dl_menu.addSeparator()
+        custom_dl_act = dl_menu.addAction(
+            f"Custom ({_format_speed(curr_dl)})..." if (curr_dl > 0 and curr_dl not in preset_values) else "Custom..."
+        )
+        custom_dl_act.setCheckable(True)
+        custom_dl_act.setChecked(curr_dl > 0 and curr_dl not in preset_values)
+        custom_dl_act.triggered.connect(lambda: self._prompt_custom_speed_limit(is_upload=False))
+
+        # Submenu for Upload Speed Limit
+        ul_menu = menu.addMenu("Upload Speed Limit")
+        for label, val in SPEED_LIMIT_PRESETS:
+            act = ul_menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(curr_ul == val)
+            act.triggered.connect(lambda checked=False, v=val: self._set_speed_limit(v, is_upload=True))
+
+        ul_menu.addSeparator()
+        custom_ul_act = ul_menu.addAction(
+            f"Custom ({_format_speed(curr_ul)})..." if (curr_ul > 0 and curr_ul not in preset_values) else "Custom..."
+        )
+        custom_ul_act.setCheckable(True)
+        custom_ul_act.setChecked(curr_ul > 0 and curr_ul not in preset_values)
+        custom_ul_act.triggered.connect(lambda: self._prompt_custom_speed_limit(is_upload=True))
+
+        menu.exec(self._speed_label.mapToGlobal(pos))
+
+    def _set_speed_limit(self, limit: int, is_upload: bool):
+        net_cfg = self._manager.network_config
+        dl = net_cfg.download_limit if is_upload else limit
+        ul = limit if is_upload else net_cfg.upload_limit
+        self._manager.set_bandwidth_limits(dl, ul)
+        self._update_speed_label()
+
+    def _prompt_custom_speed_limit(self, is_upload: bool):
+        net_cfg = self._manager.network_config
+        curr = (net_cfg.upload_limit if is_upload else net_cfg.download_limit) or 0
+        kind = "Upload" if is_upload else "Download"
+        val_kb, ok = QInputDialog.getInt(
+            self,
+            f"Custom {kind} Speed Limit",
+            f"Enter {kind.lower()} speed limit in KB/s (0 = Unlimited):",
+            value=curr // 1024,
+            minValue=0,
+            maxValue=10_000_000,
+            step=10,
+        )
+        if ok:
+            self._set_speed_limit(val_kb * 1024, is_upload)
 
     def _on_open_preferences(self, initial_tab: int = 0):
         dlg = SettingsDialog(
@@ -955,7 +1104,7 @@ class MainWindow(QMainWindow):
             self._tor_footer_progress.setVisible(True)
             self._tor_footer_progress.setRange(0, 0)
             self._tor_status_btn.setText("🧅 Tor: Connecting...")
-            self._act_tor.setText("🧅 Tor: Connecting...")
+            self._act_tor.setText("Tor: Connecting...")
             self._apply_tor_transition_style()
         elif state == "disconnecting":
             self._tor_toolbar_progress.setVisible(True)
@@ -963,7 +1112,7 @@ class MainWindow(QMainWindow):
             self._tor_footer_progress.setVisible(True)
             self._tor_footer_progress.setRange(0, 0)
             self._tor_status_btn.setText("🧅 Tor: Disconnecting...")
-            self._act_tor.setText("🧅 Tor: Disconnecting...")
+            self._act_tor.setText("Tor: Disconnecting...")
             self._apply_tor_transition_style()
         elif state in ("connected", "disconnected", "error"):
             self._tor_toolbar_progress.setVisible(False)
@@ -1016,7 +1165,7 @@ class MainWindow(QMainWindow):
         self._tor_footer_progress.setVisible(False)
 
         if config.enabled:
-            self._act_tor.setText("🧅 Tor: ON")
+            self._act_tor.setText("Tor: ON")
             routed = []
             if config.route_http:
                 routed.append("HTTP")
@@ -1068,7 +1217,7 @@ class MainWindow(QMainWindow):
             if hasattr(self, "_tor_toolbar_btn"):
                 self._tor_toolbar_btn.setStyleSheet(green_tb_style)
         else:
-            self._act_tor.setText("🧅 Tor: OFF")
+            self._act_tor.setText("Tor: OFF")
             self._act_tor.setToolTip(
                 "Tor is OFF\nClick to enable Tor routing"
             )

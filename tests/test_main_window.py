@@ -40,7 +40,7 @@ class TestMainWindowToolbar(unittest.TestCase):
         actions = toolbar.actions()
         action_texts = [a.text() for a in actions if not a.isSeparator()]
 
-        self.assertIn("➕ Add Download", action_texts)
+        self.assertIn("Add Download", action_texts)
         self.assertNotIn("📦 Add Torrent", action_texts)
         self.assertNotIn("📦 Add Torrent File…", action_texts)
 
@@ -312,5 +312,88 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
             )
 
 
+    def test_bandwidth_allocation_context_menu_and_action(self):
+        """Bandwidth allocation updates entry metadata and calls engine."""
+        entry = DownloadEntry(
+            id="bw-test-1",
+            url="https://example.com/file.zip",
+            filename="file.zip",
+            status="downloading",
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        self.win._table.selectRow(0)
+
+        self.win._on_set_bandwidth_allocation("low")
+        self.assertEqual(self.manager.get_download_bandwidth_allocation("bw-test-1"), "low")
+
+        self.win._on_set_bandwidth_allocation("high")
+        self.assertEqual(self.manager.get_download_bandwidth_allocation("bw-test-1"), "high")
+
+    def test_speed_limits_and_footer_context_menu(self):
+        """Footer speed limit context menu adjusts global bandwidth limits and updates speed label."""
+        from my_idm.main_window import SPEED_LIMIT_PRESETS
+        labels = [label.lower().replace(" ", "") for label, _ in SPEED_LIMIT_PRESETS]
+        expected_presets = [
+            "unlimited", "1kbps", "2kbps", "5kbps", "10kbps", "50kbps",
+            "100kbps", "200kbps", "500kbps", "1mbps", "2mbps", "5mbps",
+            "10mbps", "100mbps",
+        ]
+        for ep in expected_presets:
+            self.assertIn(ep, labels, f"Preset '{ep}' must be present in speed presets")
+
+        # Set download limit to 1 MB/s
+        self.win._set_speed_limit(1048576, is_upload=False)
+        self.assertEqual(self.manager.network_config.download_limit, 1048576)
+
+        # Set upload limit to 50 KB/s
+        self.win._set_speed_limit(51200, is_upload=True)
+        self.assertEqual(self.manager.network_config.upload_limit, 51200)
+
+        # Speed label must reflect active limits
+        lbl_text = self.win._speed_label.text()
+        self.assertIn("Limit: 1.0 MiB/s", lbl_text)
+        self.assertIn("Limit: 50.0 KiB/s", lbl_text)
+
+    def test_menubar_actions_icons_and_alignment(self):
+        """Menubar actions have icons to maintain uniform vertical text indentation."""
+        menubar = self.win.menuBar()
+        menus = {act.text(): act.menu() for act in menubar.actions()}
+
+        # File menu
+        file_menu = menus.get("&File")
+        self.assertIsNotNone(file_menu)
+        for act in file_menu.actions():
+            if not act.isSeparator():
+                self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' in File menu must have an icon")
+
+        # View menu
+        view_menu = menus.get("&View")
+        self.assertIsNotNone(view_menu)
+        for act in view_menu.actions():
+            if not act.isSeparator():
+                if act.menu():
+                    self.assertFalse(act.menu().icon().isNull(), f"Submenu '{act.text()}' in View menu must have an icon")
+                else:
+                    self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' in View menu must have an icon")
+
+        # Tools menu
+        tools_menu = menus.get("&Tools")
+        self.assertIsNotNone(tools_menu)
+        for act in tools_menu.actions():
+            if not act.isSeparator():
+                self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' in Tools menu must have an icon")
+        self.assertFalse(self.win._act_tor.icon().isNull())
+        self.assertEqual(self.win._act_tor.text(), "Tor: OFF")
+
+        # Help menu
+        help_menu = menus.get("&Help")
+        self.assertIsNotNone(help_menu)
+        for act in help_menu.actions():
+            if not act.isSeparator():
+                self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' in Help menu must have an icon")
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -53,6 +53,26 @@ class HTTPEngine:
         self._status_cb: Optional[StatusCallback] = None
         self._filename_cb: Optional[FilenameCallback] = None
         self._last_progress_emit: dict[str, float] = {}
+        self._download_limit: int = 0
+
+    def _get_effective_download_limit(self, entry: DownloadEntry) -> int:
+        if self._download_limit <= 0:
+            return 0
+        alloc = (entry.metadata.get("bandwidth_allocation") or "max").lower()
+        fracs = {"low": 0.25, "medium": 0.50, "high": 0.75, "max": 1.0}
+        frac = fracs.get(alloc, 1.0)
+        return int(self._download_limit * frac)
+
+    def set_download_limit(self, limit: int):
+        """Set global download rate limit in bytes/sec (0 = unlimited)."""
+        self._download_limit = limit
+
+    def set_download_bandwidth_allocation(self, download_id: str, allocation: str):
+        """Set bandwidth allocation ('low', 'medium', 'high', 'max') for an HTTP download."""
+        entry = self._db.get_download(download_id)
+        if entry:
+            entry.metadata["bandwidth_allocation"] = allocation
+            self._db.update_download(entry)
 
     def get_live_segments(self, download_id: str) -> Optional[list[SegmentEntry]]:
         """Return live in-memory segments for active downloading tasks."""
@@ -513,6 +533,12 @@ class HTTPEngine:
                         seg.downloaded_bytes += chunk_len
                         seg_progress[seg.index] = seg.downloaded_bytes
 
+                        eff_limit = self._get_effective_download_limit(entry)
+                        if eff_limit > 0:
+                            expected_time = chunk_len / eff_limit
+                            if expected_time > 0.001:
+                                await asyncio.sleep(min(expected_time, 1.0))
+
                         # Aggregate progress
                         total_dl = sum(seg_progress.values())
                         elapsed = time.monotonic() - start_time
@@ -680,6 +706,12 @@ class HTTPEngine:
 
                             f.write(chunk)
                             downloaded += len(chunk)
+
+                            eff_limit = self._get_effective_download_limit(entry)
+                            if eff_limit > 0:
+                                expected_time = len(chunk) / eff_limit
+                                if expected_time > 0.001:
+                                    await asyncio.sleep(min(expected_time, 1.0))
 
                             elapsed = time.monotonic() - start_time
                             speed = (

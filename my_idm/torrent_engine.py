@@ -11,6 +11,7 @@ from typing import Optional, Callable, Any
 from my_idm.config import TorConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.network import NetworkConfig, is_interface_active
+from my_idm.utils import normalize_path
 
 log = logging.getLogger(__name__)
 
@@ -307,9 +308,60 @@ class TorrentEngine:
                 sett["proxy_port"] = 0
                 sett["force_proxy"] = False
 
+            # 3. Bandwidth limits
+            if self._network_config:
+                sett["download_rate_limit"] = int(self._network_config.download_limit or 0)
+                sett["upload_rate_limit"] = int(self._network_config.upload_limit or 0)
+
             self._session.apply_settings(sett)
         except Exception as exc:
             log.warning("Failed to apply network settings to libtorrent: %s", exc)
+
+    def set_session_limits(self, download_limit: int, upload_limit: int):
+        """Apply global download and upload rate limits to libtorrent session."""
+        if self._network_config:
+            self._network_config.download_limit = download_limit
+            self._network_config.upload_limit = upload_limit
+        if not _HAS_LIBTORRENT or not self._session:
+            return
+        try:
+            sett = self._session.get_settings()
+            sett["download_rate_limit"] = int(download_limit or 0)
+            sett["upload_rate_limit"] = int(upload_limit or 0)
+            self._session.apply_settings(sett)
+            log.info("Applied libtorrent session limits: down=%d, up=%d", download_limit, upload_limit)
+        except Exception as exc:
+            log.warning("Failed to apply session rate limits: %s", exc)
+
+    def set_torrent_bandwidth_allocation(self, download_id: str, allocation: str):
+        """Set allocation level ('low', 'medium', 'high', 'max') for a torrent."""
+        entry = self._db.get_download(download_id)
+        if entry:
+            entry.metadata["bandwidth_allocation"] = allocation
+            self._db.update_download(entry)
+
+        handle = self._handles.get(download_id)
+        if not handle or not _HAS_LIBTORRENT:
+            return
+
+        fractions = {"low": 0.25, "medium": 0.50, "high": 0.75, "max": 1.0}
+        frac = fractions.get(allocation.lower(), 1.0)
+        try:
+            if not handle.is_valid():
+                return
+            dl_limit = self._network_config.download_limit if self._network_config else 0
+            ul_limit = self._network_config.upload_limit if self._network_config else 0
+            if dl_limit > 0:
+                handle.set_download_limit(int(dl_limit * frac))
+            else:
+                handle.set_download_limit(-1 if frac >= 1.0 else int(10_000_000 * frac))
+
+            if ul_limit > 0:
+                handle.set_upload_limit(int(ul_limit * frac))
+            else:
+                handle.set_upload_limit(-1 if frac >= 1.0 else int(10_000_000 * frac))
+        except Exception as exc:
+            log.warning("Failed to set bandwidth allocation for torrent %s: %s", download_id, exc)
 
     # -- public API ----------------------------------------------------------
 
@@ -422,12 +474,58 @@ class TorrentEngine:
                         log.info("Loaded fastresume for %s", entry.id)
                 except Exception as exc:
                     log.warning("Failed to parse fastresume for %s: %s", entry.id, exc)
+
+        elif url.startswith(("http://", "https://", "ftp://")):
+            # Fetch remote .torrent file and cache locally
+            torrent_cache = FASTRESUME_DIR / f"{entry.id}.torrent"
+            try:
+                import urllib.request
+                req = urllib.request.Request(url, headers={"User-Agent": "My-IDM/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    torrent_data = resp.read()
+                with open(torrent_cache, "wb") as f:
+                    f.write(torrent_data)
+                ti = lt.torrent_info(str(torrent_cache))
+                parsed_hash = str(ti.info_hash()).lower()
+                if parsed_hash:
+                    expected_hash = parsed_hash
+            except Exception as exc:
+                log.error("Failed to download or parse torrent file from %s: %s", url, exc)
+                return False
+
+            params = lt.add_torrent_params()
+            params.ti = ti
+            params.save_path = save_path
+
+            if resume_bytes and hasattr(lt, "read_resume_data"):
+                try:
+                    resume_params = lt.read_resume_data(resume_bytes)
+                    resume_hash = _get_info_hash_from_params(resume_params)
+                    if expected_hash and resume_hash and expected_hash != resume_hash:
+                        log.warning(
+                            "Fastresume hash mismatch for %s: expected %s, got %s. Discarding mismatched fastresume.",
+                            entry.id, expected_hash, resume_hash,
+                        )
+                        resume_path.unlink(missing_ok=True)
+                    else:
+                        params = resume_params
+                        if not getattr(params, "ti", None):
+                            params.ti = ti
+                        params.save_path = save_path
+                        log.info("Loaded fastresume for %s", entry.id)
+                except Exception as exc:
+                    log.warning("Failed to parse fastresume for %s: %s", entry.id, exc)
         else:
             log.error("Invalid torrent source: %s", url)
             return False
 
         handle = self._session.add_torrent(params)
         self._handles[entry.id] = handle
+
+        # Apply bandwidth allocation if set
+        alloc = entry.metadata.get("bandwidth_allocation") if entry.metadata else None
+        if alloc:
+            self.set_torrent_bandwidth_allocation(entry.id, alloc)
 
         # Extract info hash and persist to entry if missing or updated
         try:
@@ -795,7 +893,12 @@ class TorrentEngine:
 
     def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:
         """Sets priority for a specific file (0 = do not download, 1 = low, 4 = normal, 7 = high)."""
+        entry = self._db.get_download(download_id)
         handle = self._handles.get(download_id)
+        if not handle and entry:
+            self.add_torrent(entry)
+            handle = self._handles.get(download_id)
+
         if not handle or not _HAS_LIBTORRENT:
             return False
 
@@ -803,6 +906,52 @@ class TorrentEngine:
             if not handle.is_valid():
                 return False
             handle.file_priority(file_index, priority)
+
+            # Update file metadata if stored
+            if entry and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                for f in entry.metadata["files"]:
+                    if f.get("index") == file_index:
+                        f["priority"] = priority
+                        break
+                self._db.update_download(entry)
+
+            s = handle.status()
+            total_wanted = getattr(s, "total_wanted", 0)
+            total_wanted_done = getattr(s, "total_wanted_done", 0)
+            is_all_done = (total_wanted > 0 and total_wanted_done >= total_wanted) or getattr(s, "is_finished", False) or getattr(s, "is_seeding", False)
+
+            # If unchecked file is checked (priority > 0) after download was complete:
+            if priority > 0 and not is_all_done and entry and entry.status in ("completed", "seeding"):
+                try:
+                    if hasattr(lt, "torrent_flags"):
+                        handle.set_flags(lt.torrent_flags.auto_managed)
+                except Exception:
+                    pass
+                handle.resume()
+                new_status = "downloading"
+                entry.status = new_status
+                self._db.update_status(download_id, new_status)
+                if self._status_cb:
+                    self._status_cb(download_id, new_status, "")
+
+            # Calculate and emit updated progress & percentage
+            if entry:
+                downloaded_bytes = total_wanted_done if total_wanted_done > 0 else getattr(s, "total_done", 0)
+                total_bytes = total_wanted if total_wanted > 0 else (entry.total_size or 1)
+                entry.downloaded_size = downloaded_bytes
+                self._db.update_progress(download_id, downloaded_bytes)
+                if self._progress_cb:
+                    self._progress_cb(
+                        download_id,
+                        downloaded_bytes,
+                        total_bytes,
+                        getattr(s, "download_rate", 0),
+                        0.0,
+                        getattr(s, "num_seeds", 0),
+                        getattr(s, "num_peers", 0),
+                        getattr(s, "upload_rate", 0),
+                    )
+
             return True
         except Exception as exc:
             log.warning("Failed to set file priority for %s[%d]: %s", download_id, file_index, exc)

@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,11 +24,11 @@ from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.security import (
     SecurityConfig,
     check_url_safety,
-    quarantine_or_delete_file,
     scan_file,
+    quarantine_or_delete_file,
 )
 from my_idm.torrent_engine import TorrentEngine
-from my_idm.utils import get_unique_filename
+from my_idm.utils import get_unique_filename, normalize_path
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class DownloadManager(QObject):
     threat_detected = Signal(str, str)       # download_id, report
     queue_order_changed = Signal()
     tor_status_changed = Signal(str, str)     # status ("connecting"|"connected"|"disconnecting"|"disconnected"|"error"), message
+    bandwidth_limits_changed = Signal(int, int)  # download_limit, upload_limit
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -73,6 +75,8 @@ class DownloadManager(QObject):
         self._http.set_tor_config_sync(self._tor_config)
         self._torrent.apply_network_config(self._network_config)
         self._torrent.apply_tor_config(self._tor_config)
+        self._torrent.set_session_limits(self._network_config.download_limit, self._network_config.upload_limit)
+        self._http.set_download_limit(self._network_config.download_limit)
 
         # asyncio event loop runs in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -285,7 +289,39 @@ class DownloadManager(QObject):
             self._http.set_network_config_sync(config)
 
         self._torrent.apply_network_config(config)
+        self._torrent.set_session_limits(config.download_limit, config.upload_limit)
+        self._http.set_download_limit(config.download_limit)
         self.network_config_changed.emit(config)
+
+    def set_bandwidth_limits(self, download_limit: int, upload_limit: int):
+        """Set global download and upload speed limits in bytes/second (0 = unlimited)."""
+        self._network_config.download_limit = download_limit
+        self._network_config.upload_limit = upload_limit
+        self._network_config.save()
+        self._torrent.set_session_limits(download_limit, upload_limit)
+        self._http.set_download_limit(download_limit)
+        self.bandwidth_limits_changed.emit(download_limit, upload_limit)
+
+    def set_download_bandwidth_allocation(self, download_id: str, allocation: str):
+        """Set bandwidth allocation ('low', 'medium', 'high', 'max') for a specific download."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return
+        if not entry.metadata:
+            entry.metadata = {}
+        entry.metadata["bandwidth_allocation"] = allocation
+        self._db.update_download(entry)
+        if entry.download_type == "torrent":
+            self._torrent.set_torrent_bandwidth_allocation(download_id, allocation)
+        else:
+            self._http.set_download_bandwidth_allocation(download_id, allocation)
+
+    def get_download_bandwidth_allocation(self, download_id: str) -> str:
+        """Get bandwidth allocation ('low', 'medium', 'high', 'max') for a download."""
+        entry = self._db.get_download(download_id)
+        if not entry or not entry.metadata:
+            return "max"
+        return entry.metadata.get("bandwidth_allocation", "max")
 
     @property
     def security_config(self) -> SecurityConfig:
@@ -382,13 +418,14 @@ class DownloadManager(QObject):
             }
             filename = get_unique_filename(save_path, filename, reserved_names=reserved)
 
+        save_path = normalize_path(save_path)
         # Create new entry
         entry = DownloadEntry(
             id=str(uuid.uuid4()),
             url=url,
             save_path=save_path,
             filename=filename,
-            file_path=str(Path(save_path) / filename) if filename else "",
+            file_path=normalize_path(Path(save_path) / filename) if filename else "",
             download_type=download_type,
             num_segments=num_segments,
             added_at=_now_iso(),
@@ -543,29 +580,96 @@ class DownloadManager(QObject):
 
         # Stop active download
         if entry.download_type == "http":
-            if self._loop:
-                asyncio.run_coroutine_threadsafe(
+            if self._loop and self._loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(
                     self._http.cancel(download_id), self._loop
                 )
+                try:
+                    fut.result(timeout=5.0)
+                except Exception:
+                    pass
         elif entry.download_type == "torrent":
             self._torrent.remove(download_id, delete_files)
 
         # Delete files if requested (for HTTP or if torrent didn't handle it)
         if delete_files and entry.download_type == "http":
-            fp = Path(entry.file_path)
-            if fp.exists():
-                try:
-                    if fp.is_dir():
-                        shutil.rmtree(fp)
-                    else:
-                        fp.unlink()
-                except OSError as exc:
-                    log.warning("Failed to delete file %s: %s", fp, exc)
+            target_path = entry.file_path
+            if not target_path and entry.save_path and entry.filename:
+                target_path = normalize_path(Path(entry.save_path) / entry.filename)
+            if target_path:
+                fp = Path(target_path)
+                if fp.exists():
+                    for attempt in range(5):
+                        try:
+                            if fp.is_dir():
+                                shutil.rmtree(fp)
+                            else:
+                                fp.unlink()
+                            break
+                        except OSError as exc:
+                            time.sleep(0.1)
+                            if attempt == 4:
+                                log.warning("Failed to delete file %s: %s", fp, exc)
 
         # Remove from DB
         self._db.delete_segments(download_id)
         self._db.delete_download(download_id)
         self.download_removed.emit(download_id)
+
+    def delete_download_file(self, download_id: str):
+        """Delete downloaded files from disk while keeping the entry in DB paused at 0%."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return
+
+        # 1. Stop active download
+        if entry.download_type == "http":
+            if self._loop and self._loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._http.cancel(download_id), self._loop
+                )
+                try:
+                    fut.result(timeout=5.0)
+                except Exception:
+                    pass
+        elif entry.download_type == "torrent":
+            self._torrent.remove(download_id, delete_files=True)
+
+        # 2. Delete file / directory from disk
+        target_path = entry.file_path
+        if not target_path and entry.save_path and entry.filename:
+            target_path = normalize_path(Path(entry.save_path) / entry.filename)
+        if target_path:
+            fp = Path(target_path)
+            if fp.exists():
+                for attempt in range(5):
+                    try:
+                        if fp.is_dir():
+                            shutil.rmtree(fp)
+                        else:
+                            fp.unlink()
+                        break
+                    except OSError as exc:
+                        time.sleep(0.1)
+                        if attempt == 4:
+                            log.warning("Failed to delete file %s: %s", fp, exc)
+
+        # 3. Clean up HTTP segment records in DB
+        self._db.delete_segments(download_id)
+
+        # 4. Reset entry progress, speed, and status to paused
+        entry.downloaded_size = 0
+        entry.status = "paused"
+        entry.speed = 0.0
+        entry.upload_speed = 0.0
+        entry.eta_seconds = 0.0
+        self._db.update_download(entry)
+
+        # 5. Emit status and progress signals
+        self.status_changed.emit(download_id, "paused", "")
+        self.progress_updated.emit(
+            download_id, 0, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+        )
 
     # -- move ----------------------------------------------------------------
 
@@ -574,14 +678,15 @@ class DownloadManager(QObject):
         if not entry:
             return
 
+        new_save_path = normalize_path(new_save_path)
         old_file_path = Path(entry.file_path)
-        new_file_path = Path(new_save_path) / old_file_path.name
+        new_file_path = normalize_path(Path(new_save_path) / old_file_path.name)
 
         if entry.download_type == "torrent":
             # libtorrent handles this natively
             self._torrent.move_storage(download_id, new_save_path)
             self._db.move_download(
-                download_id, new_save_path, str(new_file_path)
+                download_id, new_save_path, new_file_path
             )
         else:
             # For HTTP: pause → move → update → resume
@@ -598,11 +703,11 @@ class DownloadManager(QObject):
 
             # Move the file
             if old_file_path.exists():
-                new_file_path.parent.mkdir(parents=True, exist_ok=True)
+                Path(new_save_path).mkdir(parents=True, exist_ok=True)
                 shutil.move(str(old_file_path), str(new_file_path))
 
             self._db.move_download(
-                download_id, new_save_path, str(new_file_path)
+                download_id, new_save_path, new_file_path
             )
 
             # Resume if it was active
@@ -1010,4 +1115,14 @@ class DownloadManager(QObject):
             return "torrent"
         if url_lower.endswith(".torrent") and os.path.isfile(url):
             return "torrent"
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme in ("http", "https", "ftp"):
+                path_lower = parsed.path.lower()
+                if path_lower.endswith(".torrent") or ".torrent" in path_lower:
+                    return "torrent"
+                if ".torrent" in parsed.query.lower():
+                    return "torrent"
+        except Exception:
+            pass
         return "http"
