@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import humanize
@@ -90,20 +91,32 @@ class DownloadTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._entries: list[DownloadEntry] = []
         self._id_to_row: dict[str, int] = {}
+        self._sort_column: int = Col.ADDED
+        self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
+
+    @property
+    def sort_column(self) -> int:
+        return self._sort_column
+
+    @property
+    def sort_order(self) -> Qt.SortOrder:
+        return self._sort_order
 
     # -- data population -----------------------------------------------------
 
     def load_entries(self, entries: list[DownloadEntry]):
         self.beginResetModel()
         self._entries = list(entries)
+        if self._sort_column is not None:
+            self._apply_sort()
         self._rebuild_index()
         self.endResetModel()
 
     def add_entry(self, entry: DownloadEntry):
-        row = len(self._entries)
+        row = self._find_insert_row(entry)
         self.beginInsertRows(QModelIndex(), row, row)
-        self._entries.append(entry)
-        self._id_to_row[entry.id] = row
+        self._entries.insert(row, entry)
+        self._rebuild_index()
         self.endInsertRows()
 
     def remove_entry(self, download_id: str):
@@ -114,6 +127,124 @@ class DownloadTableModel(QAbstractTableModel):
         self._entries.pop(row)
         self._rebuild_index()
         self.endRemoveRows()
+
+    # -- sorting -------------------------------------------------------------
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+        """Sort the model by the specified column and order."""
+        self._sort_column = column
+        self._sort_order = order
+        if not self._entries:
+            return
+
+        self.layoutAboutToBeChanged.emit()
+        old_ids = [e.id for e in self._entries]
+        self._apply_sort()
+        self._rebuild_index()
+
+        old_indexes = self.persistentIndexList()
+        new_indexes = []
+        for idx in old_indexes:
+            if idx.row() < len(old_ids):
+                old_id = old_ids[idx.row()]
+                new_row = self._id_to_row.get(old_id, idx.row())
+                new_indexes.append(self.index(new_row, idx.column()))
+            else:
+                new_indexes.append(idx)
+        self.changePersistentIndexList(old_indexes, new_indexes)
+        self.layoutChanged.emit()
+
+    def _apply_sort(self):
+        if self._sort_column is None:
+            return
+        ascending = (
+            self._sort_order == Qt.SortOrder.AscendingOrder
+            or self._sort_order == 0
+        )
+        reverse = not ascending
+        self._entries.sort(
+            key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+            reverse=reverse,
+        )
+
+    def _entry_sort_key(self, entry: DownloadEntry, col: int, ascending: bool) -> Any:
+        if col == Col.NAME:
+            return (entry.filename or entry.url or "").lower()
+
+        if col == Col.SIZE:
+            return entry.total_size if entry.total_size > 0 else -1
+
+        if col == Col.PROGRESS:
+            return entry.progress
+
+        if col == Col.STATUS:
+            return (entry.status or "").lower()
+
+        if col == Col.SPEED:
+            if entry.status == "downloading":
+                return entry.speed
+            if entry.status == "seeding":
+                return entry.upload_speed
+            return 0.0
+
+        if col == Col.ETA:
+            # Active downloads with ETA first; inactive ("—") at bottom
+            has_eta = entry.status == "downloading" and entry.eta_seconds > 0
+            if ascending:
+                return (0, entry.eta_seconds) if has_eta else (1, 0.0)
+            else:
+                return (1, entry.eta_seconds) if has_eta else (0, 0.0)
+
+        if col == Col.TYPE:
+            return (entry.download_type or "").lower()
+
+        if col == Col.SEEDS_PEERS:
+            if entry.download_type == "torrent":
+                return (entry.seeds, entry.peers)
+            if entry.download_type == "http":
+                return (entry.num_segments, 0)
+            return (0, 0)
+
+        if col == Col.ADDED:
+            return entry.added_at or ""
+
+        if col == Col.LAST_TRIED:
+            has_time = bool(entry.last_tried_at)
+            if ascending:
+                return (0, entry.last_tried_at) if has_time else (1, "")
+            else:
+                return (1, entry.last_tried_at) if has_time else (0, "")
+
+        if col == Col.COMPLETED:
+            has_time = bool(entry.completed_at)
+            if ascending:
+                return (0, entry.completed_at) if has_time else (1, "")
+            else:
+                return (1, entry.completed_at) if has_time else (0, "")
+
+        if col == Col.SAVE_PATH:
+            return (entry.save_path or "").lower()
+
+        return ""
+
+    def _find_insert_row(self, entry: DownloadEntry) -> int:
+        if self._sort_column is None or not self._entries:
+            return len(self._entries)
+        ascending = (
+            self._sort_order == Qt.SortOrder.AscendingOrder
+            or self._sort_order == 0
+        )
+        reverse = not ascending
+        key = self._entry_sort_key(entry, self._sort_column, ascending)
+        for i, existing in enumerate(self._entries):
+            existing_key = self._entry_sort_key(existing, self._sort_column, ascending)
+            if reverse:
+                if key > existing_key:
+                    return i
+            else:
+                if key < existing_key:
+                    return i
+        return len(self._entries)
 
     def get_entry(self, row: int) -> Optional[DownloadEntry]:
         if 0 <= row < len(self._entries):
@@ -174,6 +305,23 @@ class DownloadTableModel(QAbstractTableModel):
         self.dataChanged.emit(
             idx, self.index(row, Col.COUNT - 1),
             [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ForegroundRole],
+        )
+
+    def update_filename(self, download_id: str, filename: str):
+        """Update filename when resolved from server headers or metadata."""
+        row = self._id_to_row.get(download_id)
+        if row is None:
+            return
+        entry = self._entries[row]
+        entry.filename = filename
+        if entry.save_path:
+            entry.file_path = str(Path(entry.save_path) / filename)
+
+        left = self.index(row, Col.NAME)
+        right = self.index(row, Col.SAVE_PATH)
+        self.dataChanged.emit(
+            left, right,
+            [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
         )
 
     def refresh_entry(self, download_id: str, entry: DownloadEntry):

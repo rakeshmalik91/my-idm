@@ -262,6 +262,7 @@ Central orchestrator connecting GUI, engines, and database.
 |--------|------------|-------------|
 | `progress_updated` | `(str, int, int, float, float, int, int, float)` | `download_id, downloaded, total, speed, eta, seeds, peers, upload_speed` |
 | `status_changed` | `(str, str, str)` | `download_id, status, error_message` |
+| `filename_resolved` | `(str, str)` | `download_id, filename` (emitted when server headers or metadata resolve filename) |
 | `download_added` | `(str)` | `download_id` |
 | `download_removed` | `(str)` | `download_id` |
 | `download_moved` | `(str)` | `download_id` |
@@ -324,14 +325,18 @@ class DownloadTableModel(QAbstractTableModel)
 
 Table model backed by a list of `DownloadEntry` objects.
 
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `load_entries` | `(entries: list[DownloadEntry]) → None` | Full model reset |
-| `add_entry` | `(entry: DownloadEntry) → None` | Append row |
+| Method / Property | Signature | Description |
+|---|---|---|
+| `sort_column` | `int` (property) | Currently active sort column (defaults to `Col.ADDED`) |
+| `sort_order` | `Qt.SortOrder` (property) | Currently active sort order (defaults to `DescendingOrder`) |
+| `sort` | `(column: int, order: Qt.SortOrder) → None` | Sort entries and remap persistent selection indexes |
+| `load_entries` | `(entries: list[DownloadEntry]) → None` | Full model reset with automatic sort application |
+| `add_entry` | `(entry: DownloadEntry) → None` | Inserts row in correct sorted position |
 | `remove_entry` | `(download_id: str) → None` | Remove row by ID |
 | `get_entry` | `(row: int) → DownloadEntry | None` | Get entry by row index |
 | `get_entry_by_id` | `(download_id: str) → DownloadEntry | None` | Get entry by ID |
 | `get_selected_ids` | `(indexes: list[QModelIndex]) → list[str]` | Extract unique IDs from selection |
+| `update_filename` | `(download_id: str, filename: str) → None` | Update entry filename and file_path dynamically |
 | `update_progress` | `(download_id, downloaded, total, speed, eta, seeds, peers, upload_speed) → None` | Efficient partial update |
 | `update_status` | `(download_id, status, error_msg) → None` | Status and color update |
 | `refresh_entry` | `(download_id, entry) → None` | Full row refresh |

@@ -27,8 +27,8 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 ### Installation
 
 ```bash
-# Install all dependencies
-pip install PySide6 aiohttp aiosqlite humanize libtorrent
+# Install dependencies from requirements.txt
+pip install -r requirements.txt
 ```
 
 > **Note:** `libtorrent` is optional. If it cannot be installed on your system, the app will still work for HTTP downloads — torrent support will be disabled.
@@ -45,19 +45,14 @@ The main window opens with an empty download list. The status bar at the bottom 
 
 ## Adding Downloads
 
-### Add an HTTP / Magnet Link
+### Add a Download (URL, Magnet Link, or .torrent File)
 
-1. Click **➕ Add URL** in the toolbar (or press **Ctrl+N**)
-2. Paste the URL or magnet link into the text field
-3. Choose a save directory (defaults to `~/Downloads`)
-4. Set the number of segments for parallel downloading (1–32, default 8)
-5. Click **Download**
-
-### Add a .torrent File
-
-1. Click **📦 Add Torrent** in the toolbar (or press **Ctrl+T**)
-2. Browse to one or more `.torrent` files
-3. Downloads begin automatically
+1. Click **➕ Add Download** in the toolbar (or press **Ctrl+N**)
+2. The dialog **automatically detects and prefills** any valid URL, magnet link, or `.torrent` file path found in your clipboard (with the text pre-selected for quick replacement).
+3. For `.torrent` files, you can paste the file path directly or click the built-in **Browse .torrent …** button (or use File → **Add Torrent File…** / **Ctrl+T**).
+4. Choose a save directory (defaults to `~/Downloads`)
+5. Set the number of segments for parallel downloading (1–32, default 8 for HTTP)
+6. Click **Download** (or press Enter)
 
 ### Supported Input Types
 
@@ -86,8 +81,9 @@ If you add a URL that already exists:
 ### Pause & Resume
 
 - Select one or more downloads in the list
-- Click **⏸ Pause** or press **Space** to pause
-- Click **▶ Resume** or press **Ctrl+R** to resume
+- Click **⏸** (Pause icon on toolbar) or press **Space** to pause
+- Click **▶** (Play/Resume icon on toolbar) or press **Ctrl+R** to resume
+- The Edit menu and right-click context menu also provide full text **Resume** and **Pause** actions.
 
 Paused downloads save their progress to disk:
 - **HTTP**: Per-segment byte offsets are saved to the database. On resume, only the remaining bytes are fetched.
@@ -137,7 +133,7 @@ The main table shows 12 columns of information for each download:
 
 | Column | Description |
 |--------|-------------|
-| **Name** | Filename (hover for full path) |
+| **Name** | Filename (auto-updates when resolved from headers or metadata; hover for full path) |
 | **Size** | Total file size (human-readable, e.g. "1.5 GiB") |
 | **Progress** | Color-coded progress bar with percentage |
 | **Status** | Current state (see below) |
@@ -170,6 +166,26 @@ The progress bar changes color based on status:
 - 🟠 **Orange** — Paused
 - 🔴 **Red** — Error
 - 🟣 **Purple** — Seeding
+
+### Sorting the List
+
+The download list supports full column sorting:
+
+- **Default Sort**: By **Added** date, **Descending (DESC)** — newest downloads always appear at the top.
+- **Click Column Headers**: Click any column header to sort by that column. Click again to toggle between Ascending (▲) and Descending (▼) order.
+- **View Menu**: Use **View → Sort By** to select a sort column (Date Added, Name, Size, Progress, Status, Speed, ETA, Date Completed) and choose Ascending or Descending order.
+- **Selection Preserved**: Sorting keeps your selected rows highlighted even when their row positions change.
+- **Smart Sorting**: 
+  - Downloads with active ETAs appear before inactive ones.
+  - Completed downloads sort above uncompleted downloads when sorting by Completed date.
+  - New downloads automatically insert into their proper sorted position without resetting the view.
+
+### Resizing Columns
+
+All table columns are interactively resizable:
+- Hover your mouse over the vertical divider line between any two column headers.
+- Click and drag to adjust column widths to your preference.
+- Your customized column widths are automatically saved and restored on subsequent application launches.
 
 ---
 
@@ -212,9 +228,9 @@ Duplicate URLs are automatically skipped. See [backlog.txt.example](../backlog.t
 
 | Shortcut | Action |
 |----------|--------|
-| **Ctrl+N** | Add URL / Magnet link |
-| **Ctrl+T** | Add .torrent file |
-| **Ctrl+R** | Resume selected downloads |
+| **Ctrl+N** | Add Download (URL, Magnet link, or .torrent) |
+| **Ctrl+T** | Add .torrent file directly |
+| **Ctrl+R** | Resume selected downloads (Play) |
 | **Space** | Pause selected downloads |
 | **Delete** | Delete selected downloads |
 | **Enter** | Open downloaded file |

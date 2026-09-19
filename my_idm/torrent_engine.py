@@ -52,6 +52,7 @@ class TorrentEngine:
         self._handles: dict[str, object] = {}   # download_id → lt.torrent_handle
         self._progress_cb: Optional[ProgressCallback] = None
         self._status_cb: Optional[StatusCallback] = None
+        self._filename_cb: Optional[Callable[[str, str], None]] = None
         self._running = False
 
     @property
@@ -59,9 +60,11 @@ class TorrentEngine:
         return _HAS_LIBTORRENT
 
     def set_callbacks(self, progress_cb: ProgressCallback,
-                      status_cb: StatusCallback):
+                      status_cb: StatusCallback,
+                      filename_cb: Optional[Callable[[str, str], None]] = None):
         self._progress_cb = progress_cb
         self._status_cb = status_cb
+        self._filename_cb = filename_cb
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -266,13 +269,17 @@ class TorrentEngine:
             # Update DB
             entry.total_size = status["total_size"]
             entry.downloaded_size = status["downloaded"]
-            if status.get("name") and not entry.filename:
-                entry.filename = status["name"]
+            resolved_name = status.get("name")
+            if resolved_name and resolved_name != entry.filename:
+                entry.filename = resolved_name
                 entry.file_path = str(
                     Path(entry.save_path) / entry.filename
                 )
-
-            self._db.update_download(entry)
+                self._db.update_download(entry)
+                if self._filename_cb:
+                    self._filename_cb(download_id, entry.filename)
+            else:
+                self._db.update_download(entry)
 
             # Emit progress
             if self._progress_cb:

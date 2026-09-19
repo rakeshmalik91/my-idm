@@ -11,6 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 from PySide6.QtCore import QObject, Signal, QTimer
 
@@ -31,9 +32,10 @@ class DownloadManager(QObject):
     # download_id, downloaded, total, speed, eta, seeds, peers, upload_speed
     status_changed = Signal(str, str, str)
     # download_id, status, error_message
-    download_added = Signal(str)    # download_id
-    download_removed = Signal(str)  # download_id
-    download_moved = Signal(str)    # download_id
+    filename_resolved = Signal(str, str)  # download_id, filename
+    download_added = Signal(str)          # download_id
+    download_removed = Signal(str)        # download_id
+    download_moved = Signal(str)          # download_id
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -57,10 +59,14 @@ class DownloadManager(QObject):
 
         # Wire engine callbacks
         self._http.set_callbacks(
-            self._on_http_progress, self._on_http_status,
+            self._on_http_progress,
+            self._on_http_status,
+            self._on_filename_resolved,
         )
         self._torrent.set_callbacks(
-            self._on_torrent_progress, self._on_torrent_status,
+            self._on_torrent_progress,
+            self._on_torrent_status,
+            self._on_filename_resolved,
         )
 
     # -- lifecycle -----------------------------------------------------------
@@ -144,20 +150,41 @@ class DownloadManager(QObject):
             # Already downloading
             return existing.id
 
+        # Extract initial filename if available
+        filename = ""
+        if download_type == "torrent":
+            if os.path.isfile(url):
+                filename = Path(url).stem
+            elif url.startswith("magnet:?"):
+                try:
+                    parsed_qs = parse_qs(urlparse(url).query)
+                    dns = parsed_qs.get("dn", [])
+                    if dns and dns[0]:
+                        filename = unquote(dns[0])
+                except Exception:
+                    pass
+        elif download_type == "http":
+            try:
+                parsed_path = urlparse(url).path
+                if parsed_path:
+                    name = unquote(Path(parsed_path).name)
+                    if name:
+                        filename = name
+            except Exception:
+                pass
+
         # Create new entry
         entry = DownloadEntry(
             id=str(uuid.uuid4()),
             url=url,
             save_path=save_path,
+            filename=filename,
+            file_path=str(Path(save_path) / filename) if filename else "",
             download_type=download_type,
             num_segments=num_segments,
             added_at=_now_iso(),
             status="queued",
         )
-
-        # For .torrent file paths, extract filename
-        if download_type == "torrent" and os.path.isfile(url):
-            entry.filename = Path(url).stem
 
         self._db.add_download(entry)
         self.download_added.emit(entry.id)
@@ -213,8 +240,13 @@ class DownloadManager(QObject):
         if entry.status == "completed":
             return
 
+        # Reset retries and error state so manual or auto-resume always gets fresh attempts
         entry.status = "queued"
+        entry.retry_count = 0
+        entry.error_message = ""
         entry.last_tried_at = _now_iso()
+        if not entry.file_path and entry.filename and entry.save_path:
+            entry.file_path = str(Path(entry.save_path) / entry.filename)
         self._db.update_download(entry)
 
         if entry.download_type == "http":
@@ -397,6 +429,9 @@ class DownloadManager(QObject):
     def _on_torrent_status(self, download_id: str, status: str,
                            error_msg: str):
         self.status_changed.emit(download_id, status, error_msg)
+
+    def _on_filename_resolved(self, download_id: str, filename: str):
+        self.filename_resolved.emit(download_id, filename)
 
     # -- periodic callbacks --------------------------------------------------
 

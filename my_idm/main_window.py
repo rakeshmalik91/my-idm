@@ -9,8 +9,16 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import Qt, QSize, QSettings, QPointF
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -23,6 +31,7 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QTableView,
     QToolBar,
+    QToolButton,
     QWidget,
 )
 
@@ -34,6 +43,39 @@ from my_idm.manager import DownloadManager
 from my_idm.styles import Colors
 
 log = logging.getLogger(__name__)
+
+
+def _create_play_icon(size: int = 32) -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#4ade80"))
+    p.setPen(Qt.PenStyle.NoPen)
+    triangle = QPolygonF([
+        QPointF(size * 0.25, size * 0.18),
+        QPointF(size * 0.82, size * 0.5),
+        QPointF(size * 0.25, size * 0.82),
+    ])
+    p.drawPolygon(triangle)
+    p.end()
+    return QIcon(pix)
+
+
+def _create_pause_icon(size: int = 32) -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#38bdf8"))
+    p.setPen(Qt.PenStyle.NoPen)
+    bar_w = size * 0.22
+    bar_h = size * 0.64
+    y = size * 0.18
+    p.drawRoundedRect(size * 0.2, y, bar_w, bar_h, 2, 2)
+    p.drawRoundedRect(size * 0.58, y, bar_w, bar_h, 2, 2)
+    p.end()
+    return QIcon(pix)
 
 
 class MainWindow(QMainWindow):
@@ -73,7 +115,10 @@ class MainWindow(QMainWindow):
         self._table.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
-        self._table.setSortingEnabled(False)
+        self._table.setSortingEnabled(True)
+        self._table.sortByColumn(
+            Col.ADDED, Qt.SortOrder.DescendingOrder
+        )
         self._table.setShowGrid(False)
         self._table.verticalHeader().setVisible(False)
         self._table.setWordWrap(False)
@@ -84,15 +129,15 @@ class MainWindow(QMainWindow):
             Col.PROGRESS, self._progress_delegate
         )
 
-        # Column sizing
+        # Column sizing - make all columns interactively resizable
         header = self._table.horizontalHeader()
-        header.setStretchLastSection(True)
-        header.setSectionResizeMode(
-            Col.NAME, QHeaderView.ResizeMode.Stretch
-        )
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        header.setCascadingSectionResizes(True)
         header.setDefaultSectionSize(110)
 
-        # Set specific column widths
+        # Set specific default column widths
+        self._table.setColumnWidth(Col.NAME, 240)
         self._table.setColumnWidth(Col.SIZE, 90)
         self._table.setColumnWidth(Col.PROGRESS, 160)
         self._table.setColumnWidth(Col.STATUS, 110)
@@ -103,6 +148,13 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.ADDED, 130)
         self._table.setColumnWidth(Col.LAST_TRIED, 130)
         self._table.setColumnWidth(Col.COMPLETED, 130)
+        self._table.setColumnWidth(Col.SAVE_PATH, 220)
+
+        # Restore saved header state if available
+        settings = QSettings("MyIDM", "My-IDM")
+        header_state = settings.value("header_state")
+        if header_state:
+            header.restoreState(header_state)
 
         # Row height
         self._table.verticalHeader().setDefaultSectionSize(36)
@@ -117,25 +169,25 @@ class MainWindow(QMainWindow):
 
     def _setup_actions(self):
         """Create all QActions."""
-        self._act_add = QAction("➕ Add URL", self)
+        self._act_add = QAction("➕ Add Download", self)
         self._act_add.setShortcut(QKeySequence("Ctrl+N"))
-        self._act_add.setToolTip("Add HTTP URL or Magnet Link (Ctrl+N)")
+        self._act_add.setToolTip("Add URL, Magnet Link, or .torrent file (Ctrl+N)")
         self._act_add.triggered.connect(self._on_add)
 
-        self._act_add_torrent = QAction("📦 Add Torrent", self)
+        self._act_add_torrent = QAction("📦 Add Torrent File…", self)
         self._act_add_torrent.setShortcut(QKeySequence("Ctrl+T"))
         self._act_add_torrent.setToolTip("Add .torrent file (Ctrl+T)")
         self._act_add_torrent.triggered.connect(self._on_add_torrent)
 
-        self._act_pause = QAction("⏸ Pause", self)
-        self._act_pause.setShortcut(QKeySequence("Space"))
-        self._act_pause.setToolTip("Pause selected downloads")
-        self._act_pause.triggered.connect(self._on_pause)
-
-        self._act_resume = QAction("▶ Resume", self)
+        self._act_resume = QAction(_create_play_icon(), "Resume", self)
         self._act_resume.setShortcut(QKeySequence("Ctrl+R"))
         self._act_resume.setToolTip("Resume selected downloads (Ctrl+R)")
         self._act_resume.triggered.connect(self._on_resume)
+
+        self._act_pause = QAction(_create_pause_icon(), "Pause", self)
+        self._act_pause.setShortcut(QKeySequence("Space"))
+        self._act_pause.setToolTip("Pause selected downloads (Space)")
+        self._act_pause.triggered.connect(self._on_pause)
 
         self._act_delete = QAction("🗑 Delete", self)
         self._act_delete.setShortcut(QKeySequence("Delete"))
@@ -172,10 +224,9 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
         toolbar.addAction(self._act_add)
-        toolbar.addAction(self._act_add_torrent)
         toolbar.addSeparator()
-        toolbar.addAction(self._act_pause)
         toolbar.addAction(self._act_resume)
+        toolbar.addAction(self._act_pause)
         toolbar.addSeparator()
         toolbar.addAction(self._act_delete)
         toolbar.addAction(self._act_move)
@@ -183,6 +234,12 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self._act_open_file)
         toolbar.addAction(self._act_open_folder)
+
+        # Show only icons without text for play and pause buttons on the toolbar
+        for act in (self._act_resume, self._act_pause):
+            btn = toolbar.widgetForAction(act)
+            if isinstance(btn, QToolButton):
+                btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
         self.addToolBar(toolbar)
 
@@ -203,8 +260,8 @@ class MainWindow(QMainWindow):
 
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
-        edit_menu.addAction(self._act_pause)
         edit_menu.addAction(self._act_resume)
+        edit_menu.addAction(self._act_pause)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_delete)
         edit_menu.addAction(self._act_move)
@@ -216,6 +273,38 @@ class MainWindow(QMainWindow):
         select_all_act.setShortcut(QKeySequence("Ctrl+A"))
         select_all_act.triggered.connect(self._table.selectAll)
         view_menu.addAction(select_all_act)
+
+        view_menu.addSeparator()
+        sort_menu = view_menu.addMenu("&Sort By")
+        sort_columns = [
+            ("Date Added (Default)", Col.ADDED),
+            ("Name", Col.NAME),
+            ("Size", Col.SIZE),
+            ("Progress", Col.PROGRESS),
+            ("Status", Col.STATUS),
+            ("Speed", Col.SPEED),
+            ("ETA", Col.ETA),
+            ("Date Completed", Col.COMPLETED),
+        ]
+        for title, col_idx in sort_columns:
+            act = QAction(title, self)
+            act.triggered.connect(
+                lambda checked=False, c=col_idx: self._sort_by_column(c)
+            )
+            sort_menu.addAction(act)
+
+        sort_menu.addSeparator()
+        act_asc = QAction("Ascending", self)
+        act_asc.triggered.connect(
+            lambda: self._set_sort_order(Qt.SortOrder.AscendingOrder)
+        )
+        sort_menu.addAction(act_asc)
+
+        act_desc = QAction("Descending", self)
+        act_desc.triggered.connect(
+            lambda: self._set_sort_order(Qt.SortOrder.DescendingOrder)
+        )
+        sort_menu.addAction(act_desc)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -237,6 +326,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self):
         self._manager.progress_updated.connect(self._on_progress_updated)
         self._manager.status_changed.connect(self._on_status_changed)
+        self._manager.filename_resolved.connect(self._on_filename_resolved)
         self._manager.download_added.connect(self._on_download_added)
         self._manager.download_removed.connect(self._on_download_removed)
         self._manager.download_moved.connect(self._on_download_moved)
@@ -260,6 +350,18 @@ class MainWindow(QMainWindow):
         if ids:
             return self._model.get_entry_by_id(ids[0])
         return None
+
+    # -- sorting helpers -----------------------------------------------------
+
+    def _sort_by_column(self, col: int):
+        current_order = self._table.horizontalHeader().sortIndicatorOrder()
+        self._table.sortByColumn(col, current_order)
+
+    def _set_sort_order(self, order: Qt.SortOrder):
+        col = self._table.horizontalHeader().sortIndicatorSection()
+        if col < 0:
+            col = Col.ADDED
+        self._table.sortByColumn(col, order)
 
     # -- action handlers -----------------------------------------------------
 
@@ -354,8 +456,8 @@ class MainWindow(QMainWindow):
 
     def _show_context_menu(self, pos):
         menu = QMenu(self)
-        menu.addAction(self._act_pause)
         menu.addAction(self._act_resume)
+        menu.addAction(self._act_pause)
         menu.addSeparator()
         menu.addAction(self._act_recheck)
         menu.addAction(self._act_move)
@@ -381,6 +483,9 @@ class MainWindow(QMainWindow):
         self._model.update_status(download_id, status, error_msg)
         self._update_count_label()
 
+    def _on_filename_resolved(self, download_id: str, filename: str):
+        self._model.update_filename(download_id, filename)
+
     def _on_download_added(self, download_id: str):
         entry = self._manager.get_entry(download_id)
         if entry:
@@ -403,5 +508,7 @@ class MainWindow(QMainWindow):
         self._count_label.setText(f"{total} download(s)")
 
     def closeEvent(self, event):
+        settings = QSettings("MyIDM", "My-IDM")
+        settings.setValue("header_state", self._table.horizontalHeader().saveState())
         self._manager.stop()
         super().closeEvent(event)

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -25,7 +26,7 @@ DEFAULT_SAVE_PATH = str(Path.home() / "Downloads")
 class AddDownloadDialog(QDialog):
     """Dialog to add a new download (URL, magnet link, or .torrent file)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_url: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Add Download")
         self.setMinimumWidth(550)
@@ -36,6 +37,7 @@ class AddDownloadDialog(QDialog):
         self._num_segments = 8
 
         self._setup_ui()
+        self._prefill_url(initial_url)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -120,6 +122,30 @@ class AddDownloadDialog(QDialog):
         )
         if path:
             self._save_edit.setText(path)
+
+    @staticmethod
+    def _is_valid_download_url(text: str) -> bool:
+        if not text or len(text) > 4096 or "\n" in text or "\r" in text:
+            return False
+        lower = text.lower()
+        if lower.startswith(("http://", "https://", "ftp://", "magnet:?")):
+            return True
+        if lower.endswith(".torrent") and (os.path.isfile(text) or lower.startswith("file://")):
+            return True
+        return False
+
+    def _prefill_url(self, initial_url: str = ""):
+        candidate = initial_url.strip() if initial_url else ""
+        if not candidate:
+            clipboard = QGuiApplication.clipboard()
+            if clipboard:
+                text = (clipboard.text() or "").strip()
+                if self._is_valid_download_url(text):
+                    candidate = text
+
+        if candidate:
+            self._url_edit.setText(candidate)
+            self._url_edit.selectAll()
 
     def _accept(self):
         self._url = self._url_edit.text().strip()

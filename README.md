@@ -28,11 +28,24 @@ A full-featured download manager with GUI built in Python.
 ## Installation
 
 ```bash
-pip install PySide6 aiohttp aiosqlite humanize libtorrent
+pip install -r requirements.txt
+```
+
+Or install the package in editable mode:
+
+```bash
+pip install -e .
 ```
 
 ## Usage
 
+**On Windows:**
+Double-click `run.bat` or run from terminal:
+```cmd
+run.bat
+```
+
+**Using Python:**
 ```bash
 python -m my_idm.main
 ```

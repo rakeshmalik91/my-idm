@@ -394,12 +394,12 @@ def poll_all():
 ```
 QMainWindow (MainWindow)
   ├── QMenuBar
-  │     ├── File (Add URL, Add Torrent, Load Backlog, Exit)
-  │     ├── Edit (Pause, Resume, Delete, Move, Recheck)
-  │     ├── View (Select All)
+  │     ├── File (Add Download, Add Torrent, Load Backlog, Exit)
+  │     ├── Edit (Resume, Pause, Delete, Move, Recheck)
+  │     ├── View (Select All, Sort By)
   │     └── Help (About)
   ├── QToolBar
-  │     └── [Add URL][Add Torrent] | [Pause][Resume] | [Delete][Move][Recheck] | [Open File][Open Folder]
+  │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [📄 Open File][📁 Open Folder]
   ├── QTableView (central widget)
   │     ├── Model: DownloadTableModel
   │     └── Delegate: ProgressBarDelegate (column 2)

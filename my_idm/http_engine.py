@@ -31,6 +31,7 @@ ProgressCallback = Callable[
     None
 ]
 StatusCallback = Callable[[str, str, str], None]  # download_id, status, error_msg
+FilenameCallback = Callable[[str, str], None]      # download_id, filename
 
 
 class HTTPEngine:
@@ -44,13 +45,16 @@ class HTTPEngine:
         self._session: Optional[aiohttp.ClientSession] = None
         self._progress_cb: Optional[ProgressCallback] = None
         self._status_cb: Optional[StatusCallback] = None
+        self._filename_cb: Optional[FilenameCallback] = None
 
     # -- public API ----------------------------------------------------------
 
     def set_callbacks(self, progress_cb: ProgressCallback,
-                      status_cb: StatusCallback):
+                      status_cb: StatusCallback,
+                      filename_cb: Optional[FilenameCallback] = None):
         self._progress_cb = progress_cb
         self._status_cb = status_cb
+        self._filename_cb = filename_cb
 
     async def start(self):
         timeout = aiohttp.ClientTimeout(
@@ -63,7 +67,17 @@ class HTTPEngine:
 
     async def stop(self):
         for did in list(self._tasks):
-            await self.pause(did)
+            evt = self._cancel_events.pop(did, None)
+            if evt:
+                evt.set()
+            task = self._tasks.pop(did, None)
+            if task and not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    task.cancel()
+            # Mark as queued so it automatically resumes on next application start
+            self._db.update_status(did, "queued")
         if self._session:
             await self._session.close()
             self._session = None
@@ -123,11 +137,15 @@ class HTTPEngine:
                 entry.total_size = total_size
             if etag and not entry.etag:
                 entry.etag = etag
-            if filename and not entry.filename:
-                entry.filename = filename
-            if not entry.filename:
-                entry.filename = self._filename_from_url(entry.url)
-            if not entry.file_path:
+
+            resolved = filename or entry.filename or self._filename_from_url(entry.url)
+            if resolved and resolved != entry.filename:
+                entry.filename = resolved
+                entry.file_path = str(
+                    Path(entry.save_path) / entry.filename
+                )
+                self._emit_filename(entry.id, entry.filename)
+            elif not entry.file_path and entry.filename:
                 entry.file_path = str(
                     Path(entry.save_path) / entry.filename
                 )
@@ -188,9 +206,9 @@ class HTTPEngine:
                     supports_range = ar == "bytes"
                     etag = resp.headers.get("ETag", "")
 
-                    cd = resp.headers.get("Content-Disposition", "")
-                    if "filename=" in cd:
-                        filename = cd.split("filename=")[-1].strip().strip('"\'')
+                    filename = self._extract_filename_from_headers(
+                        resp.headers, str(resp.url)
+                    )
         except Exception as exc:
             log.warning("HEAD request failed for %s: %s", url, exc)
             # Will fall back to single download on GET
@@ -213,9 +231,10 @@ class HTTPEngine:
                                              num_segments)
             self._db.add_segments(segments)
 
-            # Pre-allocate file
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, "wb") as f:
+        # Ensure target file exists and is correctly sized for resuming
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        if not file_path.exists() or file_path.stat().st_size < total_size:
+            with open(file_path, "a+b") as f:
                 f.truncate(total_size)
 
         # Track progress per segment
@@ -399,8 +418,14 @@ class HTTPEngine:
                     entry.url, headers=headers
                 ) as resp:
                     if resp.status == 416:
-                        # File already complete
-                        return
+                        # 416 Range Not Satisfiable: file may already be complete
+                        if entry.total_size and existing_size >= entry.total_size:
+                            entry.downloaded_size = entry.total_size
+                            return
+                        # Or range is stale: restart from byte 0
+                        existing_size = 0
+                        headers.pop("Range", None)
+                        continue
                     if resp.status not in (200, 206):
                         raise aiohttp.ClientError(
                             f"Status {resp.status}"
@@ -420,6 +445,17 @@ class HTTPEngine:
                         cr = resp.headers.get("Content-Range", "")
                         if "/" in cr:
                             entry.total_size = int(cr.split("/")[-1])
+
+                    get_filename = self._extract_filename_from_headers(
+                        resp.headers, str(resp.url)
+                    )
+                    if get_filename and get_filename != entry.filename:
+                        entry.filename = get_filename
+                        entry.file_path = str(
+                            Path(entry.save_path) / entry.filename
+                        )
+                        file_path = Path(entry.file_path)
+                        self._emit_filename(entry.id, entry.filename)
 
                     self._db.update_download(entry)
                     downloaded = existing_size
@@ -493,6 +529,29 @@ class HTTPEngine:
         name = unquote(path.split("/")[-1]) if path else ""
         return name or "download"
 
+    @staticmethod
+    def _extract_filename_from_headers(headers, final_url: str = "") -> str:
+        cd = headers.get("Content-Disposition", "")
+        filename = ""
+        if cd:
+            if "filename*=" in cd:
+                part = cd.split("filename*=")[-1].split(";")[0].strip().strip('"\'')
+                if "''" in part:
+                    _, _, encoded = part.partition("''")
+                    filename = unquote(encoded)
+                else:
+                    filename = unquote(part)
+            elif "filename=" in cd:
+                part = cd.split("filename=")[-1].split(";")[0].strip().strip('"\'')
+                filename = unquote(part)
+
+        if not filename and final_url:
+            path = unquote(urlparse(final_url).path)
+            name = Path(path).name
+            if name:
+                filename = name
+        return filename
+
     def _emit_progress(self, download_id: str, downloaded: int,
                        total: int, speed: float, eta: float):
         if self._progress_cb:
@@ -502,6 +561,10 @@ class HTTPEngine:
                      error_msg: str = ""):
         if self._status_cb:
             self._status_cb(download_id, status, error_msg)
+
+    def _emit_filename(self, download_id: str, filename: str):
+        if self._filename_cb:
+            self._filename_cb(download_id, filename)
 
 
 class _FallbackToSingle(Exception):
