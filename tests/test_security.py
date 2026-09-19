@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
+from unittest.mock import patch
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
@@ -27,10 +28,13 @@ app = QApplication.instance() or QApplication([])
 class TestSecurityConfig(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.test_settings = QSettings(
+            str(Path(self.tmp_dir.name) / "test.ini"), QSettings.Format.IniFormat
+        )
 
     def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        self.tmp_dir.cleanup()
 
     def test_default_security_config(self):
         cfg = SecurityConfig()
@@ -53,9 +57,9 @@ class TestSecurityConfig(unittest.TestCase):
             custom_scanner_args='--bell "%file%"',
             action_on_threat="delete",
         )
-        cfg.save()
+        cfg.save(self.test_settings)
 
-        loaded = SecurityConfig.load()
+        loaded = SecurityConfig.load(self.test_settings)
         self.assertFalse(loaded.scan_before_download)
         self.assertFalse(loaded.warn_high_risk_extensions)
         self.assertTrue(loaded.block_dangerous_urls)
@@ -148,15 +152,16 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
 class TestManagerSecurityIntegration(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
-        self.db = Database(":memory:")
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.tmp_dir.name) / "test.db")
         self.db.open()
         self.manager = DownloadManager(self.db)
+        self.manager.set_security_config(SecurityConfig())
 
     def tearDown(self):
         self.manager.stop()
         self.db.close()
-        QSettings("MyIDM", "My-IDM").clear()
+        self.tmp_dir.cleanup()
 
     def test_manager_security_config_update(self):
         new_cfg = SecurityConfig(
@@ -184,14 +189,34 @@ class TestManagerSecurityIntegration(unittest.TestCase):
         did = self.manager.add_download("https://example.com/document.doc.exe")
         self.assertIsNone(did, "Strict mode must block dangerous double extension")
 
+    def test_antivirus_preserves_incomplete_status(self):
+        """Scanning an incomplete file does not mark it completed."""
+        test_file = Path(self.tmp_dir.name) / "incomplete.bin"
+        test_file.write_bytes(b"partial content")
+
+        entry = DownloadEntry(
+            id="d1",
+            url="https://example.com/incomplete.bin",
+            filename="incomplete.bin",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=1000000,
+            downloaded_size=len(b"partial content"),
+            status="paused",
+        )
+        self.db.add_download(entry)
+
+        with patch("my_idm.manager.scan_file", return_value=(True, "Clean file")):
+            self.manager.scan_download_file("d1")
+            import time
+            time.sleep(0.3)
+
+            updated = self.db.get_download("d1")
+            self.assertEqual(updated.status, "paused")
+            self.assertNotEqual(updated.status, "completed")
+
 
 class TestSecuritySettingsDialog(unittest.TestCase):
-
-    def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
-
-    def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
 
     def test_dialog_loads_and_saves_config(self):
         cfg = SecurityConfig(

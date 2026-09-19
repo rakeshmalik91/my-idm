@@ -7,12 +7,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import humanize
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -60,6 +63,71 @@ def _to_str(val: Any) -> str:
     return str(val)
 
 
+class FilesTreeWidget(QTreeWidget):
+    """QTreeWidget displaying files and folders hierarchy with table compatibility methods."""
+
+    def rowCount(self) -> int:
+        return self.topLevelItemCount()
+
+    def setRowCount(self, count: int):
+        if count == 0:
+            self.clear()
+
+    def item(self, row: int, col: int):
+        if 0 <= row < self.topLevelItemCount():
+            top = self.topLevelItem(row)
+
+            class _ItemCompat:
+                def __init__(self, it: QTreeWidgetItem, col_idx: int):
+                    self._it = it
+                    self._col_idx = col_idx
+
+                def text(self) -> str:
+                    target_col = 0 if self._col_idx in (0, 2) else self._col_idx
+                    t = self._it.text(target_col)
+                    for p in ("📁 ", "📄 "):
+                        if t.startswith(p):
+                            return t[len(p):]
+                    return t
+
+            return _ItemCompat(top, col)
+        return None
+
+    def cellWidget(self, row: int, col: int):
+        if 0 <= row < self.topLevelItemCount():
+            top = self.topLevelItem(row)
+            if col == 5:
+                return self.itemWidget(top, 3)
+            if col == 0:
+                class _CheckCompat(QCheckBox):
+                    def __init__(self, it: QTreeWidgetItem):
+                        super().__init__()
+                        self._it = it
+
+                    def isChecked(self) -> bool:
+                        return self._it.checkState(0) == Qt.CheckState.Checked
+
+                    def setChecked(self, val: bool):
+                        self._it.setCheckState(0, Qt.CheckState.Checked if val else Qt.CheckState.Unchecked)
+
+                    def isEnabled(self) -> bool:
+                        return bool(self._it.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+
+                chk = _CheckCompat(top)
+
+                class _ContainerCompat(QWidget):
+                    def __init__(self, c: QCheckBox):
+                        super().__init__()
+                        self._c = c
+
+                    def findChild(self, cls, *args, **kwargs):
+                        return self._c
+
+                return _ContainerCompat(chk)
+            return self.itemWidget(top, col)
+        return None
+
+
 class DetailsPanel(QWidget):
     """Collapsible and tabbed bottom panel showing details for the selected download."""
 
@@ -70,6 +138,10 @@ class DetailsPanel(QWidget):
         self._manager = manager
         self._download_id: Optional[str] = None
         self._current_entry: Optional[DownloadEntry] = None
+        self._files_hash: Optional[tuple] = None
+        self._tree_updating: bool = False
+        self._file_item_map: dict[int, QTreeWidgetItem] = {}
+        self._folder_items: list[QTreeWidgetItem] = []
 
         self._setup_ui()
 
@@ -117,8 +189,10 @@ class DetailsPanel(QWidget):
         header_layout.addWidget(self._btn_open_folder)
 
         self._btn_close = QPushButton("✕", header_widget)
+        self._btn_close.setObjectName("detailsCloseBtn")
         self._btn_close.setToolTip("Hide details panel (F4)")
         self._btn_close.setFixedSize(26, 26)
+        self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_close.clicked.connect(self.close_requested.emit)
         header_layout.addWidget(self._btn_close)
 
@@ -215,24 +289,46 @@ class DetailsPanel(QWidget):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        self._table_files = QTableWidget(0, 6, container)
-        self._table_files.setHorizontalHeaderLabels([
-            "#", "File Name", "Size", "Progress", "Priority", "Status"
+        self._tree_files = FilesTreeWidget(container)
+        self._tree_files.setHeaderLabels([
+            "Name", "Size", "Progress", "Priority", "Status"
         ])
-        header = self._table_files.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header = self._tree_files.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self._tree_files.setColumnWidth(2, 140)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self._table_files.setColumnWidth(3, 140)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table_files.setColumnWidth(4, 130)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self._table_files.verticalHeader().setVisible(False)
-        self._table_files.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table_files.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._tree_files.setColumnWidth(3, 130)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self._tree_files.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectRows)
+        self._tree_files.setEditTriggers(QTreeWidget.EditTrigger.NoEditTriggers)
 
-        layout.addWidget(self._table_files)
+        self._tree_files.setStyleSheet(f"""
+            QTreeWidget {{
+                background-color: {Colors.BG_MID};
+                color: {Colors.TEXT};
+                border: 1px solid {Colors.BORDER};
+                font-size: 12px;
+            }}
+            QTreeWidget::item {{
+                padding: 3px 0px;
+                border-bottom: 1px solid {Colors.BG_HOVER};
+            }}
+            QHeaderView::section {{
+                background-color: {Colors.BG_DARK};
+                color: {Colors.TEXT_SECONDARY};
+                padding: 4px 8px;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid {Colors.BORDER};
+            }}
+        """)
+
+        self._tree_files.itemChanged.connect(self._on_tree_item_changed)
+        self._table_files = self._tree_files
+
+        layout.addWidget(self._tree_files)
         return container
 
     def _create_peers_tab(self) -> QWidget:
@@ -341,6 +437,15 @@ class DetailsPanel(QWidget):
             return
 
         self._current_entry = entry
+
+        # Peers tab is only relevant for BitTorrent
+        is_torrent = (entry.download_type == "torrent")
+        peers_tab_idx = self._tabs.indexOf(self._tab_peers)
+        if peers_tab_idx != -1:
+            self._tabs.setTabVisible(peers_tab_idx, is_torrent)
+            if not is_torrent and self._tabs.currentIndex() == peers_tab_idx:
+                self._tabs.setCurrentIndex(0)
+
         self._update_header(entry)
         self._update_overview(entry)
         self._update_files(entry)
@@ -456,93 +561,396 @@ class DetailsPanel(QWidget):
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id)
         if not files:
-            self._table_files.setRowCount(0)
+            self._files_hash = None
+            self._file_item_map.clear()
+            self._folder_items.clear()
+            self._tree_files.clear()
             return
 
-        rebuild = self._table_files.rowCount() != len(files)
-        if rebuild:
-            self._table_files.setRowCount(len(files))
+        is_torrent = (entry.download_type == "torrent")
+        structure_hash = tuple((f.get("index", i), str(f.get("path", ""))) for i, f in enumerate(files))
+        if self._files_hash != structure_hash:
+            self._files_hash = structure_hash
+            self._build_files_tree(files, is_torrent)
 
-        for row, f in enumerate(files):
-            # Index
-            idx_item = self._table_files.item(row, 0)
-            if not idx_item:
-                idx_item = QTableWidgetItem()
-                idx_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._table_files.setItem(row, 0, idx_item)
-            idx_item.setText(_to_str(f.get("index", row + 1)))
+        self._update_file_values(files, is_torrent)
 
-            # Path / Name
-            name_item = self._table_files.item(row, 1)
-            if not name_item:
-                name_item = QTableWidgetItem()
-                self._table_files.setItem(row, 1, name_item)
-            name_item.setText(_to_str(f.get("path", "file")))
+    def _build_files_tree(self, files: list[dict], is_torrent: bool):
+        self._tree_files.clear()
+        self._file_item_map.clear()
+        self._folder_items.clear()
 
-            # Size
+        # Build folder hierarchy
+        root_nodes: dict[str, dict] = {}
+        for f in files:
+            raw_path = str(f.get("path", "file")).replace("\\", "/").strip("/")
+            parts = [p for p in raw_path.split("/") if p]
+            if not parts:
+                parts = ["file"]
+            if len(parts) == 1:
+                root_nodes[parts[0]] = {"type": "file", "name": parts[0], "data": f}
+            else:
+                curr = root_nodes
+                for p in parts[:-1]:
+                    if p not in curr or curr[p]["type"] != "folder":
+                        curr[p] = {"type": "folder", "name": p, "children": {}}
+                    curr = curr[p]["children"]
+                curr[parts[-1]] = {"type": "file", "name": parts[-1], "data": f}
+
+        progress_style = (
+            f"QProgressBar {{ border: 1px solid {Colors.BORDER}; border-radius: 3px; background: {Colors.BG_DARK}; height: 16px; text-align: center; font-size: 10px; color: {Colors.TEXT}; }} "
+            f"QProgressBar::chunk {{ background: {Colors.ACCENT}; border-radius: 2px; }}"
+        )
+
+        def _create_items(parent_widget_or_item, node_dict: dict):
+            for name, node in node_dict.items():
+                if node["type"] == "folder":
+                    item = QTreeWidgetItem(parent_widget_or_item)
+                    item.setText(0, f"📁 {name}")
+                    item.setData(0, Qt.ItemDataRole.UserRole, {"is_folder": True, "name": name})
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
+                    if is_torrent:
+                        item.setCheckState(0, Qt.CheckState.Checked)
+                    else:
+                        item.setCheckState(0, Qt.CheckState.Checked)
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                    self._folder_items.append(item)
+
+                    pb = QProgressBar()
+                    pb.setRange(0, 100)
+                    pb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    pb.setStyleSheet(progress_style)
+                    self._tree_files.setItemWidget(item, 2, pb)
+
+                    if is_torrent:
+                        combo = QComboBox()
+                        for p_text in ["High", "Normal", "Low", "Don't Download"]:
+                            combo.addItem(p_text, _PRIORITY_TO_VAL[p_text])
+                        combo.setCurrentText("Normal")
+                        combo.currentIndexChanged.connect(lambda idx, it=item: self._on_folder_priority_changed(it))
+                        self._tree_files.setItemWidget(item, 3, combo)
+                    else:
+                        item.setText(3, "Normal")
+
+                    _create_items(item, node["children"])
+                else:
+                    f_data = node["data"]
+                    f_idx = f_data.get("index", 0)
+                    item = QTreeWidgetItem(parent_widget_or_item)
+                    item.setText(0, f"📄 {name}")
+                    item.setData(0, Qt.ItemDataRole.UserRole, {"is_folder": False, "file_index": f_idx, "data": f_data})
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+
+                    curr_prio = f_data.get("priority", 4)
+                    is_dl = (curr_prio > 0)
+                    if is_torrent:
+                        item.setCheckState(0, Qt.CheckState.Checked if is_dl else Qt.CheckState.Unchecked)
+                    else:
+                        item.setCheckState(0, Qt.CheckState.Checked)
+                        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+
+                    self._file_item_map[f_idx] = item
+
+                    pb = QProgressBar()
+                    pb.setRange(0, 100)
+                    pb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    pb.setStyleSheet(progress_style)
+                    self._tree_files.setItemWidget(item, 2, pb)
+
+                    if is_torrent:
+                        combo = QComboBox()
+                        for p_text in ["High", "Normal", "Low", "Don't Download"]:
+                            combo.addItem(p_text, _PRIORITY_TO_VAL[p_text])
+                        prio_label = _TORRENT_PRIORITY_MAP.get(curr_prio, "Normal")
+                        combo.setCurrentText(prio_label)
+                        combo.currentIndexChanged.connect(lambda idx, it=item: self._on_file_priority_combo_changed(it))
+                        self._tree_files.setItemWidget(item, 3, combo)
+                    else:
+                        item.setText(3, "Normal")
+
+        _create_items(self._tree_files, root_nodes)
+        self._tree_files.expandAll()
+
+    def _get_descendant_file_items(self, item: QTreeWidgetItem) -> list[QTreeWidgetItem]:
+        files = []
+        for i in range(item.childCount()):
+            child = item.child(i)
+            data = child.data(0, Qt.ItemDataRole.UserRole) or {}
+            if data.get("is_folder"):
+                files.extend(self._get_descendant_file_items(child))
+            else:
+                files.append(child)
+        return files
+
+    def _refresh_folder_aggregates(self, folder_item: QTreeWidgetItem, is_torrent: bool):
+        descendant_files = self._get_descendant_file_items(folder_item)
+        if not descendant_files:
+            return
+
+        total_size = 0
+        total_downloaded = 0
+        checked_count = 0
+        all_completed = True
+        any_downloading = False
+        any_error = False
+        priorities = set()
+
+        for it in descendant_files:
+            data = it.data(0, Qt.ItemDataRole.UserRole) or {}
+            f = data.get("data", {})
+            sz = f.get("size", 0)
+            total_size += sz
+            pct_raw = f.get("progress", 0.0)
+            pct = (pct_raw / 100.0) if pct_raw > 1.0 else pct_raw
+            total_downloaded += int(sz * pct)
+
+            if it.checkState(0) == Qt.CheckState.Checked:
+                checked_count += 1
+
+            st = f.get("status", "pending")
+            if st != "completed":
+                all_completed = False
+            if st in ("downloading", "fetching_metadata"):
+                any_downloading = True
+            elif st == "error":
+                any_error = True
+
+            priorities.add(f.get("priority", 4))
+
+        folder_item.setText(1, humanize.naturalsize(total_size, binary=True) if total_size > 0 else "—")
+
+        folder_pct = (total_downloaded / total_size * 100.0) if total_size > 0 else 0.0
+        pb = self._tree_files.itemWidget(folder_item, 2)
+        if isinstance(pb, QProgressBar):
+            pb.setValue(int(min(max(folder_pct, 0.0), 100.0)))
+
+        # Update check state
+        if checked_count == len(descendant_files):
+            new_state = Qt.CheckState.Checked
+        elif checked_count == 0:
+            new_state = Qt.CheckState.Unchecked
+        else:
+            new_state = Qt.CheckState.PartiallyChecked
+        self._tree_files.blockSignals(True)
+        try:
+            folder_item.setCheckState(0, new_state)
+        finally:
+            self._tree_files.blockSignals(False)
+
+        # Update priority combo
+        if is_torrent:
+            combo = self._tree_files.itemWidget(folder_item, 3)
+            if isinstance(combo, QComboBox):
+                combo.blockSignals(True)
+                if len(priorities) == 1:
+                    p_val = next(iter(priorities))
+                    combo.setCurrentText(_TORRENT_PRIORITY_MAP.get(p_val, "Normal"))
+                else:
+                    if combo.findText("Mixed") == -1:
+                        combo.addItem("Mixed", -1)
+                    combo.setCurrentText("Mixed")
+                combo.blockSignals(False)
+
+        # Update status
+        if all_completed and len(descendant_files) > 0:
+            folder_item.setText(4, "Completed")
+        elif any_error:
+            folder_item.setText(4, "Error")
+        elif any_downloading:
+            folder_item.setText(4, "Downloading")
+        else:
+            folder_item.setText(4, "Pending")
+
+    def _update_file_values(self, files: list[dict], is_torrent: bool):
+        for f in files:
+            f_idx = f.get("index", 0)
+            item = self._file_item_map.get(f_idx)
+            if not item:
+                continue
+
+            data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            data["data"] = f
+            item.setData(0, Qt.ItemDataRole.UserRole, data)
+
             size_val = f.get("size", 0)
             size_str = humanize.naturalsize(size_val, binary=True) if size_val > 0 else "—"
-            size_item = self._table_files.item(row, 2)
-            if not size_item:
-                size_item = QTableWidgetItem()
-                size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self._table_files.setItem(row, 2, size_item)
-            size_item.setText(size_str)
+            item.setText(1, size_str)
 
-            # Progress bar
-            pct_float = f.get("progress", 0.0)
-            prog_bar = self._table_files.cellWidget(row, 3)
-            if not isinstance(prog_bar, QProgressBar):
-                prog_bar = QProgressBar()
-                prog_bar.setRange(0, 100)
-                prog_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                prog_bar.setStyleSheet(
-                    f"QProgressBar {{ border: 1px solid {Colors.BORDER}; border-radius: 3px; background: {Colors.BG_DARK}; height: 16px; text-align: center; font-size: 11px; }} "
-                    f"QProgressBar::chunk {{ background: {Colors.ACCENT}; border-radius: 2px; }}"
-                )
-                self._table_files.setCellWidget(row, 3, prog_bar)
-            prog_bar.setValue(int(pct_float * 100))
+            pct_raw = f.get("progress", 0.0)
+            pct_val = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
+            pb = self._tree_files.itemWidget(item, 2)
+            if isinstance(pb, QProgressBar):
+                pb.setValue(int(min(max(pct_val, 0.0), 100.0)))
 
-            # Priority combo (Torrents only)
-            if entry.download_type == "torrent":
-                combo = self._table_files.cellWidget(row, 4)
-                if not isinstance(combo, QComboBox):
-                    combo = QComboBox()
-                    for p_text in ["High", "Normal", "Low", "Don't Download"]:
-                        combo.addItem(p_text, _PRIORITY_TO_VAL[p_text])
-                    # Connect change signal
-                    file_idx = f.get("index", row)
-                    combo.currentIndexChanged.connect(
-                        lambda idx, c=combo, f_idx=file_idx: self._on_file_priority_changed(f_idx, c)
-                    )
-                    self._table_files.setCellWidget(row, 4, combo)
-
-                curr_prio = f.get("priority", 4)
-                combo.blockSignals(True)
-                prio_name = _TORRENT_PRIORITY_MAP.get(curr_prio, "Normal")
-                combo.setCurrentText(prio_name)
-                combo.blockSignals(False)
-            else:
-                prio_item = self._table_files.item(row, 4)
-                if not prio_item:
-                    prio_item = QTableWidgetItem("Normal")
-                    prio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    self._table_files.setItem(row, 4, prio_item)
-
-            # Status
             status_str = f.get("status", "pending")
-            status_item = self._table_files.item(row, 5)
-            if not status_item:
-                status_item = QTableWidgetItem()
-                status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self._table_files.setItem(row, 5, status_item)
-            status_item.setText(_to_str(status_str).capitalize())
+            item.setText(4, _to_str(status_str).capitalize())
 
-    def _on_file_priority_changed(self, file_index: int, combo: QComboBox):
+            if is_torrent:
+                curr_prio = f.get("priority", 4)
+                combo = self._tree_files.itemWidget(item, 3)
+                if isinstance(combo, QComboBox):
+                    combo.blockSignals(True)
+                    combo.setCurrentText(_TORRENT_PRIORITY_MAP.get(curr_prio, "Normal"))
+                    combo.blockSignals(False)
+                expected_state = Qt.CheckState.Checked if curr_prio > 0 else Qt.CheckState.Unchecked
+                if item.checkState(0) != expected_state:
+                    self._tree_files.blockSignals(True)
+                    try:
+                        item.setCheckState(0, expected_state)
+                    finally:
+                        self._tree_files.blockSignals(False)
+
+        for folder_item in reversed(self._folder_items):
+            self._refresh_folder_aggregates(folder_item, is_torrent)
+
+    def _on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
+        if column != 0 or self._tree_updating or not self._download_id:
+            return
+        new_state = item.checkState(0)
+        if new_state == Qt.CheckState.PartiallyChecked:
+            return
+        self._tree_updating = True
+        try:
+            data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            is_folder = data.get("is_folder", False)
+            is_checked = (new_state == Qt.CheckState.Checked)
+
+            if is_folder:
+                descendants = self._get_descendant_file_items(item)
+                self._tree_files.blockSignals(True)
+                try:
+                    for f_it in descendants:
+                        f_it.setCheckState(0, Qt.CheckState.Checked if is_checked else Qt.CheckState.Unchecked)
+                finally:
+                    self._tree_files.blockSignals(False)
+
+                for f_it in descendants:
+                    f_data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
+                    f_idx = f_data.get("file_index")
+                    prio = 4 if is_checked else 0
+                    if "data" in f_data and isinstance(f_data["data"], dict):
+                        f_data["data"]["priority"] = prio
+                    combo = self._tree_files.itemWidget(f_it, 3)
+                    if isinstance(combo, QComboBox):
+                        combo.blockSignals(True)
+                        combo.setCurrentText("Normal" if is_checked else "Don't Download")
+                        combo.blockSignals(False)
+                    if f_idx is not None:
+                        self._manager.set_torrent_file_priority(self._download_id, f_idx, prio)
+            else:
+                f_idx = data.get("file_index")
+                prio = 4 if is_checked else 0
+                if "data" in data and isinstance(data["data"], dict):
+                    data["data"]["priority"] = prio
+                combo = self._tree_files.itemWidget(item, 3)
+                if isinstance(combo, QComboBox):
+                    combo.blockSignals(True)
+                    combo.setCurrentText("Normal" if is_checked else "Don't Download")
+                    combo.blockSignals(False)
+                if f_idx is not None:
+                    self._manager.set_torrent_file_priority(self._download_id, f_idx, prio)
+
+            for fld in reversed(self._folder_items):
+                self._refresh_folder_aggregates(fld, is_torrent=True)
+        finally:
+            self._tree_updating = False
+
+    def _on_file_priority_combo_changed(self, item: QTreeWidgetItem):
+        if self._tree_updating or not self._download_id:
+            return
+        combo = self._tree_files.itemWidget(item, 3)
+        if not isinstance(combo, QComboBox):
+            return
+        prio_val = combo.currentData()
+        if prio_val is None or prio_val < 0:
+            return
+
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        f_idx = data.get("file_index")
+        if f_idx is None:
+            return
+
+        self._tree_updating = True
+        try:
+            new_state = Qt.CheckState.Checked if prio_val > 0 else Qt.CheckState.Unchecked
+            self._tree_files.blockSignals(True)
+            try:
+                item.setCheckState(0, new_state)
+            finally:
+                self._tree_files.blockSignals(False)
+            if "data" in data and isinstance(data["data"], dict):
+                data["data"]["priority"] = prio_val
+            self._manager.set_torrent_file_priority(self._download_id, f_idx, prio_val)
+            for fld in reversed(self._folder_items):
+                self._refresh_folder_aggregates(fld, is_torrent=True)
+        finally:
+            self._tree_updating = False
+
+    def _on_folder_priority_changed(self, item: QTreeWidgetItem):
+        if self._tree_updating or not self._download_id:
+            return
+        combo = self._tree_files.itemWidget(item, 3)
+        if not isinstance(combo, QComboBox):
+            return
+        prio_val = combo.currentData()
+        if prio_val is None or prio_val < 0:
+            return
+
+        self._tree_updating = True
+        try:
+            descendants = self._get_descendant_file_items(item)
+            for f_it in descendants:
+                f_data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
+                f_idx = f_data.get("file_index")
+                new_state = Qt.CheckState.Checked if prio_val > 0 else Qt.CheckState.Unchecked
+                f_it.setCheckState(0, new_state)
+                f_combo = self._tree_files.itemWidget(f_it, 3)
+                if isinstance(f_combo, QComboBox):
+                    f_combo.blockSignals(True)
+                    f_combo.setCurrentText(_TORRENT_PRIORITY_MAP.get(prio_val, "Normal"))
+                    f_combo.blockSignals(False)
+                if f_idx is not None:
+                    self._manager.set_torrent_file_priority(self._download_id, f_idx, prio_val)
+
+            for fld in reversed(self._folder_items):
+                self._refresh_folder_aggregates(fld, is_torrent=True)
+        finally:
+            self._tree_updating = False
+
+    def _on_row_checkbox_toggled(self, row: int, checked: bool):
+        if not self._download_id:
+            return
+        if row in self._file_item_map:
+            item = self._file_item_map[row]
+            item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self._on_tree_item_changed(item, 0)
+
+    def _on_row_priority_changed(self, row: int):
+        if not self._download_id:
+            return
+        if row in self._file_item_map:
+            item = self._file_item_map[row]
+            self._on_file_priority_combo_changed(item)
+
+    def _on_file_checkbox_toggled(self, file_index: int, checked: bool, combo: Optional[QComboBox]):
+        if not self._download_id:
+            return
+        prio = 4 if checked else 0
+        if combo:
+            combo.blockSignals(True)
+            combo.setCurrentText("Normal" if checked else "Don't Download")
+            combo.blockSignals(False)
+        self._manager.set_torrent_file_priority(self._download_id, file_index, prio)
+
+    def _on_file_priority_changed(self, file_index: int, combo: QComboBox, chk: Optional[QCheckBox] = None):
         if not self._download_id:
             return
         prio_val = combo.currentData()
         if prio_val is not None:
+            if chk:
+                chk.blockSignals(True)
+                chk.setChecked(prio_val > 0)
+                chk.blockSignals(False)
             self._manager.set_torrent_file_priority(self._download_id, file_index, prio_val)
 
     def _update_peers(self, entry: DownloadEntry):

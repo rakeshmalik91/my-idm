@@ -45,6 +45,7 @@ class HTTPEngine:
         self._max_concurrent = max_concurrent
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
+        self._active_segments: dict[str, list[SegmentEntry]] = {}
         self._session: Optional[aiohttp.ClientSession] = None
         self._network_config: Optional[NetworkConfig] = None
         self._tor_config: Optional[TorConfig] = None
@@ -52,6 +53,10 @@ class HTTPEngine:
         self._status_cb: Optional[StatusCallback] = None
         self._filename_cb: Optional[FilenameCallback] = None
         self._last_progress_emit: dict[str, float] = {}
+
+    def get_live_segments(self, download_id: str) -> Optional[list[SegmentEntry]]:
+        """Return live in-memory segments for active downloading tasks."""
+        return self._active_segments.get(download_id)
 
     # -- public API ----------------------------------------------------------
 
@@ -224,14 +229,19 @@ class HTTPEngine:
         evt = self._cancel_events.pop(download_id, None)
         if evt:
             evt.set()
-        task = self._tasks.pop(download_id, None)
-        if task and not task.done():
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                task.cancel()
         self._db.update_status(download_id, "paused")
         self._emit_status(download_id, "paused")
+        task = self._tasks.pop(download_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+        if self._progress_cb:
+            entry = self._db.get_download(download_id)
+            if entry:
+                self._progress_cb(download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0)
 
     async def cancel(self, download_id: str):
         evt = self._cancel_events.pop(download_id, None)
@@ -340,8 +350,13 @@ class HTTPEngine:
         except asyncio.CancelledError:
             log.debug("Download %s cancelled", download_id)
         except Exception as exc:
-            log.exception("Download %s failed: %s", download_id, exc)
-            self._handle_retry(entry, str(exc))
+            if cancel_evt.is_set():
+                log.debug("Download %s cancelled/paused with exception: %s", download_id, exc)
+            else:
+                current = self._db.get_download(download_id)
+                if not current or current.status not in ("paused", "completed"):
+                    log.exception("Download %s failed: %s", download_id, exc)
+                    self._handle_retry(entry, str(exc))
         finally:
             self._tasks.pop(download_id, None)
             self._cancel_events.pop(download_id, None)
@@ -389,6 +404,8 @@ class HTTPEngine:
             segments = self._create_segments(download_id, total_size,
                                              num_segments)
             self._db.add_segments(segments)
+
+        self._active_segments[download_id] = segments
 
         # Ensure target file exists and is correctly sized for resuming
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -438,6 +455,8 @@ class HTTPEngine:
                     t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        finally:
+            self._active_segments.pop(download_id, None)
 
     async def _download_one_segment(
         self, entry: DownloadEntry, seg: SegmentEntry,
@@ -527,6 +546,8 @@ class HTTPEngine:
                 )
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                if cancel_evt.is_set():
+                    return
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
                 log.warning(
                     "Segment %d attempt %d failed: %s — retrying in %.1fs",
@@ -699,6 +720,11 @@ class HTTPEngine:
     # -- retry handling -------------------------------------------------------
 
     def _handle_retry(self, entry: DownloadEntry, error_msg: str):
+        current = self._db.get_download(entry.id)
+        if current and current.status in ("paused", "completed"):
+            log.debug("Skipping retry for %s because status is %s", entry.id, current.status)
+            return
+
         count = self._db.increment_retry(entry.id)
         if count < entry.max_retries:
             self._db.update_status(entry.id, "queued", error_msg)
@@ -749,6 +775,13 @@ class HTTPEngine:
                        total: int, speed: float, eta: float):
         if not self._progress_cb:
             return
+        cancel_evt = self._cancel_events.get(download_id)
+        if cancel_evt and cancel_evt.is_set():
+            return
+        current = self._db.get_download(download_id)
+        if current and current.status == "paused":
+            speed = 0.0
+            eta = 0.0
         now = time.monotonic()
         last = self._last_progress_emit.get(download_id, 0.0)
         # Throttle to at most 10 emits/sec (100ms interval) unless download is finished

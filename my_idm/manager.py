@@ -51,6 +51,8 @@ class DownloadManager(QObject):
     security_config_changed = Signal(object)  # SecurityConfig
     tor_config_changed = Signal(object)       # TorConfig
     threat_detected = Signal(str, str)       # download_id, report
+    queue_order_changed = Signal()
+    tor_status_changed = Signal(str, str)     # status ("connecting"|"connected"|"disconnecting"|"disconnected"|"error"), message
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -129,12 +131,14 @@ class DownloadManager(QObject):
                 self._http.set_tor_config_sync(self._tor_config)
                 self._torrent.apply_tor_config(self._tor_config)
 
-        # Auto-resume interrupted downloads if configured
-        if self._general_config.auto_resume_startup:
-            for entry in self._db.get_all_downloads():
-                if entry.status in ("downloading", "checking"):
-                    log.info("Auto-resuming interrupted download on startup: %s", entry.id)
-                    self.resume_download(entry.id)
+        # Auto-resume queued and interrupted downloads on startup
+        for entry in self._db.get_all_downloads():
+            if entry.status == "queued":
+                log.info("Auto-starting queued download on startup: %s", entry.id)
+                self.resume_download(entry.id)
+            elif self._general_config.auto_resume_startup and entry.status in ("downloading", "checking", "fetching_metadata"):
+                log.info("Auto-resuming interrupted download on startup: %s", entry.id)
+                self.resume_download(entry.id)
 
         log.info("DownloadManager started")
 
@@ -204,24 +208,62 @@ class DownloadManager(QObject):
         self.tor_config_changed.emit(config)
 
     def toggle_tor(self, enable: Optional[bool] = None) -> tuple[bool, str]:
-        """Toggle or set Tor activation status, starting background service if needed."""
+        """Toggle or set Tor activation status, pausing active downloads beforehand and resuming after."""
         target = (not self._tor_config.enabled) if enable is None else bool(enable)
 
+        # 1. Identify ongoing downloads to pause before Tor transition
+        active_ids = []
+        try:
+            if self._db and getattr(self._db, "_conn", None) is not None:
+                active_ids = [
+                    e.id for e in self._db.get_all_downloads()
+                    if e.status in ("downloading", "fetching_metadata", "stalled")
+                ]
+        except Exception:
+            active_ids = []
+
+        if active_ids:
+            log.info("Pausing %d ongoing download(s) before Tor state change: %s", len(active_ids), active_ids)
+            for did in active_ids:
+                self.pause_download(did)
+
+        # 2. Emit connecting / disconnecting status
+        self.tor_status_changed.emit(
+            "connecting" if target else "disconnecting",
+            "Connecting..." if target else "Disconnecting..."
+        )
+
+        # 3. Perform Tor service start / stop
         if target:
             success, msg = self._tor_service.start(timeout=15.0)
             if not success:
                 self._tor_config.enabled = False
                 self.set_tor_config(self._tor_config)
+                self.tor_status_changed.emit("error", msg)
+                # Resume previously active downloads with direct routing
+                if active_ids:
+                    log.info("Resuming %d download(s) after Tor start failure", len(active_ids))
+                    for did in active_ids:
+                        self.resume_download(did)
                 return False, msg
 
             self._tor_config.enabled = True
             self.set_tor_config(self._tor_config)
-            return True, msg
+            self.tor_status_changed.emit("connected", msg)
         else:
             self._tor_service.stop()
             self._tor_config.enabled = False
             self.set_tor_config(self._tor_config)
-            return True, "Tor deactivated"
+            self.tor_status_changed.emit("disconnected", "Tor deactivated")
+            msg = "Tor deactivated"
+
+        # 4. Resume previously active downloads with the updated Tor routing
+        if active_ids:
+            log.info("Resuming %d ongoing download(s) after Tor state change", len(active_ids))
+            for did in active_ids:
+                self.resume_download(did)
+
+        return True, msg
 
     @property
     def network_config(self) -> NetworkConfig:
@@ -406,6 +448,9 @@ class DownloadManager(QObject):
 
     def pause_download(self, download_id: str):
         self._starting_downloads.discard(download_id)
+        self._db.update_status(download_id, "paused")
+        self.status_changed.emit(download_id, "paused", "")
+
         entry = self._db.get_download(download_id)
         if not entry:
             return
@@ -418,8 +463,9 @@ class DownloadManager(QObject):
         elif entry.download_type == "torrent":
             self._torrent.pause(download_id)
 
-        self._db.update_status(download_id, "paused")
-        self.status_changed.emit(download_id, "paused", "")
+        self.progress_updated.emit(
+            download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+        )
 
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
@@ -456,6 +502,39 @@ class DownloadManager(QObject):
                 self._torrent.add_torrent(entry)
 
         self.status_changed.emit(download_id, "downloading", "")
+
+    def force_start_download(self, download_id: str):
+        """Immediately force start a download, resetting retries/errors and bypassing paused/queued limits."""
+        entry = self._db.get_download(download_id)
+        if not entry or entry.status == "completed":
+            return
+
+        entry.status = "downloading"
+        entry.retry_count = 0
+        entry.error_message = ""
+        entry.last_tried_at = _now_iso()
+        if not entry.file_path and entry.filename and entry.save_path:
+            entry.file_path = str(Path(entry.save_path) / entry.filename)
+        self._db.update_download(entry)
+
+        if entry.download_type == "http":
+            if not self._http.is_active(download_id):
+                if self._loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._http.add(entry), self._loop
+                    )
+        elif entry.download_type == "torrent":
+            if download_id in self._torrent._handles:
+                self._torrent.force_start(download_id)
+            else:
+                self._torrent.add_torrent(entry)
+
+        target_status = "downloading"
+        if entry.download_type == "torrent" and not entry.total_size:
+            target_status = "fetching_metadata"
+            self._db.update_status(download_id, target_status)
+
+        self.status_changed.emit(download_id, target_status, "")
 
     def delete_download(self, download_id: str, delete_files: bool = False):
         entry = self._db.get_download(download_id)
@@ -537,6 +616,48 @@ class DownloadManager(QObject):
 
         self.download_moved.emit(download_id)
 
+    def mark_file_not_found(self, download_id: str):
+        """Mark download status as file_not_found when missing on disk."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return
+        entry.status = "file_not_found"
+        entry.error_message = "File not found on disk"
+        self._db.update_status(download_id, "file_not_found", "File not found on disk")
+        self.status_changed.emit(download_id, "file_not_found", "File not found on disk")
+
+    def move_queue_up(self, download_id: str) -> bool:
+        """Move download up in queue order."""
+        downloads = self._db.get_all_downloads()
+        downloads.sort(key=lambda d: d.queue_order if d.queue_order > 0 else 999999)
+        idx = next((i for i, d in enumerate(downloads) if d.id == download_id), -1)
+        if idx > 0:
+            target = downloads[idx - 1]
+            curr = downloads[idx]
+            curr_order = curr.queue_order if curr.queue_order > 0 else (idx + 1)
+            target_order = target.queue_order if target.queue_order > 0 else idx
+            self._db.update_queue_order(curr.id, target_order)
+            self._db.update_queue_order(target.id, curr_order)
+            self.queue_order_changed.emit()
+            return True
+        return False
+
+    def move_queue_down(self, download_id: str) -> bool:
+        """Move download down in queue order."""
+        downloads = self._db.get_all_downloads()
+        downloads.sort(key=lambda d: d.queue_order if d.queue_order > 0 else 999999)
+        idx = next((i for i, d in enumerate(downloads) if d.id == download_id), -1)
+        if idx != -1 and idx < len(downloads) - 1:
+            target = downloads[idx + 1]
+            curr = downloads[idx]
+            curr_order = curr.queue_order if curr.queue_order > 0 else (idx + 1)
+            target_order = target.queue_order if target.queue_order > 0 else (idx + 2)
+            self._db.update_queue_order(curr.id, target_order)
+            self._db.update_queue_order(target.id, curr_order)
+            self.queue_order_changed.emit()
+            return True
+        return False
+
     # -- recheck -------------------------------------------------------------
 
     def recheck_download(self, download_id: str):
@@ -552,9 +673,10 @@ class DownloadManager(QObject):
             # HTTP: the engine pre-allocates the full file via truncate(), so
             # st_size is always == total_size even when the download is partial.
             # Use the segment downloaded_bytes sum (or entry.downloaded_size from
-            # the DB) as the true measure of how much data was actually written.
-            fp = Path(entry.file_path)
-            if not fp.exists():
+            if not entry.file_path and entry.filename and entry.save_path:
+                entry.file_path = str(Path(entry.save_path) / entry.filename)
+            fp = Path(entry.file_path) if entry.file_path else None
+            if not fp or not fp.exists():
                 # File doesn't exist at all — full reset
                 entry.downloaded_size = 0
                 entry.status = "queued"
@@ -640,6 +762,10 @@ class DownloadManager(QObject):
 
     def _on_http_progress(self, download_id: str, downloaded: int,
                           total: int, speed: float, eta: float):
+        entry = self._db.get_download(download_id)
+        if entry and entry.status == "paused":
+            speed = 0.0
+            eta = 0.0
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta, 0, 0, 0.0
         )
@@ -647,6 +773,10 @@ class DownloadManager(QObject):
     def _on_http_status(self, download_id: str, status: str,
                         error_msg: str):
         self._starting_downloads.discard(download_id)
+        current = self._db.get_download(download_id)
+        if current and current.status == "paused" and status in ("queued", "downloading"):
+            log.debug("Ignoring status %s for paused download %s", status, download_id)
+            return
         if status == "completed" and self._security_config.scan_after_download:
             self._handle_completed_scan(download_id)
         else:
@@ -655,6 +785,11 @@ class DownloadManager(QObject):
     def _on_torrent_progress(self, download_id: str, downloaded: int,
                              total: int, speed: float, eta: float,
                              seeds: int, peers: int, upload_speed: float):
+        entry = self._db.get_download(download_id)
+        if entry and entry.status == "paused":
+            speed = 0.0
+            upload_speed = 0.0
+            eta = 0.0
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta,
             seeds, peers, upload_speed,
@@ -663,6 +798,10 @@ class DownloadManager(QObject):
     def _on_torrent_status(self, download_id: str, status: str,
                            error_msg: str):
         self._starting_downloads.discard(download_id)
+        current = self._db.get_download(download_id)
+        if current and current.status == "paused" and status in ("queued", "downloading", "fetching_metadata"):
+            log.debug("Ignoring status %s for paused torrent %s", status, download_id)
+            return
         if (
             status in ("finished", "seeding")
             and self._security_config.scan_after_download
@@ -752,12 +891,18 @@ class DownloadManager(QObject):
     # -- inspection & details queries ---------------------------------------
 
     def get_download_files(self, download_id: str) -> list[dict]:
-        """Return files for a download. For torrents, queries TorrentEngine. For HTTP, returns single target."""
+        """Return files for a download. For torrents, queries TorrentEngine (falling back to cached metadata in DB). For HTTP, returns single target."""
         entry = self._db.get_download(download_id)
         if not entry:
             return []
         if entry.download_type == "torrent":
-            return self._torrent.get_torrent_files(download_id)
+            files = self._torrent.get_torrent_files(download_id)
+            if files:
+                if entry.metadata.get("files") != files:
+                    entry.metadata["files"] = files
+                    self._db.update_download(entry)
+                return files
+            return entry.metadata.get("files", [])
         # HTTP single file representation
         name = entry.filename or os.path.basename(entry.file_path) if entry.file_path else "file"
         pct = (entry.downloaded_size / entry.total_size) if entry.total_size > 0 else 0.0
@@ -777,15 +922,36 @@ class DownloadManager(QObject):
         return self._torrent.set_torrent_file_priority(download_id, file_index, priority)
 
     def get_torrent_peers(self, download_id: str) -> list[dict]:
-        """Return active swarm peers for a torrent."""
-        return self._torrent.get_torrent_peers(download_id)
+        """Return active swarm peers for a torrent, falling back to cached metadata in DB."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return []
+        peers = self._torrent.get_torrent_peers(download_id)
+        if peers:
+            if entry.metadata.get("peers") != peers:
+                entry.metadata["peers"] = peers
+                self._db.update_download(entry)
+            return peers
+        return entry.metadata.get("peers", [])
 
     def get_torrent_trackers(self, download_id: str) -> list[dict]:
-        """Return trackers and their status for a torrent."""
-        return self._torrent.get_torrent_trackers(download_id)
+        """Return trackers and their status for a torrent, falling back to cached metadata in DB."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return []
+        trackers = self._torrent.get_torrent_trackers(download_id)
+        if trackers:
+            if entry.metadata.get("trackers") != trackers:
+                entry.metadata["trackers"] = trackers
+                self._db.update_download(entry)
+            return trackers
+        return entry.metadata.get("trackers", [])
 
     def get_download_segments(self, download_id: str) -> list[SegmentEntry]:
-        """Return segmented download chunks from the database for HTTP downloads."""
+        """Return segmented download chunks, preferring live in-memory segments if actively downloading."""
+        live = self._http.get_live_segments(download_id)
+        if live:
+            return list(live)
         return self._db.get_segments(download_id)
 
     def save_ui_state(self, state: dict):

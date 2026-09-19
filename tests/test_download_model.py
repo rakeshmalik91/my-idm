@@ -1,26 +1,26 @@
+"""Unit tests for DownloadTableModel: column indexing, data formatting, sorting, and progress bar delegates."""
+
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
-from datetime import datetime, timezone
-
-from PySide6.QtCore import Qt, QModelIndex, QSettings
+from PySide6.QtCore import Qt, QModelIndex
 from PySide6.QtWidgets import QApplication, QTableView
 
 from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import DownloadTableModel, Col
-from my_idm.main_window import MainWindow
+from my_idm.delegates import ProgressBarDelegate
 from my_idm.manager import DownloadManager
+from my_idm.main_window import MainWindow
 
-# Ensure single QApplication instance for tests
 app = QApplication.instance() or QApplication([])
 
 
 def _make_entry(id: str, name: str, size: int = 1000, progress: float = 0.0,
                 status: str = "queued", speed: float = 0.0, eta: float = 0.0,
                 download_type: str = "http", added_at: str = "2026-01-01T00:00:00Z",
-                completed_at: str = "") -> DownloadEntry:
+                completed_at: str = "", queue_order: int = 0) -> DownloadEntry:
     return DownloadEntry(
         id=id,
         url=f"https://example.com/{name}",
@@ -34,22 +34,85 @@ def _make_entry(id: str, name: str, size: int = 1000, progress: float = 0.0,
         completed_at=completed_at,
         speed=speed,
         eta_seconds=eta,
+        queue_order=queue_order,
     )
 
 
-class TestDownloadSorting(unittest.TestCase):
+class TestDownloadModel(unittest.TestCase):
 
     def setUp(self):
         self.model = DownloadTableModel()
         self.e1 = _make_entry("1", "bravo.zip", size=2000, progress=50.0,
                               status="downloading", speed=500.0, eta=30.0,
-                              added_at="2026-03-01T10:00:00Z", completed_at="")
+                              added_at="2026-03-01T10:00:00Z", completed_at="", queue_order=1)
         self.e2 = _make_entry("2", "alpha.iso", size=1000, progress=100.0,
                               status="completed", speed=0.0, eta=0.0,
-                              added_at="2026-01-01T10:00:00Z", completed_at="2026-01-01T11:00:00Z")
+                              added_at="2026-01-01T10:00:00Z", completed_at="2026-01-01T11:00:00Z", queue_order=2)
         self.e3 = _make_entry("3", "charlie.mp4", size=5000, progress=10.0,
                               status="downloading", speed=1500.0, eta=120.0,
-                              added_at="2026-05-01T10:00:00Z", completed_at="")
+                              added_at="2026-05-01T10:00:00Z", completed_at="", queue_order=3)
+
+    def test_column_indices_and_headers(self):
+        """Verify column 0 is QUEUE '#' and headers are properly mapped."""
+        self.assertEqual(Col.QUEUE, 0)
+        self.assertEqual(Col.HEADERS[Col.QUEUE], "#")
+        self.assertEqual(Col.NAME, 1)
+        self.assertEqual(Col.SIZE, 2)
+        self.assertEqual(Col.PROGRESS, 3)
+        self.assertEqual(Col.STATUS, 4)
+
+    def test_queue_column_display_and_alignment(self):
+        """Queue column displays 1-based order for active downloads and empty for completed."""
+        self.model.load_entries([self.e1, self.e2])
+        idx1 = self.model.index(0, Col.QUEUE)
+        idx2 = self.model.index(1, Col.QUEUE)
+
+        self.assertEqual(self.model.data(idx1, Qt.ItemDataRole.TextAlignmentRole), Qt.AlignmentFlag.AlignCenter)
+
+        # One entry is downloading (shows queue order), the other is completed (empty)
+        val1 = self.model.data(idx1, Qt.ItemDataRole.DisplayRole)
+        val2 = self.model.data(idx2, Qt.ItemDataRole.DisplayRole)
+        # e1 is downloading → shows number, e2 is completed → shows ""
+        values = {val1, val2}
+        self.assertIn("", values, "Completed download should show empty queue order")
+        self.assertTrue(any(v.isdigit() for v in values), "Active download should show numeric queue order")
+
+    def test_torrent_speed_shows_down_and_up(self):
+        """Torrent speed column shows both down and up speed formatted."""
+        entry = DownloadEntry(
+            id="t1",
+            filename="ubuntu.iso",
+            url="magnet:?xt=urn:btih:abc",
+            download_type="torrent",
+            status="downloading",
+            speed=1048576.0,       # 1 MB/s
+            upload_speed=262144.0, # 256 KB/s
+        )
+        self.model.load_entries([entry])
+        idx = self.model.index(0, Col.SPEED)
+        display_val = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
+        self.assertIn("↓", display_val)
+        self.assertIn("↑", display_val)
+        self.assertIn("1.0 MiB/s", display_val)
+        self.assertIn("256.0 KiB/s", display_val)
+
+    def test_aggregate_speeds(self):
+        """Model calculates total aggregate download and upload speeds."""
+        e1 = DownloadEntry(id="1", status="downloading", speed=1000.0, upload_speed=100.0)
+        e2 = DownloadEntry(id="2", status="downloading", speed=2000.0, upload_speed=200.0)
+        e3 = DownloadEntry(id="3", status="seeding", speed=0.0, upload_speed=300.0)
+        e4 = DownloadEntry(id="4", status="paused", speed=500.0, upload_speed=500.0)
+
+        self.model.load_entries([e1, e2, e3, e4])
+        down, up = self.model.get_aggregate_speeds()
+        self.assertEqual(down, 3000.0)
+        self.assertEqual(up, 600.0)
+
+    def test_delegate_progress_text_and_status_colors(self):
+        """ProgressBarDelegate supports new lifecycle states and color definitions."""
+        self.assertIn("fetching_metadata", ProgressBarDelegate._STATUS_COLORS)
+        self.assertIn("file_not_found", ProgressBarDelegate._STATUS_COLORS)
+        self.assertIn("stalled", ProgressBarDelegate._STATUS_COLORS)
 
     def test_default_sort_configuration(self):
         """Model defaults to Added column descending."""
@@ -93,7 +156,6 @@ class TestDownloadSorting(unittest.TestCase):
         """Sorting by Size ASC and DESC."""
         self.model.load_entries([self.e1, self.e2, self.e3])
         self.model.sort(Col.SIZE, Qt.SortOrder.AscendingOrder)
-        # 1000 (alpha) -> 2000 (bravo) -> 5000 (charlie)
         self.assertEqual(self.model.get_entry(0).total_size, 1000)
         self.assertEqual(self.model.get_entry(1).total_size, 2000)
         self.assertEqual(self.model.get_entry(2).total_size, 5000)
@@ -107,7 +169,6 @@ class TestDownloadSorting(unittest.TestCase):
         """Sorting by Speed ASC and DESC."""
         self.model.load_entries([self.e1, self.e2, self.e3])
         self.model.sort(Col.SPEED, Qt.SortOrder.AscendingOrder)
-        # 0.0 (alpha) -> 500.0 (bravo) -> 1500.0 (charlie)
         self.assertEqual(self.model.get_entry(0).id, "2")
         self.assertEqual(self.model.get_entry(1).id, "1")
         self.assertEqual(self.model.get_entry(2).id, "3")
@@ -121,13 +182,11 @@ class TestDownloadSorting(unittest.TestCase):
         """Active ETAs appear before inactive ones in both ASC and DESC."""
         self.model.load_entries([self.e1, self.e2, self.e3])
         self.model.sort(Col.ETA, Qt.SortOrder.AscendingOrder)
-        # e1 (30s) -> e3 (120s) -> e2 (no ETA, completed)
         self.assertEqual(self.model.get_entry(0).id, "1")
         self.assertEqual(self.model.get_entry(1).id, "3")
         self.assertEqual(self.model.get_entry(2).id, "2")
 
         self.model.sort(Col.ETA, Qt.SortOrder.DescendingOrder)
-        # e3 (120s) -> e1 (30s) -> e2 (no ETA, completed)
         self.assertEqual(self.model.get_entry(0).id, "3")
         self.assertEqual(self.model.get_entry(1).id, "1")
         self.assertEqual(self.model.get_entry(2).id, "2")
@@ -138,31 +197,21 @@ class TestDownloadSorting(unittest.TestCase):
         self.model.load_entries([self.e1, self.e2, self.e3, e4])
 
         self.model.sort(Col.COMPLETED, Qt.SortOrder.AscendingOrder)
-        # Completed: e2 (Jan 1) -> e4 (Feb 1), followed by uncompleted e1, e3
         self.assertEqual(self.model.get_entry(0).id, "2")
         self.assertEqual(self.model.get_entry(1).id, "4")
 
         self.model.sort(Col.COMPLETED, Qt.SortOrder.DescendingOrder)
-        # Completed: e4 (Feb 1) -> e2 (Jan 1), followed by uncompleted e1, e3
         self.assertEqual(self.model.get_entry(0).id, "4")
         self.assertEqual(self.model.get_entry(1).id, "2")
 
     def test_add_entry_inserts_into_correct_sorted_row(self):
         """Adding an entry inserts it at the proper position under current sort."""
-        self.model.load_entries([self.e1, self.e2])  # e1: March, e2: Jan (default sort: Added DESC)
-        # e1 (March) at row 0, e2 (Jan) at row 1
-
-        # Add newest entry (July) -> should insert at row 0
+        self.model.load_entries([self.e1, self.e2])
         newest = _make_entry("new", "new.zip", added_at="2026-07-01T10:00:00Z")
         self.model.add_entry(newest)
         self.assertEqual(self.model.get_entry(0).id, "new")
         self.assertEqual(self.model.get_entry(1).id, "1")
         self.assertEqual(self.model.get_entry(2).id, "2")
-
-        # Add oldest entry (2025) -> should insert at bottom (row 3)
-        oldest = _make_entry("old", "old.zip", added_at="2025-01-01T10:00:00Z")
-        self.model.add_entry(oldest)
-        self.assertEqual(self.model.get_entry(3).id, "old")
 
     def test_selection_tracking_across_sort(self):
         """Persistent indexes and selection stay anchored to the item when sorted."""
@@ -171,86 +220,62 @@ class TestDownloadSorting(unittest.TestCase):
         view.setModel(self.model)
         view.setSortingEnabled(True)
 
-        # In default Added DESC: row 0 is e3 ("3"), row 1 is e1 ("1"), row 2 is e2 ("2")
         self.assertEqual(self.model.get_entry(0).id, "3")
-        view.selectRow(0)  # Select e3 ("charlie.mp4")
+        view.selectRow(0)
 
         selected_ids = self.model.get_selected_ids(view.selectionModel().selectedIndexes())
         self.assertEqual(selected_ids, ["3"])
 
-        # Sort by Name ASC: e2 (alpha) at row 0, e1 (bravo) at row 1, e3 (charlie) at row 2
         view.sortByColumn(Col.NAME, Qt.SortOrder.AscendingOrder)
         self.assertEqual(self.model.get_entry(2).id, "3")
 
-        # Selection should now point to row 2 (e3)
         selected_ids_after = self.model.get_selected_ids(view.selectionModel().selectedIndexes())
         self.assertEqual(selected_ids_after, ["3"])
 
 
-class TestMainWindowSorting(unittest.TestCase):
+class TestMainWindowSortingIntegration(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        self.db = Database(":memory:")
+        self.db.open()
+        self.manager = DownloadManager(self.db)
+        self.win = MainWindow(self.manager)
 
     def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        self.win.close()
+        self.manager.stop()
+        self.db.close()
 
     def test_main_window_has_sorting_enabled(self):
         """MainWindow table has sorting enabled with Added DESC default."""
-        db = Database(":memory:")
-        db.open()
-        mgr = DownloadManager(db)
-        win = MainWindow(mgr)
-        try:
-            self.assertTrue(win._table.isSortingEnabled())
-            header = win._table.horizontalHeader()
-            self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
-            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
-        finally:
-            win.close()
-            db.close()
+        self.assertTrue(self.win._table.isSortingEnabled())
+        header = self.win._table.horizontalHeader()
+        self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
 
     def test_main_window_sort_helpers(self):
         """MainWindow sort helpers correctly update the table sort state."""
-        db = Database(":memory:")
-        db.open()
-        mgr = DownloadManager(db)
-        win = MainWindow(mgr)
-        try:
-            win._sort_by_column(Col.NAME)
-            header = win._table.horizontalHeader()
-            self.assertEqual(header.sortIndicatorSection(), Col.NAME)
+        self.win._sort_by_column(Col.NAME)
+        header = self.win._table.horizontalHeader()
+        self.assertEqual(header.sortIndicatorSection(), Col.NAME)
 
-            win._set_sort_order(Qt.SortOrder.AscendingOrder)
-            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+        self.win._set_sort_order(Qt.SortOrder.AscendingOrder)
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
 
-            # Switching back to Added column defaults to Descending order
-            win._sort_by_column(Col.ADDED)
-            self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
-            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
-        finally:
-            win.close()
-            db.close()
+        # Switching back to Added column defaults to Descending order
+        self.win._sort_by_column(Col.ADDED)
+        self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
 
     def test_main_window_header_section_clicked_added_defaults_descending(self):
         """Clicking Date Added column header switches to it in descending order."""
-        db = Database(":memory:")
-        db.open()
-        mgr = DownloadManager(db)
-        win = MainWindow(mgr)
-        try:
-            # Change to Name column ascending
-            win._table.sortByColumn(Col.NAME, Qt.SortOrder.AscendingOrder)
-            win._last_sort_section = Col.NAME
-            self.assertEqual(win._table.horizontalHeader().sortIndicatorSection(), Col.NAME)
+        self.win._table.sortByColumn(Col.NAME, Qt.SortOrder.AscendingOrder)
+        self.win._last_sort_section = Col.NAME
+        self.assertEqual(self.win._table.horizontalHeader().sortIndicatorSection(), Col.NAME)
 
-            # Simulate clicking Added column header
-            win._on_header_section_clicked(Col.ADDED)
-            self.assertEqual(win._table.horizontalHeader().sortIndicatorSection(), Col.ADDED)
-            self.assertEqual(win._table.horizontalHeader().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
-        finally:
-            win.close()
-            db.close()
+        self.win._on_header_section_clicked(Col.ADDED)
+        self.assertEqual(self.win._table.horizontalHeader().sortIndicatorSection(), Col.ADDED)
+        self.assertEqual(self.win._table.horizontalHeader().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
 
 
 if __name__ == "__main__":

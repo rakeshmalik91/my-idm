@@ -4,10 +4,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import tempfile
 import unittest
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QGuiApplication
 
+from my_idm.config import GeneralConfig
 from my_idm.dialogs import AddDownloadDialog
 
 app = QApplication.instance() or QApplication([])
@@ -99,6 +101,20 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
             self.assertEqual(dlg._url_edit.text(), "")
         finally:
             dlg.close()
+
+    def test_add_download_picks_default_folder(self):
+        """Add download dialog picks default_save_path even when remember_last is default."""
+        with tempfile.TemporaryDirectory() as custom_dir:
+            cfg = GeneralConfig(default_save_path=custom_dir)
+            cfg.save()
+
+            dlg = AddDownloadDialog()
+            try:
+                self.assertEqual(dlg.save_path, custom_dir)
+                self.assertEqual(dlg._save_edit.text(), custom_dir)
+            finally:
+                dlg.close()
+
 
 
 if __name__ == "__main__":

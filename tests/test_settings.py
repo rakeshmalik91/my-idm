@@ -82,10 +82,10 @@ class TestAddDownloadDialogSettings(unittest.TestCase):
     """Test that AddDownloadDialog uses and updates GeneralConfig."""
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        pass
 
     def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        pass
 
     def test_prefill_and_set_as_default(self):
         with tempfile.TemporaryDirectory() as custom_dir:
@@ -112,10 +112,10 @@ class TestSettingsDialog(unittest.TestCase):
     """Test Preferences and SettingsDialog functionality."""
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        pass
 
     def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        pass
 
     def test_dialog_population_and_save(self):
         with tempfile.TemporaryDirectory() as custom_dir:
@@ -210,7 +210,6 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         self.tmp.close()
         self.db = Database(Path(self.tmp.name))
         self.db.open()
-        QSettings("MyIDM", "My-IDM").clear()
 
     def tearDown(self):
         self.db.close()
@@ -219,7 +218,6 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
                 os.remove(self.tmp.name)
             except Exception:
                 pass
-        QSettings("MyIDM", "My-IDM").clear()
 
     def test_manager_preferences_window_size_persistence(self):
         mgr = DownloadManager(self.db)

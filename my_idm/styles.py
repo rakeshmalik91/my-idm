@@ -85,7 +85,11 @@ QMenu {{
 }}
 
 QMenu::item {{
-    padding: 6px 24px 6px 12px;
+    padding: 6px 24px 6px 8px;
+}}
+
+QMenu::icon {{
+    padding-left: 6px;
 }}
 
 QMenu::item:selected {{
@@ -303,6 +307,19 @@ QPushButton#dangerButton {{
     background-color: {Colors.RED};
     border-color: {Colors.RED};
     color: #ffffff;
+}}
+
+QPushButton#detailsCloseBtn {{
+    padding: 0px;
+    font-size: 14px;
+    font-weight: bold;
+    color: {Colors.TEXT_SECONDARY};
+}}
+
+QPushButton#detailsCloseBtn:hover {{
+    color: #ffffff;
+    background-color: #f8514933;
+    border-color: {Colors.RED};
 }}
 
 QCheckBox {{

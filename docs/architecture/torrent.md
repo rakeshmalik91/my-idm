@@ -24,8 +24,10 @@ With advanced multi-peer piece verification, DHT, Peer Exchange (PEX), selective
   - Accurate dynamic ETA estimation based on moving average transfer rates.
 
 ### 3. Fastresume State Persistence
-- Automatically caches session resume state under `~/.my-idm/fastresume/<hash>.fastresume` using `lt.write_resume_data_buf()`.
-- **Instant Resumption**: When restarting My-IDM or resuming paused torrents, files are instantly verified using cached piece maps (`lt.read_resume_data()`), bypassing lengthy re-hashing of massive multi-gigabyte transfers.
+- Automatically caches session resume state under `~/.my-idm/fastresume/<id>.fastresume` using `lt.write_resume_data_buf()`.
+- **Handle & Alert Pairing**: In multi-torrent sessions, libtorrent alerts (`save_resume_data_alert`) are strictly matched with their respective torrent handles and info hashes, preventing fastresume cross-contamination or entry swapping across app restarts.
+- **Cryptographic Cache Integrity Check**: Upon loading fastresume on startup or resume, the cached metadata hash is validated against the magnet URI or `.torrent` file info hash. Any mismatched or stale cache is automatically discarded and unlinked.
+- **Instant Resumption**: When restarting My-IDM or resuming paused torrents, files are verified using cached piece maps (`lt.read_resume_data()`), bypassing lengthy re-hashing of massive multi-gigabyte transfers.
 - **Force Recheck**: Right-click any torrent and select **Force Recheck** to perform a complete piece-by-piece cryptographic hash validation against on-disk files.
 
 ### 4. Interactive Bottom Details Panel

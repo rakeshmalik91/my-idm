@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
-from PySide6.QtCore import Qt, QSettings
-from PySide6.QtWidgets import QApplication, QComboBox, QSplitter, QTableWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QSplitter, QTableWidget
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.details_panel import DetailsPanel
@@ -21,7 +21,6 @@ app = QApplication.instance() or QApplication([])
 class TestDetailsPanel(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
         self.db = Database(":memory:")
         self.db.open()
         self.manager = DownloadManager(self.db)
@@ -30,7 +29,6 @@ class TestDetailsPanel(unittest.TestCase):
     def tearDown(self):
         self.win.close()
         self.db.close()
-        QSettings("MyIDM", "My-IDM").clear()
 
     def test_details_panel_splitter_integration(self):
         """MainWindow central widget should be a vertical QSplitter with table and details panel."""
@@ -104,18 +102,22 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertIn("Downloading", panel._ov_status.text())
         self.assertIn("50.0%", panel._ov_size.text())
 
-        # Check Files tab
+        # Check Files tab (Col 0: Download Checkbox, Col 1: #, Col 2: Name)
         self.assertEqual(panel._table_files.rowCount(), 1)
-        self.assertEqual(panel._table_files.item(0, 1).text(), "archive.zip")
+        self.assertEqual(panel._table_files.item(0, 2).text(), "archive.zip")
+        chk = panel._table_files.cellWidget(0, 0).findChild(QCheckBox)
+        self.assertIsNotNone(chk)
+        self.assertTrue(chk.isChecked())
+        self.assertFalse(chk.isEnabled())
 
         # Check Segments tab
         self.assertEqual(panel._table_segments.rowCount(), 2)
         self.assertEqual(panel._table_segments.item(0, 0).text(), "Segment #1")
         self.assertEqual(panel._table_segments.item(1, 0).text(), "Segment #2")
 
-        # Peers & trackers tab should display inapplicable message
-        self.assertEqual(panel._table_peers.rowCount(), 0)
-        self.assertIn("BitTorrent transfers", panel._lbl_peers_status.text())
+        # Peers tab should be hidden for HTTP downloads
+        peers_tab_idx = panel._tabs.indexOf(panel._tab_peers)
+        self.assertFalse(panel._tabs.isTabVisible(peers_tab_idx))
 
     def test_details_panel_torrent_download_inspection(self):
         """Details panel displays torrent files, peers, trackers, and handles priority changes."""
@@ -194,19 +196,48 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertIn("15 seeds, 42 peers", panel._ov_swarm.text())
         self.assertEqual(panel._ov_hash.text(), "abcdef1234567890")
 
-        # Verify Files Tab
-        self.assertEqual(panel._table_files.rowCount(), 2)
-        self.assertEqual(panel._table_files.item(0, 1).text(), "ubuntu-24.04/README.txt")
-        self.assertEqual(panel._table_files.item(1, 1).text(), "ubuntu-24.04/ubuntu-live.iso")
+        # Verify Peers Tab is visible for torrents
+        peers_tab_idx = panel._tabs.indexOf(panel._tab_peers)
+        self.assertTrue(panel._tabs.isTabVisible(peers_tab_idx))
 
-        # Check Priority Combo on Row 1
-        combo_file1 = panel._table_files.cellWidget(1, 4)
+        # Verify Files Tab (Folder hierarchy in QTreeWidget)
+        self.assertEqual(panel._tree_files.topLevelItemCount(), 1)
+        root_folder = panel._tree_files.topLevelItem(0)
+        self.assertEqual(root_folder.text(0), "📁 ubuntu-24.04")
+        self.assertEqual(root_folder.childCount(), 2)
+
+        file0 = root_folder.child(0)
+        self.assertEqual(file0.text(0), "📄 README.txt")
+        self.assertEqual(file0.checkState(0), Qt.CheckState.Checked)
+
+        file1 = root_folder.child(1)
+        self.assertEqual(file1.text(0), "📄 ubuntu-live.iso")
+        self.assertEqual(file1.checkState(0), Qt.CheckState.Checked)
+
+        # Check Priority Combo on file 1 (Col 3)
+        combo_file1 = panel._tree_files.itemWidget(file1, 3)
         self.assertIsInstance(combo_file1, QComboBox)
         self.assertEqual(combo_file1.currentText(), "High")
 
-        # Change priority to Low (1)
+        # Change priority to Low (1) via combo
         combo_file1.setCurrentText("Low")
         self.manager._torrent.set_torrent_file_priority.assert_called_with("test-torrent-1", 1, 1)
+
+        # Uncheck checkbox on file 1 -> priority becomes 0 (Don't Download)
+        file1.setCheckState(0, Qt.CheckState.Unchecked)
+        panel._on_tree_item_changed(file1, 0)
+        self.manager._torrent.set_torrent_file_priority.assert_called_with("test-torrent-1", 1, 0)
+        self.assertEqual(combo_file1.currentText(), "Don't Download")
+
+        # Folder checkState becomes partially checked because file0 is checked and file1 is unchecked
+        self.assertEqual(root_folder.checkState(0), Qt.CheckState.PartiallyChecked)
+
+        # Uncheck root folder -> unchecks all child files and sets priorities to 0
+        root_folder.setCheckState(0, Qt.CheckState.Unchecked)
+        panel._on_tree_item_changed(root_folder, 0)
+        self.assertEqual(file0.checkState(0), Qt.CheckState.Unchecked)
+        self.assertIn(unittest.mock.call("test-torrent-1", 0, 0), self.manager._torrent.set_torrent_file_priority.mock_calls)
+        self.assertIn(unittest.mock.call("test-torrent-1", 1, 0), self.manager._torrent.set_torrent_file_priority.mock_calls)
 
         # Verify Peers Tab
         self.assertEqual(panel._table_peers.rowCount(), 1)
@@ -222,6 +253,7 @@ class TestDetailsPanel(unittest.TestCase):
         panel = self.win._details_panel
         toggle_act = self.win._act_toggle_details
 
+        toggle_act.setChecked(True)
         self.assertFalse(panel.isHidden())
         self.assertTrue(toggle_act.isChecked())
 
@@ -233,10 +265,68 @@ class TestDetailsPanel(unittest.TestCase):
         toggle_act.setChecked(True)
         self.assertFalse(panel.isHidden())
 
-        # Close button emits close_requested
+        # Close button has valid text, objectName, and emits close_requested
+        self.assertEqual(panel._btn_close.text(), "✕")
+        self.assertEqual(panel._btn_close.objectName(), "detailsCloseBtn")
         panel.close_requested.emit()
         self.assertFalse(toggle_act.isChecked())
         self.assertTrue(panel.isHidden())
+
+    def test_live_segments_and_metadata_persistence(self):
+        """Live segments are fetched from HTTPEngine during download, and torrent tab metadata persists offline."""
+        # 1. Live segments
+        http_entry = DownloadEntry(
+            id="live-http-1",
+            url="http://example.com/test.bin",
+            status="downloading",
+            total_size=1000000,
+        )
+        self.db.add_download(http_entry)
+        live_seg = SegmentEntry(
+            download_id="live-http-1",
+            index=0,
+            start_byte=0,
+            end_byte=999999,
+            downloaded_bytes=450000,
+            status="downloading",
+        )
+        self.manager._http.get_live_segments = MagicMock(return_value=[live_seg])
+        segments = self.manager.get_download_segments("live-http-1")
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(segments[0].downloaded_bytes, 450000)
+
+        # 2. Tab metadata persistence across restart
+        tor_entry = DownloadEntry(
+            id="persisted-tor-1",
+            url="magnet:?xt=urn:btih:1111222233334444",
+            filename="persisted.iso",
+            download_type="torrent",
+            status="completed",
+        )
+        self.db.add_download(tor_entry)
+
+        cached_files = [{"index": 0, "path": "persisted.iso", "size": 5000, "priority": 4, "progress": 1.0, "status": "completed"}]
+        cached_trackers = [{"url": "http://tracker.example.com", "tier": 0, "status": "Working", "send_stats": True}]
+        cached_peers = [{"ip": "1.2.3.4:5678", "client": "qBittorrent", "progress": 1.0, "down_speed": 0, "up_speed": 0, "flags": ""}]
+
+        self.manager._torrent.get_torrent_files = MagicMock(return_value=cached_files)
+        self.manager._torrent.get_torrent_trackers = MagicMock(return_value=cached_trackers)
+        self.manager._torrent.get_torrent_peers = MagicMock(return_value=cached_peers)
+
+        # Query once to populate metadata cache in DB
+        self.assertEqual(self.manager.get_download_files("persisted-tor-1"), cached_files)
+        self.assertEqual(self.manager.get_torrent_trackers("persisted-tor-1"), cached_trackers)
+        self.assertEqual(self.manager.get_torrent_peers("persisted-tor-1"), cached_peers)
+
+        # Now simulate app restart / engine offline (torrent engine returns empty)
+        self.manager._torrent.get_torrent_files = MagicMock(return_value=[])
+        self.manager._torrent.get_torrent_trackers = MagicMock(return_value=[])
+        self.manager._torrent.get_torrent_peers = MagicMock(return_value=[])
+
+        # Manager should return cached records from DB metadata
+        self.assertEqual(self.manager.get_download_files("persisted-tor-1"), cached_files)
+        self.assertEqual(self.manager.get_torrent_trackers("persisted-tor-1"), cached_trackers)
+        self.assertEqual(self.manager.get_torrent_peers("persisted-tor-1"), cached_peers)
 
 
 if __name__ == "__main__":

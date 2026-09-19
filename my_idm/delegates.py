@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QModelIndex, QRect, Qt
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -23,12 +23,15 @@ class ProgressBarDelegate(QStyledItemDelegate):
     """
 
     _STATUS_COLORS = {
-        "downloading": QColor(Colors.PROGRESS_DOWNLOADING),
-        "completed":   QColor(Colors.PROGRESS_COMPLETE),
-        "seeding":     QColor(Colors.PROGRESS_SEEDING),
-        "paused":      QColor(Colors.PROGRESS_PAUSED),
-        "error":       QColor(Colors.PROGRESS_ERROR),
-        "queued":      QColor(Colors.TEXT_DIM),
+        "downloading":       QColor(Colors.PROGRESS_DOWNLOADING),
+        "completed":         QColor(Colors.PROGRESS_COMPLETE),
+        "seeding":           QColor(Colors.PROGRESS_SEEDING),
+        "paused":            QColor(Colors.PROGRESS_PAUSED),
+        "error":             QColor(Colors.PROGRESS_ERROR),
+        "queued":            QColor(Colors.TEXT_DIM),
+        "fetching_metadata": QColor(Colors.CYAN),
+        "file_not_found":    QColor(Colors.RED),
+        "stalled":           QColor(Colors.ORANGE),
     }
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
@@ -76,11 +79,19 @@ class ProgressBarDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(fill_rect, radius, radius)
 
         # Percentage text
-        text = f"{progress:.1f}%"
+        if status == "file_not_found":
+            text = "Not Found"
+        elif status == "fetching_metadata":
+            text = "Metadata..."
+        elif status == "stalled":
+            text = f"{progress:.1f}% (Stalled)"
+        else:
+            text = f"{progress:.1f}%"
         painter.setPen(QPen(QColor(Colors.TEXT)))
         font = painter.font()
-        font.setPixelSize(max(10, rect.height() - 4))
-        font.setBold(True)
+        font_size = min(11, max(9, rect.height() - 6))
+        font.setPixelSize(font_size)
+        font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 

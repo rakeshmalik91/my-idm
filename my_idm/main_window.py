@@ -9,10 +9,11 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QSettings, QPointF, QTimer, QByteArray
+from PySide6.QtCore import Qt, QSize, QSettings, QPointF, QTimer, QByteArray, QRect
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QFont,
     QGuiApplication,
     QIcon,
     QKeySequence,
@@ -30,12 +31,15 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTableView,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -86,6 +90,20 @@ def _create_pause_icon(size: int = 32) -> QIcon:
     y = size * 0.18
     p.drawRoundedRect(size * 0.2, y, bar_w, bar_h, 2, 2)
     p.drawRoundedRect(size * 0.58, y, bar_w, bar_h, 2, 2)
+    p.end()
+    return QIcon(pix)
+
+
+def _create_emoji_icon(emoji: str, size: int = 32) -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    font = QFont(["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", "sans-serif"])
+    font.setPixelSize(int(size * 0.65))
+    p.setFont(font)
+    p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
     p.end()
     return QIcon(pix)
 
@@ -157,8 +175,10 @@ class MainWindow(QMainWindow):
         header.setDefaultSectionSize(110)
 
         self._model.set_tor_config(self._manager.tor_config)
+        self._table.doubleClicked.connect(self._on_table_double_clicked)
 
         # Set specific default column widths
+        self._table.setColumnWidth(Col.QUEUE, 45)
         self._table.setColumnWidth(Col.NAME, 240)
         self._table.setColumnWidth(Col.SIZE, 90)
         self._table.setColumnWidth(Col.PROGRESS, 160)
@@ -207,45 +227,57 @@ class MainWindow(QMainWindow):
         self._act_resume.setToolTip("Resume selected downloads (Ctrl+R)")
         self._act_resume.triggered.connect(self._on_resume)
 
+        self._act_force_start = QAction(_create_emoji_icon("⚡"), "Force Start", self)
+        self._act_force_start.setToolTip("Force start selected download(s) immediately")
+        self._act_force_start.triggered.connect(self._on_force_start)
+
         self._act_pause = QAction(_create_pause_icon(), "Pause", self)
         self._act_pause.setShortcut(QKeySequence("Space"))
         self._act_pause.setToolTip("Pause selected downloads (Space)")
         self._act_pause.triggered.connect(self._on_pause)
 
-        self._act_copy_url = QAction("📋 Copy URL / Magnet", self)
+        self._act_copy_url = QAction(_create_emoji_icon("📋"), "Copy URL / Magnet", self)
         self._act_copy_url.setShortcut(QKeySequence("Ctrl+C"))
         self._act_copy_url.setToolTip("Copy download URL or Magnet link to clipboard (Ctrl+C)")
         self._act_copy_url.triggered.connect(self._on_copy_url)
 
-        self._act_delete = QAction("🗑 Delete", self)
+        self._act_delete = QAction(_create_emoji_icon("🗑"), "Delete", self)
         self._act_delete.setShortcut(QKeySequence("Delete"))
         self._act_delete.setToolTip("Delete selected downloads")
         self._act_delete.triggered.connect(self._on_delete)
 
-        self._act_move = QAction("📂 Move", self)
+        self._act_move = QAction(_create_emoji_icon("📂"), "Move…", self)
         self._act_move.setToolTip("Move download to another directory")
         self._act_move.triggered.connect(self._on_move)
 
-        self._act_recheck = QAction("🔄 Recheck", self)
+        self._act_recheck = QAction(_create_emoji_icon("🔄"), "Recheck", self)
         self._act_recheck.setToolTip("Verify existing files on disk")
         self._act_recheck.triggered.connect(self._on_recheck)
 
-        self._act_open_file = QAction("📄 Open File", self)
+        self._act_open_file = QAction(_create_emoji_icon("📄"), "Open File", self)
         self._act_open_file.setShortcut(QKeySequence("Return"))
         self._act_open_file.setToolTip("Open the downloaded file")
         self._act_open_file.triggered.connect(self._on_open_file)
 
-        self._act_open_folder = QAction("📁 Open Folder", self)
+        self._act_open_folder = QAction(_create_emoji_icon("📁"), "Open Folder", self)
         self._act_open_folder.setShortcut(QKeySequence("Ctrl+O"))
         self._act_open_folder.setToolTip("Open containing folder (Ctrl+O)")
         self._act_open_folder.triggered.connect(self._on_open_folder)
 
-        self._act_load_backlog = QAction("📋 Load Backlog", self)
+        self._act_load_backlog = QAction(_create_emoji_icon("📋"), "Load Backlog…", self)
         self._act_load_backlog.setShortcut(QKeySequence("Ctrl+L"))
         self._act_load_backlog.setToolTip("Load URLs from a backlog file")
         self._act_load_backlog.triggered.connect(self._on_load_backlog)
 
-        self._act_preferences = QAction("⚙️ Preferences…", self)
+        self._act_move_up = QAction(_create_emoji_icon("⬆"), "Move Up in Queue", self)
+        self._act_move_up.setToolTip("Move selected download up in queue order")
+        self._act_move_up.triggered.connect(self._on_move_queue_up)
+
+        self._act_move_down = QAction(_create_emoji_icon("⬇"), "Move Down in Queue", self)
+        self._act_move_down.setToolTip("Move selected download down in queue order")
+        self._act_move_down.triggered.connect(self._on_move_queue_down)
+
+        self._act_preferences = QAction(_create_emoji_icon("⚙"), "Preferences…", self)
         self._act_preferences.setShortcut(QKeySequence("Ctrl+,"))
         self._act_preferences.setToolTip(
             "Configure default download folder, performance, network, and security (Ctrl+,)"
@@ -254,7 +286,7 @@ class MainWindow(QMainWindow):
             lambda: self._on_open_preferences(0)
         )
 
-        self._act_network_settings = QAction("🌐 VPN & Network Settings…", self)
+        self._act_network_settings = QAction(_create_emoji_icon("🌐"), "VPN & Network Settings…", self)
         self._act_network_settings.setToolTip(
             "Configure VPN adapter binding, Kill Switch, and Proxy"
         )
@@ -262,7 +294,7 @@ class MainWindow(QMainWindow):
             self._on_open_network_settings
         )
 
-        self._act_security_settings = QAction("🛡️ Antivirus & Security Settings…", self)
+        self._act_security_settings = QAction(_create_emoji_icon("🛡"), "Antivirus & Security Settings…", self)
         self._act_security_settings.setToolTip(
             "Configure pre-download URL inspection and post-download antivirus scanning"
         )
@@ -270,11 +302,11 @@ class MainWindow(QMainWindow):
             self._on_open_security_settings
         )
 
-        self._act_scan_antivirus = QAction("🛡️ Scan with Antivirus", self)
+        self._act_scan_antivirus = QAction(_create_emoji_icon("🛡"), "Scan with Antivirus", self)
         self._act_scan_antivirus.setToolTip("Scan the downloaded file with antivirus")
         self._act_scan_antivirus.triggered.connect(self._on_scan_selected_file)
 
-        self._act_toggle_details = QAction("📋 Details Panel", self)
+        self._act_toggle_details = QAction(_create_emoji_icon("📋"), "Details Panel", self)
         self._act_toggle_details.setCheckable(True)
         self._act_toggle_details.setChecked(True)
         self._act_toggle_details.setShortcut(QKeySequence("F4"))
@@ -304,16 +336,46 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self._act_move)
         toolbar.addAction(self._act_recheck)
         toolbar.addSeparator()
-        toolbar.addAction(self._act_open_file)
-        toolbar.addAction(self._act_open_folder)
+
+        # Tor toolbar control with embedded progress bar
+        self._tor_toolbar_container = QWidget()
+        self._tor_toolbar_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        tor_tb_layout = QVBoxLayout(self._tor_toolbar_container)
+        tor_tb_layout.setContentsMargins(0, 0, 0, 0)
+        tor_tb_layout.setSpacing(1)
+
+        self._tor_toolbar_btn = QToolButton()
+        self._tor_toolbar_btn.setDefaultAction(self._act_tor)
+        self._tor_toolbar_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        tor_tb_layout.addWidget(self._tor_toolbar_btn)
+
+        self._tor_toolbar_progress = QProgressBar()
+        self._tor_toolbar_progress.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self._tor_toolbar_progress.setFixedHeight(4)
+        self._tor_toolbar_progress.setTextVisible(False)
+        self._tor_toolbar_progress.setVisible(False)
+        self._tor_toolbar_progress.setStyleSheet("""
+            QProgressBar {
+                background: #21252b;
+                border: none;
+                border-radius: 2px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #50fa7b, stop:1 #8be9fd);
+                border-radius: 2px;
+            }
+        """)
+        tor_tb_layout.addWidget(self._tor_toolbar_progress)
+
+        toolbar.addWidget(self._tor_toolbar_container)
         toolbar.addSeparator()
-        toolbar.addAction(self._act_tor)
-        toolbar.addSeparator()
-        toolbar.addAction(self._act_toggle_details)
         toolbar.addAction(self._act_preferences)
 
-        # Show only icons without text for play and pause buttons on the toolbar
-        for act in (self._act_resume, self._act_pause):
+        # Show only icons without text for resume and pause
+        for act in (
+            self._act_resume,
+            self._act_pause,
+        ):
             btn = toolbar.widgetForAction(act)
             if isinstance(btn, QToolButton):
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
@@ -338,7 +400,11 @@ class MainWindow(QMainWindow):
         # Edit menu
         edit_menu = menubar.addMenu("&Edit")
         edit_menu.addAction(self._act_resume)
+        edit_menu.addAction(self._act_force_start)
         edit_menu.addAction(self._act_pause)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self._act_move_up)
+        edit_menu.addAction(self._act_move_down)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_copy_url)
         edit_menu.addSeparator()
@@ -392,7 +458,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self._act_preferences)
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_tor)
-        self._act_tor_settings = QAction("🧅 Tor Network Settings...", self)
+        self._act_tor_settings = QAction(_create_emoji_icon("🧅"), "Tor Network Settings…", self)
         self._act_tor_settings.triggered.connect(self._on_open_tor_settings)
         tools_menu.addAction(self._act_tor_settings)
         tools_menu.addSeparator()
@@ -408,13 +474,38 @@ class MainWindow(QMainWindow):
     def _setup_statusbar(self):
         self._status_label = QLabel("Ready")
         self._speed_label = QLabel("")
-        self._count_label = QLabel("0 downloads")
+        self._count_label = QLabel("0 Downloads, 0 Active")
+
+        # Tor footer widget with button and embedded progress bar
+        self._tor_footer_container = QWidget()
+        tor_footer_layout = QVBoxLayout(self._tor_footer_container)
+        tor_footer_layout.setContentsMargins(0, 0, 0, 0)
+        tor_footer_layout.setSpacing(1)
 
         self._tor_status_btn = QPushButton("🧅 Tor: OFF")
         self._tor_status_btn.setFlat(True)
         self._tor_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._tor_status_btn.setToolTip("Click to configure Tor Network Settings")
         self._tor_status_btn.clicked.connect(self._on_open_tor_settings)
+        tor_footer_layout.addWidget(self._tor_status_btn)
+
+        self._tor_footer_progress = QProgressBar()
+        self._tor_footer_progress.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self._tor_footer_progress.setFixedHeight(3)
+        self._tor_footer_progress.setTextVisible(False)
+        self._tor_footer_progress.setVisible(False)
+        self._tor_footer_progress.setStyleSheet("""
+            QProgressBar {
+                background: #21252b;
+                border: none;
+                border-radius: 1px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #50fa7b, stop:1 #8be9fd);
+                border-radius: 1px;
+            }
+        """)
+        tor_footer_layout.addWidget(self._tor_footer_progress)
 
         self._vpn_status_btn = QPushButton("🌐 Net: Default")
         self._vpn_status_btn.setFlat(True)
@@ -426,7 +517,7 @@ class MainWindow(QMainWindow):
 
         status_bar = QStatusBar()
         status_bar.addWidget(self._status_label, 1)
-        status_bar.addPermanentWidget(self._tor_status_btn)
+        status_bar.addPermanentWidget(self._tor_footer_container)
         status_bar.addPermanentWidget(self._vpn_status_btn)
         status_bar.addPermanentWidget(self._speed_label)
         status_bar.addPermanentWidget(self._count_label)
@@ -435,6 +526,7 @@ class MainWindow(QMainWindow):
         self._update_network_status_badge(self._manager.network_config)
         self._on_tor_config_changed(self._manager.tor_config)
         self._update_speed_label()
+        self._update_count_label()
 
     def _connect_signals(self):
         self._manager.progress_updated.connect(self._on_progress_updated)
@@ -447,7 +539,9 @@ class MainWindow(QMainWindow):
             self._update_network_status_badge
         )
         self._manager.tor_config_changed.connect(self._on_tor_config_changed)
+        self._manager.tor_status_changed.connect(self._on_tor_status_changed)
         self._manager.threat_detected.connect(self._on_threat_detected)
+        self._manager.queue_order_changed.connect(self._on_queue_order_changed)
 
         # Connect table selection to bottom details panel
         self._table.selectionModel().selectionChanged.connect(
@@ -540,6 +634,10 @@ class MainWindow(QMainWindow):
         for did in self._selected_ids():
             self._manager.resume_download(did)
 
+    def _on_force_start(self):
+        for did in self._selected_ids():
+            self._manager.force_start_download(did)
+
     def _on_delete(self):
         ids = self._selected_ids()
         if not ids:
@@ -562,10 +660,29 @@ class MainWindow(QMainWindow):
         for did in self._selected_ids():
             self._manager.recheck_download(did)
 
+    def _on_move_queue_up(self):
+        for did in self._selected_ids():
+            self._manager.move_queue_up(did)
+
+    def _on_move_queue_down(self):
+        for did in reversed(self._selected_ids()):
+            self._manager.move_queue_down(did)
+
+    def _on_queue_order_changed(self):
+        entries = self._manager.get_all_entries()
+        self._model.load_entries(entries)
+        self._update_count_label()
+
     def _on_open_file(self):
         entry = self._first_selected_entry()
-        if entry and entry.file_path and Path(entry.file_path).exists():
-            os.startfile(entry.file_path)
+        if entry:
+            if entry.file_path and Path(entry.file_path).exists():
+                os.startfile(entry.file_path)
+            else:
+                self._manager.mark_file_not_found(entry.id)
+
+    def _on_table_double_clicked(self, index):
+        self._on_open_file()
 
     def _on_open_folder(self):
         entry = self._first_selected_entry()
@@ -626,7 +743,11 @@ class MainWindow(QMainWindow):
     def _show_context_menu(self, pos):
         menu = QMenu(self)
         menu.addAction(self._act_resume)
+        menu.addAction(self._act_force_start)
         menu.addAction(self._act_pause)
+        menu.addSeparator()
+        menu.addAction(self._act_move_up)
+        menu.addAction(self._act_move_down)
         menu.addSeparator()
         menu.addAction(self._act_copy_url)
         menu.addSeparator()
@@ -684,7 +805,11 @@ class MainWindow(QMainWindow):
 
     def _update_count_label(self):
         total = self._model.rowCount()
-        self._count_label.setText(f"{total} download(s)")
+        active = sum(
+            1 for e in self._model._entries
+            if e.status in ("downloading", "checking", "fetching_metadata")
+        )
+        self._count_label.setText(f"{total} Downloads, {active} Active")
 
     def _update_speed_label(self):
         down, up = self._model.get_aggregate_speeds()
@@ -802,6 +927,8 @@ class MainWindow(QMainWindow):
             """)
 
     def _on_toggle_tor(self, checked: bool):
+        self._on_tor_status_changed("connecting" if checked else "disconnecting", "")
+        QApplication.processEvents()
         success, msg = self._manager.toggle_tor(checked)
         self._status_label.setText(msg)
         self._model.set_tor_config(self._manager.tor_config)
@@ -810,6 +937,7 @@ class MainWindow(QMainWindow):
             self._act_tor.blockSignals(True)
             self._act_tor.setChecked(False)
             self._act_tor.blockSignals(False)
+            self._on_tor_status_changed("error", msg)
 
             QMessageBox.critical(
                 self,
@@ -817,6 +945,64 @@ class MainWindow(QMainWindow):
                 f"Unable to activate Tor network privacy:\n\n{msg}\n\n"
                 "Please verify that Tor or Tor Browser is installed, or configure the path in Tools → Tor Network Settings.",
             )
+        else:
+            self._on_tor_status_changed("connected" if checked else "disconnected", msg)
+
+    def _on_tor_status_changed(self, state: str, message: str):
+        if state == "connecting":
+            self._tor_toolbar_progress.setVisible(True)
+            self._tor_toolbar_progress.setRange(0, 0)
+            self._tor_footer_progress.setVisible(True)
+            self._tor_footer_progress.setRange(0, 0)
+            self._tor_status_btn.setText("🧅 Tor: Connecting...")
+            self._act_tor.setText("🧅 Tor: Connecting...")
+            self._apply_tor_transition_style()
+        elif state == "disconnecting":
+            self._tor_toolbar_progress.setVisible(True)
+            self._tor_toolbar_progress.setRange(0, 0)
+            self._tor_footer_progress.setVisible(True)
+            self._tor_footer_progress.setRange(0, 0)
+            self._tor_status_btn.setText("🧅 Tor: Disconnecting...")
+            self._act_tor.setText("🧅 Tor: Disconnecting...")
+            self._apply_tor_transition_style()
+        elif state in ("connected", "disconnected", "error"):
+            self._tor_toolbar_progress.setVisible(False)
+            self._tor_footer_progress.setVisible(False)
+            self._on_tor_config_changed(self._manager.tor_config)
+
+    def _apply_tor_transition_style(self):
+        trans_btn_style = """
+            QPushButton {
+                background: #2a2818;
+                color: #f1fa8c;
+                border: 1px solid #f1fa8c;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #383520;
+            }
+        """
+        self._tor_status_btn.setStyleSheet(trans_btn_style)
+
+        trans_tb_style = """
+            QToolButton {
+                background: #2a2818;
+                color: #f1fa8c;
+                border: 1px solid #f1fa8c;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QToolButton:hover {
+                background: #383520;
+            }
+        """
+        if hasattr(self, "_tor_toolbar_btn"):
+            self._tor_toolbar_btn.setStyleSheet(trans_tb_style)
 
     def _on_tor_config_changed(self, config: TorConfig):
         self._model.set_tor_config(config)
@@ -825,6 +1011,9 @@ class MainWindow(QMainWindow):
         self._act_tor.blockSignals(True)
         self._act_tor.setChecked(config.enabled)
         self._act_tor.blockSignals(False)
+
+        self._tor_toolbar_progress.setVisible(False)
+        self._tor_footer_progress.setVisible(False)
 
         if config.enabled:
             self._act_tor.setText("🧅 Tor: ON")
@@ -845,20 +1034,39 @@ class MainWindow(QMainWindow):
                 f"Traffic routed: {traffic_str}\n"
                 "Click to open Tor Settings"
             )
-            self._tor_status_btn.setStyleSheet("""
+            # Green styling when ON
+            green_btn_style = """
                 QPushButton {
-                    background: #2a1b3d;
-                    color: #bd93f9;
-                    border: 1px solid #bd93f9;
+                    background: #193524;
+                    color: #50fa7b;
+                    border: 1px solid #50fa7b;
                     border-radius: 4px;
                     padding: 2px 8px;
                     font-size: 11px;
                     font-weight: bold;
                 }
                 QPushButton:hover {
-                    background: #3c2457;
+                    background: #2a4e34;
                 }
-            """)
+            """
+            self._tor_status_btn.setStyleSheet(green_btn_style)
+
+            green_tb_style = """
+                QToolButton {
+                    background: #193524;
+                    color: #50fa7b;
+                    border: 1px solid #50fa7b;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                QToolButton:hover {
+                    background: #2a4e34;
+                }
+            """
+            if hasattr(self, "_tor_toolbar_btn"):
+                self._tor_toolbar_btn.setStyleSheet(green_tb_style)
         else:
             self._act_tor.setText("🧅 Tor: OFF")
             self._act_tor.setToolTip(
@@ -868,7 +1076,7 @@ class MainWindow(QMainWindow):
             self._tor_status_btn.setToolTip(
                 "Tor is disabled.\nClick to open Tor Settings"
             )
-            self._tor_status_btn.setStyleSheet("""
+            off_btn_style = """
                 QPushButton {
                     background: transparent;
                     color: #6272a4;
@@ -881,7 +1089,25 @@ class MainWindow(QMainWindow):
                     background: #2e3440;
                     color: #d8dee9;
                 }
-            """)
+            """
+            self._tor_status_btn.setStyleSheet(off_btn_style)
+
+            off_tb_style = """
+                QToolButton {
+                    background: transparent;
+                    color: #8892b0;
+                    border: 1px solid #3b4252;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 12px;
+                }
+                QToolButton:hover {
+                    background: #2e3440;
+                    color: #d8dee9;
+                }
+            """
+            if hasattr(self, "_tor_toolbar_btn"):
+                self._tor_toolbar_btn.setStyleSheet(off_tb_style)
 
     # -- details panel handlers ----------------------------------------------
 

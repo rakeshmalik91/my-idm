@@ -20,6 +20,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    return str(obj)
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -47,6 +53,7 @@ class DownloadEntry:
     content_hash: str = ""
     torrent_info_hash: str = ""
     metadata_json: str = "{}"
+    queue_order: int = 0
 
     # --- transient (not stored in DB) ---
     speed: float = 0.0
@@ -64,13 +71,55 @@ class DownloadEntry:
     @property
     def metadata(self) -> dict:
         try:
-            return json.loads(self.metadata_json)
+            data = json.loads(self.metadata_json) if self.metadata_json else {}
+            if not isinstance(data, dict):
+                data = {}
         except (json.JSONDecodeError, TypeError):
-            return {}
+            data = {}
+        return _MetadataDict(self, data)
 
     @metadata.setter
     def metadata(self, value: dict):
-        self.metadata_json = json.dumps(value)
+        self.metadata_json = json.dumps(
+            value if isinstance(value, dict) else {}, default=_json_default
+        )
+
+
+class _MetadataDict(dict):
+    """A dictionary wrapper that automatically serializes back to DownloadEntry.metadata_json upon mutation."""
+
+    def __init__(self, entry: DownloadEntry, initial: dict):
+        super().__init__(initial)
+        self._entry = entry
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._sync()
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        self._sync()
+
+    def update(self, *args, **kwargs):
+        super().update(*args, **kwargs)
+        self._sync()
+
+    def pop(self, *args, **kwargs):
+        res = super().pop(*args, **kwargs)
+        self._sync()
+        return res
+
+    def setdefault(self, key, default=None):
+        res = super().setdefault(key, default)
+        self._sync()
+        return res
+
+    def clear(self):
+        super().clear()
+        self._sync()
+
+    def _sync(self):
+        self._entry.metadata_json = json.dumps(dict(self), default=_json_default)
 
 
 @dataclass
@@ -92,6 +141,7 @@ _DOWNLOAD_DB_COLUMNS = [
     "num_segments", "error_message", "retry_count", "max_retries",
     "added_at", "last_tried_at", "completed_at",
     "etag", "content_hash", "torrent_info_hash", "metadata_json",
+    "queue_order",
 ]
 
 _SEGMENT_DB_COLUMNS = [
@@ -148,7 +198,8 @@ class Database:
                 etag            TEXT NOT NULL DEFAULT '',
                 content_hash    TEXT NOT NULL DEFAULT '',
                 torrent_info_hash TEXT NOT NULL DEFAULT '',
-                metadata_json   TEXT NOT NULL DEFAULT '{}'
+                metadata_json   TEXT NOT NULL DEFAULT '{}',
+                queue_order     INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS segments (
@@ -164,13 +215,27 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_segments_download ON segments(download_id);
             CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(url);
-            CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash);
 
             CREATE TABLE IF NOT EXISTS ui_state (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
         """)
+
+        # Migration check for columns in existing databases
+        cursor = self._conn.execute("PRAGMA table_info(downloads)")
+        cols = [r["name"] for r in cursor.fetchall()]
+        if "queue_order" not in cols:
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0")
+        if "torrent_info_hash" not in cols:
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN torrent_info_hash TEXT NOT NULL DEFAULT ''")
+        if "metadata_json" not in cols:
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+        # Create indexes after ensuring columns exist
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_queue_order ON downloads(queue_order)")
+
         self._conn.commit()
 
     # -- downloads -----------------------------------------------------------
@@ -180,6 +245,8 @@ class Database:
             entry.id = str(uuid.uuid4())
         if not entry.added_at:
             entry.added_at = _now_iso()
+        if entry.queue_order <= 0:
+            entry.queue_order = self.get_next_queue_order()
 
         cols = ", ".join(_DOWNLOAD_DB_COLUMNS)
         placeholders = ", ".join(["?"] * len(_DOWNLOAD_DB_COLUMNS))
@@ -261,6 +328,28 @@ class Database:
             "SELECT * FROM downloads ORDER BY added_at DESC"
         ).fetchall()
         return [self._row_to_entry(r) for r in rows]
+
+    def get_next_queue_order(self) -> int:
+        row = self._conn.execute("SELECT MAX(queue_order) AS max_order FROM downloads").fetchone()
+        if row and row["max_order"] is not None:
+            return int(row["max_order"]) + 1
+        return 1
+
+    def update_queue_order(self, download_id: str, new_order: int):
+        self._conn.execute(
+            "UPDATE downloads SET queue_order = ? WHERE id = ?",
+            (new_order, download_id),
+        )
+        self._conn.commit()
+
+    def swap_queue_order(self, id1: str, id2: str):
+        entry1 = self.get_download(id1)
+        entry2 = self.get_download(id2)
+        if entry1 and entry2:
+            order1 = entry1.queue_order
+            order2 = entry2.queue_order
+            self.update_queue_order(id1, order2)
+            self.update_queue_order(id2, order1)
 
     def find_by_url(self, url: str) -> Optional[DownloadEntry]:
         row = self._conn.execute(

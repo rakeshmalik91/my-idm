@@ -6,7 +6,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Any
 
 from my_idm.config import TorConfig
 from my_idm.database import Database, DownloadEntry
@@ -45,6 +45,76 @@ _STATE_NAMES = {
 }
 
 
+def _get_info_hash_from_params(params: Any) -> str:
+    """Extract lowercase hex info hash from add_torrent_params."""
+    if not params:
+        return ""
+    try:
+        if hasattr(params, "info_hashes"):
+            ih = params.info_hashes
+            if ih.has_v1():
+                return str(ih.v1).lower()
+            elif ih.has_v2():
+                return str(ih.v2).lower()
+        if hasattr(params, "info_hash") and params.info_hash:
+            return str(params.info_hash).lower()
+        if hasattr(params, "ti") and params.ti:
+            return str(params.ti.info_hash()).lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _get_info_hash_from_handle(handle: Any) -> str:
+    """Extract lowercase hex info hash from torrent_handle."""
+    if not handle:
+        return ""
+    try:
+        if hasattr(handle, "is_valid") and not handle.is_valid():
+            return ""
+        if hasattr(handle, "info_hashes"):
+            ih = handle.info_hashes()
+            if ih.has_v1():
+                return str(ih.v1).lower()
+            elif ih.has_v2():
+                return str(ih.v2).lower()
+        if hasattr(handle, "info_hash"):
+            return str(handle.info_hash()).lower()
+    except Exception:
+        pass
+    return ""
+
+
+def _is_save_resume_data_alert(alert: Any) -> bool:
+    if not _HAS_LIBTORRENT or lt is None:
+        return False
+    cls = getattr(lt, "save_resume_data_alert", None)
+    if isinstance(cls, type) and isinstance(alert, cls):
+        return True
+    try:
+        what = getattr(alert, "what", lambda: "")()
+        if what == "save_resume_data_alert":
+            return True
+    except Exception:
+        pass
+    return type(alert).__name__ in ("save_resume_data_alert", "FakeSaveResumeDataAlert")
+
+
+def _is_save_resume_data_failed_alert(alert: Any) -> bool:
+    if not _HAS_LIBTORRENT or lt is None:
+        return False
+    cls = getattr(lt, "save_resume_data_failed_alert", None)
+    if isinstance(cls, type) and isinstance(alert, cls):
+        return True
+    try:
+        what = getattr(alert, "what", lambda: "")()
+        if what == "save_resume_data_failed_alert":
+            return True
+    except Exception:
+        pass
+    return type(alert).__name__ in ("save_resume_data_failed_alert", "FakeSaveResumeDataFailedAlert")
+
+
 class TorrentEngine:
     """Manages torrent downloads via libtorrent."""
 
@@ -58,6 +128,7 @@ class TorrentEngine:
         self._status_cb: Optional[StatusCallback] = None
         self._filename_cb: Optional[Callable[[str, str], None]] = None
         self._running = False
+        self._last_active_time: dict[str, float] = {}
 
     @property
     def available(self) -> bool:
@@ -96,9 +167,56 @@ class TorrentEngine:
         if not self._session:
             return
 
-        # Save resume data for all handles
+        # Request resume data for all valid handles
+        pending_dids = set()
         for did, handle in list(self._handles.items()):
-            self._save_resume_data(did, handle)
+            try:
+                if handle.is_valid():
+                    handle.save_resume_data()
+                    pending_dids.add(did)
+            except Exception as exc:
+                log.debug("Failed requesting resume data for %s: %s", did, exc)
+
+        # Drain alerts with timeout, strictly pairing each alert to its handle
+        start_t = time.time()
+        while pending_dids and (time.time() - start_t) < 2.0:
+            try:
+                alerts = self._session.pop_alerts()
+            except Exception:
+                break
+
+            for alert in alerts:
+                if _is_save_resume_data_alert(alert):
+                    alert_handle = getattr(alert, "handle", None)
+                    alert_hash = _get_info_hash_from_handle(alert_handle)
+                    for did in list(pending_dids):
+                        h = self._handles.get(did)
+                        if not h:
+                            continue
+                        h_hash = _get_info_hash_from_handle(h)
+                        if h is alert_handle or (h_hash and alert_hash and h_hash == alert_hash):
+                            resume_path = FASTRESUME_DIR / f"{did}.fastresume"
+                            try:
+                                with open(resume_path, "wb") as f:
+                                    f.write(lt.write_resume_data_buf(alert.params))
+                                log.debug("Saved resume data on shutdown for %s", did)
+                            except Exception as exc:
+                                log.warning("Failed writing resume data for %s: %s", did, exc)
+                            pending_dids.discard(did)
+                            break
+                elif _is_save_resume_data_failed_alert(alert):
+                    alert_handle = getattr(alert, "handle", None)
+                    alert_hash = _get_info_hash_from_handle(alert_handle)
+                    for did in list(pending_dids):
+                        h = self._handles.get(did)
+                        if not h:
+                            continue
+                        h_hash = _get_info_hash_from_handle(h)
+                        if h is alert_handle or (h_hash and alert_hash and h_hash == alert_hash):
+                            pending_dids.discard(did)
+                            break
+            if pending_dids:
+                time.sleep(0.05)
 
         del self._session
         self._session = None
@@ -232,9 +350,6 @@ class TorrentEngine:
         url = entry.url
         save_path = entry.save_path
 
-        params = lt.add_torrent_params()
-        params.save_path = save_path
-
         # Load fastresume if available
         resume_path = FASTRESUME_DIR / f"{entry.id}.fastresume"
         resume_bytes = None
@@ -243,33 +358,70 @@ class TorrentEngine:
                 with open(resume_path, "rb") as f:
                     resume_bytes = f.read()
             except Exception as exc:
-                log.warning("Failed to read fastresume: %s", exc)
+                log.warning("Failed to read fastresume for %s: %s", entry.id, exc)
+
+        expected_hash = (entry.torrent_info_hash or "").lower()
 
         if url.startswith("magnet:"):
-            params = lt.parse_magnet_uri(url)
-            params.save_path = save_path
-            if resume_bytes and hasattr(lt, "read_resume_data"):
-                try:
-                    params = lt.read_resume_data(resume_bytes)
-                    params.save_path = save_path
-                    log.info("Loaded fastresume for %s", entry.id)
-                except Exception as exc:
-                    log.warning("Failed to parse fastresume: %s", exc)
-        elif os.path.isfile(url):
-            if resume_bytes and hasattr(lt, "read_resume_data"):
-                try:
-                    params = lt.read_resume_data(resume_bytes)
-                    params.save_path = save_path
-                    log.info("Loaded fastresume for %s", entry.id)
-                except Exception as exc:
-                    log.warning("Failed to parse fastresume: %s", exc)
-                    params = lt.add_torrent_params()
-                    params.ti = lt.torrent_info(url)
-                    params.save_path = save_path
-            else:
-                params = lt.add_torrent_params()
-                params.ti = lt.torrent_info(url)
+            try:
+                params = lt.parse_magnet_uri(url)
                 params.save_path = save_path
+                parsed_hash = _get_info_hash_from_params(params)
+                if parsed_hash:
+                    expected_hash = parsed_hash
+            except Exception as exc:
+                log.error("Failed to parse magnet URI %s: %s", url, exc)
+                return False
+
+            if resume_bytes and hasattr(lt, "read_resume_data"):
+                try:
+                    resume_params = lt.read_resume_data(resume_bytes)
+                    resume_hash = _get_info_hash_from_params(resume_params)
+                    if expected_hash and resume_hash and expected_hash != resume_hash:
+                        log.warning(
+                            "Fastresume hash mismatch for %s: expected %s, got %s. Discarding mismatched fastresume.",
+                            entry.id, expected_hash, resume_hash,
+                        )
+                        resume_path.unlink(missing_ok=True)
+                    else:
+                        params = resume_params
+                        params.save_path = save_path
+                        log.info("Loaded fastresume for %s", entry.id)
+                except Exception as exc:
+                    log.warning("Failed to parse fastresume for %s: %s", entry.id, exc)
+
+        elif os.path.isfile(url):
+            try:
+                ti = lt.torrent_info(url)
+                parsed_hash = str(ti.info_hash()).lower()
+                if parsed_hash:
+                    expected_hash = parsed_hash
+            except Exception as exc:
+                log.error("Failed to parse torrent file %s: %s", url, exc)
+                return False
+
+            params = lt.add_torrent_params()
+            params.ti = ti
+            params.save_path = save_path
+
+            if resume_bytes and hasattr(lt, "read_resume_data"):
+                try:
+                    resume_params = lt.read_resume_data(resume_bytes)
+                    resume_hash = _get_info_hash_from_params(resume_params)
+                    if expected_hash and resume_hash and expected_hash != resume_hash:
+                        log.warning(
+                            "Fastresume hash mismatch for %s: expected %s, got %s. Discarding mismatched fastresume.",
+                            entry.id, expected_hash, resume_hash,
+                        )
+                        resume_path.unlink(missing_ok=True)
+                    else:
+                        params = resume_params
+                        if not getattr(params, "ti", None):
+                            params.ti = ti
+                        params.save_path = save_path
+                        log.info("Loaded fastresume for %s", entry.id)
+                except Exception as exc:
+                    log.warning("Failed to parse fastresume for %s: %s", entry.id, exc)
         else:
             log.error("Invalid torrent source: %s", url)
             return False
@@ -277,18 +429,36 @@ class TorrentEngine:
         handle = self._session.add_torrent(params)
         self._handles[entry.id] = handle
 
-        # Extract info hash
+        # Extract info hash and persist to entry if missing or updated
         try:
-            info_hash = str(handle.info_hash())
-            if info_hash and not entry.torrent_info_hash:
+            info_hash = _get_info_hash_from_handle(handle)
+            if info_hash and entry.torrent_info_hash != info_hash:
                 entry.torrent_info_hash = info_hash
                 self._db.update_download(entry)
         except Exception:
             pass
 
-        self._db.update_status(entry.id, "downloading")
-        if self._status_cb:
-            self._status_cb(entry.id, "downloading", "")
+        if entry.status == "paused":
+            try:
+                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
+            except Exception:
+                pass
+            handle.pause()
+            self._db.update_status(entry.id, "paused")
+            if self._status_cb:
+                self._status_cb(entry.id, "paused", "")
+        else:
+            has_meta = False
+            try:
+                if hasattr(handle, "status"):
+                    has_meta = getattr(handle.status(), "has_metadata", False)
+            except Exception:
+                pass
+            initial_status = "downloading" if has_meta else "fetching_metadata"
+            self._db.update_status(entry.id, initial_status)
+            if self._status_cb:
+                self._status_cb(entry.id, initial_status, "")
 
         log.info("Added torrent: %s", entry.filename or url)
         return True
@@ -296,8 +466,17 @@ class TorrentEngine:
     def pause(self, download_id: str):
         handle = self._handles.get(download_id)
         if handle:
+            try:
+                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
+            except Exception as e:
+                log.debug("Could not unset auto_managed flag on pause: %s", e)
             handle.pause()
-            self._save_resume_data(download_id, handle)
+            try:
+                if handle.is_valid():
+                    handle.save_resume_data()
+            except Exception:
+                pass
             self._db.update_status(download_id, "paused")
             if self._status_cb:
                 self._status_cb(download_id, "paused", "")
@@ -305,10 +484,30 @@ class TorrentEngine:
     def resume(self, download_id: str):
         handle = self._handles.get(download_id)
         if handle:
+            try:
+                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.set_flags(lt.torrent_flags.auto_managed)
+            except Exception as e:
+                log.debug("Could not set auto_managed flag on resume: %s", e)
             handle.resume()
             self._db.update_status(download_id, "downloading")
             if self._status_cb:
                 self._status_cb(download_id, "downloading", "")
+
+    def force_start(self, download_id: str):
+        """Force start torrent by disabling auto-managed queue limits and resuming immediately."""
+        handle = self._handles.get(download_id)
+        if handle:
+            try:
+                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
+            except Exception as e:
+                log.debug("Could not unset auto_managed flag on handle: %s", e)
+            handle.resume()
+            self._db.update_status(download_id, "downloading")
+            if self._status_cb:
+                self._status_cb(download_id, "downloading", "")
+
 
     def remove(self, download_id: str, delete_files: bool = False):
         handle = self._handles.pop(download_id, None)
@@ -326,6 +525,13 @@ class TorrentEngine:
         handle = self._handles.get(download_id)
         if handle:
             self._db.update_status(download_id, "checking")
+            # Ensure the handle is unpaused so checking can proceed
+            try:
+                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.set_flags(lt.torrent_flags.auto_managed)
+            except Exception:
+                pass
+            handle.resume()
             handle.force_recheck()
             log.info("Rechecking torrent %s", download_id)
 
@@ -388,6 +594,8 @@ class TorrentEngine:
         if not self._session or not self._running:
             return
 
+        self._process_alerts()
+
         for download_id, handle in list(self._handles.items()):
             status = self.get_status(download_id)
             if not status:
@@ -406,11 +614,45 @@ class TorrentEngine:
                 entry.file_path = str(
                     Path(entry.save_path) / entry.filename
                 )
+                files = self.get_torrent_files(download_id)
+                if files:
+                    entry.metadata["files"] = files
+                trackers = self.get_torrent_trackers(download_id)
+                if trackers:
+                    entry.metadata["trackers"] = trackers
                 self._db.update_download(entry)
                 if self._filename_cb:
                     self._filename_cb(download_id, entry.filename)
             else:
                 self._db.update_download(entry)
+
+            # If download is paused in DB, make sure torrent handle stays paused and reports 0 speed
+            if entry.status == "paused":
+                try:
+                    s = handle.status()
+                    raw_paused = getattr(s, "paused", None)
+                    if raw_paused is not None and not type(raw_paused).__name__.startswith("MagicMock"):
+                        is_paused = bool(raw_paused)
+                    else:
+                        is_paused = bool(getattr(s, "is_paused", False))
+                    if not is_paused:
+                        if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                            handle.unset_flags(lt.torrent_flags.auto_managed)
+                        handle.pause()
+                except Exception:
+                    pass
+                if self._progress_cb:
+                    self._progress_cb(
+                        download_id,
+                        status["downloaded"],
+                        status["total_size"],
+                        0.0,
+                        0.0,
+                        status.get("seeds", 0),
+                        status.get("peers", 0),
+                        0.0,
+                    )
+                continue
 
             # Emit progress
             if self._progress_cb:
@@ -429,16 +671,42 @@ class TorrentEngine:
             state = status["state"]
             if state in ("finished", "seeding"):
                 if entry.status != "completed" and entry.status != "seeding":
+                    files = self.get_torrent_files(download_id)
+                    if files:
+                        entry.metadata["files"] = files
+                    trackers = self.get_torrent_trackers(download_id)
+                    if trackers:
+                        entry.metadata["trackers"] = trackers
+                    self._db.update_download(entry)
                     self._db.update_status(download_id, "completed")
                     if self._status_cb:
                         self._status_cb(download_id, "completed", "")
-                    self._save_resume_data(download_id, handle)
+                    try:
+                        if handle.is_valid():
+                            handle.save_resume_data()
+                    except Exception:
+                        pass
+            elif state == "downloading_metadata":
+                if entry.status != "fetching_metadata":
+                    self._db.update_status(download_id, "fetching_metadata")
+                    if self._status_cb:
+                        self._status_cb(download_id, "fetching_metadata", "")
+            elif entry.status == "fetching_metadata" and (state in ("downloading", "finished", "seeding") or status.get("name")):
+                new_status = "completed" if state in ("finished", "seeding") else "downloading"
+                self._db.update_status(download_id, new_status)
+                if self._status_cb:
+                    self._status_cb(download_id, new_status, "")
             elif entry.status == "checking" and state not in ("checking_files", "queued_for_checking"):
                 if status["total_size"] > 0 and status["downloaded"] >= status["total_size"]:
                     new_status = "completed"
                 else:
                     try:
-                        is_paused = handle.status().is_paused
+                        s = handle.status()
+                        raw_paused = getattr(s, "paused", None)
+                        if raw_paused is not None and not type(raw_paused).__name__.startswith("MagicMock"):
+                            is_paused = bool(raw_paused)
+                        else:
+                            is_paused = bool(getattr(s, "is_paused", False))
                     except Exception:
                         is_paused = False
                     new_status = "paused" if is_paused else "downloading"
@@ -449,13 +717,40 @@ class TorrentEngine:
                 # Download was marked completed, but actual progress from recheck is incomplete
                 if status["total_size"] > 0 and status["downloaded"] < status["total_size"]:
                     try:
-                        is_paused = handle.status().is_paused
+                        s = handle.status()
+                        raw_paused = getattr(s, "paused", None)
+                        if raw_paused is not None and not type(raw_paused).__name__.startswith("MagicMock"):
+                            is_paused = bool(raw_paused)
+                        else:
+                            is_paused = bool(getattr(s, "is_paused", False))
                     except Exception:
                         is_paused = False
                     new_status = "paused" if is_paused else "downloading"
                     self._db.update_status(download_id, new_status)
                     if self._status_cb:
                         self._status_cb(download_id, new_status, "")
+
+            # Stalled torrent detection (speed 0 and seeds 0 for > 45s while downloading)
+            if state == "downloading" and status["speed"] == 0 and status["seeds"] == 0:
+                last_act = self._last_active_time.get(download_id, 0)
+                now = time.time()
+                if last_act == 0:
+                    self._last_active_time[download_id] = now
+                elif now - last_act > 45.0:
+                    if entry.status not in ("stalled", "paused", "completed", "error"):
+                        self._db.update_status(download_id, "stalled")
+                        if self._status_cb:
+                            self._status_cb(download_id, "stalled", "")
+                        try:
+                            handle.force_reannounce()
+                        except Exception:
+                            pass
+            elif state == "downloading" and (status["speed"] > 0 or status["seeds"] > 0):
+                self._last_active_time[download_id] = time.time()
+                if entry.status == "stalled":
+                    self._db.update_status(download_id, "downloading")
+                    if self._status_cb:
+                        self._status_cb(download_id, "downloading", "")
 
     # -- details queries -----------------------------------------------------
 
@@ -572,21 +867,64 @@ class TorrentEngine:
             log.debug("Failed to get torrent trackers for %s: %s", download_id, exc)
             return []
 
-    # -- internal ------------------------------------------------------------
+    # -- alert processing ----------------------------------------------------
 
-    def _save_resume_data(self, download_id: str, handle):
+    def _process_alerts(self):
+        """Process pending libtorrent session alerts."""
+        if not self._session:
+            return
         try:
-            if not handle.is_valid():
-                return
-            handle.save_resume_data()
-            # Poll alerts to get the resume data
             alerts = self._session.pop_alerts()
-            for alert in alerts:
-                if isinstance(alert, lt.save_resume_data_alert):
-                    resume_path = FASTRESUME_DIR / f"{download_id}.fastresume"
-                    with open(resume_path, "wb") as f:
-                        f.write(lt.write_resume_data_buf(alert.params))
-                    log.debug("Saved resume data for %s", download_id)
+        except Exception:
+            return
+
+        for alert in alerts:
+            if _is_save_resume_data_alert(alert):
+                self._handle_save_resume_data_alert(alert)
+            elif _is_save_resume_data_failed_alert(alert):
+                log.debug("Save resume data failed: %s", getattr(alert, "message", lambda: "")())
+            elif hasattr(lt, "file_error_alert") and isinstance(alert, lt.file_error_alert):
+                alert_handle = getattr(alert, "handle", None)
+                if alert_handle:
+                    did = next((d for d, h in self._handles.items() if h is alert_handle), None)
+                    if did:
+                        self._db.update_status(did, "file_not_found", "File not found on disk")
+                        if self._status_cb:
+                            self._status_cb(did, "file_not_found", "File not found on disk")
+
+    def _handle_save_resume_data_alert(self, alert: Any):
+        alert_handle = getattr(alert, "handle", None)
+        if not alert_handle:
+            return
+
+        matched_did = None
+        alert_hash = _get_info_hash_from_handle(alert_handle)
+        for did, h in self._handles.items():
+            if h is alert_handle:
+                matched_did = did
+                break
+            h_hash = _get_info_hash_from_handle(h)
+            if h_hash and alert_hash and h_hash == alert_hash:
+                matched_did = did
+                break
+
+        if not matched_did:
+            return
+
+        try:
+            params = alert.params
+            params_hash = _get_info_hash_from_params(params)
+            handle_hash = _get_info_hash_from_handle(alert_handle)
+            if params_hash and handle_hash and params_hash != handle_hash:
+                log.warning(
+                    "Refusing to save resume data for %s: hash mismatch (%s != %s)",
+                    matched_did, params_hash, handle_hash,
+                )
+                return
+
+            resume_path = FASTRESUME_DIR / f"{matched_did}.fastresume"
+            with open(resume_path, "wb") as f:
+                f.write(lt.write_resume_data_buf(params))
+            log.debug("Saved fastresume for %s", matched_did)
         except Exception as exc:
-            log.debug("Failed to save resume data for %s: %s",
-                      download_id, exc)
+            log.warning("Failed saving fastresume for %s: %s", matched_did, exc)

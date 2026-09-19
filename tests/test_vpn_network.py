@@ -1,6 +1,8 @@
 """Unit tests for VPN adapter binding, proxy configuration, and kill switch."""
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -27,10 +29,13 @@ app = QApplication.instance() or QApplication([])
 class TestNetworkConfig(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.test_settings = QSettings(
+            str(Path(self.tmp_dir.name) / "test.ini"), QSettings.Format.IniFormat
+        )
 
     def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        self.tmp_dir.cleanup()
 
     def test_default_config(self):
         config = NetworkConfig()
@@ -83,9 +88,9 @@ class TestNetworkConfig(unittest.TestCase):
             proxy_username="vpnuser",
             proxy_password="vpnpass",
         )
-        config.save()
+        config.save(self.test_settings)
 
-        loaded = NetworkConfig.load()
+        loaded = NetworkConfig.load(self.test_settings)
         self.assertEqual(loaded.interface_name, "NordLynx")
         self.assertEqual(loaded.interface_ip, "10.5.0.2")
         self.assertTrue(loaded.kill_switch)
@@ -216,7 +221,6 @@ class TestTorrentEngineVPN(unittest.TestCase):
 class TestManagerVPNIntegration(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
         self.db = Database(":memory:")
         self.db.open()
         self.manager = DownloadManager(self.db)
@@ -224,7 +228,6 @@ class TestManagerVPNIntegration(unittest.TestCase):
     def tearDown(self):
         self.manager.stop()
         self.db.close()
-        QSettings("MyIDM", "My-IDM").clear()
 
     def test_manager_network_config_signal(self):
         received = []
@@ -245,10 +248,10 @@ class TestManagerVPNIntegration(unittest.TestCase):
 class TestNetworkSettingsDialog(unittest.TestCase):
 
     def setUp(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        pass
 
     def tearDown(self):
-        QSettings("MyIDM", "My-IDM").clear()
+        pass
 
     def test_dialog_loads_and_updates_config(self):
         cfg = NetworkConfig(

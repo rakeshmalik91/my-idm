@@ -22,21 +22,22 @@ from my_idm.styles import Colors
 
 # Column definitions
 class Col:
-    NAME = 0
-    SIZE = 1
-    PROGRESS = 2
-    STATUS = 3
-    SPEED = 4
-    ETA = 5
-    TYPE = 6
-    SEEDS_PEERS = 7
-    ADDED = 8
-    LAST_TRIED = 9
-    COMPLETED = 10
-    SAVE_PATH = 11
+    QUEUE = 0
+    NAME = 1
+    SIZE = 2
+    PROGRESS = 3
+    STATUS = 4
+    SPEED = 5
+    ETA = 6
+    TYPE = 7
+    SEEDS_PEERS = 8
+    ADDED = 9
+    LAST_TRIED = 10
+    COMPLETED = 11
+    SAVE_PATH = 12
 
     HEADERS = [
-        "Name", "Size", "Progress", "Status", "Speed", "ETA",
+        "#", "Name", "Size", "Progress", "Status", "Speed", "ETA",
         "Type", "Seeds / Peers", "Added", "Last Tried", "Completed",
         "Save Path",
     ]
@@ -44,15 +45,18 @@ class Col:
 
 
 _STATUS_COLORS = {
-    "downloading": QColor(Colors.ACCENT),
-    "completed":   QColor(Colors.GREEN),
-    "seeding":     QColor(Colors.PURPLE),
-    "paused":      QColor(Colors.ORANGE),
-    "error":       QColor(Colors.RED),
-    "queued":      QColor(Colors.TEXT_DIM),
-    "checking":    QColor(Colors.ORANGE),
-    "scanning":    QColor(Colors.CYAN),
-    "threat_detected": QColor(Colors.RED),
+    "downloading":       QColor(Colors.ACCENT),
+    "completed":         QColor(Colors.GREEN),
+    "seeding":           QColor(Colors.PURPLE),
+    "paused":            QColor(Colors.ORANGE),
+    "error":             QColor(Colors.RED),
+    "queued":            QColor(Colors.TEXT_DIM),
+    "checking":          QColor(Colors.ORANGE),
+    "scanning":          QColor(Colors.CYAN),
+    "threat_detected":   QColor(Colors.RED),
+    "fetching_metadata": QColor(Colors.CYAN),
+    "file_not_found":    QColor(Colors.RED),
+    "stalled":           QColor(Colors.ORANGE),
 }
 
 
@@ -204,6 +208,9 @@ class DownloadTableModel(QAbstractTableModel):
         )
 
     def _entry_sort_key(self, entry: DownloadEntry, col: int, ascending: bool) -> Any:
+        if col == Col.QUEUE:
+            return entry.queue_order if entry.queue_order > 0 else 999999
+
         if col == Col.NAME:
             return (entry.filename or entry.url or "").lower()
 
@@ -426,6 +433,10 @@ class DownloadTableModel(QAbstractTableModel):
 
         entry = self._entries[row]
 
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if col == Col.QUEUE:
+                return int(Qt.AlignmentFlag.AlignCenter)
+
         if role == Qt.ItemDataRole.DisplayRole:
             return self._display_data(entry, col)
 
@@ -463,6 +474,14 @@ class DownloadTableModel(QAbstractTableModel):
     # -- display helpers -----------------------------------------------------
 
     def _display_data(self, entry: DownloadEntry, col: int) -> Any:
+        if col == Col.QUEUE:
+            if entry.status in ("completed", "seeding"):
+                return ""
+            if entry.queue_order > 0:
+                return str(entry.queue_order)
+            row = self._id_to_row.get(entry.id)
+            return str((row + 1) if row is not None else "")
+
         if col == Col.NAME:
             raw_name = entry.filename or entry.url[:60]
             if self.is_tor_active_for(entry):
@@ -486,6 +505,12 @@ class DownloadTableModel(QAbstractTableModel):
                 return "Threat Detected ⚠"
             if entry.status == "scanning":
                 return "Scanning 🛡️"
+            if entry.status == "fetching_metadata":
+                return "Fetching Metadata"
+            if entry.status == "file_not_found":
+                return "File Not Found ⚠"
+            if entry.status == "stalled":
+                return "Stalled"
             s = entry.status.capitalize()
             if entry.status == "error" and entry.error_message:
                 s += f" ⚠"

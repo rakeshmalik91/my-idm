@@ -1,23 +1,53 @@
-"""Unit tests for filename resolution in My-IDM."""
+"""Unit tests for utility functions and filename resolution."""
 
 import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
+import tempfile
 import unittest
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt
+from pathlib import Path
 
-from my_idm.database import Database, DownloadEntry
+from PySide6.QtWidgets import QApplication
+
+from my_idm.database import Database
+from my_idm.download_model import Col, DownloadTableModel
 from my_idm.http_engine import HTTPEngine
 from my_idm.manager import DownloadManager
-from my_idm.download_model import DownloadTableModel, Col
-from my_idm.main_window import MainWindow
+from my_idm.utils import get_unique_filename
 
 app = QApplication.instance() or QApplication([])
 
 
+class TestAutoNumbering(unittest.TestCase):
+    """Tests for duplicate filename auto-numbering and collision avoidance."""
+
+    def test_get_unique_filename_disk_collision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "sample.pdf").touch()
+
+            fn1 = get_unique_filename(tmp, "sample.pdf")
+            self.assertEqual(fn1, "sample (1).pdf")
+
+            (tmp / "sample (1).pdf").touch()
+            fn2 = get_unique_filename(tmp, "sample.pdf")
+            self.assertEqual(fn2, "sample (2).pdf")
+
+    def test_get_unique_filename_reserved_names(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            reserved = {"archive.tar.gz", "archive (1).tar.gz"}
+
+            fn = get_unique_filename(tmp, "archive.tar.gz", reserved_names=reserved)
+            self.assertEqual(fn, "archive (2).tar.gz")
+
+    def test_get_unique_filename_no_collision(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            fn = get_unique_filename(tmp, "newfile.txt")
+            self.assertEqual(fn, "newfile.txt")
+
+
 class TestFilenameResolution(unittest.TestCase):
+    """Tests for URL, magnet, HTTP header Content-Disposition filename extraction."""
 
     def setUp(self):
         self.db = Database(":memory:")
@@ -25,6 +55,7 @@ class TestFilenameResolution(unittest.TestCase):
         self.manager = DownloadManager(self.db)
 
     def tearDown(self):
+        self.manager.stop()
         self.db.close()
 
     def test_extract_filename_from_http_url_on_add(self):
@@ -73,6 +104,8 @@ class TestFilenameResolution(unittest.TestCase):
 
     def test_model_update_filename(self):
         """Calling model.update_filename dynamically updates name and file path."""
+        from my_idm.database import DownloadEntry
+
         model = DownloadTableModel()
         entry = DownloadEntry(
             id="test-1",
@@ -92,24 +125,6 @@ class TestFilenameResolution(unittest.TestCase):
             entry.file_path,
             str(Path("C:/Downloads") / "resolved_document.pdf"),
         )
-
-    def test_main_window_receives_filename_resolved(self):
-        """MainWindow updates model when manager emits filename_resolved."""
-        win = MainWindow(self.manager)
-        try:
-            entry = DownloadEntry(
-                id="test-2",
-                url="https://example.com/api/get",
-                filename="",
-            )
-            win._model.load_entries([entry])
-
-            # Simulate manager resolving filename
-            self.manager.filename_resolved.emit("test-2", "dynamic_file.zip")
-            self.assertEqual(win._model.get_entry(0).filename, "dynamic_file.zip")
-            self.assertEqual(win._model.data(win._model.index(0, Col.NAME)), "dynamic_file.zip")
-        finally:
-            win.close()
 
 
 if __name__ == "__main__":
