@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import QSettings
 
+from my_idm.database import APP_DIR
 from my_idm.utils import normalize_path
 
 DEFAULT_DOWNLOADS_DIR = normalize_path(Path.home() / "Downloads")
@@ -26,6 +27,10 @@ class GeneralConfig:
     max_retries: int = 5
     auto_resume_startup: bool = True
     notify_on_completion: bool = True
+    backlog_locations: list[str] = field(default_factory=list)
+    clear_backlog_after_load: bool = True
+    backlog_poll_interval: int = 60
+    backlog_poll_enabled: bool = True
 
     def get_effective_save_path(self) -> str:
         """Returns the directory to prefill for a new download."""
@@ -34,6 +39,36 @@ class GeneralConfig:
         if self.default_save_path and os.path.isdir(self.default_save_path):
             return self.default_save_path
         return DEFAULT_DOWNLOADS_DIR
+
+    def get_effective_backlog_locations(self) -> list[str]:
+        """Returns the list of places (folders or files) to scan for backlog files."""
+        if self.backlog_locations:
+            cleaned = []
+            seen = set()
+            for loc in self.backlog_locations:
+                s = str(loc).strip()
+                if not s:
+                    continue
+                norm = normalize_path(s)
+                if norm.lower() not in seen:
+                    seen.add(norm.lower())
+                    cleaned.append(norm)
+            if cleaned:
+                return cleaned
+
+        # Default places: Project root (cwd), user app data dir, user home dir
+        defaults = [
+            normalize_path(Path.cwd()),
+            normalize_path(APP_DIR),
+            normalize_path(Path.home()),
+        ]
+        result = []
+        seen = set()
+        for p in defaults:
+            if p.lower() not in seen:
+                seen.add(p.lower())
+                result.append(p)
+        return result
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,10 +80,22 @@ class GeneralConfig:
             "max_retries": self.max_retries,
             "auto_resume_startup": self.auto_resume_startup,
             "notify_on_completion": self.notify_on_completion,
+            "backlog_locations": list(self.backlog_locations),
+            "clear_backlog_after_load": self.clear_backlog_after_load,
+            "backlog_poll_interval": self.backlog_poll_interval,
+            "backlog_poll_enabled": self.backlog_poll_enabled,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GeneralConfig:
+        raw_locs = data.get("backlog_locations", [])
+        if isinstance(raw_locs, list):
+            locs = [str(x) for x in raw_locs if str(x).strip()]
+        elif isinstance(raw_locs, str) and raw_locs.strip():
+            locs = [x.strip() for x in raw_locs.split(";") if x.strip()]
+        else:
+            locs = []
+
         return cls(
             default_save_path=str(data.get("default_save_path", DEFAULT_DOWNLOADS_DIR)),
             remember_last_save_path=bool(data.get("remember_last_save_path", False)),
@@ -58,6 +105,10 @@ class GeneralConfig:
             max_retries=int(data.get("max_retries", 5)),
             auto_resume_startup=bool(data.get("auto_resume_startup", True)),
             notify_on_completion=bool(data.get("notify_on_completion", True)),
+            backlog_locations=locs,
+            clear_backlog_after_load=bool(data.get("clear_backlog_after_load", True)),
+            backlog_poll_interval=int(data.get("backlog_poll_interval", 60)),
+            backlog_poll_enabled=bool(data.get("backlog_poll_enabled", True)),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -73,6 +124,10 @@ class GeneralConfig:
         settings.setValue("max_retries", self.max_retries)
         settings.setValue("auto_resume_startup", self.auto_resume_startup)
         settings.setValue("notify_on_completion", self.notify_on_completion)
+        settings.setValue("backlog_locations", self.backlog_locations)
+        settings.setValue("clear_backlog_after_load", self.clear_backlog_after_load)
+        settings.setValue("backlog_poll_interval", self.backlog_poll_interval)
+        settings.setValue("backlog_poll_enabled", self.backlog_poll_enabled)
         settings.endGroup()
 
     @classmethod
@@ -89,6 +144,16 @@ class GeneralConfig:
         max_retries = settings.value("max_retries", 5, type=int)
         auto_resume_startup = settings.value("auto_resume_startup", True, type=bool)
         notify_on_completion = settings.value("notify_on_completion", True, type=bool)
+        raw_locs = settings.value("backlog_locations", [])
+        if isinstance(raw_locs, list):
+            backlog_locations = [str(x) for x in raw_locs if str(x).strip()]
+        elif isinstance(raw_locs, str) and raw_locs.strip():
+            backlog_locations = [x.strip() for x in raw_locs.split(";") if x.strip()]
+        else:
+            backlog_locations = []
+        clear_backlog_after_load = settings.value("clear_backlog_after_load", True, type=bool)
+        backlog_poll_interval = settings.value("backlog_poll_interval", 60, type=int)
+        backlog_poll_enabled = settings.value("backlog_poll_enabled", True, type=bool)
         settings.endGroup()
 
         return cls(
@@ -100,6 +165,10 @@ class GeneralConfig:
             max_retries=int(max_retries),
             auto_resume_startup=bool(auto_resume_startup),
             notify_on_completion=bool(notify_on_completion),
+            backlog_locations=backlog_locations,
+            clear_backlog_after_load=bool(clear_backlog_after_load),
+            backlog_poll_interval=int(backlog_poll_interval),
+            backlog_poll_enabled=bool(backlog_poll_enabled),
         )
 
 

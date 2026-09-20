@@ -210,8 +210,11 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         self.tmp.close()
         self.db = Database(Path(self.tmp.name))
         self.db.open()
+        self.test_settings = QSettings("MyIDMTest", "My-IDMTest")
+        self.test_settings.clear()
 
     def tearDown(self):
+        self.test_settings.clear()
         self.db.close()
         if os.path.exists(self.tmp.name):
             try:
@@ -238,6 +241,68 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
             self.assertIsNotNone(entry)
             from my_idm.utils import normalize_path
             self.assertEqual(entry.save_path, normalize_path(custom_dir))
+
+    def test_general_config_backlog_locations_and_clear_settings(self):
+        cfg = GeneralConfig(
+            backlog_locations=["D:/CustomBacklog", "D:/AnotherBacklog/urls.txt"],
+            clear_backlog_after_load=False,
+        )
+        self.assertEqual(len(cfg.get_effective_backlog_locations()), 2)
+        cfg.save(self.test_settings)
+
+        loaded = GeneralConfig.load(self.test_settings)
+        self.assertEqual(loaded.backlog_locations, ["D:/CustomBacklog", "D:/AnotherBacklog/urls.txt"])
+        self.assertFalse(loaded.clear_backlog_after_load)
+
+    def test_general_config_effective_backlog_locations_defaults(self):
+        cfg = GeneralConfig(backlog_locations=[])
+        effective = cfg.get_effective_backlog_locations()
+        # Should contain cwd, APP_DIR, and home
+        self.assertGreaterEqual(len(effective), 2)
+        from my_idm.utils import normalize_path
+        self.assertIn(normalize_path(Path.cwd()), effective)
+
+    def test_settings_dialog_backlog_ui_and_actions(self):
+        from unittest.mock import patch
+        cfg = GeneralConfig(
+            backlog_locations=["D:/Folder1", "D:/Folder2/backlog.txt"],
+            clear_backlog_after_load=True,
+        )
+        dlg = SettingsDialog(general_config=cfg)
+
+        # Verify initial population
+        self.assertEqual(dlg._backlog_list.count(), 2)
+        self.assertTrue(dlg._clear_backlog_cb.isChecked())
+
+        # Test Remove action
+        dlg._backlog_list.setCurrentRow(0)
+        dlg._on_remove_backlog_loc()
+        self.assertEqual(dlg._backlog_list.count(), 1)
+
+        # Test Add Folder
+        with patch("PySide6.QtWidgets.QFileDialog.getExistingDirectory", return_value="D:/NewFolder"):
+            dlg._on_add_backlog_folder()
+        self.assertEqual(dlg._backlog_list.count(), 2)
+
+        # Test Add File
+        with patch("PySide6.QtWidgets.QFileDialog.getOpenFileName", return_value=("D:/NewFile.txt", "")):
+            dlg._on_add_backlog_file()
+        self.assertEqual(dlg._backlog_list.count(), 3)
+
+        # Test Reset Defaults
+        dlg._on_reset_backlog_defaults()
+        self.assertGreaterEqual(dlg._backlog_list.count(), 2)
+
+        # Test saving
+        dlg._clear_backlog_cb.setChecked(False)
+        dlg._backlog_poll_cb.setChecked(True)
+        dlg._backlog_poll_spin.setValue(120)
+        with patch("os.path.exists", return_value=True):
+            dlg._on_save()
+        self.assertFalse(dlg.general_config.clear_backlog_after_load)
+        self.assertTrue(dlg.general_config.backlog_poll_enabled)
+        self.assertEqual(dlg.general_config.backlog_poll_interval, 120)
+        dlg.close()
 
 
 if __name__ == "__main__":

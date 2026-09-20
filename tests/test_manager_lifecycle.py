@@ -343,6 +343,225 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertEqual(self.manager._detect_type("https://example.com/ubuntu-22.04.iso"), "http")
         self.assertEqual(self.manager._detect_type("magnet:?xt=urn:btih:1234567890"), "torrent")
 
+    # -- Backlog parsing, download locations, auto-clearing & discovery --------
+
+    def test_parse_backlog_entry_syntax(self):
+        from my_idm.manager import parse_backlog_entry
+        from my_idm.utils import normalize_path
+
+        # 1. Blank & Comments
+        self.assertEqual(parse_backlog_entry(""), (None, "", None))
+        self.assertEqual(parse_backlog_entry("   # comment"), (None, "", None))
+        self.assertEqual(parse_backlog_entry("// another comment"), (None, "", None))
+
+        # 2. Directives
+        self.assertEqual(
+            parse_backlog_entry("# dir: D:/Downloads/ISO"),
+            (None, "", normalize_path("D:/Downloads/ISO")),
+        )
+        self.assertEqual(
+            parse_backlog_entry("[D:/Downloads/Music]"),
+            (None, "", normalize_path("D:/Downloads/Music")),
+        )
+        self.assertEqual(
+            parse_backlog_entry("save_path = D:/Torrents"),
+            (None, "", normalize_path("D:/Torrents")),
+        )
+
+        # 3. Simple URL with active save path fallback
+        self.assertEqual(
+            parse_backlog_entry("https://example.com/file.zip", active_save_path="D:/ActiveDir"),
+            ("https://example.com/file.zip", "D:/ActiveDir", None),
+        )
+
+        # 4. Pipe delimiter
+        self.assertEqual(
+            parse_backlog_entry("https://example.com/file.zip | D:/Custom/Dir"),
+            ("https://example.com/file.zip", normalize_path("D:/Custom/Dir"), None),
+        )
+
+        # 5. Tab delimiter
+        self.assertEqual(
+            parse_backlog_entry("https://example.com/file.zip\tD:/Tab/Dir"),
+            ("https://example.com/file.zip", normalize_path("D:/Tab/Dir"), None),
+        )
+
+        # 6. Arrow delimiter
+        self.assertEqual(
+            parse_backlog_entry("https://example.com/file.zip -> D:/Arrow/Dir"),
+            ("https://example.com/file.zip", normalize_path("D:/Arrow/Dir"), None),
+        )
+
+        # 7. aria2 style dir= option
+        self.assertEqual(
+            parse_backlog_entry('https://example.com/file.zip dir="D:/Aria2/Dir"'),
+            ("https://example.com/file.zip", normalize_path("D:/Aria2/Dir"), None),
+        )
+
+        # 8. Space separated
+        self.assertEqual(
+            parse_backlog_entry("https://example.com/file.iso D:/Space/Dir"),
+            ("https://example.com/file.iso", normalize_path("D:/Space/Dir"), None),
+        )
+
+    def test_load_backlog_with_custom_download_locations(self):
+        from my_idm.utils import normalize_path
+        dest1 = normalize_path(Path(self.tmp_dir.name) / "folder1")
+        dest2 = normalize_path(Path(self.tmp_dir.name) / "folder2")
+
+        backlog_content = f"""# Test Backlog
+https://example.com/item1.zip | {dest1}
+# dir: {dest2}
+https://example.com/item2.zip
+"""
+        bf = Path(self.tmp_dir.name) / "test_backlog.txt"
+        bf.write_text(backlog_content, encoding="utf-8")
+
+        added = self.manager.load_backlog(str(bf))
+        self.assertEqual(added, 2)
+
+        e1 = self.db.find_by_url("https://example.com/item1.zip")
+        self.assertIsNotNone(e1)
+        self.assertEqual(e1.save_path, dest1)
+
+        e2 = self.db.find_by_url("https://example.com/item2.zip")
+        self.assertIsNotNone(e2)
+        self.assertEqual(e2.save_path, dest2)
+
+    def test_load_backlog_clears_entries_on_success(self):
+        bf = Path(self.tmp_dir.name) / "clear_backlog.txt"
+        bf.write_text(
+            "# Queue\nhttps://example.com/success1.zip\nhttps://example.com/success2.zip\n",
+            encoding="utf-8",
+        )
+
+        self.manager.load_backlog(str(bf))
+
+        # Because all succeeded and clear_backlog_after_load is True by default, file is emptied
+        self.assertTrue(bf.exists())
+        self.assertEqual(bf.read_text(encoding="utf-8"), "")
+
+    def test_load_backlog_preserves_failed_lines(self):
+        self.manager._general_config.clear_backlog_after_load = True
+        bf = Path(self.tmp_dir.name) / "partial_backlog.txt"
+        # Security policy blocks dangerous urls if block_dangerous_urls is True
+        from my_idm.security import SecurityConfig
+        self.manager._security_config = SecurityConfig(block_dangerous_urls=True)
+
+        bf.write_text(
+            "https://example.com/good.zip\nhttp://malware.testing.example.com/evil.exe\n",
+            encoding="utf-8",
+        )
+
+        # Mock add_download to fail for evil.exe
+        orig_add = self.manager.add_download
+
+        def mock_add(url, **kwargs):
+            if "evil.exe" in url:
+                return None
+            return orig_add(url, **kwargs)
+
+        with patch.object(self.manager, "add_download", side_effect=mock_add):
+            added = self.manager.load_backlog(str(bf))
+            self.assertEqual(added, 1)
+
+        # Failed line must still be in the file
+        remaining = bf.read_text(encoding="utf-8")
+        self.assertIn("evil.exe", remaining)
+        self.assertNotIn("good.zip", remaining)
+
+    def test_load_backlog_no_clear_when_disabled(self):
+        self.manager._general_config.clear_backlog_after_load = False
+
+        bf = Path(self.tmp_dir.name) / "no_clear.txt"
+        content = "https://example.com/preserve.zip\n"
+        bf.write_text(content, encoding="utf-8")
+
+        self.manager.load_backlog(str(bf))
+        self.assertEqual(bf.read_text(encoding="utf-8"), content)
+
+    def test_process_backlogs_multi_locations(self):
+        loc1 = Path(self.tmp_dir.name) / "proj_home"
+        loc1.mkdir(parents=True, exist_ok=True)
+        (loc1 / "backlog.txt").write_text("https://example.com/p1.zip\n", encoding="utf-8")
+
+        loc2 = Path(self.tmp_dir.name) / "user_home"
+        loc2.mkdir(parents=True, exist_ok=True)
+        (loc2 / "backlog.txt").write_text("https://example.com/u1.zip\n", encoding="utf-8")
+
+        self.manager._general_config.backlog_locations = [str(loc1), str(loc2)]
+
+        count = self.manager.process_backlogs()
+        self.assertEqual(count, 2)
+        self.assertIsNotNone(self.db.find_by_url("https://example.com/p1.zip"))
+        self.assertIsNotNone(self.db.find_by_url("https://example.com/u1.zip"))
+
+    def test_periodic_backlog_polling_timer_and_tick(self):
+        from my_idm.config import GeneralConfig
+        # Check default timer interval is 60_000 ms (60 seconds)
+        self.assertEqual(self.manager._backlog_timer.interval(), 60_000)
+
+        # Updating general config updates timer interval
+        new_cfg = GeneralConfig(backlog_poll_interval=30, backlog_poll_enabled=True)
+        self.manager.set_general_config(new_cfg)
+        self.assertEqual(self.manager._backlog_timer.interval(), 30_000)
+
+        # Test tick handler calls process_backlogs
+        with patch.object(self.manager, "process_backlogs", return_value=3) as mock_proc:
+            self.manager._on_backlog_timer_tick()
+            mock_proc.assert_called_once()
+
+    def test_parse_backlog_entry_custom_filename_and_headers(self):
+        from my_idm.manager import parse_backlog_entry
+
+        # 1. Pipe syntax with filename: url | dir | filename
+        res1 = parse_backlog_entry("https://example.com/stream | D:/Anime | episode_01.mp4")
+        self.assertEqual(res1.filename, "episode_01.mp4")
+        self.assertEqual(res1.save_path, "D:/Anime")
+
+        # 2. Key-value options in pipe
+        res2 = parse_backlog_entry(
+            "https://vault-99.owocdn.top/mp4/123?file=orig.mp4 | dir=D:/Anime | filename=custom.mp4 | referer=https://kwik.cx/"
+        )
+        self.assertEqual(res2.filename, "custom.mp4")
+        self.assertEqual(res2.save_path, "D:/Anime")
+        self.assertEqual(res2.headers.get("Referer"), "https://kwik.cx/")
+
+        # 3. Comment preceding entry with embedded filename
+        comment = "# Jaadugar A Witch in Mongolia - Episode 11 (AnimePahe_Jaadugar_11_720p.mp4)"
+        res3 = parse_backlog_entry(
+            "https://vault-99.owocdn.top/mp4/743c1081 | D:/Anime",
+            last_comment=comment,
+        )
+        self.assertEqual(res3.filename, "AnimePahe_Jaadugar_11_720p.mp4")
+        self.assertEqual(res3.save_path, "D:/Anime")
+        # Auto-referer applied for owocdn
+        self.assertEqual(res3.headers.get("Referer"), "https://kwik.cx/")
+
+        # 4. Fallback to query parameter file= when path has no extension
+        res4 = parse_backlog_entry("https://vault-99.owocdn.top/mp4/abc?file=Video_720p.mp4")
+        self.assertEqual(res4.filename, "Video_720p.mp4")
+
+    def test_load_backlog_with_filename_and_referer(self):
+        from my_idm.utils import normalize_path
+        dest = normalize_path(Path(self.tmp_dir.name) / "anime_test")
+        backlog_text = f"""# Test Backlog
+# Episode 11 (AnimePahe_Ep11.mp4)
+https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=https://kwik.cx/
+"""
+        bf = Path(self.tmp_dir.name) / "anime_backlog.txt"
+        bf.write_text(backlog_text, encoding="utf-8")
+
+        added = self.manager.load_backlog(str(bf))
+        self.assertEqual(added, 1)
+
+        entry = self.db.find_by_url("https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.save_path, dest)
+        self.assertEqual(entry.filename, "AnimePahe_Ep11.mp4")
+        self.assertEqual(entry.metadata.get("headers", {}).get("Referer"), "https://kwik.cx/")
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -33,6 +34,192 @@ from my_idm.utils import get_unique_filename, normalize_path
 log = logging.getLogger(__name__)
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
+
+
+class ParsedBacklogEntry(tuple):
+    """Backwards-compatible 3-tuple (url, save_path, new_dir) with filename and headers attributes."""
+    def __new__(cls, url: Optional[str], save_path: str, new_dir: Optional[str],
+                filename: str = "", headers: Optional[dict[str, str]] = None):
+        return super().__new__(cls, (url, save_path, new_dir))
+
+    def __init__(self, url: Optional[str], save_path: str, new_dir: Optional[str],
+                 filename: str = "", headers: Optional[dict[str, str]] = None):
+        self.url = url
+        self.save_path = save_path
+        self.new_dir = new_dir
+        self.filename = filename
+        self.headers = headers or {}
+
+
+def parse_backlog_entry(
+    raw_line: str,
+    active_save_path: str = "",
+    last_comment: str = "",
+) -> ParsedBacklogEntry:
+    """Parse a single backlog file line.
+
+    Returns a backwards-compatible 3-tuple (url, save_path, new_dir) with
+    .filename and .headers attributes:
+    - If line is empty or comment: (None, "", None).
+    - If line sets directory directive (# dir: ..., dir=..., [path]): (None, "", directive_path).
+    - If line contains a download URL/magnet: (url, save_path, None, filename, headers).
+    """
+    line = raw_line.strip()
+    if not line:
+        return ParsedBacklogEntry(None, "", None)
+
+    # Check for comment directive: e.g. # dir: /path or # save_path: /path
+    m_comment_dir = re.match(r'^#+\s*(?:dir|save_path|path)\s*[:=]\s*(.+)$', line, re.IGNORECASE)
+    if m_comment_dir:
+        p = m_comment_dir.group(1).strip().strip('"\'')
+        p = os.path.expandvars(os.path.expanduser(p))
+        return ParsedBacklogEntry(None, "", normalize_path(p))
+
+    # General comments
+    if line.startswith("#") or line.startswith("//"):
+        return ParsedBacklogEntry(None, "", None)
+
+    # Section directive: e.g. [D:\Downloads\Music]
+    m_section = re.match(r'^\[(.+)\]$', line)
+    if m_section:
+        p = m_section.group(1).strip().strip('"\'')
+        p = os.path.expandvars(os.path.expanduser(p))
+        return ParsedBacklogEntry(None, "", normalize_path(p))
+
+    # Directive without leading comment: e.g. dir = D:\Path or save_path = D:\Path
+    m_dir = re.match(r'^(?:dir|save_path|path)\s*[:=]\s*(.+)$', line, re.IGNORECASE)
+    if m_dir:
+        p = m_dir.group(1).strip().strip('"\'')
+        p = os.path.expandvars(os.path.expanduser(p))
+        return ParsedBacklogEntry(None, "", normalize_path(p))
+
+    url = ""
+    save_path = ""
+    filename = ""
+    headers: dict[str, str] = {}
+
+    # Extract filename or directives if embedded in line
+    if "|" in line:
+        parts = [p.strip() for p in line.split("|")]
+        url = parts[0]
+        for part in parts[1:]:
+            if not part:
+                continue
+            # Check key=value format
+            if "=" in part:
+                k, _, v = part.partition("=")
+                k_clean = k.strip().lower()
+                v_clean = v.strip().strip('"\'')
+                if k_clean in ("dir", "save_path", "path", "folder"):
+                    save_path = v_clean
+                elif k_clean in ("filename", "file", "out", "name"):
+                    filename = v_clean
+                elif k_clean in ("referer", "referrer"):
+                    headers["Referer"] = v_clean
+                elif k_clean.startswith("header"):
+                    # e.g. header=Name: Value
+                    if ":" in v_clean:
+                        hn, _, hv = v_clean.partition(":")
+                        headers[hn.strip()] = hv.strip()
+            else:
+                # Positional
+                if not save_path and not filename:
+                    # Check if this part looks like a directory or filename
+                    if "." in os.path.basename(part) and not os.path.isdir(part):
+                        filename = part
+                    else:
+                        save_path = part
+                elif save_path and not filename:
+                    filename = part
+                elif not save_path and filename:
+                    save_path = part
+    elif " -> " in line:
+        parts = [p.strip() for p in line.split(" -> ")]
+        url = parts[0]
+        if len(parts) >= 2:
+            save_path = parts[1]
+        if len(parts) >= 3:
+            filename = parts[2]
+    elif "\t" in line:
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        url = parts[0]
+        if len(parts) >= 2:
+            save_path = parts[1]
+        if len(parts) >= 3:
+            filename = parts[2]
+    elif ";" in line:
+        parts = line.split(";", 1)
+        if ("://" in parts[0] or parts[0].startswith("magnet:") or parts[0].endswith(".torrent")) and parts[1].strip():
+            url = parts[0].strip()
+            save_path = parts[1].strip()
+        else:
+            url = line
+    else:
+        # Check for aria2-style dir="path" or out="name" or referer="url"
+        m_dir_opt = re.search(r'(?:dir|out_dir)\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|(\S+))', line, re.IGNORECASE)
+        if m_dir_opt:
+            save_path = m_dir_opt.group(1) or m_dir_opt.group(2) or m_dir_opt.group(3)
+            line = (line[:m_dir_opt.start()] + " " + line[m_dir_opt.end():]).strip()
+
+        m_out_opt = re.search(r'(?:out|filename)\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|(\S+))', line, re.IGNORECASE)
+        if m_out_opt:
+            filename = m_out_opt.group(1) or m_out_opt.group(2) or m_out_opt.group(3)
+            line = (line[:m_out_opt.start()] + " " + line[m_out_opt.end():]).strip()
+
+        m_ref_opt = re.search(r'referer\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|(\S+))', line, re.IGNORECASE)
+        if m_ref_opt:
+            headers["Referer"] = m_ref_opt.group(1) or m_ref_opt.group(2) or m_ref_opt.group(3)
+            line = (line[:m_ref_opt.start()] + " " + line[m_ref_opt.end():]).strip()
+
+        if " " in line:
+            parts = line.split(None, 1)
+            if ("://" in parts[0] or parts[0].startswith("magnet:") or parts[0].endswith(".torrent")) and len(parts) == 2:
+                url = parts[0].strip()
+                if not save_path:
+                    save_path = parts[1].strip()
+            else:
+                url = line
+        else:
+            url = line
+
+    if save_path:
+        save_path = save_path.strip().strip('"\'')
+        save_path = os.path.expandvars(os.path.expanduser(save_path))
+        save_path = normalize_path(save_path)
+    elif active_save_path:
+        save_path = active_save_path
+
+    if filename:
+        filename = filename.strip().strip('"\'')
+
+    # Fallback: Extract filename from last comment if comment contains '(filename.ext)' or '[filename.ext]'
+    if not filename and last_comment:
+        m_fn = re.search(r'[\(\[]([^\(\)\[\]]+\.[a-zA-Z0-9]{2,5})[\)\]]', last_comment)
+        if m_fn:
+            filename = m_fn.group(1).strip()
+
+    # Fallback: Extract filename from URL query params (e.g. ?file=... or ?filename=...)
+    if not filename and url and ("?" in url):
+        try:
+            parsed_u = urlparse(url)
+            qs = parse_qs(parsed_u.query)
+            for k in ("file", "filename", "name", "title"):
+                val = qs.get(k)
+                if val and val[0]:
+                    cand = unquote(val[0])
+                    if "." in cand:
+                        filename = Path(cand).name
+                        break
+        except Exception:
+            pass
+
+    # Auto-referer for known video CDNs
+    if url and ("owocdn.top" in url or "kwik." in url):
+        if "Referer" not in headers:
+            headers["Referer"] = "https://kwik.cx/"
+
+    return ParsedBacklogEntry(url, save_path, None, filename=filename, headers=headers)
+
 
 
 class DownloadManager(QObject):
@@ -92,6 +279,11 @@ class DownloadManager(QObject):
         self._retry_timer.setInterval(10_000)  # 10 seconds
         self._retry_timer.timeout.connect(self._process_retry_queue)
 
+        # Backlog poll timer — periodically checks for backlog files
+        self._backlog_timer = QTimer(self)
+        self._backlog_timer.timeout.connect(self._on_backlog_timer_tick)
+        self._apply_backlog_timer_config()
+
         # Wire engine callbacks
         self._http.set_callbacks(
             self._on_http_progress,
@@ -126,6 +318,10 @@ class DownloadManager(QObject):
         self._torrent_timer.start()
         self._retry_timer.start()
 
+        # Start periodic backlog polling if enabled
+        if self._general_config.backlog_poll_enabled and self._general_config.backlog_poll_interval > 0:
+            self._backlog_timer.start()
+
         # Check if Tor should be activated at startup
         if self._tor_config.auto_start_at_startup:
             self.toggle_tor(True)
@@ -154,6 +350,7 @@ class DownloadManager(QObject):
 
         self._torrent_timer.stop()
         self._retry_timer.stop()
+        self._backlog_timer.stop()
 
         # Stop HTTP engine
         if self._loop and self._loop.is_running():
@@ -341,7 +538,26 @@ class DownloadManager(QObject):
         """Update general download and application preferences."""
         self._general_config = config
         config.save()
+        self._apply_backlog_timer_config()
         self.general_config_changed.emit(config)
+
+    def _apply_backlog_timer_config(self):
+        interval_ms = max(1, self._general_config.backlog_poll_interval) * 1000
+        self._backlog_timer.setInterval(interval_ms)
+        if getattr(self, "_thread", None) and self._thread.is_alive():
+            if self._general_config.backlog_poll_enabled and self._general_config.backlog_poll_interval > 0:
+                if not self._backlog_timer.isActive():
+                    self._backlog_timer.start()
+            else:
+                self._backlog_timer.stop()
+
+    def _on_backlog_timer_tick(self):
+        try:
+            count = self.process_backlogs()
+            if count > 0:
+                log.info("Periodic backlog poll added %d download(s)", count)
+        except Exception as exc:
+            log.error("Error in periodic backlog poll: %s", exc)
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
@@ -350,7 +566,10 @@ class DownloadManager(QObject):
     # -- add downloads -------------------------------------------------------
 
     def add_download(self, url: str, save_path: str = "",
-                     num_segments: int = 8) -> Optional[str]:
+                     num_segments: int = 8,
+                     filename: str = "",
+                     headers: Optional[dict] = None,
+                     metadata: Optional[dict] = None) -> Optional[str]:
         """Add a new download. Returns download_id or None if duplicate resumed."""
         url = url.strip()
         if not url:
@@ -386,28 +605,41 @@ class DownloadManager(QObject):
             # Already downloading
             return existing.id
 
-        # Extract initial filename if available
-        filename = ""
-        if download_type == "torrent":
-            if os.path.isfile(url):
-                filename = Path(url).stem
-            elif url.startswith("magnet:?"):
+        # Extract initial filename if not explicitly provided
+        if not filename:
+            if download_type == "torrent":
+                if os.path.isfile(url):
+                    filename = Path(url).stem
+                elif url.startswith("magnet:?"):
+                    try:
+                        parsed_qs = parse_qs(urlparse(url).query)
+                        dns = parsed_qs.get("dn", [])
+                        if dns and dns[0]:
+                            filename = unquote(dns[0])
+                    except Exception:
+                        pass
+            elif download_type == "http":
                 try:
-                    parsed_qs = parse_qs(urlparse(url).query)
-                    dns = parsed_qs.get("dn", [])
-                    if dns and dns[0]:
-                        filename = unquote(dns[0])
+                    parsed = urlparse(url)
+                    parsed_path = parsed.path
+                    if parsed_path:
+                        name = unquote(Path(parsed_path).name)
+                        if name and "." in name:
+                            filename = name
+                    # Fallback to query params if path has no extension
+                    if not filename:
+                        qs = parse_qs(parsed.query)
+                        for k in ("file", "filename", "name", "title"):
+                            val = qs.get(k)
+                            if val and val[0]:
+                                cand = unquote(val[0])
+                                if "." in cand:
+                                    filename = Path(cand).name
+                                    break
+                    if not filename and parsed_path:
+                        filename = unquote(Path(parsed_path).name)
                 except Exception:
                     pass
-        elif download_type == "http":
-            try:
-                parsed_path = urlparse(url).path
-                if parsed_path:
-                    name = unquote(Path(parsed_path).name)
-                    if name:
-                        filename = name
-            except Exception:
-                pass
 
         # Auto-number filename if already taken on disk or by another download in DB
         if filename:
@@ -419,6 +651,12 @@ class DownloadManager(QObject):
             filename = get_unique_filename(save_path, filename, reserved_names=reserved)
 
         save_path = normalize_path(save_path)
+        entry_metadata = metadata.copy() if metadata else {}
+        if risk_level != "clean":
+            entry_metadata["security_warning"] = sec_details
+        if headers:
+            entry_metadata["headers"] = headers
+
         # Create new entry
         entry = DownloadEntry(
             id=str(uuid.uuid4()),
@@ -431,8 +669,8 @@ class DownloadManager(QObject):
             added_at=_now_iso(),
             status="queued",
         )
-        if risk_level != "clean":
-            entry.metadata = {"security_warning": sec_details}
+        if entry_metadata:
+            entry.metadata = entry_metadata
 
         self._db.add_download(entry)
         self.download_added.emit(entry.id)
@@ -837,23 +1075,140 @@ class DownloadManager(QObject):
     # -- backlog -------------------------------------------------------------
 
     def load_backlog(self, filepath: str) -> int:
-        """Load URLs from a backlog file. Returns count of newly added."""
-        count = 0
+        """Load URLs from a backlog file. Supports per-line and section download locations.
+        If clear_backlog_after_load is enabled, successfully processed entries are cleared.
+        Returns count of newly added downloads."""
+        p = Path(filepath)
+        if not p.is_file():
+            log.warning("Backlog file not found: %s", filepath)
+            return 0
+
         try:
             with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    result = self.add_download(line)
-                    if result:
-                        count += 1
-        except FileNotFoundError:
-            log.warning("Backlog file not found: %s", filepath)
+                lines = f.readlines()
         except Exception as exc:
-            log.error("Failed to load backlog %s: %s", filepath, exc)
-        log.info("Loaded %d downloads from backlog %s", count, filepath)
+            log.error("Failed to read backlog %s: %s", filepath, exc)
+            return 0
+
+        count = 0
+        active_save_path = ""
+        entries_info: list[tuple[int, str, bool, bool]] = []
+        total_download_lines = 0
+        successful_download_lines = 0
+
+        last_comment = ""
+        for idx, raw_line in enumerate(lines):
+            parsed = parse_backlog_entry(raw_line, active_save_path, last_comment=last_comment)
+            url, save_path, new_dir = parsed[0], parsed[1], parsed[2]
+            entry_filename = getattr(parsed, "filename", "")
+            entry_headers = getattr(parsed, "headers", {})
+
+            if new_dir:
+                active_save_path = new_dir
+                entries_info.append((idx, raw_line, False, True))
+                continue
+
+            line_str = raw_line.strip()
+            if line_str.startswith("#") or line_str.startswith("//"):
+                last_comment = line_str
+                entries_info.append((idx, raw_line, False, True))
+                continue
+
+            if not url:
+                entries_info.append((idx, raw_line, False, True))
+                continue
+
+            # Clear last_comment after being consumed by a download line
+            last_comment = ""
+
+            total_download_lines += 1
+            success = False
+            try:
+                existing = self._db.find_by_url(url)
+                if existing:
+                    if existing.status in ("queued", "paused", "error"):
+                        self.resume_download(existing.id)
+                    success = True
+                else:
+                    res = self.add_download(
+                        url,
+                        save_path=save_path,
+                        filename=entry_filename,
+                        headers=entry_headers,
+                    )
+                    if res:
+                        count += 1
+                        success = True
+                    else:
+                        success = False
+            except Exception as exc:
+                log.error("Failed to add download from backlog line '%s': %s", raw_line.strip(), exc)
+                success = False
+
+            if success:
+                successful_download_lines += 1
+            entries_info.append((idx, raw_line, True, success))
+
+        log.info(
+            "Backlog %s: processed %d/%d entries (newly added: %d)",
+            filepath, successful_download_lines, total_download_lines, count,
+        )
+
+        # Clear processed entries if enabled
+        if self._general_config.clear_backlog_after_load and total_download_lines > 0:
+            try:
+                if successful_download_lines == total_download_lines:
+                    # All download entries processed successfully; empty the file
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        pass
+                    log.info("Backlog file cleared completely: %s", filepath)
+                elif successful_download_lines > 0:
+                    # Some download entries succeeded, some failed; retain failed lines and comments
+                    remaining_lines = [
+                        raw_line for _, raw_line, is_download, success in entries_info
+                        if not (is_download and success)
+                    ]
+                    with open(filepath, "w", encoding="utf-8") as f:
+                        f.writelines(remaining_lines)
+                    log.info("Backlog file updated: removed %d successful entries from %s", successful_download_lines, filepath)
+            except Exception as exc:
+                log.error("Failed to clear / update backlog file %s: %s", filepath, exc)
+
         return count
+
+    def process_backlogs(self, extra_filepath: Optional[str] = None) -> int:
+        """Scan configured locations (project root, user home, app dir) and extra_filepath,
+        loading and auto-clearing any discovered backlog files. Returns total added downloads."""
+        total_added = 0
+        candidate_paths: list[Path] = []
+
+        if extra_filepath:
+            candidate_paths.append(Path(extra_filepath))
+
+        for loc in self._general_config.get_effective_backlog_locations():
+            p = Path(loc)
+            if p.is_dir():
+                candidate_paths.append(p / "backlog.txt")
+            else:
+                candidate_paths.append(p)
+
+        processed_files: set[str] = set()
+        for candidate in candidate_paths:
+            try:
+                if not candidate.is_file():
+                    continue
+                canonical = str(candidate.resolve()).lower()
+                if canonical in processed_files:
+                    continue
+                processed_files.add(canonical)
+
+                log.info("Processing backlog file: %s", candidate)
+                count = self.load_backlog(str(candidate))
+                total_added += count
+            except Exception as exc:
+                log.error("Error processing backlog file %s: %s", candidate, exc)
+
+        return total_added
 
     # -- query ---------------------------------------------------------------
 

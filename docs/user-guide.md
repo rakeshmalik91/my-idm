@@ -342,11 +342,20 @@ All table columns are interactively resizable:
 
 ## Backlog Files
 
-A backlog file is a text file with one URL per line. My-IDM can load backlog files in two ways:
+A backlog file is a text file containing download URLs, magnet links, or `.torrent` file paths. My-IDM automatically discovers, processes, and manages backlog queues.
 
-### Automatic Loading on Startup
+### Automatic Auto-Discovery & Periodic Polling
 
-If `~/.my-idm/backlog.txt` exists, it is automatically loaded when the app starts.
+My-IDM continuously monitors and processes backlog files:
+- **At Application Startup**: Backlog files are automatically scanned and queued on boot.
+- **Periodic Background Polling**: By default, My-IDM periodically scans all configured locations every **60 seconds (1 minute)** for newly added URLs. This allows external scripts or downloads added to `backlog.txt` while the app is running to be queued automatically.
+- **Configurable Interval**: You can adjust the polling frequency (5s to 3600s) or toggle it off under **Preferences → General → Backlog Files Auto-Processing**.
+
+**Discovered Locations**:
+1. **Project Directory / Working Directory**: `./backlog.txt`
+2. **User Application Data Directory**: `~/.my-idm/backlog.txt`
+3. **User Home Directory**: `~/backlog.txt`
+4. **Custom Configured Places**: Any additional folders or specific files added under **Preferences → General**.
 
 ### Manual Loading
 
@@ -354,24 +363,50 @@ If `~/.my-idm/backlog.txt` exists, it is automatically loaded when the app start
 2. Select a `.txt` file
 3. The status bar shows how many downloads were added
 
-### Backlog File Format
+### Custom Download Locations
+
+You can specify a custom destination folder for any download in a backlog file:
+
+- **Per-Line Pipe Delimiter**: `https://example.com/file.zip | D:\Downloads\ISO`
+- **Per-Line Arrow Delimiter**: `https://example.com/file.zip -> D:\Downloads\ISO`
+- **Aria2 Style Inline Option**: `https://example.com/file.zip dir="D:\Downloads\ISO"`
+- **Section / Directive Headers**: Set the default directory for all subsequent lines:
+  ```txt
+  # dir: D:\Torrents
+  magnet:?xt=urn:btih:EXAMPLE_HASH&dn=example_file
+
+  [D:\Media\Music]
+  https://example.com/song.mp3
+  ```
+
+### Automatic Entry Clearing
+
+By default, once entries from a backlog file are successfully queued or resumed, My-IDM automatically removes them from the file:
+- If all downloads in the file are processed successfully, the backlog file is emptied (truncated to 0 bytes) so it won't be reprocessed on the next startup.
+- If any downloads fail (e.g. invalid URL or connectivity error), failed lines are preserved in the file so you can inspect and fix them.
+- This behavior can be toggled via the **"Clear entries from backlog file after processing successfully"** option in **Preferences → General**.
+
+### Backlog File Format Example
 
 ```
 # Lines starting with # are comments
 # Empty lines are ignored
 
-# HTTP downloads
+# 1. Standard HTTP downloads (uses default download folder)
 https://example.com/file1.zip
 https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso
 
-# Magnet links
-magnet:?xt=urn:btih:EXAMPLE_HASH&dn=example_file
+# 2. Custom destination folder per download
+https://example.com/driver.zip | D:\Drivers
+https://example.com/dataset.tar.gz -> D:\Datasets
 
-# .torrent file paths
+# 3. Section directive for subsequent items
+# dir: D:\Torrents
+magnet:?xt=urn:btih:EXAMPLE_HASH&dn=example_file
 D:\Torrents\example.torrent
 ```
 
-Duplicate URLs are automatically skipped. See [backlog.txt.example](../backlog.txt.example) for a reference.
+Duplicate URLs are automatically skipped or resumed. See [backlog.txt.example](../backlog.txt.example) for reference and the [Backlog Processing Architecture Guide](architecture/backlog.md) for full technical specifications.
 
 ---
 

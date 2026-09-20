@@ -312,6 +312,27 @@ class TestTorrentEngine(unittest.TestCase):
         self.assertEqual(self.db.get_download("t_stall").status, "stalled")
         mock_handle.force_reannounce.assert_called_once()
 
+    def test_torrent_engine_guards_against_http_downloads(self):
+        """Torrent engine immediately returns False for non-torrent entries and file priority changes."""
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+
+        http_entry = DownloadEntry(
+            id="http_stream",
+            url="https://vault-99.owocdn.top/mp4/123?file=video.mp4",
+            download_type="http",
+            status="downloading",
+        )
+        self.db.add_download(http_entry)
+
+        # add_torrent should immediately reject non-torrent entry without making network requests
+        self.assertFalse(te.add_torrent(http_entry))
+
+        # set_torrent_file_priority should reject non-torrent entry
+        self.assertFalse(te.set_torrent_file_priority("http_stream", 0, 1))
+
 
 if __name__ == "__main__":
     unittest.main()
+

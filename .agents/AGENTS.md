@@ -15,6 +15,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **VPN & Kill Switch** | [`docs/architecture/vpn.md`](file:///d:/Projects/my-idm/docs/architecture/vpn.md) | Network adapter interface binding, live adapter monitoring, instant kill switch loop, and HTTP/SOCKS5 proxy support. |
 | **Antivirus & Security** | [`docs/architecture/antivirus.md`](file:///d:/Projects/my-idm/docs/architecture/antivirus.md) | Pre-download dangerous format warnings, double-extension inspection, post-download Windows Defender / custom scanning, and quarantine. |
 | **BitTorrent Engine** | [`docs/architecture/torrent.md`](file:///d:/Projects/my-idm/docs/architecture/torrent.md) | `libtorrent` session management, magnet URI / `.torrent` file handling, file priorities, swarm/peer/tracker tracking, and fastresume. |
+| **Backlog Processing** | [`docs/architecture/backlog.md`](file:///d:/Projects/my-idm/docs/architecture/backlog.md) | Multi-location auto-discovery, custom download location delimiters & directives, auto-clearing queue lifecycle, and IPC ingestion. |
 
 ---
 

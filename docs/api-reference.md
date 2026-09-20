@@ -288,7 +288,8 @@ Central orchestrator connecting GUI, engines, and database.
 | `set_bandwidth_limits` | `(download_limit, upload_limit) → None` | Set global down/up bandwidth limits in bytes/s |
 | `set_download_bandwidth_allocation` | `(download_id, allocation) → None` | Set download allocation ('low', 'medium', 'high', 'max') |
 | `get_download_bandwidth_allocation` | `(download_id) → str` | Get download allocation |
-| `load_backlog` | `(filepath) → int` | Load URLs from file, return count added |
+| `load_backlog` | `(filepath) → int` | Load URLs with optional download locations from file, auto-clearing processed entries |
+| `process_backlogs` | `(extra_filepath=None) → int` | Scan project root, app dir, user home & custom places for backlog files |
 
 #### Query
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -32,7 +33,8 @@ from PySide6.QtWidgets import (
 import asyncio
 import aiohttp
 from my_idm.config import GeneralConfig, TorConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
-from my_idm.database import Database
+from my_idm.database import Database, APP_DIR
+from my_idm.utils import normalize_path
 from my_idm.tor_service import find_tor_executable
 from my_idm.network import (
     NetworkConfig,
@@ -304,6 +306,77 @@ class SettingsDialog(QDialog):
         app_layout.addWidget(self._notify_cb)
 
         layout.addWidget(app_group)
+
+        # 4. Backlog Auto-Processing Locations
+        backlog_group = QGroupBox("Backlog Files Auto-Processing")
+        backlog_layout = QVBoxLayout(backlog_group)
+        backlog_layout.setSpacing(8)
+
+        backlog_info_lbl = QLabel(
+            "Configure folders and files to automatically scan for backlog download URLs on launch.\n"
+            "By default, My-IDM scans project directory, application directory, and user home."
+        )
+        backlog_info_lbl.setWordWrap(True)
+        backlog_info_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        backlog_layout.addWidget(backlog_info_lbl)
+
+        self._backlog_list = QListWidget()
+        self._backlog_list.setMaximumHeight(120)
+        backlog_layout.addWidget(self._backlog_list)
+
+        btn_row = QHBoxLayout()
+        add_folder_btn = QPushButton("📁 Add Folder…")
+        add_folder_btn.clicked.connect(self._on_add_backlog_folder)
+        btn_row.addWidget(add_folder_btn)
+
+        add_file_btn = QPushButton("📄 Add File…")
+        add_file_btn.clicked.connect(self._on_add_backlog_file)
+        btn_row.addWidget(add_file_btn)
+
+        remove_btn = QPushButton("🗑 Remove")
+        remove_btn.clicked.connect(self._on_remove_backlog_loc)
+        btn_row.addWidget(remove_btn)
+
+        reset_btn = QPushButton("↺ Reset Defaults")
+        reset_btn.clicked.connect(self._on_reset_backlog_defaults)
+        btn_row.addWidget(reset_btn)
+        btn_row.addStretch()
+
+        backlog_layout.addLayout(btn_row)
+
+        self._clear_backlog_cb = QCheckBox(
+            "Clear entries from backlog file after processing successfully"
+        )
+        self._clear_backlog_cb.setToolTip(
+            "When checked, URLs that are successfully queued, resumed, or already in progress "
+            "are removed from the backlog file to prevent duplicate processing on subsequent runs."
+        )
+        backlog_layout.addWidget(self._clear_backlog_cb)
+
+        poll_row = QHBoxLayout()
+        self._backlog_poll_cb = QCheckBox("Periodically scan for new backlog entries")
+        self._backlog_poll_cb.setToolTip(
+            "When checked, My-IDM automatically scans configured backlog folders and files "
+            "for new downloads at regular intervals."
+        )
+        poll_row.addWidget(self._backlog_poll_cb)
+
+        poll_lbl = QLabel("Interval:")
+        poll_row.addWidget(poll_lbl)
+
+        self._backlog_poll_spin = QSpinBox()
+        self._backlog_poll_spin.setRange(5, 3600)
+        self._backlog_poll_spin.setSingleStep(15)
+        self._backlog_poll_spin.setSuffix(" sec")
+        self._backlog_poll_spin.setToolTip("Polling frequency in seconds (default: 60s / 1 min)")
+        poll_row.addWidget(self._backlog_poll_spin)
+        poll_row.addStretch()
+
+        backlog_layout.addLayout(poll_row)
+
+        self._backlog_poll_cb.toggled.connect(self._backlog_poll_spin.setEnabled)
+
+        layout.addWidget(backlog_group)
         layout.addStretch()
         return tab
 
@@ -580,6 +653,15 @@ class SettingsDialog(QDialog):
         self._auto_resume_cb.setChecked(self._general_cfg.auto_resume_startup)
         self._notify_cb.setChecked(self._general_cfg.notify_on_completion)
 
+        # Backlog locations
+        self._backlog_list.clear()
+        for loc in self._general_cfg.get_effective_backlog_locations():
+            self._backlog_list.addItem(loc)
+        self._clear_backlog_cb.setChecked(self._general_cfg.clear_backlog_after_load)
+        self._backlog_poll_cb.setChecked(self._general_cfg.backlog_poll_enabled)
+        self._backlog_poll_spin.setValue(self._general_cfg.backlog_poll_interval)
+        self._backlog_poll_spin.setEnabled(self._general_cfg.backlog_poll_enabled)
+
         # Network tab
         self._load_interfaces()
         self._kill_switch_cb.setChecked(self._network_cfg.kill_switch)
@@ -661,6 +743,38 @@ class SettingsDialog(QDialog):
                 QMessageBox.warning(self, "Cannot Open Folder", f"Failed to create directory:\n{ex}")
                 return
         QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+
+    def _on_add_backlog_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Backlog Folder")
+        if folder:
+            norm = normalize_path(folder)
+            existing = [self._backlog_list.item(i).text() for i in range(self._backlog_list.count())]
+            if norm not in existing:
+                self._backlog_list.addItem(norm)
+
+    def _on_add_backlog_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Backlog File", "", "Text Files (*.txt);;All Files (*)"
+        )
+        if file_path:
+            norm = normalize_path(file_path)
+            existing = [self._backlog_list.item(i).text() for i in range(self._backlog_list.count())]
+            if norm not in existing:
+                self._backlog_list.addItem(norm)
+
+    def _on_remove_backlog_loc(self):
+        for item in self._backlog_list.selectedItems():
+            self._backlog_list.takeItem(self._backlog_list.row(item))
+
+    def _on_reset_backlog_defaults(self):
+        self._backlog_list.clear()
+        defaults = [
+            normalize_path(Path.cwd()),
+            normalize_path(APP_DIR),
+            normalize_path(Path.home()),
+        ]
+        for d in defaults:
+            self._backlog_list.addItem(d)
 
     def _load_interfaces(self):
         self._interfaces = get_available_interfaces()
@@ -829,6 +943,11 @@ class SettingsDialog(QDialog):
         self._general_cfg.max_retries = self._retries_spin.value()
         self._general_cfg.auto_resume_startup = self._auto_resume_cb.isChecked()
         self._general_cfg.notify_on_completion = self._notify_cb.isChecked()
+        locs = [self._backlog_list.item(i).text().strip() for i in range(self._backlog_list.count())]
+        self._general_cfg.backlog_locations = [l for l in locs if l]
+        self._general_cfg.clear_backlog_after_load = self._clear_backlog_cb.isChecked()
+        self._general_cfg.backlog_poll_enabled = self._backlog_poll_cb.isChecked()
+        self._general_cfg.backlog_poll_interval = self._backlog_poll_spin.value()
         self._general_cfg.save()
 
         # 2. Collect Network settings

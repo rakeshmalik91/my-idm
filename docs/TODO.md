@@ -47,6 +47,11 @@ commit after each features or set of fixes/enhancements
 - [x] Top taskbar menu items not indented correctly
 - [x] If a torrent file url is given treat it as torrent
 - [x] Make app single instance, focusing existing window on subsequent launches
+- [x] Fix backlog processing on startup; pick backlog files from both project home and user home
+- [x] Add support for custom download location in backlog files (inline delimiters and section directives)
+- [x] Add settings UI for configuring list of places where backlog files will be picked
+- [x] Automatically clear entries after processing successfully from the backlog file
+- [x] Poll for backlog periodically with configurable interval (1 min default)
 
 ----------------------
 ### Tor Support

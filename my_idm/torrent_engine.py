@@ -374,6 +374,10 @@ class TorrentEngine:
             log.error("Cannot add torrent — libtorrent not available")
             return False
 
+        if entry.download_type != "torrent":
+            log.debug("Skipping non-torrent entry in TorrentEngine: %s (type=%s)", entry.id, entry.download_type)
+            return False
+
         if entry.id in self._handles:
             log.warning("Torrent %s already added to session, resuming instead", entry.id)
             self.resume(entry.id)
@@ -476,11 +480,22 @@ class TorrentEngine:
                     log.warning("Failed to parse fastresume for %s: %s", entry.id, exc)
 
         elif url.startswith(("http://", "https://", "ftp://")):
+            # Only proceed if the URL actually indicates a .torrent file
+            parsed_u = urlparse(url)
+            p_lower = parsed_u.path.lower()
+            q_lower = parsed_u.query.lower()
+            if not (p_lower.endswith(".torrent") or ".torrent" in p_lower or ".torrent" in q_lower):
+                log.warning("HTTP URL %s does not point to a .torrent file, skipping remote torrent fetch", url)
+                return False
+
             # Fetch remote .torrent file and cache locally
             torrent_cache = FASTRESUME_DIR / f"{entry.id}.torrent"
             try:
                 import urllib.request
-                req = urllib.request.Request(url, headers={"User-Agent": "My-IDM/1.0"})
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"}
+                )
                 with urllib.request.urlopen(req, timeout=15) as resp:
                     torrent_data = resp.read()
                 with open(torrent_cache, "wb") as f:
@@ -894,6 +909,8 @@ class TorrentEngine:
     def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:
         """Sets priority for a specific file (0 = do not download, 1 = low, 4 = normal, 7 = high)."""
         entry = self._db.get_download(download_id)
+        if not entry or entry.download_type != "torrent":
+            return False
         handle = self._handles.get(download_id)
         if not handle and entry:
             self.add_torrent(entry)

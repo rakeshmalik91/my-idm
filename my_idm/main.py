@@ -133,9 +133,9 @@ def main():
 
         # Handle backlog if passed
         b_path = msg.get("backlog")
-        if b_path and Path(b_path).exists():
-            count = manager.load_backlog(b_path)
-            log.info("Loaded %d downloads from secondary instance backlog: %s", count, b_path)
+        if b_path:
+            count = manager.process_backlogs(extra_filepath=b_path)
+            log.info("Processed %d downloads from secondary instance backlog: %s", count, b_path)
 
         # Handle urls if passed
         for u in msg.get("urls", []):
@@ -163,11 +163,9 @@ def main():
 
     app.aboutToQuit.connect(_cleanup)
 
-    # Load backlog
-    backlog_path = args.backlog or str(DEFAULT_BACKLOG)
-    if Path(backlog_path).exists():
-        count = manager.load_backlog(backlog_path)
-        log.info("Loaded %d downloads from backlog: %s", count, backlog_path)
+    # Load and process backlog files (project root, user home, app dir, and configured locations)
+    count = manager.process_backlogs(extra_filepath=args.backlog)
+    log.info("Finished processing backlog files (total added: %d)", count)
 
     # Run
     exit_code = app.exec()

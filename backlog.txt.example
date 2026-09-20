@@ -1,14 +1,33 @@
-# My-IDM — Download Manager
+# My-IDM — Backlog Download Queue
+# 
+# One URL per line. Lines starting with # are comments.
+# Supports HTTP/HTTPS URLs, magnet links, and local .torrent files.
+# By default, successfully queued/processed entries are automatically cleared.
+# Backlog files are automatically picked up on startup from:
+#   1. Project root / Current working directory (./backlog.txt)
+#   2. User application data directory (~/.my-idm/backlog.txt)
+#   3. User home directory (~/backlog.txt)
+#   4. Any custom folders/files configured in Preferences -> General.
 
-## One URL per line. Lines starting with # are comments.
-## Supports HTTP/HTTPS URLs and magnet links.
+# ----------------------------------------------------------------------------
+# 1. Standard Downloads (uses default download location from Preferences)
+# ----------------------------------------------------------------------------
+https://example.com/file.zip
+https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso
 
-# Example HTTP downloads:
-# https://example.com/file.zip
-# https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso
+# ----------------------------------------------------------------------------
+# 2. Per-Line Custom Download Location (Pipe, Arrow, or dir= option)
+# ----------------------------------------------------------------------------
+https://example.com/driver.zip | D:\Drivers
+https://example.com/dataset.tar.gz -> D:\Datasets
+https://example.com/archive.7z dir="D:\Archives"
 
-# Example magnet links:
-# magnet:?xt=urn:btih:EXAMPLE_HASH&dn=example_file
+# ----------------------------------------------------------------------------
+# 3. Section / Directory Directives (sets folder for subsequent downloads)
+# ----------------------------------------------------------------------------
+# dir: D:\Torrents
+magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=sample_torrent
+D:\Torrents\sample.torrent
 
-# Example .torrent file paths:
-# D:\Torrents\example.torrent
+[D:\Media\Music]
+https://example.com/audiobook.mp3

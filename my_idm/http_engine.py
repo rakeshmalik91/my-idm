@@ -9,9 +9,16 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional, Callable
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 
 import aiohttp
+
+try:
+    from curl_cffi.requests import AsyncSession as CurlAsyncSession
+    _HAS_CURL_CFFI = True
+except ImportError:
+    CurlAsyncSession = None
+    _HAS_CURL_CFFI = False
 
 from my_idm.config import TorConfig
 from my_idm.database import Database, DownloadEntry, SegmentEntry
@@ -21,12 +28,24 @@ from my_idm.utils import get_unique_filename
 log = logging.getLogger(__name__)
 
 # Defaults
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 DEFAULT_SEGMENTS = 8
 CHUNK_SIZE = 64 * 1024          # 64 KiB per read
 MAX_RETRIES_PER_SEGMENT = 5
 RETRY_BASE_DELAY = 1.0          # seconds, exponential backoff base
 CONNECT_TIMEOUT = 30
 READ_TIMEOUT = 60
+
+
+def _requires_curl_impersonation(url: str) -> bool:
+    if not _HAS_CURL_CFFI or not url:
+        return False
+    u_lower = url.lower()
+    return any(domain in u_lower for domain in ("owocdn.top", "kwik.cx", "kwik.si", "pahe.win"))
+
 
 
 ProgressCallback = Callable[
@@ -194,13 +213,39 @@ class HTTPEngine:
         self._session = aiohttp.ClientSession(
             connector=connector,
             timeout=timeout,
-            headers={"User-Agent": "My-IDM/1.0"},
+            headers={"User-Agent": DEFAULT_USER_AGENT},
         )
 
-    def _request_kwargs(self, headers: Optional[dict] = None) -> dict:
-        kwargs: dict = {}
+    def _build_headers(
+        self,
+        headers: Optional[dict] = None,
+        entry: Optional[DownloadEntry] = None,
+        url: str = "",
+    ) -> dict:
+        req_headers = {"User-Agent": DEFAULT_USER_AGENT}
+        if entry and entry.metadata:
+            if "headers" in entry.metadata and isinstance(entry.metadata["headers"], dict):
+                req_headers.update(entry.metadata["headers"])
+            if "referer" in entry.metadata and entry.metadata["referer"]:
+                req_headers["Referer"] = entry.metadata["referer"]
+
+        url_check = url or (entry.url if entry else "")
+        if url_check and ("owocdn.top" in url_check or "kwik." in url_check):
+            if "Referer" not in req_headers:
+                req_headers["Referer"] = "https://kwik.cx/"
+
         if headers:
-            kwargs["headers"] = headers
+            req_headers.update(headers)
+        return req_headers
+
+    def _request_kwargs(
+        self,
+        headers: Optional[dict] = None,
+        entry: Optional[DownloadEntry] = None,
+        url: str = "",
+    ) -> dict:
+        kwargs: dict = {}
+        kwargs["headers"] = self._build_headers(headers, entry=entry, url=url)
 
         tor_routing_http = (
             self._tor_config
@@ -312,7 +357,7 @@ class HTTPEngine:
 
             # Probe the URL
             supports_range, total_size, etag, filename = await self._probe_url(
-                entry.url
+                entry.url, entry=entry
             )
 
             # Update entry with discovered info
@@ -381,31 +426,74 @@ class HTTPEngine:
             self._tasks.pop(download_id, None)
             self._cancel_events.pop(download_id, None)
 
-    async def _probe_url(self, url: str):
-        """HEAD request to discover file size, range support, ETag, filename."""
+    async def _probe_url(self, url: str, entry: Optional[DownloadEntry] = None):
+        """HEAD or GET request to discover file size, range support, ETag, filename."""
         supports_range = False
         total_size = 0
         etag = ""
         filename = ""
+        req_kwargs = self._request_kwargs(entry=entry, url=url)
+        headers = req_kwargs.get("headers", {})
 
+        # If domain requires browser impersonation or entry requested it
+        use_curl = _HAS_CURL_CFFI and (
+            _requires_curl_impersonation(url)
+            or (entry and entry.metadata.get("use_curl_cffi"))
+        )
+
+        if use_curl:
+            try:
+                async with CurlAsyncSession(impersonate="chrome124") as cs:
+                    resp = await cs.get(url, headers=headers, stream=True, timeout=20)
+                    if resp.status_code in (200, 206):
+                        cl = resp.headers.get("content-length")
+                        if cl:
+                            total_size = int(cl)
+                        ar = resp.headers.get("accept-ranges", "").lower()
+                        supports_range = (ar == "bytes")
+                        etag = resp.headers.get("etag", "")
+                        filename = self._extract_filename_from_headers(resp.headers, url)
+                        if entry:
+                            if not entry.metadata:
+                                entry.metadata = {}
+                            entry.metadata["use_curl_cffi"] = True
+                        return supports_range, total_size, etag, filename
+            except Exception as exc:
+                log.warning("curl_cffi probe failed for %s: %s", url, exc)
+
+        # Standard aiohttp probe
         try:
             async with self._session.head(
-                url, allow_redirects=True, **self._request_kwargs()
+                url, allow_redirects=True, **req_kwargs
             ) as resp:
                 if resp.status == 200:
-                    total_size = int(
-                        resp.headers.get("Content-Length", 0)
-                    )
+                    total_size = int(resp.headers.get("Content-Length", 0))
                     ar = resp.headers.get("Accept-Ranges", "").lower()
-                    supports_range = ar == "bytes"
+                    supports_range = (ar == "bytes")
                     etag = resp.headers.get("ETag", "")
-
-                    filename = self._extract_filename_from_headers(
-                        resp.headers, str(resp.url)
-                    )
+                    filename = self._extract_filename_from_headers(resp.headers, str(resp.url))
+                elif resp.status in (403, 503) and _HAS_CURL_CFFI:
+                    # Cloudflare block fallback to curl_cffi
+                    try:
+                        async with CurlAsyncSession(impersonate="chrome124") as cs:
+                            c_resp = await cs.get(url, headers=headers, stream=True, timeout=20)
+                            if c_resp.status_code in (200, 206):
+                                cl = c_resp.headers.get("content-length")
+                                if cl:
+                                    total_size = int(cl)
+                                ar = c_resp.headers.get("accept-ranges", "").lower()
+                                supports_range = (ar == "bytes")
+                                etag = c_resp.headers.get("etag", "")
+                                filename = self._extract_filename_from_headers(c_resp.headers, url)
+                                if entry:
+                                    if not entry.metadata:
+                                        entry.metadata = {}
+                                    entry.metadata["use_curl_cffi"] = True
+                                return supports_range, total_size, etag, filename
+                    except Exception as c_exc:
+                        log.warning("curl_cffi fallback probe failed for %s: %s", url, c_exc)
         except Exception as exc:
             log.warning("HEAD request failed for %s: %s", url, exc)
-            # Will fall back to single download on GET
 
         return supports_range, total_size, etag, filename
 
@@ -478,12 +566,71 @@ class HTTPEngine:
         finally:
             self._active_segments.pop(download_id, None)
 
+    async def _download_segment_curl(
+        self, entry: DownloadEntry, seg: SegmentEntry,
+        current_start: int, headers: dict,
+        seg_progress: dict[int, int],
+        start_time: float, start_downloaded: int,
+        cancel_evt: asyncio.Event,
+    ):
+        req_kwargs = self._request_kwargs(headers, entry=entry, url=entry.url)
+        c_headers = req_kwargs.get("headers", {})
+        async with CurlAsyncSession(impersonate="chrome124") as cs:
+            resp = await cs.get(entry.url, headers=c_headers, stream=True, timeout=READ_TIMEOUT)
+            if resp.status_code == 416:
+                raise _FallbackToSingle("416 Range Not Satisfiable")
+            if resp.status_code not in (200, 206):
+                raise Exception(f"Unexpected status {resp.status_code} in curl segment download")
+            if resp.status_code == 200 and seg.index > 0:
+                raise _FallbackToSingle("Server returned 200 instead of 206")
+
+            file_path = Path(entry.file_path)
+            async for chunk in resp.aiter_content():
+                if cancel_evt.is_set():
+                    self._db.update_segment(seg.id, seg.downloaded_bytes, "pending")
+                    return
+
+                with open(file_path, "r+b") as f:
+                    f.seek(current_start)
+                    f.write(chunk)
+
+                chunk_len = len(chunk)
+                current_start += chunk_len
+                seg.downloaded_bytes += chunk_len
+                seg_progress[seg.index] = seg.downloaded_bytes
+
+                eff_limit = self._get_effective_download_limit(entry)
+                if eff_limit > 0:
+                    expected_time = chunk_len / eff_limit
+                    if expected_time > 0.001:
+                        await asyncio.sleep(min(expected_time, 1.0))
+
+                total_dl = sum(seg_progress.values())
+                elapsed = time.monotonic() - start_time
+                speed = ((total_dl - start_downloaded) / elapsed if elapsed > 0 else 0)
+                remaining = entry.total_size - total_dl
+                eta = remaining / speed if speed > 0 else 0
+
+                entry.downloaded_size = total_dl
+                entry.speed = speed
+                entry.eta_seconds = eta
+                self._db.update_segment(seg.id, seg.downloaded_bytes, "downloading")
+                self._emit_progress(entry.id, total_dl, entry.total_size, speed, eta)
+
+            seg.status = "completed"
+            self._db.update_segment(seg.id, seg.downloaded_bytes, "completed")
+
     async def _download_one_segment(
         self, entry: DownloadEntry, seg: SegmentEntry,
         seg_progress: dict[int, int],
         start_time: float, start_downloaded: int,
         cancel_evt: asyncio.Event,
     ):
+        use_curl = _HAS_CURL_CFFI and (
+            _requires_curl_impersonation(entry.url)
+            or entry.metadata.get("use_curl_cffi")
+        )
+
         for attempt in range(MAX_RETRIES_PER_SEGMENT):
             if cancel_evt.is_set():
                 return
@@ -498,12 +645,24 @@ class HTTPEngine:
                 headers = {
                     "Range": f"bytes={current_start}-{seg.end_byte}"
                 }
+
+                if use_curl:
+                    await self._download_segment_curl(
+                        entry, seg, current_start, headers,
+                        seg_progress, start_time, start_downloaded, cancel_evt,
+                    )
+                    return
+
                 async with self._session.get(
-                    entry.url, **self._request_kwargs(headers)
+                    entry.url, **self._request_kwargs(headers, entry=entry, url=entry.url)
                 ) as resp:
                     if resp.status == 416:
                         raise _FallbackToSingle("416 Range Not Satisfiable")
                     if resp.status == 403:
+                        if _HAS_CURL_CFFI and not use_curl:
+                            entry.metadata["use_curl_cffi"] = True
+                            use_curl = True
+                            continue
                         raise _FallbackToSingle("403 Forbidden on range request")
                     if resp.status not in (200, 206):
                         raise aiohttp.ClientError(
@@ -612,10 +771,78 @@ class HTTPEngine:
 
     # -- single-stream download ----------------------------------------------
 
+    async def _single_download_curl(
+        self, entry: DownloadEntry, file_path: Path,
+        existing_size: int, headers: dict, mode: str,
+        start_time: float, start_downloaded: int,
+        cancel_evt: asyncio.Event,
+    ):
+        req_kwargs = self._request_kwargs(headers, entry=entry, url=entry.url)
+        c_headers = req_kwargs.get("headers", {})
+        async with CurlAsyncSession(impersonate="chrome124") as cs:
+            resp = await cs.get(entry.url, headers=c_headers, stream=True, timeout=READ_TIMEOUT)
+            if resp.status_code not in (200, 206):
+                raise Exception(f"Status {resp.status_code} in curl single download")
+
+            total_from_header = resp.headers.get("content-length")
+            if resp.status_code == 200 and total_from_header:
+                entry.total_size = int(total_from_header)
+            elif resp.status_code == 206:
+                cr = resp.headers.get("content-range", "")
+                if "/" in cr:
+                    entry.total_size = int(cr.split("/")[-1])
+
+            get_filename = self._extract_filename_from_headers(resp.headers, entry.url)
+            if get_filename and get_filename != entry.filename:
+                existing_entries = self._db.get_all_downloads()
+                reserved = {
+                    d.filename for d in existing_entries
+                    if d.id != entry.id and d.save_path == entry.save_path and d.filename
+                }
+                unique_fn = get_unique_filename(entry.save_path, get_filename, reserved_names=reserved)
+                if unique_fn != entry.filename:
+                    entry.filename = unique_fn
+                    entry.file_path = str(Path(entry.save_path) / entry.filename)
+                    file_path = Path(entry.file_path)
+                    self._emit_filename(entry.id, entry.filename)
+
+            self._db.update_download(entry)
+            downloaded = existing_size
+
+            with open(file_path, mode) as f:
+                async for chunk in resp.aiter_content():
+                    if cancel_evt.is_set():
+                        self._db.update_progress(entry.id, downloaded)
+                        return
+
+                    f.write(chunk)
+                    downloaded += len(chunk)
+
+                    eff_limit = self._get_effective_download_limit(entry)
+                    if eff_limit > 0:
+                        expected_time = len(chunk) / eff_limit
+                        if expected_time > 0.001:
+                            await asyncio.sleep(min(expected_time, 1.0))
+
+                    elapsed = time.monotonic() - start_time
+                    speed = ((downloaded - start_downloaded) / elapsed if elapsed > 0 else 0)
+                    remaining = (entry.total_size - downloaded) if entry.total_size else 0
+                    eta = remaining / speed if speed > 0 else 0
+
+                    entry.downloaded_size = downloaded
+                    entry.speed = speed
+                    entry.eta_seconds = eta
+                    self._emit_progress(entry.id, downloaded, entry.total_size, speed, eta)
+
     async def _single_download(self, entry: DownloadEntry,
                                cancel_evt: asyncio.Event):
         file_path = Path(entry.file_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        use_curl = _HAS_CURL_CFFI and (
+            _requires_curl_impersonation(entry.url)
+            or entry.metadata.get("use_curl_cffi")
+        )
 
         # Resume: start from existing file size
         existing_size = 0
@@ -640,10 +867,22 @@ class HTTPEngine:
 
                 start_time = time.monotonic()
                 start_downloaded = existing_size
+                mode = "ab" if existing_size > 0 else "wb"
+
+                if use_curl:
+                    await self._single_download_curl(
+                        entry, file_path, existing_size, headers, mode,
+                        start_time, start_downloaded, cancel_evt,
+                    )
+                    return
 
                 async with self._session.get(
-                    entry.url, **self._request_kwargs(headers)
+                    entry.url, **self._request_kwargs(headers, entry=entry, url=entry.url)
                 ) as resp:
+                    if resp.status == 403 and _HAS_CURL_CFFI and not use_curl:
+                        entry.metadata["use_curl_cffi"] = True
+                        use_curl = True
+                        continue
                     if resp.status == 416:
                         # 416 Range Not Satisfiable: file may already be complete
                         if entry.total_size and existing_size >= entry.total_size:
@@ -776,8 +1015,17 @@ class HTTPEngine:
 
     @staticmethod
     def _filename_from_url(url: str) -> str:
-        path = urlparse(url).path
+        parsed = urlparse(url)
+        path = parsed.path
         name = unquote(path.split("/")[-1]) if path else ""
+        if not name or "." not in name:
+            qs = parse_qs(parsed.query)
+            for key in ("file", "filename", "name", "title"):
+                val = qs.get(key)
+                if val and val[0]:
+                    cand = unquote(val[0])
+                    if "." in cand:
+                        return Path(cand).name
         return name or "download"
 
     @staticmethod
@@ -797,10 +1045,22 @@ class HTTPEngine:
                 filename = unquote(part)
 
         if not filename and final_url:
-            path = unquote(urlparse(final_url).path)
+            parsed = urlparse(final_url)
+            path = unquote(parsed.path)
             name = Path(path).name
-            if name:
+            if name and "." in name:
                 filename = name
+            else:
+                qs = parse_qs(parsed.query)
+                for key in ("file", "filename", "name", "title"):
+                    val = qs.get(key)
+                    if val and val[0]:
+                        cand = unquote(val[0])
+                        if "." in cand:
+                            filename = Path(cand).name
+                            break
+                if not filename and name:
+                    filename = name
         return filename
 
     def _emit_progress(self, download_id: str, downloaded: int,
