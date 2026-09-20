@@ -61,6 +61,12 @@ def parse_args():
         action="store_true",
         help="Enable verbose (debug) logging",
     )
+    parser.add_argument(
+        "urls",
+        nargs="*",
+        default=[],
+        help="Optional download URL(s), magnet link(s), or .torrent file(s)",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +97,23 @@ def main():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
+    # Single-instance check
+    from my_idm.single_instance import SingleInstanceManager, activate_window
+
+    single_instance = SingleInstanceManager()
+    payload = {
+        "action": "activate",
+        "backlog": args.backlog,
+        "urls": [u for u in args.urls if u],
+    }
+
+    if single_instance.send_message(payload):
+        log.info("My-IDM is already running. Signal sent to bring existing window to focus.")
+        sys.exit(0)
+
+    if not single_instance.start_server():
+        log.warning("Could not start single instance IPC server; proceeding as standalone.")
+
     # Database
     db = Database()
     db.open()
@@ -99,12 +122,46 @@ def main():
     manager = DownloadManager(db)
     manager.start()
 
-    # Wire clean shutdown on application quit
-    app.aboutToQuit.connect(manager.stop)
-
     # Main window
     window = MainWindow(manager)
     window.show()
+
+    # Connect single instance IPC message receiver
+    def _on_instance_message(msg: dict):
+        log.info("Received IPC activation message from secondary instance: %s", msg)
+        activate_window(window)
+
+        # Handle backlog if passed
+        b_path = msg.get("backlog")
+        if b_path and Path(b_path).exists():
+            count = manager.load_backlog(b_path)
+            log.info("Loaded %d downloads from secondary instance backlog: %s", count, b_path)
+
+        # Handle urls if passed
+        for u in msg.get("urls", []):
+            if u:
+                manager.add_download(u)
+
+    single_instance.message_received.connect(_on_instance_message)
+
+    # Initial URLs from CLI args
+    for u in args.urls:
+        if u:
+            manager.add_download(u)
+
+    # Wire clean shutdown on application quit
+    _cleaned_up = False
+
+    def _cleanup():
+        nonlocal _cleaned_up
+        if _cleaned_up:
+            return
+        _cleaned_up = True
+        single_instance.close()
+        manager.stop()
+        db.close()
+
+    app.aboutToQuit.connect(_cleanup)
 
     # Load backlog
     backlog_path = args.backlog or str(DEFAULT_BACKLOG)
@@ -116,8 +173,7 @@ def main():
     exit_code = app.exec()
 
     # Cleanup
-    manager.stop()
-    db.close()
+    _cleanup()
     log.info("My-IDM shutdown complete")
     sys.exit(exit_code)
 

@@ -454,3 +454,30 @@ Class containing all color constants used throughout the application.
 ### `DARK_STYLESHEET`
 
 A complete QSS stylesheet string applied to `QApplication`. Covers all widget types: `QMainWindow`, `QMenuBar`, `QMenu`, `QToolBar`, `QToolButton`, `QTableView`, `QHeaderView`, `QScrollBar`, `QStatusBar`, `QDialog`, `QLabel`, `QLineEdit`, `QSpinBox`, `QPushButton`, `QCheckBox`, `QToolTip`, `QGroupBox`.
+
+---
+
+## `my_idm.single_instance`
+
+### `SingleInstanceManager`
+
+```python
+class SingleInstanceManager(QObject)
+```
+
+Enforces a single running instance of My-IDM using `QLocalServer` and `QLocalSocket` IPC.
+
+| Method / Signal | Signature | Description |
+|-----------------|-----------|-------------|
+| `send_message(payload, timeout_ms=1500)` | `(dict, int) -> bool` | Transmits JSON payload to the active primary instance. Returns `True` if connected and delivered. |
+| `start_server()` | `() -> bool` | Starts the `QLocalServer` for the primary instance, clearing stale pipes. |
+| `close()` | `() -> None` | Shuts down server and removes pipe registration. |
+| `message_received` | `Signal(dict)` | Emitted when a secondary instance connects with payload data. |
+
+### `activate_window(window)`
+
+```python
+def activate_window(window: Optional[QWidget]) -> None
+```
+
+Restores minimized windows (`showNormal()`), raises to top (`raise_()`), and requests foreground input focus across platforms (including Windows `SetForegroundWindow` integration).

@@ -70,6 +70,7 @@ my_idm/
 ├── download_model.py    # QAbstractTableModel (12 columns)
 ├── delegates.py         # ProgressBarDelegate for QTableView
 ├── dialogs.py           # AddDownloadDialog, MoveDialog, DeleteDialog
+├── single_instance.py   # Single-instance enforcement via QLocalServer / QLocalSocket IPC
 └── styles.py            # Dark theme QSS stylesheet, color palette
 ```
 
@@ -77,6 +78,7 @@ my_idm/
 
 ```
 main.py
+  ├── single_instance.py
   ├── database.py
   ├── config.py
   ├── network.py

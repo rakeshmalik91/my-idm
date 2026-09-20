@@ -46,6 +46,7 @@ commit after each features or set of fixes/enhancements
 - [x] Make the settings page vertically scrollable, Antivirus page iputs are squeezed on default height
 - [x] Top taskbar menu items not indented correctly
 - [x] If a torrent file url is given treat it as torrent
+- [x] Make app single instance, focusing existing window on subsequent launches
 
 ----------------------
 ### Tor Support
