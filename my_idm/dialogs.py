@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -44,6 +45,7 @@ class AddDownloadDialog(QDialog):
 
         self._config = GeneralConfig.load()
         self._url = ""
+        self._urls: list[str] = []
         self._save_path = self._config.get_effective_save_path()
         self._num_segments = self._config.default_segments
         self._tor_enabled = (
@@ -70,10 +72,14 @@ class AddDownloadDialog(QDialog):
         url_group = QGroupBox("URL / Magnet Link")
         url_layout = QVBoxLayout(url_group)
 
-        self._url_edit = QLineEdit()
+        self._url_edit = QPlainTextEdit()
+        self._url_edit.text = self._url_edit.toPlainText
+        self._url_edit.setText = self._url_edit.setPlainText
+        self._url_edit.hasSelectedText = lambda: self._url_edit.textCursor().hasSelection()
         self._url_edit.setPlaceholderText(
-            "Paste URL, magnet link, or browse for .torrent file..."
+            "Paste URL(s), magnet link(s), one per line, or browse for .torrent file(s)..."
         )
+        self._url_edit.setFixedHeight(90)
         url_layout.addWidget(self._url_edit)
 
         browse_layout = QHBoxLayout()
@@ -201,12 +207,17 @@ class AddDownloadDialog(QDialog):
         self._update_tor_btn()
 
     def _browse_torrent(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Torrent File", "",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select Torrent File(s)", "",
             "Torrent Files (*.torrent);;All Files (*)",
         )
-        if path:
-            self._url_edit.setText(path)
+        if paths:
+            existing = self._url_edit.toPlainText().strip()
+            lines = [l.strip() for l in existing.splitlines() if l.strip()] if existing else []
+            for p in paths:
+                if p not in lines:
+                    lines.append(p)
+            self._url_edit.setPlainText("\n".join(lines))
 
     def _browse_save_path(self):
         path = QFileDialog.getExistingDirectory(
@@ -217,33 +228,41 @@ class AddDownloadDialog(QDialog):
 
     @staticmethod
     def _is_valid_download_url(text: str) -> bool:
-        if not text or len(text) > 4096 or "\n" in text or "\r" in text:
+        if not text or len(text) > 4096:
             return False
-        lower = text.lower()
+        trimmed = text.strip()
+        lower = trimmed.lower()
         if lower.startswith(("http://", "https://", "ftp://", "magnet:?")):
             return True
-        if lower.endswith(".torrent") and (os.path.isfile(text) or lower.startswith("file://")):
+        if lower.endswith(".torrent") and (os.path.isfile(trimmed) or lower.startswith("file://")):
             return True
         return False
 
     def _prefill_url(self, initial_url: str = ""):
-        candidate = initial_url.strip() if initial_url else ""
-        if not candidate:
+        candidates: list[str] = []
+        if initial_url:
+            for line in initial_url.splitlines():
+                if line.strip():
+                    candidates.append(line.strip())
+        else:
             clipboard = QGuiApplication.clipboard()
             if clipboard:
                 text = (clipboard.text() or "").strip()
-                if self._is_valid_download_url(text):
-                    candidate = text
+                lines = [l.strip() for l in text.splitlines() if l.strip()]
+                if lines and all(self._is_valid_download_url(l) for l in lines):
+                    candidates = lines
 
-        if candidate:
-            self._url_edit.setText(candidate)
+        if candidates:
+            self._url_edit.setPlainText("\n".join(candidates))
             self._url_edit.selectAll()
 
     def _accept(self):
-        self._url = self._url_edit.text().strip()
+        raw_text = self._url_edit.toPlainText().strip()
+        self._urls = [l.strip() for l in raw_text.splitlines() if l.strip()]
+        self._url = self._urls[0] if self._urls else ""
         self._save_path = self._save_edit.text().strip()
         self._num_segments = self._seg_spin.value()
-        if self._url:
+        if self._urls:
             if self._save_path:
                 if self._set_as_default_cb.isChecked():
                     self._config.default_save_path = self._save_path
@@ -255,7 +274,18 @@ class AddDownloadDialog(QDialog):
 
     @property
     def url(self) -> str:
-        return self._url
+        if self._url:
+            return self._url
+        urls = self.urls
+        return urls[0] if urls else ""
+
+    @property
+    def urls(self) -> list[str]:
+        if getattr(self, "_urls", None):
+            return self._urls
+        raw = self._url_edit.toPlainText().strip()
+        lines = [l.strip() for l in raw.splitlines() if l.strip()]
+        return lines if lines else ([self._url] if self._url else [])
 
     @property
     def save_path(self) -> str:
@@ -345,7 +375,7 @@ class DeleteConfirmDialog(QDialog):
             f"Are you sure you want to remove {items}?"
         ))
 
-        self._files_cb = QCheckBox("Also delete downloaded files from disk")
+        self._files_cb = QCheckBox("Also delete downloaded files from disk (move to Trash)")
         layout.addWidget(self._files_cb)
 
         layout.addSpacing(8)
@@ -372,3 +402,65 @@ class DeleteConfirmDialog(QDialog):
     @property
     def delete_files(self) -> bool:
         return self._delete_files
+
+
+class RenameDialog(QDialog):
+    """Dialog to rename a download's file or root folder name."""
+
+    def __init__(self, current_name: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Rename Download")
+        self.setMinimumWidth(560)
+        self.setModal(True)
+
+        from my_idm.resources import get_app_icon
+        self.setWindowIcon(get_app_icon())
+
+        self._new_name = current_name
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        layout.addWidget(QLabel("Enter new filename or root folder name:"))
+
+        self._name_edit = QLineEdit(current_name)
+        self._name_edit.setClearButtonEnabled(True)
+        self._name_edit.returnPressed.connect(self._accept)
+        layout.addWidget(self._name_edit)
+
+        # Pre-select basename excluding extension if dot is present
+        if "." in current_name and not current_name.startswith("."):
+            dot_idx = current_name.rfind(".")
+            self._name_edit.setSelection(0, dot_idx)
+        else:
+            self._name_edit.selectAll()
+
+        layout.addSpacing(8)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.setObjectName("primaryButton")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self._accept)
+        btn_layout.addWidget(ok_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _accept(self):
+        text = self._name_edit.text().strip()
+        if not text:
+            QMessageBox.warning(self, "Invalid Name", "Filename cannot be empty.")
+            return
+        self._new_name = text
+        self.accept()
+
+    @property
+    def new_name(self) -> str:
+        return self._new_name

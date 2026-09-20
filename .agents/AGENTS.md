@@ -42,3 +42,8 @@ The canonical architecture documentation is organized under [`docs/architecture/
    - On Windows, un-isolated `QSettings("MyIDM", "My-IDM")` modifies the live Windows Registry (`HKEY_CURRENT_USER\Software\MyIDM\My-IDM`), which causes the user's default download folder, UI state, and configured preferences to be wiped repeatedly.
    - All tests must use isolated settings (enforced automatically in [`tests/conftest.py`](file:///d:/Projects/my-idm/tests/conftest.py) via a temporary `IniFormat` directory) or explicit temporary files (`QSettings(temp_file, QSettings.Format.IniFormat)`).
    - Never call `.clear()` on production registry settings.
+5. **No Automatic Git Push (CRITICAL)**:
+   - **NEVER** push automatically (`git push`).
+   - Only commit changes locally (`git commit`).
+   - Pushing to the remote repository must only be done if explicitly instructed by the user.
+

@@ -266,6 +266,7 @@ Central orchestrator connecting GUI, engines, and database.
 | `download_added` | `(str)` | `download_id` |
 | `download_removed` | `(str)` | `download_id` |
 | `download_moved` | `(str)` | `download_id` |
+| `download_renamed` | `(str, str)` | `download_id, new_filename` (emitted when root file or folder is renamed) |
 | `bandwidth_limits_changed` | `(int, int)` | `download_limit, upload_limit` (bytes/s, 0 = unlimited) |
 
 #### Lifecycle
@@ -284,6 +285,7 @@ Central orchestrator connecting GUI, engines, and database.
 | `resume_download` | `(download_id) → None` | Resume paused/errored download |
 | `delete_download` | `(download_id, delete_files=False) → None` | Remove download and optionally delete files |
 | `move_download` | `(download_id, new_save_path) → None` | Move download to new directory |
+| `rename_download` | `(download_id, new_filename) → tuple[bool, str]` | Rename root file or folder on disk and DB at any point in time |
 | `recheck_download` | `(download_id) → None` | Verify file integrity |
 | `set_bandwidth_limits` | `(download_limit, upload_limit) → None` | Set global down/up bandwidth limits in bytes/s |
 | `set_download_bandwidth_allocation` | `(download_id, allocation) → None` | Set download allocation ('low', 'medium', 'high', 'max') |
@@ -382,6 +384,19 @@ Renders a styled, color-coded progress bar in a `QTableView` cell.
 | `paused` | Amber | `#9e6a03` |
 | `error` | Red | `#da3633` |
 | `queued` | Gray | `#6e7681` |
+
+### `DownloadNameDelegate`
+
+```python
+class DownloadNameDelegate(QStyledItemDelegate)
+```
+
+Renders the download filename in standard text color followed by its source website domain at the end in cyan (`#39c5bb`), with automatic proportional trimming with ellipses (`...`) if column space is restricted.
+
+**Data roles used:**
+- `Qt.DisplayRole`: Filename / title string.
+- `Qt.DecorationRole`: Filetype / Tor icon.
+- `Qt.UserRole`: Source website domain (e.g. `releases.ubuntu.com`, `tracker.debian.org`).
 
 ---
 

@@ -42,6 +42,7 @@ from my_idm.network import (
     get_available_interfaces,
 )
 from my_idm.security import (
+    KNOWN_THREAT_CATEGORIES,
     SecurityConfig,
     find_windows_defender_path,
     scan_file,
@@ -622,6 +623,19 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(post_group)
 
+        # Scan Timing
+        timing_group = QGroupBox("Scan Timing")
+        timing_inner = QVBoxLayout(timing_group)
+        timing_inner.setSpacing(8)
+
+        self._timing_auto_rb = QRadioButton("🔄 Automatically scan when download completes")
+        timing_inner.addWidget(self._timing_auto_rb)
+
+        self._timing_manual_rb = QRadioButton("🖱️ Manual scan only (right-click → Scan with Antivirus)")
+        timing_inner.addWidget(self._timing_manual_rb)
+
+        layout.addWidget(timing_group)
+
         # Threat Remediation
         action_group = QGroupBox("Action When Threat is Detected")
         action_inner = QVBoxLayout(action_group)
@@ -630,6 +644,44 @@ class SettingsDialog(QDialog):
         self._action_quarantine_rb = QRadioButton("🗑️ Alert user and automatically quarantine / delete infected file")
         action_inner.addWidget(self._action_quarantine_rb)
         layout.addWidget(action_group)
+
+        # Threat Exclusions
+        excl_group = QGroupBox("Threat Exclusions (silently allowed)")
+        excl_inner = QVBoxLayout(excl_group)
+        excl_inner.setSpacing(8)
+
+        excl_desc = QLabel(
+            "Threats matching any pattern or category in this list (e.g. HackTool, CrackTool, Keygen) "
+            "will be silently allowed without triggering warnings or quarantine actions."
+        )
+        excl_desc.setWordWrap(True)
+        excl_desc.setStyleSheet("color: #a0aab8; font-size: 11px;")
+        excl_inner.addWidget(excl_desc)
+
+        self._threat_excl_list = QListWidget()
+        self._threat_excl_list.setMaximumHeight(130)
+        excl_inner.addWidget(self._threat_excl_list)
+
+        add_row = QHBoxLayout()
+        self._new_threat_excl_edit = QLineEdit()
+        self._new_threat_excl_edit.setPlaceholderText("Enter threat category or pattern (e.g. Win32/Keygen, CrackTool, PUA)")
+        self._new_threat_excl_edit.returnPressed.connect(self._on_add_threat_exclusion)
+        add_row.addWidget(self._new_threat_excl_edit, 1)
+
+        add_btn = QPushButton("➕ Add")
+        add_btn.clicked.connect(self._on_add_threat_exclusion)
+        add_row.addWidget(add_btn)
+
+        remove_btn = QPushButton("🗑 Remove")
+        remove_btn.clicked.connect(self._on_remove_threat_exclusion)
+        add_row.addWidget(remove_btn)
+
+        reset_btn = QPushButton("↺ Reset Defaults")
+        reset_btn.clicked.connect(self._on_reset_threat_exclusions_defaults)
+        add_row.addWidget(reset_btn)
+
+        excl_inner.addLayout(add_row)
+        layout.addWidget(excl_group)
 
         # Test Antivirus Scanner button
         test_scanner_btn = QPushButton("🧪 Test Antivirus Scanner")
@@ -692,6 +744,29 @@ class SettingsDialog(QDialog):
             self._action_quarantine_rb.setChecked(True)
         else:
             self._action_warn_rb.setChecked(True)
+
+        # Scan timing
+        if self._security_cfg.scan_timing == "manual_only":
+            self._timing_manual_rb.setChecked(True)
+        else:
+            self._timing_auto_rb.setChecked(True)
+
+        # Threat exclusions list
+        self._threat_excl_list.clear()
+        for cat in self._security_cfg.get_effective_threat_exclusions():
+            if cat.strip():
+                self._threat_excl_list.addItem(cat.strip())
+        if self._security_cfg.ignored_threat_patterns:
+            patterns = self._security_cfg.ignored_threat_patterns
+            if isinstance(patterns, str):
+                patterns = [p.strip() for p in patterns.split(",") if p.strip()]
+            for pat in patterns:
+                existing = [
+                    self._threat_excl_list.item(i).text().strip().lower()
+                    for i in range(self._threat_excl_list.count())
+                ]
+                if pat.lower() not in existing:
+                    self._threat_excl_list.addItem(pat)
 
         # Tor tab
         self._tor_enable_cb.setChecked(self._tor_cfg.enabled)
@@ -879,6 +954,7 @@ class SettingsDialog(QDialog):
         custom_args = self._custom_args_edit.text().strip()
 
         cfg = SecurityConfig(
+            scan_after_download=True,
             scanner_type=scanner_type,
             custom_scanner_path=custom_path,
             custom_scanner_args=custom_args,
@@ -890,21 +966,22 @@ class SettingsDialog(QDialog):
             temp_path = tf.name
 
         try:
-            res = scan_file(temp_path, cfg)
-            if res.is_clean:
+            is_clean, report = scan_file(temp_path, cfg)
+            scanner_display = f"Custom ({Path(custom_path).name})" if scanner_type == "custom" and custom_path else "Windows Defender"
+            if is_clean:
                 QMessageBox.information(
                     self, "Antivirus Scanner Test",
                     f"✅ Scanner verified successfully!\n\n"
-                    f"Scanner: {res.scanner_name}\n"
+                    f"Scanner: {scanner_display}\n"
                     f"Result: Clean (Safe)\n"
-                    f"Details: {res.details}",
+                    f"Details: {report}",
                 )
             else:
                 QMessageBox.warning(
                     self, "Antivirus Scanner Test",
                     f"⚠️ Scanner executed but detected a threat or returned non-zero code:\n\n"
-                    f"Scanner: {res.scanner_name}\n"
-                    f"Result: {res.details}",
+                    f"Scanner: {scanner_display}\n"
+                    f"Result: {report}",
                 )
         except Exception as ex:
             QMessageBox.critical(
@@ -917,6 +994,31 @@ class SettingsDialog(QDialog):
                     os.remove(temp_path)
                 except Exception:
                     pass
+
+    def _on_add_threat_exclusion(self):
+        text = self._new_threat_excl_edit.text().strip()
+        if not text:
+            return
+        items = [p.strip() for p in text.split(",") if p.strip()]
+        existing = [
+            self._threat_excl_list.item(i).text().strip().lower()
+            for i in range(self._threat_excl_list.count())
+        ]
+        for item in items:
+            if item.lower() not in existing:
+                self._threat_excl_list.addItem(item)
+                existing.append(item.lower())
+        self._new_threat_excl_edit.clear()
+
+    def _on_remove_threat_exclusion(self):
+        row = self._threat_excl_list.currentRow()
+        if row >= 0:
+            self._threat_excl_list.takeItem(row)
+
+    def _on_reset_threat_exclusions_defaults(self):
+        self._threat_excl_list.clear()
+        for cat in KNOWN_THREAT_CATEGORIES:
+            self._threat_excl_list.addItem(cat)
 
     # -----------------------------------------------------------------------
     # Save & Results
@@ -980,6 +1082,15 @@ class SettingsDialog(QDialog):
         self._security_cfg.action_on_threat = (
             "quarantine" if self._action_quarantine_rb.isChecked() else "warn"
         )
+        self._security_cfg.scan_timing = (
+            "manual_only" if self._timing_manual_rb.isChecked() else "after_complete"
+        )
+        excl_items = [
+            self._threat_excl_list.item(i).text().strip()
+            for i in range(self._threat_excl_list.count())
+        ]
+        self._security_cfg.ignored_threat_categories = [x for x in excl_items if x]
+        self._security_cfg.ignored_threat_patterns = ""
         self._security_cfg.save()
 
         # 4. Collect Tor settings

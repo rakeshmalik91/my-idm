@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from my_idm.security import (
+    KNOWN_THREAT_CATEGORIES,
     SecurityConfig,
     find_windows_defender_path,
     scan_file,
@@ -182,6 +184,21 @@ class SecuritySettingsDialog(QDialog):
 
         post_layout.addWidget(scanner_group)
 
+        # Scan Timing group
+        timing_group = QGroupBox("Scan Timing")
+        timing_inner = QVBoxLayout(timing_group)
+        self._timing_group = QButtonGroup(self)
+
+        self._rb_timing_auto = QRadioButton("🔄 Automatically scan when download completes")
+        self._timing_group.addButton(self._rb_timing_auto)
+        timing_inner.addWidget(self._rb_timing_auto)
+
+        self._rb_timing_manual = QRadioButton("🖱️ Manual scan only (right-click → Scan with Antivirus)")
+        self._timing_group.addButton(self._rb_timing_manual)
+        timing_inner.addWidget(self._rb_timing_manual)
+
+        post_layout.addWidget(timing_group)
+
         # Action on threat group
         action_group = QGroupBox("Action When Threat is Detected")
         action_inner = QVBoxLayout(action_group)
@@ -198,6 +215,45 @@ class SecuritySettingsDialog(QDialog):
         action_inner.addWidget(self._rb_delete)
 
         post_layout.addWidget(action_group)
+
+        # Threat Exclusions group
+        excl_group = QGroupBox("Threat Exclusions (silently allowed)")
+        excl_inner = QVBoxLayout(excl_group)
+        excl_inner.setSpacing(8)
+
+        excl_desc = QLabel(
+            "Threats matching any pattern or category in this list (e.g. HackTool, CrackTool, Keygen) "
+            "will be silently allowed without triggering warnings or quarantine actions."
+        )
+        excl_desc.setWordWrap(True)
+        excl_desc.setStyleSheet("color: #8892b0; font-size: 11px;")
+        excl_inner.addWidget(excl_desc)
+
+        self._threat_excl_list = QListWidget()
+        self._threat_excl_list.setMaximumHeight(130)
+        excl_inner.addWidget(self._threat_excl_list)
+
+        add_row = QHBoxLayout()
+        self._new_threat_excl_edit = QLineEdit()
+        self._new_threat_excl_edit.setPlaceholderText("Enter threat category or pattern (e.g. Win32/Keygen, CrackTool, PUA)")
+        self._new_threat_excl_edit.returnPressed.connect(self._on_add_threat_exclusion)
+        add_row.addWidget(self._new_threat_excl_edit, 1)
+
+        add_btn = QPushButton("➕ Add")
+        add_btn.clicked.connect(self._on_add_threat_exclusion)
+        add_row.addWidget(add_btn)
+
+        remove_btn = QPushButton("🗑 Remove")
+        remove_btn.clicked.connect(self._on_remove_threat_exclusion)
+        add_row.addWidget(remove_btn)
+
+        reset_btn = QPushButton("↺ Reset Defaults")
+        reset_btn.clicked.connect(self._on_reset_threat_exclusions_defaults)
+        add_row.addWidget(reset_btn)
+
+        excl_inner.addLayout(add_row)
+        post_layout.addWidget(excl_group)
+
         post_layout.addStretch()
         tabs.addTab(self._wrap_scrollable(post_tab), "🛡️ Post-Download Antivirus")
 
@@ -238,6 +294,27 @@ class SecuritySettingsDialog(QDialog):
             self._rb_delete.setChecked(True)
         else:
             self._rb_warn.setChecked(True)
+
+        if self._config.scan_timing == "manual_only":
+            self._rb_timing_manual.setChecked(True)
+        else:
+            self._rb_timing_auto.setChecked(True)
+
+        self._threat_excl_list.clear()
+        for cat in self._config.get_effective_threat_exclusions():
+            if cat.strip():
+                self._threat_excl_list.addItem(cat.strip())
+        if self._config.ignored_threat_patterns:
+            patterns = self._config.ignored_threat_patterns
+            if isinstance(patterns, str):
+                patterns = [p.strip() for p in patterns.split(",") if p.strip()]
+            for pat in patterns:
+                existing = [
+                    self._threat_excl_list.item(i).text().strip().lower()
+                    for i in range(self._threat_excl_list.count())
+                ]
+                if pat.lower() not in existing:
+                    self._threat_excl_list.addItem(pat)
 
         self._on_pre_scan_toggled(self._config.scan_before_download)
         self._on_post_scan_toggled(self._config.scan_after_download)
@@ -303,6 +380,31 @@ class SecuritySettingsDialog(QDialog):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def _on_add_threat_exclusion(self):
+        text = self._new_threat_excl_edit.text().strip()
+        if not text:
+            return
+        items = [p.strip() for p in text.split(",") if p.strip()]
+        existing = [
+            self._threat_excl_list.item(i).text().strip().lower()
+            for i in range(self._threat_excl_list.count())
+        ]
+        for item in items:
+            if item.lower() not in existing:
+                self._threat_excl_list.addItem(item)
+                existing.append(item.lower())
+        self._new_threat_excl_edit.clear()
+
+    def _on_remove_threat_exclusion(self):
+        row = self._threat_excl_list.currentRow()
+        if row >= 0:
+            self._threat_excl_list.takeItem(row)
+
+    def _on_reset_threat_exclusions_defaults(self):
+        self._threat_excl_list.clear()
+        for cat in KNOWN_THREAT_CATEGORIES:
+            self._threat_excl_list.addItem(cat)
+
     def _on_save(self):
         self._config.scan_before_download = self._scan_before_cb.isChecked()
         self._config.warn_high_risk_extensions = self._warn_ext_cb.isChecked()
@@ -314,6 +416,13 @@ class SecuritySettingsDialog(QDialog):
         self._config.custom_scanner_path = self._custom_path_edit.text().strip()
         self._config.custom_scanner_args = self._custom_args_edit.text().strip()
         self._config.action_on_threat = "delete" if self._rb_delete.isChecked() else "warn"
+        self._config.scan_timing = "manual_only" if self._rb_timing_manual.isChecked() else "after_complete"
+        excl_items = [
+            self._threat_excl_list.item(i).text().strip()
+            for i in range(self._threat_excl_list.count())
+        ]
+        self._config.ignored_threat_categories = [x for x in excl_items if x]
+        self._config.ignored_threat_patterns = ""
 
         self.accept()
 

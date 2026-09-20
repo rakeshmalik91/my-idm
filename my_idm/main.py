@@ -62,6 +62,11 @@ def parse_args():
         help="Enable verbose (debug) logging",
     )
     parser.add_argument(
+        "--no-splash",
+        action="store_true",
+        help="Disable the startup splash screen",
+    )
+    parser.add_argument(
         "urls",
         nargs="*",
         default=[],
@@ -114,17 +119,42 @@ def main():
     if not single_instance.start_server():
         log.warning("Could not start single instance IPC server; proceeding as standalone.")
 
+    # Splash screen
+    splash = None
+    if not args.no_splash:
+        try:
+            from my_idm.splash import IDMSplashScreen
+            splash = IDMSplashScreen()
+            splash.show()
+            splash.set_message("Starting My-IDM...", 15)
+        except Exception as e:
+            log.warning("Could not initialize splash screen: %s", e)
+            splash = None
+
     # Database
+    if splash:
+        splash.set_message("Opening database...", 30)
     db = Database()
     db.open()
 
     # Manager
+    if splash:
+        splash.set_message("Starting download engines...", 55)
     manager = DownloadManager(db)
     manager.start()
 
     # Main window
-    window = MainWindow(manager)
-    window.show()
+    if splash:
+        splash.set_message("Loading user interface...", 80)
+    window = MainWindow(manager, show_exit_splash=not args.no_splash)
+
+    if splash:
+        splash.set_message("Ready!", 100)
+        window.show()
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(400, lambda: splash.finish(window))
+    else:
+        window.show()
 
     # Connect single instance IPC message receiver
     def _on_instance_message(msg: dict):

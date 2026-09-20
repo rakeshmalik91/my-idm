@@ -52,6 +52,18 @@ commit after each features or set of fixes/enhancements
 - [x] Add settings UI for configuring list of places where backlog files will be picked
 - [x] Automatically clear entries after processing successfully from the backlog file
 - [x] Poll for backlog periodically with configurable interval (1 min default)
+- [x] Add support to select multiple and copy URL/Magnet. Should copy all Url/Magnet one per line.
+- [x] Add Download should also accept multiple URLs, one per line. make the textbox multiline
+- [x] Add support to change the root file or folder name of a Torrent/HTTP download (at any point of time, during download or after completion)
+- [x] If a torrent or HTTP download is already completed, dont try to fetch metadata when clicked on it. Leave it as it is unless recheck/force-start etc.
+- [x] In name column, show source website domain in different colour (at end, trim with ellipses if too long)
+- [x] seed/peer data isnt showing up in the seed/peer column or details panel anymore
+- [x] Add a stop button that puts a download to Stopped state, that dis never retried unless manually resumed, and not considered as active, doesnt have an order number
+- [x] Add filters over Status & Name (for Type) columns. A filter icon on header that opens a opoup for multiselect. 
+- [x] Show an ASC/DESC icon on header for columns sorted by
+- [x] left click on footer speed should also open its bandwidth context menu
+- [x] deleting files should move to trash, verify it is the behaviour
+- [x] Add startup splash screen with loading progress, logo, and stage indicators
 
 ----------------------
 ### Tor Support
@@ -63,6 +75,8 @@ commit after each features or set of fixes/enhancements
   - [x] fix progressbar glitch when tor is turned on/off during download
   - [x] while connecting or disconnecting tor, show a progressbar on both toolbar and footer tor buttons. when ON make the buttons green.
   - [x] before tor start/stop pause all ongoing downloads, and resume on tor stop/start. ensure switching works seemslessly and doesnt mess up downloads data.
+  - [ ] to verify tor connectivity is actually working as expected
+  - [ ] to verify what happens if another instance of tor or tor browser running in parallel
 
 ----------------------
 ### Bandwidth control
@@ -71,3 +85,8 @@ commit after each features or set of fixes/enhancements
   
 ----------------------
 
+### Malware Scan
+- [x] BUG: test antivirus button in preferences window failing: tuple object has no object is_clean
+- [x] control what type of virus/malware to scan (for example ignore win/CrackTool, HackTool etc that are mostly harmless and commonly found on torrents). 
+- [x] control when to scan, before download start, after completes etc
+- [x] control what kind of malware to delete/quarrantine

@@ -224,19 +224,142 @@ class TestSecuritySettingsDialog(unittest.TestCase):
             warn_high_risk_extensions=True,
             scan_after_download=True,
             action_on_threat="warn",
+            scan_timing="after_complete",
+            ignored_threat_categories=["HackTool", "CrackTool"],
         )
         dlg = SecuritySettingsDialog(cfg)
         self.assertTrue(dlg._scan_before_cb.isChecked())
         self.assertTrue(dlg._warn_ext_cb.isChecked())
         self.assertTrue(dlg._rb_warn.isChecked())
+        self.assertTrue(dlg._rb_timing_auto.isChecked())
+        self.assertEqual(dlg._threat_excl_list.count(), 2)
 
-        # Toggle to delete
+        # Toggle to delete and manual_only
         dlg._rb_delete.setChecked(True)
+        dlg._rb_timing_manual.setChecked(True)
+
+        # Add an exclusion via list UI
+        dlg._new_threat_excl_edit.setText("Keygen, PUA")
+        dlg._on_add_threat_exclusion()
+        self.assertEqual(dlg._threat_excl_list.count(), 4)
+
+        # Remove an exclusion
+        dlg._threat_excl_list.setCurrentRow(0)
+        dlg._on_remove_threat_exclusion()
+        self.assertEqual(dlg._threat_excl_list.count(), 3)
+
         dlg._on_save()
 
         self.assertEqual(dlg.config.action_on_threat, "delete")
+        self.assertEqual(dlg.config.scan_timing, "manual_only")
+        self.assertIn("Keygen", dlg.config.ignored_threat_categories)
+        self.assertIn("PUA", dlg.config.ignored_threat_categories)
         dlg.close()
+
+    def test_dialog_reset_exclusions_defaults(self):
+        dlg = SecuritySettingsDialog(SecurityConfig())
+        dlg._threat_excl_list.clear()
+        self.assertEqual(dlg._threat_excl_list.count(), 0)
+
+        dlg._on_reset_threat_exclusions_defaults()
+        self.assertGreaterEqual(dlg._threat_excl_list.count(), 3)
+        items = [dlg._threat_excl_list.item(i).text() for i in range(dlg._threat_excl_list.count())]
+        self.assertIn("HackTool", items)
+        self.assertIn("CrackTool", items)
+        dlg.close()
+
+
+class TestThreatExclusionAndScanTiming(unittest.TestCase):
+
+    def test_threat_exclusion_silently_allows_matched_threat(self):
+        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+            f.write(b"mock binary")
+            temp_path = f.name
+
+        try:
+            cfg = SecurityConfig(
+                scan_after_download=True,
+                scanner_type="defender",
+                ignored_threat_categories=["HackTool", "CrackTool"],
+            )
+            # Mock subprocess.run simulating Defender detecting HackTool:Win32/AutoKMS
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 2
+                mock_run.return_value.stdout = "Threat detected: HackTool:Win32/AutoKMS found in file."
+                mock_run.return_value.stderr = ""
+
+                is_clean, report = scan_file(temp_path, cfg)
+                self.assertTrue(is_clean, "Threat matching ignored_threat_categories should be allowed as clean")
+                self.assertIn("Allowed (matched exclusion 'HackTool')", report)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_threat_not_excluded_is_flagged(self):
+        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
+            f.write(b"mock binary")
+            temp_path = f.name
+
+        try:
+            cfg = SecurityConfig(
+                scan_after_download=True,
+                scanner_type="defender",
+                ignored_threat_categories=["HackTool"],
+            )
+            # Mock subprocess.run simulating Trojan:Win32/Wacatac
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 2
+                mock_run.return_value.stdout = "Threat detected: Trojan:Win32/Wacatac found in file."
+                mock_run.return_value.stderr = ""
+
+                is_clean, report = scan_file(temp_path, cfg)
+                self.assertFalse(is_clean, "Threat not matching exclusions must be flagged")
+                self.assertIn("Trojan:Win32/Wacatac", report)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    def test_manual_only_scan_timing_skips_auto_scan(self):
+        tmp_dir = tempfile.TemporaryDirectory()
+        db = None
+        mgr = None
+        try:
+            db = Database(Path(tmp_dir.name) / "test.db")
+            db.open()
+            mgr = DownloadManager(db)
+            cfg = SecurityConfig(
+                scan_after_download=True,
+                scan_timing="manual_only",
+            )
+            mgr.set_security_config(cfg)
+
+            entry = DownloadEntry(
+                id="test-dl",
+                url="https://example.com/test.bin",
+                filename="test.bin",
+                file_path=str(Path(tmp_dir.name) / "test.bin"),
+                save_path=tmp_dir.name,
+                total_size=100,
+                downloaded_size=100,
+                status="downloading",
+            )
+            db.add_download(entry)
+
+            emitted_statuses = []
+            mgr.status_changed.connect(lambda did, st, err: emitted_statuses.append((did, st)))
+
+            with patch.object(mgr, "_handle_completed_scan") as mock_scan:
+                mgr._on_http_status("test-dl", "completed", "")
+                mock_scan.assert_not_called()
+                self.assertIn(("test-dl", "completed"), emitted_statuses)
+        finally:
+            if mgr:
+                mgr.stop()
+            if db:
+                db.close()
+            tmp_dir.cleanup()
 
 
 if __name__ == "__main__":
     unittest.main()
+

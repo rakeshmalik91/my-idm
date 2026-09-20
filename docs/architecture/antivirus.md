@@ -34,12 +34,23 @@ When an infected or malicious file is detected:
 - **Warn (Default)**: Displays an urgent alert dialog identifying the threat name, scanner engine output, and file path, while tagging the download in the UI.
 - **Delete / Quarantine**: Automatically removes the infected file or directory from disk immediately (`quarantine_or_delete_file`), preventing accidental execution or background OS indexing.
 
-### 4. On-Demand Right-Click Scanning
+### 4. Threat Exclusions List
+To prevent false-positive alerts on commonly encountered torrent payloads (keygens, cracks, game patches, or diagnostic utilities), My-IDM allows configuring a list of excluded threat patterns:
+- Managed as an interactive list widget with **Add**, **Remove**, and **↺ Reset Defaults** controls.
+- By default, common harmless categories can be pre-filled: `HackTool`, `CrackTool`, `PUA`, `Adware`, and `Riskware`.
+- Any scanner threat output matching an exclusion item is silently allowed as clean (`Allowed (matched exclusion '...')`).
+
+### 5. Scan Timing Control
+Users can specify when antivirus scanning occurs:
+- **🔄 Automatically scan when download completes (Default)**: Immediately runs the scanner upon completion of HTTP or torrent downloads.
+- **🖱️ Manual scan only**: Completely disables automatic post-download scanning, allowing users to scan on-demand via right-click whenever desired.
+
+### 6. On-Demand Right-Click Scanning
 - Right-click any completed download in the transfer table and select **🛡️ Scan with Antivirus**.
 - The scan runs asynchronously in a worker thread without freezing the user interface.
 - Results update the download metadata and are immediately viewable in the Details Panel.
 
-### 5. Details Panel Security Reporting
+### 7. Details Panel Security Reporting
 - The bottom Details Panel displays security audit information in the **Overview** tab:
   - **🛡️ Antivirus: Clean** (green) with scanner verification notes.
   - **⚠️ Antivirus: Threat Detected** (red) with complete engine logs.

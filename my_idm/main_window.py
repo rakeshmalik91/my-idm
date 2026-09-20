@@ -27,8 +27,10 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
+    QDialog,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -45,10 +47,16 @@ from PySide6.QtWidgets import (
 )
 
 from my_idm.database import Database, DownloadEntry
-from my_idm.delegates import ProgressBarDelegate
+from my_idm.delegates import DownloadNameDelegate, ProgressBarDelegate
 from my_idm.details_panel import DetailsPanel
-from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, MoveDownloadDialog
+from my_idm.dialogs import (
+    AddDownloadDialog,
+    DeleteConfirmDialog,
+    MoveDownloadDialog,
+    RenameDialog,
+)
 from my_idm.download_model import Col, DownloadTableModel
+from my_idm.header_view import FilterHeaderView
 from my_idm.manager import DownloadManager
 from my_idm.resources import get_app_icon, get_app_logo_pixmap
 from my_idm.network import NetworkConfig, is_vpn_adapter_name
@@ -112,6 +120,20 @@ def _create_pause_icon(size: int = 32) -> QIcon:
     return QIcon(pix)
 
 
+def _create_stop_icon(size: int = 32) -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#ef4444"))
+    p.setPen(Qt.PenStyle.NoPen)
+    margin = size * 0.2
+    side = size - 2 * margin
+    p.drawRoundedRect(margin, margin, side, side, 3, 3)
+    p.end()
+    return QIcon(pix)
+
+
 def _create_emoji_icon(emoji: str, size: int = 32) -> QIcon:
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -129,9 +151,15 @@ def _create_emoji_icon(emoji: str, size: int = 32) -> QIcon:
 class MainWindow(QMainWindow):
     """The main My-IDM window."""
 
-    def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        manager: DownloadManager,
+        show_exit_splash: bool = False,
+        parent: Optional[QWidget] = None,
+    ):
         super().__init__(parent)
         self._manager = manager
+        self._show_exit_splash = show_exit_splash
 
         self.setWindowTitle("My-IDM — Download Manager")
         self.setMinimumSize(1100, 600)
@@ -179,20 +207,30 @@ class MainWindow(QMainWindow):
         self._table.verticalHeader().setVisible(False)
         self._table.setWordWrap(False)
 
+        # Name column delegate (renders source website domain in cyan)
+        self._name_delegate = DownloadNameDelegate(self._table)
+        self._table.setItemDelegateForColumn(
+            Col.NAME, self._name_delegate
+        )
+
         # Progress bar delegate
         self._progress_delegate = ProgressBarDelegate(self._table)
         self._table.setItemDelegateForColumn(
             Col.PROGRESS, self._progress_delegate
         )
 
-        # Column sizing - make all columns interactively resizable
-        header = self._table.horizontalHeader()
+        # Filterable and movable column header with sort indicators
+        self._header_view = FilterHeaderView(self._table)
+        self._table.setHorizontalHeader(self._header_view)
+        header = self._header_view
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(False)
         header.setCascadingSectionResizes(False)
         header.setDefaultSectionSize(110)
         header.setSectionsMovable(True)
-        header.setDragEnabled(True)
+        header.setFirstSectionMovable(True)
+        header.sectionMoved.connect(self._on_section_moved)
+        header.filter_requested.connect(self._on_header_filter_requested)
 
         self._model.set_tor_config(self._manager.tor_config)
         self._table.doubleClicked.connect(self._on_table_double_clicked)
@@ -224,7 +262,9 @@ class MainWindow(QMainWindow):
         self._splitter = QSplitter(Qt.Orientation.Vertical, self)
         self._splitter.addWidget(self._table)
         self._details_panel = DetailsPanel(self._manager, self)
+        self._details_panel.setMinimumHeight(140)
         self._splitter.addWidget(self._details_panel)
+        self._splitter.setChildrenCollapsible(False)
         self._splitter.setSizes([450, 250])
 
         self.setCentralWidget(self._splitter)
@@ -255,10 +295,19 @@ class MainWindow(QMainWindow):
         self._act_pause.setToolTip("Pause selected downloads (Space)")
         self._act_pause.triggered.connect(self._on_pause)
 
+        self._act_stop = QAction(_create_stop_icon(), "Stop", self)
+        self._act_stop.setToolTip("Stop selected downloads permanently until manually resumed")
+        self._act_stop.triggered.connect(self._on_stop)
+
         self._act_copy_url = QAction(_create_emoji_icon("📋"), "Copy URL / Magnet", self)
         self._act_copy_url.setShortcut(QKeySequence("Ctrl+C"))
         self._act_copy_url.setToolTip("Copy download URL or Magnet link to clipboard (Ctrl+C)")
         self._act_copy_url.triggered.connect(self._on_copy_url)
+
+        self._act_rename = QAction(_create_emoji_icon("✏️"), "Rename…", self)
+        self._act_rename.setShortcut(QKeySequence("F2"))
+        self._act_rename.setToolTip("Rename downloaded file or folder (F2)")
+        self._act_rename.triggered.connect(self._on_rename)
 
         self._act_delete = QAction(_create_emoji_icon("🗑"), "Delete", self)
         self._act_delete.setShortcut(QKeySequence("Delete"))
@@ -266,7 +315,7 @@ class MainWindow(QMainWindow):
         self._act_delete.triggered.connect(self._on_delete)
 
         self._act_delete_file = QAction(_create_emoji_icon("🗑"), "Delete File", self)
-        self._act_delete_file.setToolTip("Delete downloaded file from disk, keeping entry paused at 0%")
+        self._act_delete_file.setToolTip("Delete downloaded file from disk (move to Trash), keeping entry paused at 0%")
         self._act_delete_file.triggered.connect(self._on_delete_file)
 
         self._act_move = QAction(_create_emoji_icon("📂"), "Move…", self)
@@ -356,6 +405,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self._act_resume)
         toolbar.addAction(self._act_pause)
+        stop_action = toolbar.addAction(self._act_stop)
         toolbar.addSeparator()
         toolbar.addAction(self._act_delete)
         toolbar.addAction(self._act_move)
@@ -396,10 +446,14 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self._act_preferences)
 
-        # Show only icons without text for resume and pause
+        # Show only icons without text for playback and action buttons (resume, pause, stop, delete, move, recheck)
         for act in (
             self._act_resume,
             self._act_pause,
+            self._act_stop,
+            self._act_delete,
+            self._act_move,
+            self._act_recheck,
         ):
             btn = toolbar.widgetForAction(act)
             if isinstance(btn, QToolButton):
@@ -432,6 +486,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_move_down)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_copy_url)
+        edit_menu.addAction(self._act_rename)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_delete)
         edit_menu.addAction(self._act_move)
@@ -503,7 +558,15 @@ class MainWindow(QMainWindow):
         self._speed_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._speed_label.customContextMenuRequested.connect(self._show_speed_context_menu)
         self._speed_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._speed_label.setToolTip("Total Transfer Speed (Right-click to set Download / Upload limits)")
+        self._speed_label.setToolTip("Total Transfer Speed (Click or right-click to set Download / Upload limits)")
+
+        def _speed_label_mouse_press(event):
+            if event.button() == Qt.MouseButton.LeftButton:
+                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                self._show_speed_context_menu(pos)
+            QLabel.mousePressEvent(self._speed_label, event)
+
+        self._speed_label.mousePressEvent = _speed_label_mouse_press
         self._count_label = QLabel("0 Downloads, 0 Active")
 
         # Tor footer widget with button and embedded progress bar
@@ -545,10 +608,17 @@ class MainWindow(QMainWindow):
         )
         self._vpn_status_btn.clicked.connect(self._on_open_network_settings)
 
+        self._details_status_btn = QPushButton("📋 Details")
+        self._details_status_btn.setFlat(True)
+        self._details_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._details_status_btn.setToolTip("Toggle bottom download details panel (F4)")
+        self._details_status_btn.clicked.connect(lambda: self._act_toggle_details.trigger())
+
         status_bar = QStatusBar()
         status_bar.addWidget(self._status_label, 1)
         status_bar.addPermanentWidget(self._tor_footer_container)
         status_bar.addPermanentWidget(self._vpn_status_btn)
+        status_bar.addPermanentWidget(self._details_status_btn)
         status_bar.addPermanentWidget(self._speed_label)
         status_bar.addPermanentWidget(self._count_label)
         self.setStatusBar(status_bar)
@@ -565,6 +635,7 @@ class MainWindow(QMainWindow):
         self._manager.download_added.connect(self._on_download_added)
         self._manager.download_removed.connect(self._on_download_removed)
         self._manager.download_moved.connect(self._on_download_moved)
+        self._manager.download_renamed.connect(self._on_download_renamed)
         self._manager.network_config_changed.connect(
             self._update_network_status_badge
         )
@@ -606,7 +677,14 @@ class MainWindow(QMainWindow):
             return self._model.get_entry_by_id(ids[0])
         return None
 
-    # -- sorting helpers -----------------------------------------------------
+    # -- sorting & column helpers --------------------------------------------
+
+    def _on_header_filter_requested(self, column: int, selected_keys: object):
+        self._update_count_label()
+
+    def _on_section_moved(self, logical_index: int, old_visual: int, new_visual: int):
+        if old_visual != new_visual:
+            self._save_ui_state_to_db()
 
     def _on_header_section_clicked(self, logical_index: int):
         if logical_index == Col.ADDED:
@@ -645,9 +723,11 @@ class MainWindow(QMainWindow):
     def _on_add(self):
         dlg = AddDownloadDialog(self, manager=self._manager)
         if dlg.exec() == AddDownloadDialog.DialogCode.Accepted:
-            self._manager.add_download(
-                dlg.url, dlg.save_path, dlg.num_segments
-            )
+            urls = getattr(dlg, "urls", [dlg.url] if dlg.url else [])
+            for u in urls:
+                self._manager.add_download(
+                    u, dlg.save_path, dlg.num_segments
+                )
 
     def _on_add_torrent(self):
         paths, _ = QFileDialog.getOpenFileNames(
@@ -660,6 +740,10 @@ class MainWindow(QMainWindow):
     def _on_pause(self):
         for did in self._selected_ids():
             self._manager.pause_download(did)
+
+    def _on_stop(self):
+        for did in self._selected_ids():
+            self._manager.stop_download(did)
 
     def _on_resume(self):
         for did in self._selected_ids():
@@ -686,7 +770,7 @@ class MainWindow(QMainWindow):
         ans = QMessageBox.question(
             self,
             "Delete File",
-            f"Are you sure you want to delete {items_str} from disk?\n\n"
+            f"Are you sure you want to delete {items_str} from disk (move to Trash)?\n\n"
             "The download entry will be kept, paused, and progress reset to 0.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -778,13 +862,42 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_copy_url(self):
-        entry = self._first_selected_entry()
-        if entry and entry.url:
+        ids = self._selected_ids()
+        if not ids:
+            return
+        urls: list[str] = []
+        for did in ids:
+            entry = self._manager.get_entry(did)
+            if entry and entry.url:
+                urls.append(entry.url)
+        if urls:
             clipboard = QGuiApplication.clipboard()
             if clipboard:
-                clipboard.setText(entry.url)
-                kind = "Magnet link" if entry.url.startswith("magnet:") else "URL"
-                self._status_label.setText(f"Copied {kind} to clipboard")
+                clipboard.setText("\n".join(urls))
+                if len(urls) == 1:
+                    kind = "Magnet link" if urls[0].startswith("magnet:") else "URL"
+                    self._status_label.setText(f"Copied {kind} to clipboard")
+                else:
+                    self._status_label.setText(f"Copied {len(urls)} URLs/Magnets to clipboard")
+
+    def _on_rename(self):
+        entry = self._first_selected_entry()
+        if not entry:
+            return
+        current_name = entry.filename or ""
+        dlg = RenameDialog(current_name, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_name = dlg.new_name.strip()
+            if new_name and new_name != current_name:
+                success, err = self._manager.rename_download(entry.id, new_name)
+                if not success:
+                    QMessageBox.warning(
+                        self,
+                        "Rename Failed",
+                        f"Could not rename '{current_name}':\n\n{err}",
+                    )
+                else:
+                    self._status_label.setText(f"Renamed to '{new_name}'")
 
     # -- context menu --------------------------------------------------------
 
@@ -793,15 +906,19 @@ class MainWindow(QMainWindow):
         menu.addAction(self._act_resume)
         menu.addAction(self._act_force_start)
         menu.addAction(self._act_pause)
+        menu.addAction(self._act_stop)
         menu.addSeparator()
         menu.addAction(self._act_move_up)
         menu.addAction(self._act_move_down)
         menu.addSeparator()
         menu.addAction(self._act_copy_url)
+        menu.addAction(self._act_rename)
         menu.addSeparator()
         menu.addAction(self._act_scan_antivirus)
         menu.addAction(self._act_recheck)
         menu.addAction(self._act_move)
+        menu.addSeparator()
+        menu.addAction(self._act_toggle_details)
         menu.addSeparator()
         # Bandwidth Allocation Submenu
         bw_menu = menu.addMenu("Bandwidth Allocation")
@@ -841,18 +958,20 @@ class MainWindow(QMainWindow):
             seeds, peers, upload_speed,
         )
         self._update_speed_label()
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
+            self._details_panel.refresh()
 
     def _on_status_changed(self, download_id: str, status: str,
                            error_msg: str):
         self._model.update_status(download_id, status, error_msg)
         self._update_count_label()
         self._update_speed_label()
-        if self._details_panel.isVisible() and self._details_panel.current_download_id == download_id:
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 
     def _on_filename_resolved(self, download_id: str, filename: str):
         self._model.update_filename(download_id, filename)
-        if self._details_panel.isVisible() and self._details_panel.current_download_id == download_id:
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 
     def _on_download_added(self, download_id: str):
@@ -871,15 +990,26 @@ class MainWindow(QMainWindow):
         if entry:
             self._model.refresh_entry(download_id, entry)
 
+    def _on_download_renamed(self, download_id: str, new_filename: str):
+        entry = self._manager.get_entry(download_id)
+        fp = entry.file_path if entry else ""
+        self._model.rename_entry(download_id, new_filename, fp)
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
+            self._details_panel.refresh()
+
     # -- helpers -------------------------------------------------------------
 
     def _update_count_label(self):
-        total = self._model.rowCount()
+        total_all = self._model.total_unfiltered_count()
+        visible = self._model.rowCount()
         active = sum(
-            1 for e in self._model._entries
+            1 for e in self._model.all_entries
             if e.status in ("downloading", "checking", "fetching_metadata")
         )
-        self._count_label.setText(f"{total} Downloads, {active} Active")
+        if self._model.is_filtered():
+            self._count_label.setText(f"{visible} of {total_all} Downloads, {active} Active (Filtered)")
+        else:
+            self._count_label.setText(f"{total_all} Downloads, {active} Active")
 
     def _update_speed_label(self):
         down, up = self._model.get_aggregate_speeds()
@@ -894,7 +1024,7 @@ class MainWindow(QMainWindow):
             f"Total Transfer Speed\n"
             f"Download Limit: {_format_speed(dl_lim) if dl_lim > 0 else 'Unlimited'}\n"
             f"Upload Limit: {_format_speed(ul_lim) if ul_lim > 0 else 'Unlimited'}\n"
-            f"Right-click to adjust limits"
+            f"Click or right-click to adjust limits"
         )
 
     def _on_bandwidth_limits_changed(self, download_limit: int, upload_limit: int):
@@ -1263,8 +1393,16 @@ class MainWindow(QMainWindow):
     def _on_toggle_details(self, checked: bool):
         self._details_panel.setVisible(checked)
         if checked:
+            sizes = self._splitter.sizes()
+            if len(sizes) == 2 and sizes[1] < 100:
+                total = sum(sizes) if sum(sizes) > 250 else (self.height() or 700)
+                bot_h = max(220, int(total * 0.35))
+                top_h = max(150, total - bot_h)
+                self._splitter.setSizes([top_h, bot_h])
             entry = self._first_selected_entry()
             self._details_panel.set_download_id(entry.id if entry else None)
+        if hasattr(self, "_details_status_btn"):
+            self._details_status_btn.setText("📋 Details: ON" if checked else "📋 Details: OFF")
 
     def _on_table_selection_changed(self, *args):
         entry = self._first_selected_entry()
@@ -1292,6 +1430,12 @@ class MainWindow(QMainWindow):
             splitter_hex = bytes(self._splitter.saveState().toHex()).decode()
             splitter_sizes = self._splitter.sizes()
             details_vis = self._details_panel.isVisible()
+
+            # If details panel is hidden or collapsed (< 50px), preserve a healthy height in saved state
+            if len(splitter_sizes) == 2 and splitter_sizes[1] < 50:
+                total = sum(splitter_sizes) if sum(splitter_sizes) > 250 else 700
+                bot_s = max(220, int(total * 0.35))
+                splitter_sizes = [max(150, total - bot_s), bot_s]
 
             sort_sec = self._table.horizontalHeader().sortIndicatorSection()
             try:
@@ -1344,6 +1488,13 @@ class MainWindow(QMainWindow):
                 if details_vis is not None:
                     self._act_toggle_details.setChecked(bool(details_vis))
                     self._details_panel.setVisible(bool(details_vis))
+                else:
+                    self._act_toggle_details.setChecked(True)
+                    self._details_panel.setVisible(True)
+                if hasattr(self, "_details_status_btn"):
+                    self._details_status_btn.setText("📋 Details: ON" if self._details_panel.isVisible() else "📋 Details: OFF")
+                self._table.horizontalHeader().setSectionsMovable(True)
+                self._table.horizontalHeader().setFirstSectionMovable(True)
                 self._table.horizontalHeader().setStretchLastSection(False)
                 self._table.horizontalHeader().setCascadingSectionResizes(False)
                 self._table.sortByColumn(Col.ADDED, Qt.SortOrder.DescendingOrder)
@@ -1384,7 +1535,9 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # Ensure cascading resizes and stretch last section are not overwritten by saved state
+            # Ensure sections remain movable and flags are not overwritten by saved state
+            self._table.horizontalHeader().setSectionsMovable(True)
+            self._table.horizontalHeader().setFirstSectionMovable(True)
             self._table.horizontalHeader().setStretchLastSection(False)
             self._table.horizontalHeader().setCascadingSectionResizes(False)
 
@@ -1413,17 +1566,86 @@ class MainWindow(QMainWindow):
 
             splitter_sizes = state.get("splitter_sizes")
             if splitter_sizes and isinstance(splitter_sizes, list) and len(splitter_sizes) == 2:
-                self._splitter.setSizes([int(s) for s in splitter_sizes])
+                top_s = int(splitter_sizes[0])
+                bot_s = int(splitter_sizes[1])
+                # Guard against collapsed bottom panel (< 50px)
+                if bot_s < 50:
+                    total = (top_s + bot_s) if (top_s + bot_s) > 250 else (self.height() or 700)
+                    bot_s = max(220, int(total * 0.35))
+                    top_s = max(150, total - bot_s)
+                self._splitter.setSizes([top_s, bot_s])
+            else:
+                self._splitter.setSizes([450, 250])
 
-            # Details panel visibility
-            if "details_visible" in state:
-                vis = bool(state["details_visible"])
-                self._act_toggle_details.setChecked(vis)
-                self._details_panel.setVisible(vis)
+            # Details panel visibility:
+            # If saved as false while collapsed to 0, auto-heal to True so the panel reappears
+            details_vis = state.get("details_visible")
+            if details_vis is None:
+                details_vis = True
+            elif details_vis is False and splitter_sizes and len(splitter_sizes) == 2 and int(splitter_sizes[1]) < 50:
+                details_vis = True
+
+            self._act_toggle_details.setChecked(bool(details_vis))
+            self._details_panel.setVisible(bool(details_vis))
+            if bool(details_vis):
+                sizes = self._splitter.sizes()
+                if len(sizes) == 2 and sizes[1] < 100:
+                    total = sum(sizes) if sum(sizes) > 250 else 700
+                    bot_h = max(220, int(total * 0.35))
+                    self._splitter.setSizes([max(150, total - bot_h), bot_h])
+            if hasattr(self, "_details_status_btn"):
+                self._details_status_btn.setText("📋 Details: ON" if bool(details_vis) else "📋 Details: OFF")
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
 
     def closeEvent(self, event):
-        self._save_ui_state_to_db()
-        self._manager.stop()
-        super().closeEvent(event)
+        if getattr(self, "_is_closing", False):
+            event.accept()
+            return
+        self._is_closing = True
+
+        # Stop UI timer immediately so no further GUI updates fire
+        if hasattr(self, "_details_timer"):
+            self._details_timer.stop()
+
+        # Save UI state before hiding so geometry is accurate
+        try:
+            self._save_ui_state_to_db()
+        except Exception as exc:
+            log.warning("Failed saving UI state: %s", exc)
+
+        exit_splash = None
+        if self._show_exit_splash:
+            try:
+                from my_idm.splash import IDMExitSplashScreen
+                exit_splash = IDMExitSplashScreen()
+                # Center exit splash over the closing main window
+                splash_x = self.x() + (self.width() - exit_splash.width()) // 2
+                splash_y = self.y() + (self.height() - exit_splash.height()) // 2
+                exit_splash.move(max(0, splash_x), max(0, splash_y))
+                exit_splash.show()
+                exit_splash.set_message("Closing My-IDM...", 10)
+            except Exception as exc:
+                log.warning("Could not show exit splash: %s", exc)
+                exit_splash = None
+
+        # Instantly hide main window
+        self.hide()
+
+        # Flush all pending window manager messages so main window vanishes immediately
+        # and exit splash screen appears on screen with zero delay
+        app = QApplication.instance()
+        if app:
+            app.processEvents()
+
+        try:
+            if exit_splash:
+                self._manager.stop(status_cb=exit_splash.set_message)
+                exit_splash.set_message("Goodbye!", 100)
+                exit_splash.close()
+                if app:
+                    app.processEvents()
+            else:
+                self._manager.stop()
+        finally:
+            super().closeEvent(event)

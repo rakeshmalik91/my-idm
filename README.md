@@ -9,7 +9,14 @@
   <i>Segmented Parallel HTTP • BitTorrent Engine • VPN Kill Switch Privacy • Automated Malware Scanning</i>
 </p>
 
+<p align="center">
+  <img src="media/screenshot.jpg" alt="My-IDM Main Interface" width="100%" />
+</p>
+
 ---
+
+> [!WARNING]
+> **Active Development**: My-IDM is currently in active development. Features, interfaces, and configurations are subject to rapid evolution. Bugs, feedback, and contributions are welcome!
 
 ## ✨ Features
 

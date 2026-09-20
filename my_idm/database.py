@@ -42,7 +42,7 @@ class DownloadEntry:
     file_path: str = ""          # full path to file
     total_size: int = 0
     downloaded_size: int = 0
-    status: str = "queued"       # queued | downloading | paused | completed | error | seeding
+    status: str = "queued"       # queued | downloading | paused | completed | error | seeding | stopped
     download_type: str = "http"  # http | torrent
     num_segments: int = 8
     error_message: str = ""
@@ -62,6 +62,8 @@ class DownloadEntry:
     eta_seconds: float = 0.0
     seeds: int = 0
     peers: int = 0
+    total_seeds: int = 0
+    total_peers: int = 0
     upload_speed: float = 0.0
 
     @property

@@ -168,6 +168,42 @@ class TestSettingsDialog(unittest.TestCase):
         dlg_sec = SettingsDialog(initial_tab=2)
         self.assertEqual(dlg_sec._tabs.currentIndex(), 2)
 
+    def test_settings_dialog_threat_exclusions_list_and_scan_timing(self):
+        sec_cfg = SecurityConfig(
+            scan_timing="after_complete",
+            ignored_threat_categories=["HackTool", "CrackTool"],
+        )
+        dlg = SettingsDialog(security_config=sec_cfg)
+        self.assertTrue(dlg._timing_auto_rb.isChecked())
+        self.assertEqual(dlg._threat_excl_list.count(), 2)
+
+        # Switch to manual scan only
+        dlg._timing_manual_rb.setChecked(True)
+
+        # Add threat exclusions
+        dlg._new_threat_excl_edit.setText("Win32/AutoKMS, PUA")
+        dlg._on_add_threat_exclusion()
+        self.assertEqual(dlg._threat_excl_list.count(), 4)
+
+        # Remove item
+        dlg._threat_excl_list.setCurrentRow(0)
+        dlg._on_remove_threat_exclusion()
+        self.assertEqual(dlg._threat_excl_list.count(), 3)
+
+        # Reset defaults
+        dlg._on_reset_threat_exclusions_defaults()
+        self.assertGreaterEqual(dlg._threat_excl_list.count(), 3)
+        items = [dlg._threat_excl_list.item(i).text() for i in range(dlg._threat_excl_list.count())]
+        self.assertIn("HackTool", items)
+        self.assertIn("CrackTool", items)
+        self.assertIn("PUA", items)
+
+        # Save and verify
+        dlg._on_save()
+        self.assertEqual(dlg.security_config.scan_timing, "manual_only")
+        self.assertIn("HackTool", dlg.security_config.ignored_threat_categories)
+
+
 
     def test_preferences_window_width_and_db_persistence(self):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
@@ -302,6 +338,26 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         self.assertFalse(dlg.general_config.clear_backlog_after_load)
         self.assertTrue(dlg.general_config.backlog_poll_enabled)
         self.assertEqual(dlg.general_config.backlog_poll_interval, 120)
+        dlg.close()
+
+    def test_settings_dialog_test_antivirus_scanner(self):
+        from unittest.mock import patch, MagicMock
+        dlg = SettingsDialog()
+
+        # Test clean scan result
+        with patch("my_idm.settings_dialog.scan_file", return_value=(True, "Clean test report")):
+            with patch("PySide6.QtWidgets.QMessageBox.information") as mock_info:
+                dlg._on_test_scanner()
+                mock_info.assert_called_once()
+                self.assertIn("Clean", mock_info.call_args[0][2])
+
+        # Test threat detected / non-zero code result
+        with patch("my_idm.settings_dialog.scan_file", return_value=(False, "Threat detected: EICAR")):
+            with patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
+                dlg._on_test_scanner()
+                mock_warn.assert_called_once()
+                self.assertIn("Threat detected", mock_warn.call_args[0][2])
+
         dlg.close()
 
 

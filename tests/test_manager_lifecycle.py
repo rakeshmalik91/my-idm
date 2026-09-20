@@ -335,6 +335,58 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertEqual(updated.status, "paused")
         self.assertEqual(updated.downloaded_size, 0)
 
+    def test_delete_download_with_delete_files_moves_to_trash(self):
+        """delete_download(..., delete_files=True) removes entry from DB and moves files to trash."""
+        test_file = Path(self.tmp_dir.name) / "http_trash.iso"
+        test_file.write_bytes(b"http payload data" * 50)
+        self.assertTrue(test_file.exists())
+
+        entry = DownloadEntry(
+            id="del-trash-1",
+            url="https://example.com/http_trash.iso",
+            filename="http_trash.iso",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=500,
+            downloaded_size=500,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        self.manager.delete_download("del-trash-1", delete_files=True)
+
+        # File removed from disk (sent to trash)
+        self.assertFalse(test_file.exists())
+        # Removed from DB
+        self.assertIsNone(self.db.get_download("del-trash-1"))
+
+    def test_delete_download_without_delete_files_keeps_disk_file(self):
+        """delete_download(..., delete_files=False) removes entry from DB but preserves files on disk."""
+        test_file = Path(self.tmp_dir.name) / "keep_file.iso"
+        test_file.write_bytes(b"keep me" * 50)
+        self.assertTrue(test_file.exists())
+
+        entry = DownloadEntry(
+            id="del-keep-1",
+            url="https://example.com/keep_file.iso",
+            filename="keep_file.iso",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=500,
+            downloaded_size=500,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        self.manager.delete_download("del-keep-1", delete_files=False)
+
+        # File remains on disk
+        self.assertTrue(test_file.exists())
+        # Removed from DB
+        self.assertIsNone(self.db.get_download("del-keep-1"))
+
     def test_detect_type_web_torrent_url(self):
         """Manager identifies http/https URLs pointing to .torrent files as torrent type."""
         self.assertEqual(self.manager._detect_type("https://releases.ubuntu.com/22.04/ubuntu-22.04.iso.torrent"), "torrent")
@@ -560,6 +612,215 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual(entry.save_path, dest)
         self.assertEqual(entry.filename, "AnimePahe_Ep11.mp4")
         self.assertEqual(entry.metadata.get("headers", {}).get("Referer"), "https://kwik.cx/")
+        self.assertTrue(entry.metadata.get("explicit_filename"))
+
+    def test_explicit_filename_preserved_over_website_headers(self):
+        """HTTPEngine must preserve explicit_filename rather than overwriting with website header filename."""
+        entry = DownloadEntry(
+            id="test-explicit-fn",
+            url="https://vault-99.owocdn.top/stream/ep1",
+            filename="Custom_Frieren_01.mp4",
+            save_path=self.tmp_dir.name,
+            status="queued",
+            download_type="http",
+            metadata_json='{"explicit_filename": true}',
+        )
+        self.db.add_download(entry)
+
+        # Probe discovered a different website generated filename (e.g. from Content-Disposition)
+        website_filename = "AnimePahe_Frieren_-_01_720p.mp4"
+        meta = entry.metadata
+        has_explicit_fn = meta.get("explicit_filename", False)
+        self.assertTrue(has_explicit_fn)
+
+        if has_explicit_fn and entry.filename:
+            candidate = entry.filename
+        else:
+            candidate = website_filename
+
+        self.assertEqual(candidate, "Custom_Frieren_01.mp4")
+
+    def test_rename_download_http_completed_file_on_disk(self):
+        """Renaming a completed HTTP download renames disk file and updates DB entry."""
+        file_path = Path(self.tmp_dir.name) / "old_file.txt"
+        file_path.write_text("Hello IDM", encoding="utf-8")
+
+        entry = DownloadEntry(
+            id="d_rename_http",
+            url="https://example.com/old_file.txt",
+            filename="old_file.txt",
+            save_path=self.tmp_dir.name,
+            file_path=str(file_path),
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        renamed_signals = []
+        self.manager.download_renamed.connect(lambda did, name: renamed_signals.append((did, name)))
+
+        ok, msg = self.manager.rename_download("d_rename_http", "new_file.txt")
+        self.assertTrue(ok)
+        self.assertEqual(msg, "")
+
+        # Disk verification
+        self.assertFalse(file_path.exists())
+        new_path = Path(self.tmp_dir.name) / "new_file.txt"
+        self.assertTrue(new_path.exists())
+        self.assertEqual(new_path.read_text(encoding="utf-8"), "Hello IDM")
+
+        # DB verification
+        updated = self.db.get_download("d_rename_http")
+        self.assertEqual(updated.filename, "new_file.txt")
+        from my_idm.utils import normalize_path
+        self.assertEqual(updated.file_path, normalize_path(new_path))
+        self.assertTrue(updated.metadata.get("explicit_filename"))
+
+        # Signal verification
+        self.assertEqual(renamed_signals, [("d_rename_http", "new_file.txt")])
+
+    def test_rename_download_invalid_characters_and_collision(self):
+        """Renaming validates filename and prevents collisions with existing files."""
+        entry = DownloadEntry(
+            id="d_rename_val",
+            url="https://example.com/test.bin",
+            filename="test.bin",
+            save_path=self.tmp_dir.name,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        # Invalid characters
+        ok, msg = self.manager.rename_download("d_rename_val", "invalid/name:?.bin")
+        self.assertFalse(ok)
+        self.assertIn("invalid characters", msg)
+
+        # Collision with existing file
+        existing = Path(self.tmp_dir.name) / "already_exists.bin"
+        existing.write_text("Existing", encoding="utf-8")
+        ok, msg = self.manager.rename_download("d_rename_val", "already_exists.bin")
+        self.assertFalse(ok)
+        self.assertIn("already exists", msg)
+
+    def test_rename_download_torrent(self):
+        """Renaming a torrent download delegates to TorrentEngine.rename_root and updates DB."""
+        entry = DownloadEntry(
+            id="d_rename_tor",
+            url="magnet:?xt=urn:btih:fedcba9876543210&dn=TorrentRoot",
+            filename="TorrentRoot",
+            save_path=self.tmp_dir.name,
+            status="seeding",
+            download_type="torrent",
+        )
+        self.db.add_download(entry)
+
+        with patch.object(self.manager._torrent, "rename_root", return_value=True) as mock_ren:
+            ok, msg = self.manager.rename_download("d_rename_tor", "NewTorrentRoot")
+            self.assertTrue(ok)
+            mock_ren.assert_called_once_with("d_rename_tor", "NewTorrentRoot")
+
+        updated = self.db.get_download("d_rename_tor")
+        self.assertEqual(updated.filename, "NewTorrentRoot")
+        self.assertTrue(updated.metadata.get("explicit_filename"))
+
+    # -- Stop download -------------------------------------------------------
+
+    def test_stop_download_sets_stopped_status_and_clears_queue(self):
+        """stop_download() sets status to 'stopped' and queue_order to 0."""
+        entry = DownloadEntry(
+            id="d_stop_1",
+            url="https://example.com/large.zip",
+            filename="large.zip",
+            save_path="C:/Downloads",
+            status="downloading",
+            queue_order=5,
+        )
+        self.db.add_download(entry)
+
+        status_signals = []
+        self.manager.status_changed.connect(lambda did, s, e: status_signals.append((did, s)))
+
+        self.manager.stop_download("d_stop_1")
+
+        updated = self.db.get_download("d_stop_1")
+        self.assertEqual(updated.status, "stopped")
+        self.assertEqual(updated.queue_order, 0)
+        self.assertIn(("d_stop_1", "stopped"), status_signals)
+
+    def test_stopped_download_not_auto_resumed_on_startup(self):
+        """Stopped downloads should NOT be auto-resumed on startup."""
+        e_stopped = DownloadEntry(
+            id="d_stopped", url="http://example.com/stopped.zip",
+            filename="stopped.zip", save_path="/tmp", status="stopped",
+        )
+        e_queued = DownloadEntry(
+            id="d_queued", url="http://example.com/queued.zip",
+            filename="queued.zip", save_path="/tmp", status="queued",
+        )
+        self.db.add_download(e_stopped)
+        self.db.add_download(e_queued)
+
+        resumed = []
+        with patch.object(self.manager, "resume_download", side_effect=lambda did: resumed.append(did)):
+            self.manager.start()
+
+        self.assertNotIn("d_stopped", resumed)
+        self.assertIn("d_queued", resumed)
+
+    def test_resume_restarts_stopped_download(self):
+        """Manually resuming a stopped download resets it to queued and restarts."""
+        entry = DownloadEntry(
+            id="d_stop_resume",
+            url="https://example.com/resume.zip",
+            filename="resume.zip",
+            save_path="C:/Downloads",
+            status="stopped",
+            queue_order=0,
+        )
+        self.db.add_download(entry)
+
+        with patch.object(self.manager._http, "is_active", return_value=False):
+            self.manager.resume_download("d_stop_resume")
+
+        updated = self.db.get_download("d_stop_resume")
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.retry_count, 0)
+
+    def test_add_download_dedup_resumes_stopped_entry(self):
+        """Re-adding a URL that is in 'stopped' state should resume it."""
+        entry = DownloadEntry(
+            id="d_stop_dedup",
+            url="https://example.com/dedup.zip",
+            filename="dedup.zip",
+            save_path="C:/Downloads",
+            status="stopped",
+        )
+        self.db.add_download(entry)
+
+        with patch.object(self.manager, "resume_download") as mock_resume:
+            result = self.manager.add_download("https://example.com/dedup.zip")
+
+        self.assertEqual(result, "d_stop_dedup")
+        mock_resume.assert_called_once_with("d_stop_dedup")
+
+    def test_retry_queue_skips_stopped_downloads(self):
+        """The retry queue should not retry stopped downloads."""
+        entry = DownloadEntry(
+            id="d_stop_retry",
+            url="https://example.com/retry.zip",
+            filename="retry.zip",
+            save_path="C:/Downloads",
+            status="stopped",
+            retry_count=1,
+            max_retries=5,
+        )
+        self.db.add_download(entry)
+
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            self.manager._process_retry_queue()
+
+        mock_start.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -68,7 +68,7 @@ my_idm/
 ├── main_window.py       # QMainWindow with toolbar, menus, table, splitter
 ├── details_panel.py     # Bottom panel (Overview, Files, Peers, Trackers, Segments)
 ├── download_model.py    # QAbstractTableModel (12 columns)
-├── delegates.py         # ProgressBarDelegate for QTableView
+├── delegates.py         # DownloadNameDelegate, ProgressBarDelegate for QTableView
 ├── dialogs.py           # AddDownloadDialog, MoveDialog, DeleteDialog
 ├── single_instance.py   # Single-instance enforcement via QLocalServer / QLocalSocket IPC
 └── styles.py            # Dark theme QSS stylesheet, color palette
@@ -627,6 +627,7 @@ QMainWindow (MainWindow)
   ├── QSplitter (central widget, vertical orientation)
   │     ├── QTableView (top pane)
   │     │     ├── Model: DownloadTableModel
+  │     │     ├── Delegate: DownloadNameDelegate (column 1: filename + cyan source domain)
   │     │     └── Delegate: ProgressBarDelegate (column 2)
   │     └── DetailsPanel (bottom pane, collapsible)
   │           ├── Header (Icon, Title, Transfer Type Badge, Open Folder, Close)
@@ -720,6 +721,14 @@ Colors per status:
 - Paused → `#9e6a03` (amber)
 - Error → `#da3633` (red)
 - Seeding → `#8957e5` (purple)
+
+### DownloadNameDelegate
+
+The Name column uses `DownloadNameDelegate` (subclass of `QStyledItemDelegate`) to:
+1. Preserve standard selection backgrounds, hover states, and decoration file type / Tor icons.
+2. Render the download filename in standard text color (`#e6edf3`).
+3. Render the source website domain (e.g. `releases.ubuntu.com`, `tracker.opentrackr.org`) at the end in distinct cyan (`#39c5bb`).
+4. Apply intelligent proportional text layout: if the column is narrowed, the filename and domain are trimmed with ellipses (`...`), preserving visibility of both elements.
 
 ### Interactive Table Sorting Architecture
 

@@ -328,6 +328,150 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(self.manager.get_torrent_trackers("persisted-tor-1"), cached_trackers)
         self.assertEqual(self.manager.get_torrent_peers("persisted-tor-1"), cached_peers)
 
+    def test_completed_torrent_click_does_not_fetch_metadata(self):
+        """Clicking on a completed torrent leaves status as completed and does not trigger metadata fetching."""
+        tor_entry = DownloadEntry(
+            id="completed-tor-click",
+            url="magnet:?xt=urn:btih:aabbccddeeff00112233445566778899aabbccdd&dn=CompletedMedia",
+            filename="CompletedMedia",
+            download_type="torrent",
+            status="completed",
+            total_size=1024 * 1024,
+            downloaded_size=1024 * 1024,
+            metadata_json='{"files": [{"index": 0, "path": "CompletedMedia/video.mkv", "size": 1048576, "priority": 4, "progress": 1.0, "status": "completed"}]}',
+        )
+        self.db.add_download(tor_entry)
+        self.win._load_history()
+
+        # Select row in table view (triggers _on_table_selection_changed -> set_download_id -> _build_files_tree)
+        self.win._table.selectRow(0)
+
+        # Status must stay completed
+        db_entry = self.db.get_download("completed-tor-click")
+        self.assertEqual(db_entry.status, "completed")
+        model_entry = self.win._model.get_entry(0)
+        self.assertEqual(model_entry.status, "completed")
+        self.assertNotEqual(model_entry.status, "fetching_metadata")
+
+    def test_details_panel_live_progress_updates_overview_and_swarm(self):
+        """When progress is updated, DetailsPanel updates live overview speeds, seeds, and peers."""
+        tor_entry = DownloadEntry(
+            id="live-tor-1",
+            url="magnet:?xt=urn:btih:1111222233334444555566667777888899990000",
+            filename="LiveTorrent",
+            download_type="torrent",
+            status="downloading",
+            total_size=10000,
+            downloaded_size=1000,
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        panel = self.win._details_panel
+        panel.setVisible(True)
+        panel.set_download_id("live-tor-1")
+
+        # Simulate live progress update signal from manager
+        self.win._on_progress_updated(
+            "live-tor-1", 5000, 10000, 1048576.0, 5.0, seeds=9, peers=25, upload_speed=262144.0
+        )
+
+        # Overview should now display updated speeds, seeds and peers
+        self.assertIn("9 seeds, 25 peers connected", panel._ov_swarm.text())
+        self.assertIn("1.0 MiB/s", panel._ov_speed.text())
+        self.assertIn("256.0 KiB/s", panel._ov_speed.text())
+
+    def test_details_panel_swarm_totals_display(self):
+        """Overview swarm and peers status labels reflect swarm totals when available."""
+        tor_entry = DownloadEntry(
+            id="swarm-tor-1",
+            url="magnet:?xt=urn:btih:9999888877776666555544443333222211110000",
+            filename="SwarmTorrent",
+            download_type="torrent",
+            status="downloading",
+            total_size=10000,
+            downloaded_size=2000,
+            seeds=5,
+            peers=12,
+            total_seeds=45,
+            total_peers=110,
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("swarm-tor-1")
+
+        self.assertIn("5 (45) seeds, 12 (110) peers connected", panel._ov_swarm.text())
+        self.assertIn("45 seeds, 110 peers in swarm", panel._lbl_peers_status.text())
+
+    def test_details_panel_restore_from_collapsed_or_vanished_state(self):
+        """Details panel automatically recovers if saved state had it collapsed to 0 height."""
+        self.assertFalse(self.win._splitter.childrenCollapsible())
+        self.assertGreaterEqual(self.win._details_panel.minimumHeight(), 120)
+
+        # Simulate the vanished state (collapsed to 0 and marked hidden)
+        self.manager.save_ui_state({
+            "splitter_sizes": [903, 0],
+            "details_visible": False,
+        })
+
+        win2 = MainWindow(self.manager)
+        win2.show()
+        try:
+            # Must auto-heal to visible with healthy non-zero height
+            self.assertFalse(win2._details_panel.isHidden())
+            self.assertTrue(win2._details_panel.isVisible())
+            self.assertTrue(win2._act_toggle_details.isChecked())
+            sizes = win2._splitter.sizes()
+            self.assertGreaterEqual(sizes[1], 140)
+            self.assertEqual(win2._details_status_btn.text(), "📋 Details: ON")
+
+            # Toggle off
+            win2._act_toggle_details.setChecked(False)
+            self.assertFalse(win2._details_panel.isVisible())
+            self.assertEqual(win2._details_status_btn.text(), "📋 Details: OFF")
+
+            # Toggle back on — must not restore to 0 height
+            win2._act_toggle_details.setChecked(True)
+            self.assertTrue(win2._details_panel.isVisible())
+            sizes2 = win2._splitter.sizes()
+            self.assertGreaterEqual(sizes2[1], 140)
+            self.assertEqual(win2._details_status_btn.text(), "📋 Details: ON")
+        finally:
+            win2.close()
+
+    def test_details_panel_refresh_with_integer_peers_metadata(self):
+        """Regression test: metadata['peers'] storing an int count must not crash details panel refresh with TypeError."""
+        tor_entry = DownloadEntry(
+            id="tor-int-peers",
+            url="magnet:?xt=urn:btih:2222333344445555666677778888999900001111",
+            filename="integers.iso",
+            download_type="torrent",
+            status="downloading",
+            metadata_json='{"seeds": 5, "peers": 12, "total_seeds": 20, "total_peers": 50}',
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        # Torrent engine has 0 active peer dicts
+        self.manager._torrent.get_torrent_peers = MagicMock(return_value=[])
+
+        # Verify manager returns [] instead of the int 12
+        peers = self.manager.get_torrent_peers("tor-int-peers")
+        self.assertIsInstance(peers, list)
+        self.assertEqual(peers, [])
+
+        # Set download ID on panel and refresh
+        panel = self.win._details_panel
+        panel.set_download_id("tor-int-peers")
+        panel.refresh()
+
+        # Status should show 0 connected peer(s) without raising TypeError
+        self.assertIn("0 connected peer(s)", panel._lbl_peers_status.text())
+        self.assertIn("20 seeds, 50 peers in swarm", panel._lbl_peers_status.text())
+
 
 if __name__ == "__main__":
     unittest.main()
+

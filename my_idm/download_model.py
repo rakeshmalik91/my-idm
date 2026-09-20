@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor
 from my_idm.config import TorConfig
 from my_idm.database import DownloadEntry
 from my_idm.styles import Colors
-from my_idm.utils import create_emoji_icon, normalize_path
+from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, to_int
 
 _ICON_CACHE: dict[str, Any] = {}
 
@@ -64,6 +64,7 @@ _STATUS_COLORS = {
     "fetching_metadata": QColor(Colors.CYAN),
     "file_not_found":    QColor(Colors.RED),
     "stalled":           QColor(Colors.ORANGE),
+    "stopped":           QColor(Colors.RED),
 }
 
 ACTIVE_QUEUE_STATUSES = {
@@ -102,16 +103,45 @@ def _format_time(iso_str: str) -> str:
         return iso_str[:16] if len(iso_str) >= 16 else iso_str
 
 
+STATUS_FILTER_GROUPS: dict[str, set[str]] = {
+    "downloading": {"downloading", "fetching_metadata", "checking", "scanning", "stalled"},
+    "queued": {"queued"},
+    "paused": {"paused"},
+    "stopped": {"stopped"},
+    "completed": {"completed"},
+    "seeding": {"seeding"},
+    "error": {"error", "threat_detected", "file_not_found"},
+}
+
+STATUS_FILTER_LABELS: dict[str, str] = {
+    "downloading": "Downloading",
+    "queued": "Queued",
+    "paused": "Paused",
+    "stopped": "Stopped",
+    "completed": "Completed",
+    "seeding": "Seeding",
+    "error": "Error",
+}
+
+TYPE_FILTER_LABELS: dict[str, str] = {
+    "http": "HTTP / Multi-Segment",
+    "torrent": "BitTorrent Swarm",
+}
+
+
 class DownloadTableModel(QAbstractTableModel):
-    """Table model backed by a list of DownloadEntry objects."""
+    """Table model backed by a list of DownloadEntry objects with filtering support."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._all_entries: list[DownloadEntry] = []
         self._entries: list[DownloadEntry] = []
         self._id_to_row: dict[str, int] = {}
         self._sort_column: int = Col.ADDED
         self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
         self._tor_config: Optional[TorConfig] = None
+        self._status_filter: Optional[set[str]] = None
+        self._type_filter: Optional[set[str]] = None
 
     @property
     def tor_config(self) -> Optional[TorConfig]:
@@ -151,24 +181,140 @@ class DownloadTableModel(QAbstractTableModel):
     def sort_order(self) -> Qt.SortOrder:
         return self._sort_order
 
+    # -- helpers & filtering ---------------------------------------------------
+
+    _to_int = staticmethod(to_int)
+
+    def _matches_filter(self, entry: DownloadEntry) -> bool:
+        if self._type_filter is not None:
+            dtype = entry.download_type or "http"
+            if dtype not in self._type_filter:
+                return False
+        if self._status_filter is not None:
+            matched = False
+            for group in self._status_filter:
+                if entry.status in STATUS_FILTER_GROUPS.get(group, {group}):
+                    matched = True
+                    break
+            if not matched:
+                return False
+        return True
+
+    def _reapply_filter(self):
+        self.beginResetModel()
+        self._entries = [e for e in self._all_entries if self._matches_filter(e)]
+        if self._sort_column is not None:
+            self._apply_sort()
+        self._rebuild_index()
+        self.endResetModel()
+
+    def status_filter(self) -> Optional[set[str]]:
+        return self._status_filter
+
+    def type_filter(self) -> Optional[set[str]]:
+        return self._type_filter
+
+    def is_filtered(self) -> bool:
+        return self._status_filter is not None or self._type_filter is not None
+
+    def is_status_filtered(self) -> bool:
+        return self._status_filter is not None
+
+    def is_type_filtered(self) -> bool:
+        return self._type_filter is not None
+
+    def set_status_filter(self, allowed_groups: Optional[set[str]]):
+        if allowed_groups is not None and len(allowed_groups) >= len(STATUS_FILTER_GROUPS):
+            allowed_groups = None
+        if self._status_filter == allowed_groups:
+            return
+        self._status_filter = set(allowed_groups) if allowed_groups is not None else None
+        self._reapply_filter()
+
+    def set_type_filter(self, allowed_types: Optional[set[str]]):
+        if allowed_types is not None and len(allowed_types) >= len(TYPE_FILTER_LABELS):
+            allowed_types = None
+        if self._type_filter == allowed_types:
+            return
+        self._type_filter = set(allowed_types) if allowed_types is not None else None
+        self._reapply_filter()
+
+    def clear_filters(self):
+        if self._status_filter is None and self._type_filter is None:
+            return
+        self._status_filter = None
+        self._type_filter = None
+        self._reapply_filter()
+
+    def total_unfiltered_count(self) -> int:
+        return len(self._all_entries)
+
+    def get_status_counts(self) -> dict[str, int]:
+        counts = {k: 0 for k in STATUS_FILTER_GROUPS}
+        for e in self._all_entries:
+            if self._type_filter is not None:
+                dtype = e.download_type or "http"
+                if dtype not in self._type_filter:
+                    continue
+            for group, statuses in STATUS_FILTER_GROUPS.items():
+                if e.status in statuses:
+                    counts[group] += 1
+                    break
+        return counts
+
+    def get_type_counts(self) -> dict[str, int]:
+        counts = {k: 0 for k in TYPE_FILTER_LABELS}
+        for e in self._all_entries:
+            if self._status_filter is not None:
+                matched = any(e.status in STATUS_FILTER_GROUPS.get(g, set()) for g in self._status_filter)
+                if not matched:
+                    continue
+            dtype = e.download_type or "http"
+            if dtype in counts:
+                counts[dtype] += 1
+        return counts
+
     # -- data population -----------------------------------------------------
 
     def load_entries(self, entries: list[DownloadEntry]):
         self.beginResetModel()
-        self._entries = list(entries)
+        self._all_entries = list(entries)
+        for e in self._all_entries:
+            if e.download_type == "torrent" and e.metadata:
+                if not e.seeds and "seeds" in e.metadata:
+                    e.seeds = self._to_int(e.metadata.get("seeds", 0))
+                if not e.peers and "peers" in e.metadata:
+                    e.peers = self._to_int(e.metadata.get("peers", 0))
+                if not getattr(e, "total_seeds", 0) and "total_seeds" in e.metadata:
+                    e.total_seeds = self._to_int(e.metadata.get("total_seeds", 0))
+                if not getattr(e, "total_peers", 0) and "total_peers" in e.metadata:
+                    e.total_peers = self._to_int(e.metadata.get("total_peers", 0))
+        self._entries = [e for e in self._all_entries if self._matches_filter(e)]
         if self._sort_column is not None:
             self._apply_sort()
         self._rebuild_index()
         self.endResetModel()
 
     def add_entry(self, entry: DownloadEntry):
-        row = self._find_insert_row(entry)
-        self.beginInsertRows(QModelIndex(), row, row)
-        self._entries.insert(row, entry)
-        self._rebuild_index()
-        self.endInsertRows()
+        if entry.download_type == "torrent" and entry.metadata:
+            if not entry.seeds and "seeds" in entry.metadata:
+                entry.seeds = self._to_int(entry.metadata.get("seeds", 0))
+            if not entry.peers and "peers" in entry.metadata:
+                entry.peers = self._to_int(entry.metadata.get("peers", 0))
+            if not getattr(entry, "total_seeds", 0) and "total_seeds" in entry.metadata:
+                entry.total_seeds = self._to_int(entry.metadata.get("total_seeds", 0))
+            if not getattr(entry, "total_peers", 0) and "total_peers" in entry.metadata:
+                entry.total_peers = self._to_int(entry.metadata.get("total_peers", 0))
+        self._all_entries.append(entry)
+        if self._matches_filter(entry):
+            row = self._find_insert_row(entry)
+            self.beginInsertRows(QModelIndex(), row, row)
+            self._entries.insert(row, entry)
+            self._rebuild_index()
+            self.endInsertRows()
 
     def remove_entry(self, download_id: str):
+        self._all_entries = [e for e in self._all_entries if e.id != download_id]
         row = self._id_to_row.get(download_id)
         if row is None:
             return
@@ -256,7 +402,7 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.SEEDS_PEERS:
             if entry.download_type == "torrent":
-                return (entry.seeds, entry.peers)
+                return (to_int(entry.seeds), to_int(entry.peers))
             if entry.download_type == "http":
                 return (entry.num_segments, 0)
             return (0, 0)
@@ -315,6 +461,9 @@ class DownloadTableModel(QAbstractTableModel):
         row = self._id_to_row.get(download_id)
         if row is not None and 0 <= row < len(self._entries):
             return self._entries[row]
+        for e in self._all_entries:
+            if e.id == download_id:
+                return e
         return None
 
     def get_selected_ids(self, indexes: list[QModelIndex]) -> list[str]:
@@ -328,10 +477,14 @@ class DownloadTableModel(QAbstractTableModel):
     def entries(self) -> list[DownloadEntry]:
         return self._entries
 
+    @property
+    def all_entries(self) -> list[DownloadEntry]:
+        return self._all_entries
+
     def get_aggregate_speeds(self) -> tuple[float, float]:
         """Returns (total_download_speed, total_upload_speed) in B/s."""
-        down = sum(e.speed for e in self._entries if e.status == "downloading")
-        up = sum(e.upload_speed for e in self._entries if e.status in ("downloading", "seeding"))
+        down = sum(e.speed for e in self._all_entries if e.status == "downloading")
+        up = sum(e.upload_speed for e in self._all_entries if e.status in ("downloading", "seeding"))
         return down, up
 
     # -- progress updates (called from manager signals) ---------------------
@@ -339,30 +492,41 @@ class DownloadTableModel(QAbstractTableModel):
     def update_progress(self, download_id: str, downloaded: int,
                         total: int, speed: float, eta: float,
                         seeds: int = 0, peers: int = 0,
-                        upload_speed: float = 0.0):
+                        upload_speed: float = 0.0,
+                        total_seeds: int = 0, total_peers: int = 0):
+        # Update canonical entry in _all_entries
+        for e in self._all_entries:
+            if e.id == download_id:
+                if (
+                    downloaded < e.downloaded_size
+                    and e.status == "downloading"
+                    and e.total_size > 0
+                    and total == e.total_size
+                    and (e.downloaded_size - downloaded < 1024 * 1024)
+                    and downloaded > 0
+                ):
+                    return
+                e.downloaded_size = downloaded
+                if total > 0:
+                    e.total_size = total
+                e.speed = speed
+                e.eta_seconds = eta
+                e.seeds = to_int(seeds)
+                e.peers = to_int(peers)
+                if total_seeds > 0:
+                    e.total_seeds = to_int(total_seeds)
+                elif e.metadata and "total_seeds" in e.metadata:
+                    e.total_seeds = to_int(e.metadata["total_seeds"])
+                if total_peers > 0:
+                    e.total_peers = to_int(total_peers)
+                elif e.metadata and "total_peers" in e.metadata:
+                    e.total_peers = to_int(e.metadata["total_peers"])
+                e.upload_speed = upload_speed
+                break
+
         row = self._id_to_row.get(download_id)
         if row is None:
             return
-        entry = self._entries[row]
-        # Guard against minor backwards jitter during active download from out-of-order signals
-        if (
-            downloaded < entry.downloaded_size
-            and entry.status == "downloading"
-            and entry.total_size > 0
-            and total == entry.total_size
-            and (entry.downloaded_size - downloaded < 1024 * 1024)
-            and downloaded > 0
-        ):
-            return
-
-        entry.downloaded_size = downloaded
-        if total > 0:
-            entry.total_size = total
-        entry.speed = speed
-        entry.eta_seconds = eta
-        entry.seeds = seeds
-        entry.peers = peers
-        entry.upload_speed = upload_speed
 
         # Emit change for relevant columns
         left = self.index(row, Col.SIZE)
@@ -371,16 +535,49 @@ class DownloadTableModel(QAbstractTableModel):
 
     def update_status(self, download_id: str, status: str,
                       error_msg: str = ""):
+        entry_all: Optional[DownloadEntry] = None
+        for e in self._all_entries:
+            if e.id == download_id:
+                e.status = status
+                e.error_message = error_msg
+                if status in ("paused", "completed", "error", "stopped"):
+                    e.speed = 0
+                    e.eta_seconds = 0
+                entry_all = e
+                break
+
         row = self._id_to_row.get(download_id)
+        matches = entry_all is not None and self._matches_filter(entry_all)
+
+        if row is not None and not matches:
+            self.beginRemoveRows(QModelIndex(), row, row)
+            self._entries.pop(row)
+            self._rebuild_index()
+            self.endRemoveRows()
+            if len(self._entries) > 0:
+                self.dataChanged.emit(
+                    self.index(0, Col.QUEUE),
+                    self.index(len(self._entries) - 1, Col.QUEUE),
+                    [Qt.ItemDataRole.DisplayRole],
+                )
+            return
+
+        if row is None and matches and entry_all is not None:
+            insert_row = self._find_insert_row(entry_all)
+            self.beginInsertRows(QModelIndex(), insert_row, insert_row)
+            self._entries.insert(insert_row, entry_all)
+            self._rebuild_index()
+            self.endInsertRows()
+            if len(self._entries) > 0:
+                self.dataChanged.emit(
+                    self.index(0, Col.QUEUE),
+                    self.index(len(self._entries) - 1, Col.QUEUE),
+                    [Qt.ItemDataRole.DisplayRole],
+                )
+            return
+
         if row is None:
             return
-        entry = self._entries[row]
-        entry.status = status
-        entry.error_message = error_msg
-
-        if status == "completed":
-            entry.speed = 0
-            entry.eta_seconds = 0
 
         left = self.index(row, 0)
         right = self.index(row, Col.COUNT - 1)
@@ -392,7 +589,6 @@ class DownloadTableModel(QAbstractTableModel):
                 Qt.ItemDataRole.ToolTipRole,
             ],
         )
-        # Refresh QUEUE column across rows so continuous numbering updates immediately
         if len(self._entries) > 1:
             self.dataChanged.emit(
                 self.index(0, Col.QUEUE),
@@ -402,6 +598,13 @@ class DownloadTableModel(QAbstractTableModel):
 
     def update_filename(self, download_id: str, filename: str):
         """Update filename when resolved from server headers or metadata."""
+        for e in self._all_entries:
+            if e.id == download_id:
+                e.filename = filename
+                if e.save_path:
+                    e.file_path = str(Path(e.save_path) / filename)
+                break
+
         row = self._id_to_row.get(download_id)
         if row is None:
             return
@@ -417,15 +620,80 @@ class DownloadTableModel(QAbstractTableModel):
             [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
         )
 
-    def refresh_entry(self, download_id: str, entry: DownloadEntry):
-        """Full refresh of an entry (e.g. after move or recheck)."""
+    def rename_entry(self, download_id: str, filename: str, file_path: str = ""):
+        """Update entry filename and file_path after user rename."""
+        for e in self._all_entries:
+            if e.id == download_id:
+                e.filename = filename
+                if file_path:
+                    e.file_path = file_path
+                elif e.save_path:
+                    e.file_path = str(Path(e.save_path) / filename)
+                break
+
         row = self._id_to_row.get(download_id)
         if row is None:
             return
-        self._entries[row] = entry
+        entry = self._entries[row]
+        entry.filename = filename
+        if file_path:
+            entry.file_path = file_path
+        elif entry.save_path:
+            entry.file_path = str(Path(entry.save_path) / filename)
+
         left = self.index(row, 0)
         right = self.index(row, Col.COUNT - 1)
-        self.dataChanged.emit(left, right)
+        self.dataChanged.emit(
+            left, right,
+            [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
+        )
+
+    def refresh_entry(self, download_id: str, entry: DownloadEntry):
+        """Full refresh of an entry (e.g. after move or recheck)."""
+        if entry.download_type == "torrent" and entry.metadata:
+            if not entry.seeds and "seeds" in entry.metadata:
+                entry.seeds = to_int(entry.metadata.get("seeds", 0))
+            if not entry.peers and "peers" in entry.metadata:
+                entry.peers = to_int(entry.metadata.get("peers", 0))
+            if not getattr(entry, "total_seeds", 0) and "total_seeds" in entry.metadata:
+                entry.total_seeds = to_int(entry.metadata.get("total_seeds", 0))
+            if not getattr(entry, "total_peers", 0) and "total_peers" in entry.metadata:
+                entry.total_peers = to_int(entry.metadata.get("total_peers", 0))
+        entry.seeds = to_int(entry.seeds)
+        entry.peers = to_int(entry.peers)
+        entry.total_seeds = to_int(getattr(entry, "total_seeds", 0))
+        entry.total_peers = to_int(getattr(entry, "total_peers", 0))
+
+        for i, e in enumerate(self._all_entries):
+            if e.id == download_id:
+                self._all_entries[i] = entry
+                break
+        else:
+            self._all_entries.append(entry)
+
+        row = self._id_to_row.get(download_id)
+        matches = self._matches_filter(entry)
+
+        if row is not None and not matches:
+            self.beginRemoveRows(QModelIndex(), row, row)
+            self._entries.pop(row)
+            self._rebuild_index()
+            self.endRemoveRows()
+            return
+
+        if row is None and matches:
+            insert_row = self._find_insert_row(entry)
+            self.beginInsertRows(QModelIndex(), insert_row, insert_row)
+            self._entries.insert(insert_row, entry)
+            self._rebuild_index()
+            self.endInsertRows()
+            return
+
+        if row is not None:
+            self._entries[row] = entry
+            left = self.index(row, 0)
+            right = self.index(row, Col.COUNT - 1)
+            self.dataChanged.emit(left, right)
 
     # -- QAbstractTableModel interface ---------------------------------------
 
@@ -505,6 +773,10 @@ class DownloadTableModel(QAbstractTableModel):
                 if is_tor and self._tor_config:
                     return f"Active Tor Transfer: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
 
+        if role == Qt.ItemDataRole.UserRole:
+            if col == Col.NAME:
+                return extract_source_domain(entry.url)
+
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
@@ -557,6 +829,8 @@ class DownloadTableModel(QAbstractTableModel):
                 return "File Not Found ⚠"
             if entry.status == "stalled":
                 return "Stalled"
+            if entry.status == "stopped":
+                return "Stopped ⏹"
             s = entry.status.capitalize()
             if entry.status == "error" and entry.error_message:
                 s += f" ⚠"
@@ -581,6 +855,25 @@ class DownloadTableModel(QAbstractTableModel):
             if entry.status == "downloading":
                 return _format_eta(entry.eta_seconds)
             return "—"
+
+        if col == Col.SEEDS_PEERS:
+            if entry.download_type == "torrent":
+                seeds = self._to_int(entry.seeds)
+                peers = self._to_int(entry.peers)
+                ts = self._to_int(getattr(entry, "total_seeds", 0) or (entry.metadata.get("total_seeds", 0) if entry.metadata else 0))
+                tp = self._to_int(getattr(entry, "total_peers", 0) or (entry.metadata.get("total_peers", 0) if entry.metadata else 0))
+                s_str = f"{seeds} ({ts})" if ts > seeds else f"{seeds}"
+                p_str = f"{peers} ({tp})" if tp > peers else f"{peers}"
+                return f"S:{s_str}  P:{p_str}"
+            if entry.download_type == "http":
+                return f"{entry.num_segments} seg"
+            return "—"
+
+        if col == Col.ADDED:
+            return _format_time(entry.added_at)
+
+        if col == Col.LAST_TRIED:
+            return _format_time(entry.last_tried_at)
 
         if col == Col.COMPLETED:
             return _format_time(entry.completed_at)

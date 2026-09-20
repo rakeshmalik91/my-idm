@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Optional, Callable, Any
@@ -163,10 +164,13 @@ class TorrentEngine:
         self._running = True
         log.info("Torrent engine started")
 
-    def stop(self):
+    def stop(self, status_cb=None):
         self._running = False
         if not self._session:
             return
+
+        if status_cb:
+            status_cb("Saving BitTorrent resume state...", 55)
 
         # Request resume data for all valid handles
         pending_dids = set()
@@ -218,6 +222,13 @@ class TorrentEngine:
                             break
             if pending_dids:
                 time.sleep(0.05)
+                try:
+                    from PySide6.QtWidgets import QApplication
+                    app = QApplication.instance()
+                    if app:
+                        app.processEvents()
+                except Exception:
+                    pass
 
         del self._session
         self._session = None
@@ -561,6 +572,17 @@ class TorrentEngine:
             self._db.update_status(entry.id, "paused")
             if self._status_cb:
                 self._status_cb(entry.id, "paused", "")
+        elif entry.status == "completed":
+            try:
+                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
+            except Exception:
+                pass
+            handle.pause()
+            # Preserve completed status — do not switch to fetching_metadata
+        elif entry.status == "seeding":
+            # Keep seeding active
+            pass
         else:
             has_meta = False
             try:
@@ -654,6 +676,84 @@ class TorrentEngine:
             handle.move_storage(new_path)
             log.info("Moving torrent %s storage to %s", download_id, new_path)
 
+    def rename_root(self, download_id: str, new_name: str) -> bool:
+        """Rename the root file or folder of a torrent in libtorrent and on disk."""
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return False
+
+        old_disk_path = (
+            Path(entry.file_path)
+            if entry.file_path
+            else (Path(entry.save_path) / entry.filename if entry.filename else None)
+        )
+        new_disk_path = Path(entry.save_path) / new_name
+
+        handle = self._handles.get(download_id)
+        if handle:
+            try:
+                if not hasattr(handle, "is_valid") or handle.is_valid():
+                    ti = None
+                    try:
+                        ti = handle.torrent_file() if hasattr(handle, "torrent_file") else None
+                    except Exception:
+                        pass
+                    if not ti:
+                        try:
+                            ti = handle.get_torrent_info() if hasattr(handle, "get_torrent_info") else None
+                        except Exception:
+                            pass
+
+                    if ti and hasattr(handle, "rename_file"):
+                        try:
+                            num_files = ti.num_files()
+                            files = ti.files()
+                            for i in range(num_files):
+                                rel_path = files.file_path(i)
+                                parts = [p for p in rel_path.replace("\\", "/").split("/") if p]
+                                if parts:
+                                    if len(parts) == 1:
+                                        handle.rename_file(i, new_name)
+                                    else:
+                                        parts[0] = new_name
+                                        new_rel_path = "/".join(parts)
+                                        handle.rename_file(i, new_rel_path)
+                        except Exception as exc:
+                            log.warning("Failed to rename file(s) in libtorrent handle for %s: %s", download_id, exc)
+
+                    if hasattr(handle, "save_resume_data"):
+                        try:
+                            handle.save_resume_data()
+                        except Exception:
+                            pass
+            except Exception as exc:
+                log.warning("Error checking handle validity for %s rename: %s", download_id, exc)
+
+        # Update metadata files list if present
+        if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+            for f in entry.metadata["files"]:
+                f_path = f.get("path", "")
+                if f_path:
+                    parts = [p for p in f_path.replace("\\", "/").split("/") if p]
+                    if parts:
+                        if len(parts) > 1:
+                            parts[0] = new_name
+                            f["path"] = "/".join(parts)
+                        else:
+                            f["path"] = new_name
+                            f["name"] = new_name
+
+        # If file or folder exists on disk, rename it
+        if old_disk_path and old_disk_path.exists() and old_disk_path != new_disk_path:
+            try:
+                new_disk_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_disk_path), str(new_disk_path))
+            except Exception as exc:
+                log.error("Failed to move torrent path on disk from %s to %s: %s", old_disk_path, new_disk_path, exc)
+                return False
+
+        return True
+
     def get_status(self, download_id: str) -> Optional[dict]:
         """Get current torrent status for polling."""
         handle = self._handles.get(download_id)
@@ -676,6 +776,19 @@ class TorrentEngine:
                 if speed > 0 else 0
             )
 
+            # Swarm totals from scrape / peer list
+            num_comp = getattr(s, "num_complete", -1)
+            list_s = getattr(s, "list_seeds", 0)
+            total_seeds = max(num_comp, list_s, seeds)
+            if total_seeds < 0:
+                total_seeds = seeds
+
+            num_incomp = getattr(s, "num_incomplete", -1)
+            list_p = getattr(s, "list_peers", 0)
+            total_peers = max(num_incomp, list_p, peers)
+            if total_peers < 0:
+                total_peers = peers
+
             # Get name from torrent info if available
             name = ""
             if s.has_metadata:
@@ -692,6 +805,8 @@ class TorrentEngine:
                 "upload_speed": upload_speed,
                 "seeds": seeds,
                 "peers": peers,
+                "total_seeds": total_seeds,
+                "total_peers": total_peers,
                 "eta": eta,
                 "name": name,
             }
@@ -718,11 +833,26 @@ class TorrentEngine:
             if not entry:
                 continue
 
-            # Update DB
-            entry.total_size = status["total_size"]
-            entry.downloaded_size = status["downloaded"]
+            # Update DB and entry transient attributes
+            entry.total_size = status.get("total_size", 0)
+            entry.downloaded_size = status.get("downloaded", 0)
+            seeds = status.get("seeds", 0)
+            peers = status.get("peers", 0)
+            total_seeds = status.get("total_seeds", seeds)
+            total_peers = status.get("total_peers", peers)
+            entry.seeds = seeds
+            entry.peers = peers
+            entry.total_seeds = total_seeds
+            entry.total_peers = total_peers
+            if entry.metadata is not None:
+                entry.metadata["seeds"] = seeds
+                entry.metadata["peers"] = peers
+                entry.metadata["total_seeds"] = total_seeds
+                entry.metadata["total_peers"] = total_peers
+
             resolved_name = status.get("name")
-            if resolved_name and resolved_name != entry.filename:
+            has_explicit = bool(entry.metadata.get("explicit_filename")) if entry.metadata else False
+            if not has_explicit and resolved_name and resolved_name != entry.filename:
                 entry.filename = resolved_name
                 entry.file_path = str(
                     Path(entry.save_path) / entry.filename
@@ -739,8 +869,8 @@ class TorrentEngine:
             else:
                 self._db.update_download(entry)
 
-            # If download is paused in DB, make sure torrent handle stays paused and reports 0 speed
-            if entry.status == "paused":
+            # If download is paused or stopped in DB, make sure torrent handle stays paused and reports 0 speed
+            if entry.status in ("paused", "stopped"):
                 try:
                     s = handle.status()
                     raw_paused = getattr(s, "paused", None)
@@ -800,7 +930,7 @@ class TorrentEngine:
                     except Exception:
                         pass
             elif state == "downloading_metadata":
-                if entry.status != "fetching_metadata":
+                if entry.status not in ("fetching_metadata", "completed", "seeding", "paused", "stopped"):
                     self._db.update_status(download_id, "fetching_metadata")
                     if self._status_cb:
                         self._status_cb(download_id, "fetching_metadata", "")
@@ -826,7 +956,7 @@ class TorrentEngine:
                 self._db.update_status(download_id, new_status)
                 if self._status_cb:
                     self._status_cb(download_id, new_status, "")
-            elif entry.status == "completed" and state not in ("finished", "seeding", "checking_files", "queued_for_checking"):
+            elif entry.status == "completed" and state not in ("finished", "seeding", "checking_files", "queued_for_checking", "downloading_metadata"):
                 # Download was marked completed, but actual progress from recheck is incomplete
                 if status["total_size"] > 0 and status["downloaded"] < status["total_size"]:
                     try:
@@ -850,7 +980,7 @@ class TorrentEngine:
                 if last_act == 0:
                     self._last_active_time[download_id] = now
                 elif now - last_act > 45.0:
-                    if entry.status not in ("stalled", "paused", "completed", "error"):
+                    if entry.status not in ("stalled", "paused", "stopped", "completed", "error"):
                         self._db.update_status(download_id, "stalled")
                         if self._status_cb:
                             self._status_cb(download_id, "stalled", "")
@@ -913,6 +1043,14 @@ class TorrentEngine:
             return False
         handle = self._handles.get(download_id)
         if not handle and entry:
+            if entry.status in ("completed", "seeding") and priority == 0:
+                if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                    for f in entry.metadata["files"]:
+                        if f.get("index") == file_index:
+                            f["priority"] = priority
+                            break
+                    self._db.update_download(entry)
+                return True
             self.add_torrent(entry)
             handle = self._handles.get(download_id)
 
@@ -996,8 +1134,36 @@ class TorrentEngine:
             peers = []
             for p in peer_info_list:
                 ip_str = f"{p.ip[0]}:{p.ip[1]}" if isinstance(p.ip, (tuple, list)) else str(p.ip)
-                client_str = self._safe_str(getattr(p, "client", "Unknown"), default="Unknown")
-                flags_str = self._safe_str(getattr(p, "flags", ""))
+                client_str = self._safe_str(getattr(p, "client", "Unknown"), default="Unknown").strip()
+                if not client_str:
+                    client_str = "Unknown"
+
+                # Format flags into standard client flag letters
+                flags_letters = []
+                if getattr(p, "seed", False) or getattr(p, "upload_only", False):
+                    flags_letters.append("S")
+                if getattr(p, "down_speed", 0) > 0 or (not getattr(p, "choked", True) and getattr(p, "interesting", False)):
+                    flags_letters.append("D")
+                if getattr(p, "up_speed", 0) > 0 or (not getattr(p, "remote_choked", True) and getattr(p, "remote_interested", False)):
+                    flags_letters.append("U")
+                if getattr(p, "optimistic_unchoke", False):
+                    flags_letters.append("O")
+                if getattr(p, "snubbed", False):
+                    flags_letters.append("K")
+                if getattr(p, "rc4_encrypted", False) or getattr(p, "plaintext_encrypted", False):
+                    flags_letters.append("E")
+                if getattr(p, "dht", False):
+                    flags_letters.append("H")
+                if getattr(p, "pex", False):
+                    flags_letters.append("X")
+                if not getattr(p, "outgoing_connection", True) or getattr(p, "local_connection", False):
+                    flags_letters.append("I")
+
+                flags_str = "".join(flags_letters)
+                if not flags_str:
+                    raw_flags = getattr(p, "flags", "")
+                    flags_str = self._safe_str(raw_flags) if raw_flags else "—"
+
                 peers.append({
                     "ip": ip_str,
                     "client": client_str,

@@ -418,6 +418,8 @@ Duplicate URLs are automatically skipped or resumed. See [backlog.txt.example](.
 | **Ctrl+T** | Add .torrent file directly |
 | **Ctrl+R** | Resume selected downloads (Play) |
 | **Space** | Pause selected downloads |
+| **Ctrl+C** | Copy URL(s) / Magnet link(s) of selected download(s) |
+| **F2** | Rename root file or folder (Torrent/HTTP) |
 | **Delete** | Delete selected downloads |
 | **Enter** | Open downloaded file |
 | **Ctrl+O** | Open containing folder |

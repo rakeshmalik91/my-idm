@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QGuiApplication
@@ -55,13 +55,17 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.assertNotIn(self.win._act_toggle_details, actions)
 
     def test_icon_only_buttons_on_toolbar(self):
-        """Play and Pause must be icon-only on the toolbar, while Delete, Move, Recheck, and Preferences show text."""
+        """Resume, Pause, Stop, Delete, Move, and Recheck must be icon-only on toolbar, while Preferences shows text."""
         toolbar = self.win.findChild(QToolBar)
         self.assertIsNotNone(toolbar)
 
         for act in (
             self.win._act_resume,
             self.win._act_pause,
+            self.win._act_stop,
+            self.win._act_delete,
+            self.win._act_move,
+            self.win._act_recheck,
         ):
             btn = toolbar.widgetForAction(act)
             self.assertIsInstance(btn, QToolButton)
@@ -76,9 +80,6 @@ class TestMainWindowToolbar(unittest.TestCase):
             )
 
         for act in (
-            self.win._act_delete,
-            self.win._act_move,
-            self.win._act_recheck,
             self.win._act_preferences,
         ):
             btn = toolbar.widgetForAction(act)
@@ -116,6 +117,8 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         self.win.close()
         self.manager.stop()
         self.db.close()
+        settings = QSettings("MyIDM", "My-IDM")
+        settings.remove("header_state")
 
     def test_all_columns_are_interactive_resizable(self):
         """Every column in the table must have ResizeMode.Interactive so users can drag borders."""
@@ -172,6 +175,28 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         win2 = MainWindow(self.manager)
         try:
             self.assertEqual(win2._table.columnWidth(Col.NAME), 380)
+            self.assertTrue(win2._table.horizontalHeader().sectionsMovable())
+        finally:
+            win2.close()
+
+    def test_column_ordering_by_dragging_and_persistence(self):
+        """Columns are movable by dragging and their reordered visual positions persist."""
+        header = self.win._table.horizontalHeader()
+        self.assertTrue(header.sectionsMovable())
+        self.assertTrue(header.isFirstSectionMovable())
+
+        # Move section Col.NAME (1) to visual index 3
+        with patch.object(self.win, "_save_ui_state_to_db", wraps=self.win._save_ui_state_to_db) as mock_save:
+            header.moveSection(Col.NAME, 3)
+            self.assertEqual(header.visualIndex(Col.NAME), 3)
+            mock_save.assert_called()
+
+        # When creating a second window, the moved visual index is restored
+        win2 = MainWindow(self.manager)
+        try:
+            header2 = win2._table.horizontalHeader()
+            self.assertTrue(header2.sectionsMovable())
+            self.assertEqual(header2.visualIndex(Col.NAME), 3)
         finally:
             win2.close()
 
@@ -393,7 +418,217 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
             if not act.isSeparator():
                 self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' in Help menu must have an icon")
 
+    def test_copy_multiple_urls_to_clipboard(self):
+        """MainWindow._on_copy_url with multiple selected rows copies URLs joined by newline."""
+        cb = QGuiApplication.clipboard()
+        orig = cb.text() if cb else ""
+
+        e1 = DownloadEntry(
+            id="test_copy_1",
+            url="https://example.com/file1.zip",
+            filename="file1.zip",
+            status="completed",
+        )
+        e2 = DownloadEntry(
+            id="test_copy_2",
+            url="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=test_mag",
+            filename="test_mag",
+            status="downloading",
+        )
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.win._load_history()
+
+        try:
+            self.win._table.selectAll()
+            self.win._on_copy_url()
+            copied_lines = cb.text().splitlines()
+            self.assertEqual(set(copied_lines), {e1.url, e2.url})
+            self.assertEqual(len(copied_lines), 2)
+            self.assertIn("Copied 2 URLs/Magnets to clipboard", self.win._status_label.text())
+        finally:
+            if cb:
+                cb.setText(orig)
+
+    def test_rename_action_triggers_rename_download(self):
+        """MainWindow._on_rename triggers manager.rename_download and updates model."""
+        e = DownloadEntry(
+            id="d_rename_1",
+            url="https://example.com/old_name.iso",
+            filename="old_name.iso",
+            save_path=tempfile.gettempdir(),
+            status="completed",
+        )
+        self.db.add_download(e)
+        self.win._load_history()
+        self.win._table.selectRow(0)
+
+        mock_dlg = MagicMock()
+        mock_dlg.exec.return_value = 1  # Accepted
+        mock_dlg.new_name = "new_name.iso"
+        with patch("my_idm.main_window.RenameDialog", return_value=mock_dlg):
+            with patch.object(self.manager, "rename_download", return_value=(True, "")) as mock_ren:
+                self.win._act_rename.trigger()
+                mock_ren.assert_called_once_with("d_rename_1", "new_name.iso")
+
+        # Emitting download_renamed updates table model row
+        self.manager.download_renamed.emit("d_rename_1", "new_name.iso")
+        self.assertEqual(self.win._model.get_entry(0).filename, "new_name.iso")
+        self.assertEqual(self.win._model.data(self.win._model.index(0, Col.NAME)), "new_name.iso")
+
+    def test_on_add_multiple_urls_queues_all(self):
+        """MainWindow._on_add adds each URL from dlg.urls."""
+        mock_dlg = MagicMock()
+        mock_dlg.exec.return_value = 1  # Accepted
+        mock_dlg.urls = [
+            "https://example.com/batch1.zip",
+            "https://example.com/batch2.zip",
+        ]
+        mock_dlg.save_path = "D:/Downloads"
+        mock_dlg.num_segments = 8
+
+        with patch("my_idm.main_window.AddDownloadDialog", return_value=mock_dlg) as mock_cls:
+            mock_cls.DialogCode.Accepted = 1
+            with patch.object(self.manager, "add_download") as mock_add:
+                self.win._on_add()
+                self.assertEqual(mock_add.call_count, 2)
+                mock_add.assert_any_call("https://example.com/batch1.zip", "D:/Downloads", 8)
+                mock_add.assert_any_call("https://example.com/batch2.zip", "D:/Downloads", 8)
+
+    def test_speed_label_left_click_opens_menu(self):
+        """Left clicking the footer speed label should invoke _show_speed_context_menu."""
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QPoint, QPointF, QEvent
+
+        with patch.object(self.win, "_show_speed_context_menu") as mock_menu:
+            press_event = QMouseEvent(
+                QEvent.Type.MouseButtonPress,
+                QPointF(5.0, 5.0),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            self.win._speed_label.mousePressEvent(press_event)
+            mock_menu.assert_called_once_with(QPoint(5, 5))
+
+
+class TestHeaderViewAndFiltering(unittest.TestCase):
+    """Tests for FilterHeaderView, sort indicators, and multiselect filter popup."""
+
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.db.open()
+        self.manager = DownloadManager(self.db)
+        self.win = MainWindow(self.manager)
+
+    def tearDown(self):
+        self.win.close()
+        self.manager.stop()
+        self.db.close()
+
+    def test_header_sort_indicator_and_painting(self):
+        header = self.win._header_view
+        self.assertTrue(header.isSortIndicatorShown())
+
+        # Test setSortIndicator
+        header.setSortIndicator(Col.ADDED, Qt.SortOrder.DescendingOrder)
+        self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+
+        header.setSortIndicator(Col.NAME, Qt.SortOrder.AscendingOrder)
+        self.assertEqual(header.sortIndicatorSection(), Col.NAME)
+        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+
+        # Test filter button rect geometry calculations
+        name_rect = header._get_filter_btn_rect(Col.NAME)
+        self.assertFalse(name_rect.isEmpty())
+        self.assertEqual(name_rect.width(), 16)
+        self.assertEqual(name_rect.height(), 16)
+
+        status_rect = header._get_filter_btn_rect(Col.STATUS)
+        self.assertFalse(status_rect.isEmpty())
+        self.assertEqual(status_rect.width(), 16)
+        self.assertEqual(status_rect.height(), 16)
+
+        # Non-filterable column has empty rect
+        size_rect = header._get_filter_btn_rect(Col.SIZE)
+        self.assertTrue(size_rect.isEmpty())
+
+    def test_header_filter_button_click_opens_popup(self):
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QPointF, QEvent
+        header = self.win._header_view
+
+        # Get the filter button rect for Col.STATUS
+        btn_rect = header._get_filter_btn_rect(Col.STATUS)
+        self.assertFalse(btn_rect.isEmpty())
+
+        # Simulate left-click directly on the filter button
+        click_pt = btn_rect.center()
+        press_event = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(click_pt.x(), click_pt.y()),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        header.mousePressEvent(press_event)
+
+        # Active popup should have been created
+        self.assertIsNotNone(header._active_popup)
+        popup = header._active_popup
+        self.assertEqual(popup._column, Col.STATUS)
+        popup.close()
+
+    def test_multiselect_filter_popup_interactions(self):
+        from my_idm.header_view import MultiselectFilterPopup
+        counts = {"downloading": 2, "completed": 1, "paused": 0}
+        popup = MultiselectFilterPopup(Col.STATUS, None, counts, self.win)
+
+        changes = []
+        popup.filter_changed.connect(lambda col, keys: changes.append((col, keys)))
+
+        # Initially all checked
+        for cb in popup._checkboxes.values():
+            self.assertTrue(cb.isChecked())
+
+        # Uncheck downloading
+        popup._checkboxes["downloading"].setChecked(False)
+        self.assertTrue(len(changes) > 0)
+        last_col, last_keys = changes[-1]
+        self.assertEqual(last_col, Col.STATUS)
+        self.assertNotIn("downloading", last_keys)
+
+        # Select all
+        popup._select_all()
+        last_col, last_keys = changes[-1]
+        self.assertIsNone(last_keys)  # None indicates all selected (unfiltered)
+
+        popup.close()
+
+    def test_count_label_filtered_indicator(self):
+        # Add two downloads
+        e1 = DownloadEntry(id="1", url="http://example.com/1", filename="1.zip", status="downloading", download_type="http")
+        e2 = DownloadEntry(id="2", url="http://example.com/2", filename="2.zip", status="completed", download_type="http")
+        self.win._model.load_entries([e1, e2])
+        self.win._update_count_label()
+        self.assertEqual(self.win._count_label.text(), "2 Downloads, 1 Active")
+
+        # Apply filter
+        self.win._model.set_status_filter({"downloading"})
+        self.win._update_count_label()
+        self.assertIn("Filtered", self.win._count_label.text())
+        self.assertEqual(self.win._count_label.text(), "1 of 2 Downloads, 1 Active (Filtered)")
+
+        # Clear filter
+        self.win._model.clear_filters()
+        self.win._update_count_label()
+        self.assertNotIn("Filtered", self.win._count_label.text())
+        self.assertEqual(self.win._count_label.text(), "2 Downloads, 1 Active")
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
 

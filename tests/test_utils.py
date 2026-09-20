@@ -11,7 +11,7 @@ from my_idm.database import Database
 from my_idm.download_model import Col, DownloadTableModel
 from my_idm.http_engine import HTTPEngine
 from my_idm.manager import DownloadManager
-from my_idm.utils import get_unique_filename
+from my_idm.utils import extract_source_domain, get_unique_filename, send_to_trash
 
 app = QApplication.instance() or QApplication([])
 
@@ -127,5 +127,125 @@ class TestFilenameResolution(unittest.TestCase):
         )
 
 
+class TestExtractSourceDomain(unittest.TestCase):
+    """Tests for source website domain extraction from URLs and magnet links."""
+
+    def test_http_https_domain_extraction(self):
+        """Extract clean hostname from http/https URLs."""
+        self.assertEqual(
+            extract_source_domain("https://releases.ubuntu.com/24.04/ubuntu.iso"),
+            "releases.ubuntu.com",
+        )
+        self.assertEqual(
+            extract_source_domain("https://www.youtube.com/watch?v=123"),
+            "youtube.com",
+        )
+        self.assertEqual(
+            extract_source_domain("http://mirror.archlinux.org/iso/archlinux.iso"),
+            "mirror.archlinux.org",
+        )
+
+    def test_custom_ports_and_ftp(self):
+        """Handles custom ports and FTP protocol."""
+        self.assertEqual(
+            extract_source_domain("http://myfiles.org:8080/files/archive.zip"),
+            "myfiles.org",
+        )
+        self.assertEqual(
+            extract_source_domain("ftp://ftp.gnu.org/gnu/emacs/emacs-29.1.tar.gz"),
+            "ftp.gnu.org",
+        )
+
+    def test_magnet_tracker_and_webseed(self):
+        """Extracts domain from tracker (tr) or webseed (ws) query parameters in magnet links."""
+        magnet_tr = (
+            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709"
+            "&dn=Ubuntu&tr=http%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+        )
+        self.assertEqual(extract_source_domain(magnet_tr), "tracker.opentrackr.org")
+
+        magnet_ws = (
+            "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709"
+            "&dn=Linux&ws=https%3A%2F%2Fseed.kernel.org%2Flinux.iso"
+        )
+        self.assertEqual(extract_source_domain(magnet_ws), "seed.kernel.org")
+
+    def test_empty_or_local_urls(self):
+        """Returns empty string for local paths, empty URLs, or trackerless magnets."""
+        self.assertEqual(extract_source_domain(""), "")
+        self.assertEqual(extract_source_domain(None), "")
+        self.assertEqual(extract_source_domain("C:/Downloads/torrent.torrent"), "")
+        self.assertEqual(
+            extract_source_domain("magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"),
+            "",
+        )
+
+
+class TestToInt(unittest.TestCase):
+    """Tests for safe integer coercion utility to_int."""
+
+    def test_to_int_with_integers(self):
+        from my_idm.utils import to_int
+        self.assertEqual(to_int(0), 0)
+        self.assertEqual(to_int(42), 42)
+        self.assertEqual(to_int(-10), -10)
+
+    def test_to_int_with_collections(self):
+        from my_idm.utils import to_int
+        self.assertEqual(to_int([]), 0)
+        self.assertEqual(to_int(["peer1", "peer2"]), 2)
+        self.assertEqual(to_int(("a", "b", "c")), 3)
+        self.assertEqual(to_int({"key1": "val1"}), 1)
+        self.assertEqual(to_int({1, 2, 3, 4}), 4)
+
+    def test_to_int_with_strings(self):
+        from my_idm.utils import to_int
+        self.assertEqual(to_int("123"), 123)
+        self.assertEqual(to_int("0"), 0)
+        self.assertEqual(to_int("invalid"), 0)
+        self.assertEqual(to_int("invalid", default=99), 99)
+
+    def test_to_int_with_none_and_other_types(self):
+        from my_idm.utils import to_int
+        self.assertEqual(to_int(None), 0)
+        self.assertEqual(to_int(None, default=-1), -1)
+        self.assertEqual(to_int(object()), 0)
+
+
+class TestSendToTrash(unittest.TestCase):
+    """Tests for send_to_trash utility moving files and folders to trash."""
+
+    def test_send_file_to_trash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = Path(tmpdir) / "sample_to_trash.txt"
+            test_file.write_text("Hello Trash")
+            self.assertTrue(test_file.exists())
+
+            result = send_to_trash(test_file)
+            self.assertTrue(result)
+            self.assertFalse(test_file.exists())
+
+    def test_send_directory_to_trash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sub_dir = Path(tmpdir) / "folder_to_trash"
+            sub_dir.mkdir()
+            (sub_dir / "nested_file.bin").write_bytes(b"content" * 20)
+            self.assertTrue(sub_dir.exists())
+
+            result = send_to_trash(sub_dir)
+            self.assertTrue(result)
+            self.assertFalse(sub_dir.exists())
+
+    def test_send_nonexistent_path_returns_true(self):
+        non_existent = Path(tempfile.gettempdir()) / "non_existent_never_existed_123.bin"
+        self.assertFalse(non_existent.exists())
+        self.assertTrue(send_to_trash(non_existent))
+
+    def test_send_empty_path_returns_false(self):
+        self.assertFalse(send_to_trash(""))
+        self.assertFalse(send_to_trash(None))
+
+
 if __name__ == "__main__":
     unittest.main()
+

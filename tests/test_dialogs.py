@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QGuiApplication
 
 from my_idm.config import GeneralConfig
-from my_idm.dialogs import AddDownloadDialog
+from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, RenameDialog
 
 app = QApplication.instance() or QApplication([])
 
@@ -178,5 +178,92 @@ class TestDialogsScrollable(unittest.TestCase):
             dlg.close()
 
 
+class TestAddDownloadDialogMultiline(unittest.TestCase):
+    """Test multiline URL support in AddDownloadDialog."""
+
+    def test_multiline_urls_property(self):
+        """AddDownloadDialog.urls parses multiple lines and filters blanks."""
+        dlg = AddDownloadDialog()
+        try:
+            dlg._url_edit.setPlainText(
+                "https://example.com/file1.zip\n\n"
+                "https://example.com/file2.zip\n"
+                "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709\n"
+            )
+            dlg._accept()
+            self.assertEqual(len(dlg.urls), 3)
+            self.assertEqual(dlg.urls[0], "https://example.com/file1.zip")
+            self.assertEqual(dlg.urls[1], "https://example.com/file2.zip")
+            self.assertEqual(dlg.urls[2], "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709")
+            self.assertEqual(dlg.url, "https://example.com/file1.zip")
+        finally:
+            dlg.close()
+
+    def test_multiline_prefill_from_clipboard(self):
+        """Clipboard with multiple valid URLs prefills all lines."""
+        clipboard = QGuiApplication.clipboard()
+        multiline_urls = (
+            "https://mirror1.example.com/iso.img\n"
+            "https://mirror2.example.com/iso.img\n"
+            "https://mirror3.example.com/iso.img"
+        )
+        clipboard.setText(multiline_urls)
+        dlg = AddDownloadDialog()
+        try:
+            self.assertEqual(dlg._url_edit.toPlainText().strip(), multiline_urls)
+            self.assertEqual(len(dlg.urls or [dlg.url]), 3)
+        finally:
+            dlg.close()
+
+
+class TestRenameDialog(unittest.TestCase):
+    """Test RenameDialog length, styling, and behavior."""
+
+    def test_rename_dialog_dimensions_and_initial_name(self):
+        """RenameDialog is long (minimum width >= 550) and pre-fills current name."""
+        dlg = RenameDialog("debian-12.0.0-amd64-netinst.iso")
+        try:
+            self.assertGreaterEqual(dlg.minimumWidth(), 550)
+            self.assertEqual(dlg._name_edit.text(), "debian-12.0.0-amd64-netinst.iso")
+            self.assertEqual(dlg._name_edit.selectedText(), "debian-12.0.0-amd64-netinst")
+            self.assertEqual(dlg.new_name, "debian-12.0.0-amd64-netinst.iso")
+        finally:
+            dlg.close()
+
+    def test_rename_dialog_accept_and_modify(self):
+        """Modifying text in name edit updates new_name upon accept."""
+        dlg = RenameDialog("ubuntu.iso")
+        try:
+            dlg._name_edit.setText("ubuntu-24.04.iso")
+            dlg._accept()
+            self.assertEqual(dlg.new_name, "ubuntu-24.04.iso")
+        finally:
+            dlg.close()
+
+
+class TestDeleteConfirmDialog(unittest.TestCase):
+    """Tests for DeleteConfirmDialog text and delete_files flag."""
+
+    def test_delete_confirm_dialog_defaults_and_trash_label(self):
+        dlg = DeleteConfirmDialog(count=1)
+        try:
+            self.assertIn("Trash", dlg._files_cb.text())
+            self.assertFalse(dlg.delete_files)
+            dlg._accept()
+            self.assertFalse(dlg.delete_files)
+        finally:
+            dlg.close()
+
+    def test_delete_confirm_dialog_with_files_checked(self):
+        dlg = DeleteConfirmDialog(count=3)
+        try:
+            dlg._files_cb.setChecked(True)
+            dlg._accept()
+            self.assertTrue(dlg.delete_files)
+        finally:
+            dlg.close()
+
+
 if __name__ == "__main__":
     unittest.main()
+

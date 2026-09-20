@@ -366,7 +366,13 @@ class HTTPEngine:
             if etag and not entry.etag:
                 entry.etag = etag
 
-            candidate = filename or entry.filename or self._filename_from_url(entry.url)
+            # If explicit_filename was specified by caller/backlog/user, preserve it and do not overwrite with website header filename!
+            meta = entry.metadata if hasattr(entry, "metadata") else {}
+            has_explicit_fn = meta.get("explicit_filename", False)
+            if has_explicit_fn and entry.filename:
+                candidate = entry.filename
+            else:
+                candidate = filename or entry.filename or self._filename_from_url(entry.url)
             if candidate:
                 existing_entries = self._db.get_all_downloads()
                 reserved = {
@@ -792,19 +798,22 @@ class HTTPEngine:
                 if "/" in cr:
                     entry.total_size = int(cr.split("/")[-1])
 
-            get_filename = self._extract_filename_from_headers(resp.headers, entry.url)
-            if get_filename and get_filename != entry.filename:
-                existing_entries = self._db.get_all_downloads()
-                reserved = {
-                    d.filename for d in existing_entries
-                    if d.id != entry.id and d.save_path == entry.save_path and d.filename
-                }
-                unique_fn = get_unique_filename(entry.save_path, get_filename, reserved_names=reserved)
-                if unique_fn != entry.filename:
-                    entry.filename = unique_fn
-                    entry.file_path = str(Path(entry.save_path) / entry.filename)
-                    file_path = Path(entry.file_path)
-                    self._emit_filename(entry.id, entry.filename)
+            meta = entry.metadata if hasattr(entry, "metadata") else {}
+            has_explicit_fn = meta.get("explicit_filename", False)
+            if not has_explicit_fn:
+                get_filename = self._extract_filename_from_headers(resp.headers, entry.url)
+                if get_filename and get_filename != entry.filename:
+                    existing_entries = self._db.get_all_downloads()
+                    reserved = {
+                        d.filename for d in existing_entries
+                        if d.id != entry.id and d.save_path == entry.save_path and d.filename
+                    }
+                    unique_fn = get_unique_filename(entry.save_path, get_filename, reserved_names=reserved)
+                    if unique_fn != entry.filename:
+                        entry.filename = unique_fn
+                        entry.file_path = str(Path(entry.save_path) / entry.filename)
+                        file_path = Path(entry.file_path)
+                        self._emit_filename(entry.id, entry.filename)
 
             self._db.update_download(entry)
             downloaded = existing_size
@@ -914,23 +923,26 @@ class HTTPEngine:
                         if "/" in cr:
                             entry.total_size = int(cr.split("/")[-1])
 
-                    get_filename = self._extract_filename_from_headers(
-                        resp.headers, str(resp.url)
-                    )
-                    if get_filename and get_filename != entry.filename:
-                        existing_entries = self._db.get_all_downloads()
-                        reserved = {
-                            d.filename for d in existing_entries
-                            if d.id != entry.id and d.save_path == entry.save_path and d.filename
-                        }
-                        unique_fn = get_unique_filename(entry.save_path, get_filename, reserved_names=reserved)
-                        if unique_fn != entry.filename:
-                            entry.filename = unique_fn
-                            entry.file_path = str(
-                                Path(entry.save_path) / entry.filename
-                            )
-                            file_path = Path(entry.file_path)
-                            self._emit_filename(entry.id, entry.filename)
+                    meta = entry.metadata if hasattr(entry, "metadata") else {}
+                    has_explicit_fn = meta.get("explicit_filename", False)
+                    if not has_explicit_fn:
+                        get_filename = self._extract_filename_from_headers(
+                            resp.headers, str(resp.url)
+                        )
+                        if get_filename and get_filename != entry.filename:
+                            existing_entries = self._db.get_all_downloads()
+                            reserved = {
+                                d.filename for d in existing_entries
+                                if d.id != entry.id and d.save_path == entry.save_path and d.filename
+                            }
+                            unique_fn = get_unique_filename(entry.save_path, get_filename, reserved_names=reserved)
+                            if unique_fn != entry.filename:
+                                entry.filename = unique_fn
+                                entry.file_path = str(
+                                    Path(entry.save_path) / entry.filename
+                                )
+                                file_path = Path(entry.file_path)
+                                self._emit_filename(entry.id, entry.filename)
 
                     self._db.update_download(entry)
                     downloaded = existing_size

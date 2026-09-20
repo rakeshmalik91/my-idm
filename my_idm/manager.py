@@ -29,7 +29,7 @@ from my_idm.security import (
     quarantine_or_delete_file,
 )
 from my_idm.torrent_engine import TorrentEngine
-from my_idm.utils import get_unique_filename, normalize_path
+from my_idm.utils import get_unique_filename, normalize_path, send_to_trash, to_int
 
 log = logging.getLogger(__name__)
 
@@ -234,6 +234,7 @@ class DownloadManager(QObject):
     download_added = Signal(str)          # download_id
     download_removed = Signal(str)        # download_id
     download_moved = Signal(str)          # download_id
+    download_renamed = Signal(str, str)   # download_id, new_filename
     general_config_changed = Signal(object)   # GeneralConfig
     network_config_changed = Signal(object)  # NetworkConfig
     security_config_changed = Signal(object)  # SecurityConfig
@@ -342,17 +343,21 @@ class DownloadManager(QObject):
 
         log.info("DownloadManager started")
 
-    def stop(self):
+    def stop(self, status_cb=None):
         """Shut down everything cleanly."""
         if getattr(self, "_stopped", False):
             return
         self._stopped = True
 
+        if status_cb:
+            status_cb("Stopping background timers...", 15)
         self._torrent_timer.stop()
         self._retry_timer.stop()
         self._backlog_timer.stop()
 
         # Stop HTTP engine
+        if status_cb:
+            status_cb("Stopping active HTTP downloads...", 35)
         if self._loop and self._loop.is_running():
             future = asyncio.run_coroutine_threadsafe(
                 self._http.stop(), self._loop
@@ -363,9 +368,13 @@ class DownloadManager(QObject):
                 pass
 
         # Stop torrent engine
+        if status_cb:
+            status_cb("Saving BitTorrent resume state...", 60)
         self._torrent.stop()
 
         # Stop Tor background service
+        if status_cb:
+            status_cb("Stopping Tor network service...", 80)
         self._tor_service.stop()
 
         # If Tor was active on exit but auto-start is False, ensure enabled is saved as False
@@ -374,11 +383,15 @@ class DownloadManager(QObject):
             self._tor_config.save()
 
         # Stop asyncio loop
+        if status_cb:
+            status_cb("Closing background threads...", 95)
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
             self._thread.join(timeout=3)
 
+        if status_cb:
+            status_cb("Shutdown complete.", 100)
         log.info("DownloadManager stopped")
 
     @property
@@ -598,12 +611,14 @@ class DownloadManager(QObject):
             if existing.status in ("completed", "seeding"):
                 log.info("URL already completed: %s", url)
                 return None  # Already done
-            if existing.status in ("queued", "paused", "error"):
+            if existing.status in ("queued", "paused", "error", "stopped"):
                 log.info("Resuming existing download: %s", existing.id)
                 self.resume_download(existing.id)
                 return existing.id
             # Already downloading
             return existing.id
+
+        explicit_fn = bool(filename and filename.strip())
 
         # Extract initial filename if not explicitly provided
         if not filename:
@@ -652,6 +667,8 @@ class DownloadManager(QObject):
 
         save_path = normalize_path(save_path)
         entry_metadata = metadata.copy() if metadata else {}
+        if explicit_fn:
+            entry_metadata["explicit_filename"] = True
         if risk_level != "clean":
             entry_metadata["security_warning"] = sec_details
         if headers:
@@ -742,6 +759,37 @@ class DownloadManager(QObject):
             download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
 
+    def stop_download(self, download_id: str):
+        """Permanently stop a download. It will never be auto-retried or auto-resumed.
+
+        Only an explicit resume_download() or force_start_download() will restart it.
+        The download is removed from the active queue (queue_order set to 0).
+        """
+        self._starting_downloads.discard(download_id)
+
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return
+
+        # Halt the transfer in the engine
+        if entry.download_type == "http":
+            if self._loop:
+                asyncio.run_coroutine_threadsafe(
+                    self._http.pause(download_id), self._loop
+                )
+        elif entry.download_type == "torrent":
+            self._torrent.pause(download_id)
+
+        # Update DB: stopped status, clear queue position
+        entry.status = "stopped"
+        entry.queue_order = 0
+        self._db.update_download(entry)
+
+        self.status_changed.emit(download_id, "stopped", "")
+        self.progress_updated.emit(
+            download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+        )
+
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
         if not entry:
@@ -827,27 +875,19 @@ class DownloadManager(QObject):
                 except Exception:
                     pass
         elif entry.download_type == "torrent":
-            self._torrent.remove(download_id, delete_files)
+            self._torrent.remove(download_id, delete_files=False)
 
-        # Delete files if requested (for HTTP or if torrent didn't handle it)
-        if delete_files and entry.download_type == "http":
+        # Move files to trash if requested
+        if delete_files:
             target_path = entry.file_path
             if not target_path and entry.save_path and entry.filename:
                 target_path = normalize_path(Path(entry.save_path) / entry.filename)
             if target_path:
                 fp = Path(target_path)
                 if fp.exists():
-                    for attempt in range(5):
-                        try:
-                            if fp.is_dir():
-                                shutil.rmtree(fp)
-                            else:
-                                fp.unlink()
-                            break
-                        except OSError as exc:
-                            time.sleep(0.1)
-                            if attempt == 4:
-                                log.warning("Failed to delete file %s: %s", fp, exc)
+                    success = send_to_trash(fp)
+                    if not success and fp.exists():
+                        log.warning("Failed to move file to trash: %s", fp)
 
         # Remove from DB
         self._db.delete_segments(download_id)
@@ -871,26 +911,18 @@ class DownloadManager(QObject):
                 except Exception:
                     pass
         elif entry.download_type == "torrent":
-            self._torrent.remove(download_id, delete_files=True)
+            self._torrent.remove(download_id, delete_files=False)
 
-        # 2. Delete file / directory from disk
+        # 2. Move file / directory to trash
         target_path = entry.file_path
         if not target_path and entry.save_path and entry.filename:
             target_path = normalize_path(Path(entry.save_path) / entry.filename)
         if target_path:
             fp = Path(target_path)
             if fp.exists():
-                for attempt in range(5):
-                    try:
-                        if fp.is_dir():
-                            shutil.rmtree(fp)
-                        else:
-                            fp.unlink()
-                        break
-                    except OSError as exc:
-                        time.sleep(0.1)
-                        if attempt == 4:
-                            log.warning("Failed to delete file %s: %s", fp, exc)
+                success = send_to_trash(fp)
+                if not success and fp.exists():
+                    log.warning("Failed to move file to trash: %s", fp)
 
         # 3. Clean up HTTP segment records in DB
         self._db.delete_segments(download_id)
@@ -958,6 +990,97 @@ class DownloadManager(QObject):
                         )
 
         self.download_moved.emit(download_id)
+
+    def rename_download(self, download_id: str, new_filename: str) -> tuple[bool, str]:
+        """Rename the root file or folder of an HTTP or Torrent download.
+
+        Can be invoked at any point of time (before start, during download, or after completion).
+        Returns (success: bool, message: str).
+        """
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return False, "Download not found."
+
+        new_name = new_filename.strip()
+        if not new_name:
+            return False, "Filename cannot be empty."
+
+        # Disallow filesystem-illegal characters
+        invalid_chars = set(r'<>:"/\|?*' + "".join(chr(i) for i in range(32)))
+        if any(c in invalid_chars for c in new_name):
+            return False, "Filename contains invalid characters (< > : \" / \\ | ? *)."
+
+        old_filename = entry.filename or ""
+        if new_name == old_filename:
+            return True, "Filename is unchanged."
+
+        save_path = entry.save_path or self._general_config.get_effective_save_path()
+        old_file_path = (
+            Path(entry.file_path)
+            if entry.file_path
+            else (Path(save_path) / old_filename if old_filename else None)
+        )
+        new_file_path = normalize_path(Path(save_path) / new_name)
+
+        # Check collision with existing file/folder
+        if Path(new_file_path).exists():
+            if not old_file_path or normalize_path(old_file_path) != new_file_path:
+                return False, f"A file or folder named '{new_name}' already exists in the save folder."
+
+        if entry.download_type == "torrent":
+            success = self._torrent.rename_root(download_id, new_name)
+            if not success:
+                return False, "Failed to rename torrent root file/folder."
+
+            entry.filename = new_name
+            entry.file_path = new_file_path
+            if not entry.metadata:
+                entry.metadata = {}
+            entry.metadata["explicit_filename"] = True
+            self._db.update_download(entry)
+        else:
+            # HTTP download
+            was_active = self._http.is_active(download_id)
+            if was_active:
+                if self._loop and self._loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._http.pause(download_id), self._loop
+                    )
+                    try:
+                        future.result(timeout=10)
+                    except Exception as exc:
+                        log.warning("Timeout or error pausing %s for rename: %s", download_id, exc)
+
+            # Move file on disk if it exists
+            if old_file_path and old_file_path.exists() and normalize_path(old_file_path) != new_file_path:
+                try:
+                    Path(new_file_path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(old_file_path), str(new_file_path))
+                except Exception as exc:
+                    log.error("Failed to rename disk file from %s to %s: %s", old_file_path, new_file_path, exc)
+                    # If was active, resume
+                    if was_active and self._loop and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(self._http.add(entry), self._loop)
+                    return False, f"Could not rename file on disk: {exc}"
+
+            entry.filename = new_name
+            entry.file_path = new_file_path
+            if not entry.metadata:
+                entry.metadata = {}
+            entry.metadata["explicit_filename"] = True
+            self._db.update_download(entry)
+
+            # Resume if active
+            if was_active and self._loop and self._loop.is_running():
+                refreshed_entry = self._db.get_download(download_id)
+                if refreshed_entry:
+                    asyncio.run_coroutine_threadsafe(
+                        self._http.add(refreshed_entry), self._loop
+                    )
+
+        self.download_renamed.emit(download_id, new_name)
+        log.info("Renamed download %s to '%s'", download_id, new_name)
+        return True, ""
 
     def mark_file_not_found(self, download_id: str):
         """Mark download status as file_not_found when missing on disk."""
@@ -1216,7 +1339,27 @@ class DownloadManager(QObject):
         return self._db.get_all_downloads()
 
     def get_entry(self, download_id: str) -> Optional[DownloadEntry]:
-        return self._db.get_download(download_id)
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return None
+        if entry.download_type == "torrent":
+            status = self._torrent.get_status(download_id)
+            if status:
+                entry.total_size = status["total_size"] or entry.total_size
+                entry.downloaded_size = status["downloaded"]
+                entry.speed = status["speed"]
+                entry.upload_speed = status["upload_speed"]
+                entry.seeds = to_int(status["seeds"])
+                entry.peers = to_int(status["peers"])
+                entry.total_seeds = to_int(status.get("total_seeds", status["seeds"]))
+                entry.total_peers = to_int(status.get("total_peers", status["peers"]))
+                entry.eta_seconds = status["eta"]
+            elif entry.metadata:
+                entry.seeds = to_int(entry.metadata.get("seeds", 0))
+                entry.peers = to_int(entry.metadata.get("peers", 0))
+                entry.total_seeds = to_int(entry.metadata.get("total_seeds", 0))
+                entry.total_peers = to_int(entry.metadata.get("total_peers", 0))
+        return entry
 
     # -- engine callbacks (called from async / background threads) -----------
 
@@ -1237,7 +1380,14 @@ class DownloadManager(QObject):
         if current and current.status == "paused" and status in ("queued", "downloading"):
             log.debug("Ignoring status %s for paused download %s", status, download_id)
             return
-        if status == "completed" and self._security_config.scan_after_download:
+        if current and current.status == "stopped" and status in ("queued", "downloading"):
+            log.debug("Ignoring status %s for stopped download %s", status, download_id)
+            return
+        if (
+            status == "completed"
+            and self._security_config.scan_after_download
+            and self._security_config.scan_timing == "after_complete"
+        ):
             self._handle_completed_scan(download_id)
         else:
             self.status_changed.emit(download_id, status, error_msg)
@@ -1262,9 +1412,13 @@ class DownloadManager(QObject):
         if current and current.status == "paused" and status in ("queued", "downloading", "fetching_metadata"):
             log.debug("Ignoring status %s for paused torrent %s", status, download_id)
             return
+        if current and current.status == "stopped" and status in ("queued", "downloading", "fetching_metadata"):
+            log.debug("Ignoring status %s for stopped torrent %s", status, download_id)
+            return
         if (
             status in ("finished", "seeding")
             and self._security_config.scan_after_download
+            and self._security_config.scan_timing == "after_complete"
         ):
             entry = self._db.get_download(download_id)
             if entry and not entry.metadata.get("antivirus_scanned"):
@@ -1362,7 +1516,8 @@ class DownloadManager(QObject):
                     entry.metadata["files"] = files
                     self._db.update_download(entry)
                 return files
-            return entry.metadata.get("files", [])
+            cached = entry.metadata.get("files", [])
+            return cached if isinstance(cached, list) else []
         # HTTP single file representation
         name = entry.filename or os.path.basename(entry.file_path) if entry.file_path else "file"
         pct = (entry.downloaded_size / entry.total_size) if entry.total_size > 0 else 0.0
@@ -1388,11 +1543,19 @@ class DownloadManager(QObject):
             return []
         peers = self._torrent.get_torrent_peers(download_id)
         if peers:
-            if entry.metadata.get("peers") != peers:
-                entry.metadata["peers"] = peers
+            cached = entry.metadata.get("peer_list")
+            if not isinstance(cached, list) or len(cached) != len(peers) or [c.get("ip") for c in cached] != [p.get("ip") for p in peers]:
+                entry.metadata["peer_list"] = peers
                 self._db.update_download(entry)
             return peers
-        return entry.metadata.get("peers", [])
+        cached = entry.metadata.get("peer_list")
+        if isinstance(cached, list):
+            return cached
+        # Fallback to legacy "peers" key only if it was stored as a list of dicts
+        legacy = entry.metadata.get("peers")
+        if isinstance(legacy, list):
+            return legacy
+        return []
 
     def get_torrent_trackers(self, download_id: str) -> list[dict]:
         """Return trackers and their status for a torrent, falling back to cached metadata in DB."""
@@ -1405,7 +1568,8 @@ class DownloadManager(QObject):
                 entry.metadata["trackers"] = trackers
                 self._db.update_download(entry)
             return trackers
-        return entry.metadata.get("trackers", [])
+        cached = entry.metadata.get("trackers", [])
+        return cached if isinstance(cached, list) else []
 
     def get_download_segments(self, download_id: str) -> list[SegmentEntry]:
         """Return segmented download chunks, preferring live in-memory segments if actively downloading."""

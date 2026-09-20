@@ -27,6 +27,16 @@ HIGH_RISK_EXTENSIONS = {
 }
 
 
+# Common threat categories that users may want to exclude
+KNOWN_THREAT_CATEGORIES = [
+    "HackTool",
+    "CrackTool",
+    "PUA",
+    "Adware",
+    "Riskware",
+]
+
+
 @dataclass
 class SecurityConfig:
     """Configuration for pre- and post-download antivirus scanning."""
@@ -43,11 +53,38 @@ class SecurityConfig:
     custom_scanner_args: str = '"%file%"'
     action_on_threat: str = "warn"  # "warn" or "delete"
 
+    # Scan timing: "after_complete" (auto-scan on completion) or "manual_only"
+    scan_timing: str = "after_complete"
+
+    # Threat exclusions: categories and custom patterns to silently allow
+    ignored_threat_categories: list = None  # e.g. ["HackTool", "CrackTool"]
+    ignored_threat_patterns: str = ""       # comma-separated custom substrings
+
+    def __post_init__(self):
+        if self.ignored_threat_categories is None:
+            self.ignored_threat_categories = list(KNOWN_THREAT_CATEGORIES)
+
+    def get_effective_threat_exclusions(self) -> list[str]:
+        if self.ignored_threat_categories:
+            cats = [c for c in self.ignored_threat_categories if c.strip()]
+            if cats:
+                return cats
+        return list(KNOWN_THREAT_CATEGORIES)
+
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> SecurityConfig:
+        cats = data.get("ignored_threat_categories")
+        if cats is None:
+            cats = list(KNOWN_THREAT_CATEGORIES)
+        elif isinstance(cats, str):
+            cats = [c.strip() for c in cats.split(",") if c.strip()]
+            if not cats:
+                cats = list(KNOWN_THREAT_CATEGORIES)
+        elif isinstance(cats, list) and not cats:
+            cats = list(KNOWN_THREAT_CATEGORIES)
         return cls(
             scan_before_download=bool(data.get("scan_before_download", True)),
             warn_high_risk_extensions=bool(data.get("warn_high_risk_extensions", True)),
@@ -58,6 +95,9 @@ class SecurityConfig:
             custom_scanner_path=str(data.get("custom_scanner_path", "")),
             custom_scanner_args=str(data.get("custom_scanner_args", '"%file%"')),
             action_on_threat=str(data.get("action_on_threat", "warn")),
+            scan_timing=str(data.get("scan_timing", "after_complete")),
+            ignored_threat_categories=list(cats) if isinstance(cats, list) else list(KNOWN_THREAT_CATEGORIES),
+            ignored_threat_patterns=str(data.get("ignored_threat_patterns", "")),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -73,6 +113,9 @@ class SecurityConfig:
         settings.setValue("custom_scanner_path", self.custom_scanner_path)
         settings.setValue("custom_scanner_args", self.custom_scanner_args)
         settings.setValue("action_on_threat", self.action_on_threat)
+        settings.setValue("scan_timing", self.scan_timing)
+        settings.setValue("ignored_threat_categories", ",".join(self.get_effective_threat_exclusions()))
+        settings.setValue("ignored_threat_patterns", self.ignored_threat_patterns)
         settings.endGroup()
 
     @classmethod
@@ -80,6 +123,13 @@ class SecurityConfig:
         if settings is None:
             settings = QSettings("MyIDM", "My-IDM")
         settings.beginGroup("Security")
+        val = settings.value("ignored_threat_categories", None)
+        if val is None or not str(val).strip():
+            cats = list(KNOWN_THREAT_CATEGORIES)
+        else:
+            cats = [c.strip() for c in str(val).split(",") if c.strip()]
+            if not cats:
+                cats = list(KNOWN_THREAT_CATEGORIES)
         cfg = cls(
             scan_before_download=settings.value("scan_before_download", True, type=bool),
             warn_high_risk_extensions=settings.value("warn_high_risk_extensions", True, type=bool),
@@ -90,6 +140,9 @@ class SecurityConfig:
             custom_scanner_path=str(settings.value("custom_scanner_path", "") or ""),
             custom_scanner_args=str(settings.value("custom_scanner_args", '"%file%"') or '"%file%"'),
             action_on_threat=str(settings.value("action_on_threat", "warn") or "warn"),
+            scan_timing=str(settings.value("scan_timing", "after_complete") or "after_complete"),
+            ignored_threat_categories=cats,
+            ignored_threat_patterns=str(settings.value("ignored_threat_patterns", "") or ""),
         )
         settings.endGroup()
         return cfg
@@ -190,10 +243,35 @@ def check_url_safety(url: str, config: SecurityConfig) -> tuple[bool, str, str]:
     return True, "clean", "URL passed preliminary safety checks."
 
 
+def _is_threat_excluded(report: str, config: SecurityConfig) -> Optional[str]:
+    """Check whether a threat report matches any exclusion category or pattern.
+
+    Returns the matched exclusion string if excluded, or None if not excluded.
+    """
+    report_lower = report.lower()
+
+    # Check categories / patterns from exclusion list
+    for cat in config.get_effective_threat_exclusions():
+        if cat.lower() in report_lower:
+            return cat
+
+    # Check custom comma-separated patterns
+    if config.ignored_threat_patterns:
+        patterns = config.ignored_threat_patterns
+        if isinstance(patterns, str):
+            patterns = [p.strip() for p in patterns.split(",") if p.strip()]
+        for pattern in patterns:
+            if pattern and pattern.lower() in report_lower:
+                return pattern
+
+    return None
+
+
 def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool, str]:
     """Scan a downloaded file with the configured antivirus scanner.
 
     Returns (is_clean, report_message).
+    Threats matching excluded categories/patterns are treated as clean.
     """
     if not config.scan_after_download:
         return True, "Post-download scan is disabled."
@@ -228,7 +306,11 @@ def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool, str]:
                 return True, f"Clean (Custom Scanner: {Path(scanner).name})"
             else:
                 out = (res.stdout + "\n" + res.stderr).strip()
-                return False, f"Threat detected or scanner alert (Exit code {res.returncode}): {out[:200]}"
+                threat_report = f"Threat detected or scanner alert (Exit code {res.returncode}): {out[:200]}"
+                excluded = _is_threat_excluded(threat_report, config)
+                if excluded:
+                    return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
+                return False, threat_report
         except subprocess.TimeoutExpired:
             return True, "Custom scan timed out after 60 seconds."
         except Exception as exc:
@@ -259,12 +341,20 @@ def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool, str]:
         if res.returncode == 0:
             return True, "Clean (Windows Defender verified no threats found)"
         elif res.returncode == 2:
-            return False, f"⚠️ Threat detected by Windows Defender!\n{out}"
+            threat_report = f"⚠️ Threat detected by Windows Defender!\n{out}"
+            excluded = _is_threat_excluded(threat_report, config)
+            if excluded:
+                return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
+            return False, threat_report
         else:
             if "found no threats" in out.lower():
                 return True, "Clean (Windows Defender: no threats found)"
             if "threat" in out.lower():
-                return False, f"⚠️ Threat detected by Windows Defender: {out}"
+                threat_report = f"⚠️ Threat detected by Windows Defender: {out}"
+                excluded = _is_threat_excluded(threat_report, config)
+                if excluded:
+                    return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
+                return False, threat_report
             return True, f"Windows Defender completed with code {res.returncode}."
     except subprocess.TimeoutExpired:
         log.warning("Windows Defender scan timed out on %s", abs_path)

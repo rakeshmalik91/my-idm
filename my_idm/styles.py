@@ -19,6 +19,7 @@ class Colors:
     TEXT = "#e6edf3"
     TEXT_SECONDARY = "#8b949e"
     TEXT_DIM = "#6e7681"
+    TEXT_MUTED = "#6e7681"
 
     ACCENT = "#58a6ff"
     ACCENT_HOVER = "#79c0ff"
@@ -171,7 +172,7 @@ QHeaderView::section {{
     border: none;
     border-bottom: 2px solid {Colors.BORDER};
     border-right: 1px solid {Colors.BORDER};
-    padding: 6px 8px;
+    padding: 6px 22px 6px 8px;
     font-weight: 600;
     font-size: 12px;
     text-transform: uppercase;

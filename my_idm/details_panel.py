@@ -37,6 +37,7 @@ from my_idm.database import DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
 from my_idm.manager import DownloadManager
 from my_idm.styles import Colors
+from my_idm.utils import to_int
 
 
 _TORRENT_PRIORITY_MAP = {
@@ -548,7 +549,15 @@ class DetailsPanel(QWidget):
         up_speed = _format_speed(entry.upload_speed)
         if entry.download_type == "torrent":
             self._ov_speed.setText(f"↓ {down_speed}   |   ↑ {up_speed}")
-            self._ov_swarm.setText(f"{entry.seeds} seeds, {entry.peers} peers connected")
+            ts = getattr(entry, "total_seeds", 0) or (entry.metadata.get("total_seeds", 0) if entry.metadata else 0)
+            tp = getattr(entry, "total_peers", 0) or (entry.metadata.get("total_peers", 0) if entry.metadata else 0)
+            seeds = to_int(entry.seeds)
+            peers = to_int(entry.peers)
+            ts = to_int(ts)
+            tp = to_int(tp)
+            s_str = f"{seeds} ({ts})" if ts > seeds else f"{seeds}"
+            p_str = f"{peers} ({tp})" if tp > peers else f"{peers}"
+            self._ov_swarm.setText(f"{s_str} seeds, {p_str} peers connected")
         else:
             self._ov_speed.setText(f"↓ {down_speed}")
             self._ov_swarm.setText(f"{entry.num_segments} HTTP parallel segments")
@@ -582,7 +591,7 @@ class DetailsPanel(QWidget):
 
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id)
-        if not files:
+        if not isinstance(files, list) or not files:
             self._files_hash = None
             self._file_item_map.clear()
             self._folder_items.clear()
@@ -598,11 +607,12 @@ class DetailsPanel(QWidget):
         self._update_file_values(files, is_torrent)
 
     def _build_files_tree(self, files: list[dict], is_torrent: bool):
+        self._tree_files.blockSignals(True)
         self._tree_files.clear()
         self._file_item_map.clear()
         self._folder_items.clear()
 
-        # Build folder hierarchy
+            # Build folder hierarchy
         root_nodes: dict[str, dict] = {}
         for f in files:
             raw_path = str(f.get("path", "file")).replace("\\", "/").strip("/")
@@ -692,6 +702,7 @@ class DetailsPanel(QWidget):
 
         _create_items(self._tree_files, root_nodes)
         self._tree_files.expandAll()
+        self._tree_files.blockSignals(False)
 
     def _get_descendant_file_items(self, item: QTreeWidgetItem) -> list[QTreeWidgetItem]:
         files = []
@@ -1017,13 +1028,20 @@ class DetailsPanel(QWidget):
             return
 
         peers = self._manager.get_torrent_peers(entry.id)
-        self._lbl_peers_status.setText(f"{len(peers)} connected peer(s) in active swarm")
+        if not isinstance(peers, list):
+            peers = []
+        ts = getattr(entry, "total_seeds", 0) or (entry.metadata.get("total_seeds", 0) if entry.metadata else 0)
+        tp = getattr(entry, "total_peers", 0) or (entry.metadata.get("total_peers", 0) if entry.metadata else 0)
+        swarm_str = f" ({ts} seeds, {tp} peers in swarm)" if (ts > 0 or tp > 0) else ""
+        self._lbl_peers_status.setText(f"{len(peers)} connected peer(s) in active swarm{swarm_str}")
 
         rebuild = self._table_peers.rowCount() != len(peers)
         if rebuild:
             self._table_peers.setRowCount(len(peers))
 
         for row, p in enumerate(peers):
+            if not isinstance(p, dict):
+                continue
             # IP : Port
             ip_item = self._table_peers.item(row, 0)
             if not ip_item:
@@ -1036,7 +1054,8 @@ class DetailsPanel(QWidget):
             if not client_item:
                 client_item = QTableWidgetItem()
                 self._table_peers.setItem(row, 1, client_item)
-            client_item.setText(_to_str(p.get("client", "Unknown")))
+            c_name = _to_str(p.get("client", "Unknown")).strip()
+            client_item.setText(c_name if c_name else "Unknown")
 
             # Progress
             prog_item = self._table_peers.item(row, 2)
@@ -1082,6 +1101,8 @@ class DetailsPanel(QWidget):
             return
 
         trackers = self._manager.get_torrent_trackers(entry.id)
+        if not isinstance(trackers, list):
+            trackers = []
         self._lbl_trackers_status.setText(f"{len(trackers)} tracker(s) announced")
 
         rebuild = self._table_trackers.rowCount() != len(trackers)
