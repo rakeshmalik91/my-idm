@@ -736,7 +736,11 @@ class DownloadManager(QObject):
                     "libtorrent not installed — torrent support disabled",
                 )
                 return
-            self._torrent.add_torrent(entry)
+            if not self._torrent.add_torrent(entry):
+                err = f"Failed to add torrent — invalid source or parse error: {entry.url}"
+                log.warning(err)
+                self._db.update_status(entry.id, "error", err)
+                self.status_changed.emit(entry.id, "error", err)
 
     # -- pause / resume / delete ---------------------------------------------
 
@@ -824,7 +828,13 @@ class DownloadManager(QObject):
             if download_id in self._torrent._handles:
                 self._torrent.resume(download_id)
             else:
-                self._torrent.add_torrent(entry)
+                if not self._torrent.add_torrent(entry):
+                    err = f"Failed to add torrent on resume — invalid source: {entry.url}"
+                    log.warning(err)
+                    self._db.update_status(entry.id, "error", err)
+                    self.status_changed.emit(entry.id, "error", err)
+                    self._starting_downloads.discard(download_id)
+                    return
 
         self.status_changed.emit(download_id, "downloading", "")
 
@@ -1633,6 +1643,7 @@ class DownloadManager(QObject):
                 return
 
         now = time.time()
+        QUEUED_STARTUP_TIMEOUT = 30
         for entry in self._db.get_all_downloads():
             if entry.status == "queued" and entry.retry_count > 0:
                 if entry.retry_count < entry.max_retries:
@@ -1644,6 +1655,22 @@ class DownloadManager(QObject):
                         entry.id, entry.retry_count + 1, entry.max_retries,
                     )
                     self._start_entry(entry)
+            elif entry.status == "queued" and entry.retry_count == 0:
+                added_at = entry.added_at
+                if not added_at:
+                    continue
+                try:
+                    added_dt = datetime.fromisoformat(added_at)
+                    elapsed = (datetime.now(timezone.utc) - added_dt).total_seconds()
+                except (ValueError, TypeError):
+                    continue
+                if elapsed < QUEUED_STARTUP_TIMEOUT:
+                    continue
+                log.info(
+                    "Re-starting stuck queued download %s (queued for %.0fs, no retries yet)",
+                    entry.id, elapsed,
+                )
+                self._start_entry(entry)
 
     # -- helpers -------------------------------------------------------------
 
