@@ -77,7 +77,7 @@ commit after each features or set of fixes/enhancements
   - [x] while connecting or disconnecting tor, show a progressbar on both toolbar and footer tor buttons. when ON make the buttons green.
   - [x] before tor start/stop pause all ongoing downloads, and resume on tor stop/start. ensure switching works seemslessly and doesnt mess up downloads data.
   - [ ] to verify tor connectivity is actually working as expected
-  - [ ] to verify what happens if another instance of tor or tor browser running in parallel
+  - [x] to verify what happens if another instance of tor or tor browser running in parallel
 
 ----------------------
 ### Bandwidth control

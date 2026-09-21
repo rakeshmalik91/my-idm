@@ -80,6 +80,27 @@ In **Tools → ⚙️ Preferences…** → **🧅 Tor Network** tab:
 
 ---
 
+## Parallel Tor Instances & Tor Browser Coexistence
+
+My-IDM is engineered to operate seamlessly alongside external Tor instances or active Tor Browser sessions without interference or crashes:
+
+1. **Shared Port Connection (Attach Mode)**:
+   - When Tor or Tor Browser is already active on the configured port (e.g. `9050` or `9150`), `TorServiceManager` attaches to the running SOCKS5 proxy directly without spawning a duplicate process.
+   - **Process Protection**: Because My-IDM did not launch the external Tor process, stopping Tor in My-IDM or quitting the application leaves the external Tor service or Tor Browser running completely untouched.
+
+2. **Parallel Dual-Instance Operation (Different Ports)**:
+   - If Tor Browser is running on port `9150` while My-IDM is configured to use port `9050`, My-IDM launches its background Tor instance using its own isolated session directory (`~/.my-idm/tor_data`).
+   - Both Tor processes run concurrently in parallel, maintaining independent circuits, consensus data, and SOCKS5 endpoints without port or file lock conflicts.
+
+3. **Port Conflict Resolution**:
+   - If another non-Tor process has already bound the configured port (e.g., port `9050`), `TorServiceManager` detects the `Address already in use` error on startup.
+   - It gracefully captures the exit code, prevents crashes, leaves active downloads running over direct connections, and alerts the user with an actionable recommendation to switch to port `9150` (or another free port) in Preferences.
+
+4. **Tor Browser Detection**:
+   - The connection tester in **Preferences → Tor Network** automatically probes alternative ports. If port `9050` is idle but Tor Browser is active on port `9150`, it alerts the user that Tor Browser was detected and provides a one-click preset button to bind directly to it.
+
+---
+
 ## Architecture & Code Reference
 
 | Component | File | Description |

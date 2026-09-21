@@ -830,13 +830,21 @@ class SettingsDialog(QDialog):
             self._tor_test_status_lbl.setText(f"✓ Connected to Tor proxy on {host}:{port}")
             self._tor_test_status_lbl.setStyleSheet("color: #50fa7b; font-weight: bold;")
         else:
-            exe = find_tor_executable(self._tor_path_edit.text().strip())
-            if exe:
-                self._tor_test_status_lbl.setText(f"Tor service not running. Executable found (will auto-start): {exe}")
-                self._tor_test_status_lbl.setStyleSheet("color: #f1fa8c;")
+            other_port = 9150 if port == 9050 else 9050
+            other_desc = "Tor Browser" if other_port == 9150 else "Tor Service"
+            if is_tor_reachable(host, other_port):
+                self._tor_test_status_lbl.setText(
+                    f"Port {port} not running, but {other_desc} is active on port {other_port}! Click '{other_desc} (Port {other_port})' above to use it."
+                )
+                self._tor_test_status_lbl.setStyleSheet("color: #50fa7b; font-weight: bold;")
             else:
-                self._tor_test_status_lbl.setText(f"✗ Tor proxy not reachable and tor.exe not found")
-                self._tor_test_status_lbl.setStyleSheet("color: #ff5555; font-weight: bold;")
+                exe = find_tor_executable(self._tor_path_edit.text().strip())
+                if exe:
+                    self._tor_test_status_lbl.setText(f"Tor service not running. Executable found (will auto-start): {exe}")
+                    self._tor_test_status_lbl.setStyleSheet("color: #f1fa8c;")
+                else:
+                    self._tor_test_status_lbl.setText(f"✗ Tor proxy not reachable and tor.exe not found")
+                    self._tor_test_status_lbl.setStyleSheet("color: #ff5555; font-weight: bold;")
 
     def _on_browse_tor_path(self):
         path, _ = QFileDialog.getOpenFileName(

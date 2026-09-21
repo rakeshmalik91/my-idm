@@ -109,13 +109,22 @@ class TorServiceManager:
         # 2. Locate Tor binary
         tor_exe = find_tor_executable(self._config.tor_executable_path)
         if not tor_exe:
+            alt_port = 9150 if port == 9050 else 9050
+            alt_desc = "Tor Browser" if alt_port == 9150 else "Tor Service"
+            alt_hint = ""
+            if is_tor_reachable(host, alt_port, timeout=0.5):
+                alt_hint = (
+                    f"\n\n💡 Note: {alt_desc} was detected actively running on port {alt_port}!\n"
+                    f"You can switch the port to {alt_port} in Tools → Preferences → Tor Network to connect to it directly."
+                )
+
             err = (
                 f"Tor executable ('tor.exe') could not be found.\n\n"
                 f"Searched in:\n"
                 f"• Configured path: {self._config.tor_executable_path or '(none)'}\n"
                 f"• System PATH\n"
                 f"• Standard Tor Browser and Tor install locations\n\n"
-                f"Please ensure Tor or Tor Browser is installed, or specify the full path to tor.exe in Preferences."
+                f"Please ensure Tor or Tor Browser is installed, or specify the full path to tor.exe in Preferences.{alt_hint}"
             )
             log.warning("Tor start failed: %s", err)
             return False, err
@@ -175,9 +184,29 @@ class TorServiceManager:
                 except Exception:
                     pass
                 err_detail = stderr_data.strip() or stdout_data.strip() or f"Process exited with code {ret}"
+                if isinstance(err_detail, bytes):
+                    err_detail = err_detail.decode("utf-8", errors="replace")
                 self._spawned_by_us = False
                 self._process = None
-                err = f"Tor process terminated unexpectedly (exit code {ret}):\n{err_detail}"
+                if "already in use" in err_detail.lower() or "could not bind" in err_detail.lower():
+                    alt_port = 9150 if port == 9050 else 9050
+                    alt_desc = "Tor Browser" if alt_port == 9150 else "Tor Service"
+                    alt_note = ""
+                    if is_tor_reachable(host, alt_port, timeout=0.5):
+                        alt_note = f"\n• Alternatively, {alt_desc} is active on port {alt_port} — you can select port {alt_port} in Preferences."
+                    err = (
+                        f"Port {port} is already in use by another application or Tor instance.\n\n"
+                        f"To resolve this conflict:\n"
+                        f"• Change the port in Preferences → Tor Network (e.g. port 9150 for Tor Browser){alt_note}\n"
+                        f"• Or close the conflicting application using port {port}."
+                    )
+                elif "data directory" in err_detail.lower() and "already using" in err_detail.lower():
+                    err = (
+                        f"Another Tor process is already using the data directory '{self._data_dir}'.\n\n"
+                        f"Please ensure no orphan Tor background processes are running."
+                    )
+                else:
+                    err = f"Tor process terminated unexpectedly (exit code {ret}):\n{err_detail}"
                 log.error(err)
                 return False, err
 
@@ -199,13 +228,18 @@ class TorServiceManager:
 
     def stop(self):
         """Terminate the background Tor process forcefully and cleanly."""
+        # If we did not spawn Tor (e.g. connected to existing Tor Browser or system Tor), do not kill external process
+        if not self._spawned_by_us and (self._process is None or self._process.poll() is not None):
+            log.info("Tor was not spawned by My-IDM; leaving external service running untouched")
+            return
+
         pid_file = self._data_dir / "tor.pid"
         target_pids: list[int] = []
 
         if self._process and self._process.poll() is None:
             target_pids.append(self._process.pid)
 
-        if pid_file.exists():
+        if self._spawned_by_us and pid_file.exists():
             try:
                 saved_pid = int(pid_file.read_text(encoding="utf-8").strip())
                 if saved_pid not in target_pids:

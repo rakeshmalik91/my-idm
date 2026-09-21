@@ -88,6 +88,69 @@ class TestTorServiceLifecycle(unittest.TestCase):
         self.assertIn("started and connected", msg)
         self.assertTrue(self.service.is_spawned)
 
+    @patch("my_idm.tor_service.is_tor_reachable", return_value=True)
+    @patch("subprocess.run")
+    def test_external_tor_not_terminated_on_stop(self, mock_run, mock_reachable):
+        """When Tor was already running before start(), stop() must NOT kill external process."""
+        success, _ = self.service.start()
+        self.assertTrue(success)
+        self.assertFalse(self.service.is_spawned)
+
+        self.service.stop()
+        mock_run.assert_not_called()
+
+    @patch("subprocess.run")
+    def test_stale_pid_file_ignored_when_not_spawned(self, mock_run):
+        """If a stale tor.pid exists, stop() ignores it if My-IDM did not spawn Tor."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        pid_file = self.data_dir / "tor.pid"
+        pid_file.write_text("99999", encoding="utf-8")
+
+        self.assertFalse(self.service.is_spawned)
+        self.service.stop()
+        mock_run.assert_not_called()
+
+    @patch("my_idm.tor_service.find_tor_executable", return_value="C:\\Tools\\tor.exe")
+    @patch("my_idm.tor_service.is_tor_reachable", side_effect=[False, False])
+    @patch("subprocess.Popen")
+    def test_port_conflict_detection(self, mock_popen, mock_reachable, mock_find):
+        """When tor fails to start due to port already in use, a clear diagnostic is returned."""
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.communicate.return_value = (b"", b"[warn] Could not bind to 127.0.0.1:9050: Address already in use. Is Tor already running?")
+        mock_popen.return_value = proc
+
+        success, msg = self.service.start()
+        self.assertFalse(success)
+        self.assertIn("already in use by another application or Tor instance", msg)
+        self.assertIn("Port 9050", msg)
+
+    @patch("my_idm.tor_service.find_tor_executable", return_value="C:\\Tools\\tor.exe")
+    @patch("my_idm.tor_service.is_tor_reachable", side_effect=[False, False])
+    @patch("subprocess.Popen")
+    def test_data_dir_locked_conflict_detection(self, mock_popen, mock_reachable, mock_find):
+        """When tor fails to start because data dir is locked, a clear message is returned."""
+        proc = MagicMock()
+        proc.poll.return_value = 1
+        proc.communicate.return_value = (b"", b"[err] It appears something else is already using this data directory. If not, delete ...")
+        mock_popen.return_value = proc
+
+        success, msg = self.service.start()
+        self.assertFalse(success)
+        self.assertIn("already using the data directory", msg)
+
+    @patch("my_idm.tor_service.is_tor_reachable")
+    @patch("my_idm.tor_service.find_tor_executable", return_value=None)
+    def test_binary_not_found_with_tor_browser_running(self, mock_find, mock_reachable):
+        """When binary not found on port 9050, but Tor Browser is running on port 9150, advise user."""
+        def reachable_check(h, p, timeout=0.5):
+            return p == 9150
+        mock_reachable.side_effect = reachable_check
+
+        success, msg = self.service.start()
+        self.assertFalse(success)
+        self.assertIn("Tor Browser was detected actively running on port 9150", msg)
+
 
 class TestTorStartupAndExitGating(unittest.TestCase):
     """Test that Tor is only started on startup if configured, and cleanly terminated on exit."""
@@ -287,6 +350,35 @@ class TestTorToggleAndProgress(unittest.TestCase):
         self.assertFalse(self.win._tor_footer_progress.isVisible())
         self.assertNotIn("#50fa7b", self.win._tor_status_btn.styleSheet())
         self.assertNotIn("#50fa7b", self.win._tor_toolbar_btn.styleSheet())
+
+
+class TestTorSettingsDialogDetection(unittest.TestCase):
+    """Test the smart alternative port detection in SettingsDialog."""
+
+    def setUp(self):
+        from my_idm.settings_dialog import SettingsDialog
+        self.dialog = SettingsDialog()
+
+    def tearDown(self):
+        self.dialog.close()
+
+    @patch("my_idm.settings_dialog.is_tor_reachable")
+    def test_detects_tor_browser_on_port_9150(self, mock_reachable):
+        """When checking port 9050 and it's unreachable, detect Tor Browser on 9150."""
+        self.dialog._tor_port_spin.setValue(9050)
+        mock_reachable.side_effect = lambda h, p: p == 9150
+
+        self.dialog._on_test_tor()
+        self.assertIn("Tor Browser is active on port 9150", self.dialog._tor_test_status_lbl.text())
+
+    @patch("my_idm.settings_dialog.is_tor_reachable")
+    def test_detects_tor_service_on_port_9050(self, mock_reachable):
+        """When checking port 9150 and it's unreachable, detect Tor Service on 9050."""
+        self.dialog._tor_port_spin.setValue(9150)
+        mock_reachable.side_effect = lambda h, p: p == 9050
+
+        self.dialog._on_test_tor()
+        self.assertIn("Tor Service is active on port 9050", self.dialog._tor_test_status_lbl.text())
 
 
 if __name__ == "__main__":
