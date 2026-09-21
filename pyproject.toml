@@ -17,6 +17,9 @@ dependencies = [
 [project.scripts]
 my-idm = "my_idm.main:main"
 
+[project.gui-scripts]
+my-idm-gui = "my_idm.main:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

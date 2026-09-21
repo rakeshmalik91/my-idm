@@ -52,7 +52,8 @@ pip install -r requirements.txt
 
 Run the application:
 ```cmd
-run.bat               # Windows batch launcher
+run.pyw               # Windows windowed launcher (no command prompt)
+run.bat               # Windows console launcher
 python -m my_idm.main # Or direct python execution
 ```
 

@@ -7,6 +7,7 @@ commit after each features or set of fixes/enhancements
 ### CRITICAL BUG
 - [x] had 3 torrents, 1 completed, 2 downloading, everytime i restart the app, one of the downloading torrent gets replaced by the completed one 
 - [x] download going on even in paused state sometimes
+- [ ] to check why animepahe downloads are going to queued state and not retrying, manual resume works fine
 
 ### Fixes / Enhancements
 - [x] add download popup isnt picking default folder
@@ -65,6 +66,12 @@ commit after each features or set of fixes/enhancements
 - [x] deleting files should move to trash, verify it is the behaviour
 - [x] Add startup splash screen with loading progress, logo, and stage indicators
 - [x] make retry exponential and configurable
+- [ ] window is always placed a bit below compared to last launch
+- [ ] column filter button is blocking column resize trigger area. filter button is on right, and dropdown is on left
+- [ ] there are 2 column sort buttons overlapping
+- [ ] make the white part of app logo transparent
+- [ ] make the horizontal scroll smooth, instead of snapping on colum start/end
+- [ ] move the retry configuration in preferences to a seperate group
 
 ----------------------
 ### Tor Support
