@@ -259,6 +259,7 @@ class DownloadManager(QObject):
         self._starting_downloads: set[str] = set()
         self._http = HTTPEngine(db)
         self._torrent = TorrentEngine(db)
+        self._http.set_general_config_sync(self._general_config)
         self._http.set_network_config_sync(self._network_config)
         self._http.set_tor_config_sync(self._tor_config)
         self._torrent.apply_network_config(self._network_config)
@@ -275,9 +276,9 @@ class DownloadManager(QObject):
         self._torrent_timer.setInterval(1000)  # 1 second
         self._torrent_timer.timeout.connect(self._poll_torrents)
 
-        # Retry timer — checks queued items periodically
+        # Retry timer — checks queued items periodically (1s for responsive backoff)
         self._retry_timer = QTimer(self)
-        self._retry_timer.setInterval(10_000)  # 10 seconds
+        self._retry_timer.setInterval(1000)  # 1 second
         self._retry_timer.timeout.connect(self._process_retry_queue)
 
         # Backlog poll timer — periodically checks for backlog files
@@ -550,6 +551,7 @@ class DownloadManager(QObject):
     def set_general_config(self, config: GeneralConfig):
         """Update general download and application preferences."""
         self._general_config = config
+        self._http.set_general_config_sync(config)
         config.save()
         self._apply_backlog_timer_config()
         self.general_config_changed.emit(config)
@@ -1616,9 +1618,13 @@ class DownloadManager(QObject):
                 log.debug("Skipping retry queue: VPN/interface is disconnected")
                 return
 
+        now = time.time()
         for entry in self._db.get_all_downloads():
             if entry.status == "queued" and entry.retry_count > 0:
                 if entry.retry_count < entry.max_retries:
+                    next_retry_at = entry.metadata.get("next_retry_at", 0) if entry.metadata else 0
+                    if now < next_retry_at:
+                        continue
                     log.info(
                         "Auto-retrying %s (attempt %d/%d)",
                         entry.id, entry.retry_count + 1, entry.max_retries,

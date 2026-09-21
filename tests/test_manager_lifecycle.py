@@ -822,6 +822,35 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
 
         mock_start.assert_not_called()
 
+    def test_retry_queue_respects_exponential_backoff_window(self):
+        """The retry queue should only restart downloads whose backoff window has elapsed."""
+        import time
+        # Entry in future backoff window
+        future_entry = DownloadEntry(
+            id="d_future_retry",
+            url="https://example.com/future.zip",
+            filename="future.zip",
+            save_path="C:/Downloads",
+            status="queued",
+            retry_count=2,
+            max_retries=5,
+        )
+        future_entry.metadata["next_retry_at"] = time.time() + 300
+        self.db.add_download(future_entry)
+
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            self.manager._process_retry_queue()
+            mock_start.assert_not_called()
+
+        # Update next_retry_at to past
+        future_entry.metadata["next_retry_at"] = time.time() - 5
+        self.db.update_download(future_entry)
+
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            self.manager._process_retry_queue()
+            mock_start.assert_called_once()
+            self.assertEqual(mock_start.call_args[0][0].id, "d_future_retry")
+
 
 if __name__ == "__main__":
     unittest.main()

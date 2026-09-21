@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGroupBox,
@@ -284,10 +285,47 @@ class SettingsDialog(QDialog):
         retry_lbl = QLabel("Maximum automatic retries on connection failure:")
         retry_row.addWidget(retry_lbl, 1)
         self._retries_spin = QSpinBox()
-        self._retries_spin.setRange(1, 10)
+        self._retries_spin.setRange(1, 20)
         self._retries_spin.setToolTip("Number of automatic reconnect attempts before marking as error")
         retry_row.addWidget(self._retries_spin)
         perf_layout.addLayout(retry_row)
+
+        self._retry_exp_cb = QCheckBox("📈 Use exponential backoff for connection retries")
+        self._retry_exp_cb.setToolTip(
+            "When checked, wait time progressively increases between consecutive retry attempts "
+            "to reduce server pressure and prevent spamming failed connections."
+        )
+        self._retry_exp_cb.toggled.connect(self._on_retry_exp_toggled)
+        perf_layout.addWidget(self._retry_exp_cb)
+
+        retry_details_layout = QHBoxLayout()
+        retry_details_layout.addWidget(QLabel("Initial retry delay:"))
+        self._retry_delay_spin = QDoubleSpinBox()
+        self._retry_delay_spin.setRange(0.1, 120.0)
+        self._retry_delay_spin.setSingleStep(0.5)
+        self._retry_delay_spin.setSuffix(" sec")
+        self._retry_delay_spin.setToolTip("Initial wait time before the first retry attempt (e.g. 2.0s)")
+        retry_details_layout.addWidget(self._retry_delay_spin)
+
+        self._retry_factor_lbl = QLabel("Multiplier:")
+        retry_details_layout.addWidget(self._retry_factor_lbl)
+        self._retry_factor_spin = QDoubleSpinBox()
+        self._retry_factor_spin.setRange(1.0, 10.0)
+        self._retry_factor_spin.setSingleStep(0.5)
+        self._retry_factor_spin.setSuffix("x")
+        self._retry_factor_spin.setToolTip("Factor by which delay multiplies on each retry attempt (e.g. 2.0x -> 2s, 4s, 8s, 16s...)")
+        retry_details_layout.addWidget(self._retry_factor_spin)
+
+        self._retry_max_delay_lbl = QLabel("Max cap:")
+        retry_details_layout.addWidget(self._retry_max_delay_lbl)
+        self._retry_max_delay_spin = QSpinBox()
+        self._retry_max_delay_spin.setRange(1, 3600)
+        self._retry_max_delay_spin.setSingleStep(10)
+        self._retry_max_delay_spin.setSuffix(" sec")
+        self._retry_max_delay_spin.setToolTip("Maximum wait time ceiling for retries")
+        retry_details_layout.addWidget(self._retry_max_delay_spin)
+
+        perf_layout.addLayout(retry_details_layout)
 
         layout.addWidget(perf_group)
 
@@ -702,6 +740,11 @@ class SettingsDialog(QDialog):
         self._segments_spin.setValue(self._general_cfg.default_segments)
         self._concurrent_spin.setValue(self._general_cfg.max_concurrent_downloads)
         self._retries_spin.setValue(self._general_cfg.max_retries)
+        self._retry_exp_cb.setChecked(self._general_cfg.retry_exponential_backoff)
+        self._retry_delay_spin.setValue(self._general_cfg.retry_delay)
+        self._retry_factor_spin.setValue(self._general_cfg.retry_backoff_factor)
+        self._retry_max_delay_spin.setValue(int(self._general_cfg.retry_max_delay))
+        self._on_retry_exp_toggled(self._general_cfg.retry_exponential_backoff)
         self._auto_resume_cb.setChecked(self._general_cfg.auto_resume_startup)
         self._notify_cb.setChecked(self._general_cfg.notify_on_completion)
 
@@ -869,6 +912,12 @@ class SettingsDialog(QDialog):
         self._iface_combo.setCurrentIndex(selected_idx)
         self._iface_combo.blockSignals(False)
         self._on_iface_changed(selected_idx)
+
+    def _on_retry_exp_toggled(self, checked: bool):
+        self._retry_factor_lbl.setEnabled(checked)
+        self._retry_factor_spin.setEnabled(checked)
+        self._retry_max_delay_lbl.setEnabled(checked)
+        self._retry_max_delay_spin.setEnabled(checked)
 
     def _on_iface_changed(self, index: int):
         if index <= 0:
@@ -1043,6 +1092,10 @@ class SettingsDialog(QDialog):
         self._general_cfg.default_segments = self._segments_spin.value()
         self._general_cfg.max_concurrent_downloads = self._concurrent_spin.value()
         self._general_cfg.max_retries = self._retries_spin.value()
+        self._general_cfg.retry_exponential_backoff = self._retry_exp_cb.isChecked()
+        self._general_cfg.retry_delay = self._retry_delay_spin.value()
+        self._general_cfg.retry_backoff_factor = self._retry_factor_spin.value()
+        self._general_cfg.retry_max_delay = float(self._retry_max_delay_spin.value())
         self._general_cfg.auto_resume_startup = self._auto_resume_cb.isChecked()
         self._general_cfg.notify_on_completion = self._notify_cb.isChecked()
         locs = [self._backlog_list.item(i).text().strip() for i in range(self._backlog_list.count())]

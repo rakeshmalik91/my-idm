@@ -20,7 +20,7 @@ except ImportError:
     CurlAsyncSession = None
     _HAS_CURL_CFFI = False
 
-from my_idm.config import TorConfig
+from my_idm.config import TorConfig, GeneralConfig
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.utils import get_unique_filename
@@ -73,6 +73,7 @@ class HTTPEngine:
         self._filename_cb: Optional[FilenameCallback] = None
         self._last_progress_emit: dict[str, float] = {}
         self._download_limit: int = 0
+        self._general_config: Optional[GeneralConfig] = None
 
     def _get_effective_download_limit(self, entry: DownloadEntry) -> int:
         if self._download_limit <= 0:
@@ -109,6 +110,25 @@ class HTTPEngine:
     def set_network_config_sync(self, config: NetworkConfig):
         """Set network config synchronously prior to start or in tests."""
         self._network_config = config
+
+    def set_general_config_sync(self, config: GeneralConfig):
+        """Set general preferences (retries, timeouts, backoff) synchronously."""
+        self._general_config = config
+
+    def _get_retry_delay(self, attempt: int) -> float:
+        """Calculate retry delay based on GeneralConfig or fallback defaults."""
+        if self._general_config:
+            return self._general_config.get_retry_delay(attempt)
+        delay = RETRY_BASE_DELAY * (2 ** max(0, attempt))
+        return min(delay, 60.0)
+
+    def _get_max_retries(self, entry: Optional[DownloadEntry] = None) -> int:
+        """Get configured max retries for an entry or global config."""
+        if entry and entry.max_retries > 0:
+            return entry.max_retries
+        if self._general_config and self._general_config.max_retries > 0:
+            return self._general_config.max_retries
+        return MAX_RETRIES_PER_SEGMENT
 
     async def set_network_config(self, config: NetworkConfig):
         """Update network config at runtime and recreate the client session."""
@@ -637,7 +657,8 @@ class HTTPEngine:
             or entry.metadata.get("use_curl_cffi")
         )
 
-        for attempt in range(MAX_RETRIES_PER_SEGMENT):
+        max_retries = self._get_max_retries(entry)
+        for attempt in range(max_retries):
             if cancel_evt.is_set():
                 return
             try:
@@ -739,7 +760,7 @@ class HTTPEngine:
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 if cancel_evt.is_set():
                     return
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                delay = self._get_retry_delay(attempt)
                 log.warning(
                     "Segment %d attempt %d failed: %s — retrying in %.1fs",
                     seg.index, attempt + 1, exc, delay,
@@ -753,7 +774,7 @@ class HTTPEngine:
         seg.status = "error"
         self._db.update_segment(seg.id, seg.downloaded_bytes, "error")
         raise Exception(
-            f"Segment {seg.index} failed after {MAX_RETRIES_PER_SEGMENT} retries"
+            f"Segment {seg.index} failed after {max_retries} retries"
         )
 
     @staticmethod
@@ -864,7 +885,8 @@ class HTTPEngine:
 
         start_time = time.monotonic()
 
-        for attempt in range(MAX_RETRIES_PER_SEGMENT):
+        max_single_retries = self._get_max_retries(entry)
+        for attempt in range(max_single_retries):
             if cancel_evt.is_set():
                 return
             try:
@@ -989,7 +1011,7 @@ class HTTPEngine:
                     self._db.update_progress(entry.id, file_path.stat().st_size)
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                delay = self._get_retry_delay(attempt)
                 log.warning(
                     "Single-stream attempt %d failed: %s — retrying in %.1fs",
                     attempt + 1, exc, delay,
@@ -997,7 +1019,7 @@ class HTTPEngine:
                 await asyncio.sleep(delay)
 
         raise Exception(
-            f"Single-stream download failed after {MAX_RETRIES_PER_SEGMENT} retries"
+            f"Single-stream download failed after {max_single_retries} retries"
         )
 
     # -- retry handling -------------------------------------------------------
@@ -1010,11 +1032,20 @@ class HTTPEngine:
 
         count = self._db.increment_retry(entry.id)
         if count < entry.max_retries:
-            self._db.update_status(entry.id, "queued", error_msg)
-            self._emit_status(entry.id, "queued", error_msg)
+            delay = self._get_retry_delay(count - 1)
+            entry.metadata["next_retry_at"] = time.time() + delay
+            entry.metadata["retry_delay"] = delay
+            self._db.update_download(entry)
+            msg = (
+                f"Retrying in {int(delay)}s ({count}/{entry.max_retries}): {error_msg}"
+                if delay >= 1
+                else f"Retrying ({count}/{entry.max_retries}): {error_msg}"
+            )
+            self._db.update_status(entry.id, "queued", msg)
+            self._emit_status(entry.id, "queued", msg)
             log.info(
-                "Download %s retry %d/%d queued",
-                entry.id, count, entry.max_retries,
+                "Download %s retry %d/%d scheduled in %.1fs: %s",
+                entry.id, count, entry.max_retries, delay, error_msg,
             )
         else:
             self._db.update_status(entry.id, "error", error_msg)

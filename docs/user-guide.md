@@ -198,7 +198,11 @@ The settings popup is organized into three tabs:
 - **Download Performance & Engine Defaults**:
   - **Default parallel connections (segments)**: Configure the default number of HTTP segments (1–32, default 8).
   - **Maximum concurrent active downloads**: Limit simultaneous active downloads (1–20, default 3) to prevent saturating bandwidth.
-  - **Maximum automatic retries**: Number of automatic reconnection attempts before marking a download as errored (1–10, default 5).
+  - **Maximum automatic retries**: Number of automatic reconnection attempts before marking a download as errored (1–20, default 5).
+  - **Exponential backoff**: Toggle between exponential multiplier backoff and constant linear retry delay.
+  - **Initial retry delay (s)**: Initial wait duration before retrying (0.1–120.0s, default 2.0s).
+  - **Backoff multiplier**: Factor multiplied after each retry attempt (1.0–10.0x, default 2.0x).
+  - **Maximum delay cap (s)**: Upper ceiling for exponential backoff wait times (1–3600s, default 60s).
 - **Application Behavior**:
   - **Automatically resume incomplete downloads when application starts**: Interrupted or actively downloading items resume immediately on launch.
   - **Show desktop / status notification when a download completes**: Notifies you when files finish.
@@ -498,9 +502,11 @@ python -m my_idm.main -b urls.txt -v
 
 ### Automatic Retries
 
-- HTTP segments retry up to 5 times with exponential backoff
-- A global retry timer checks every 10 seconds for any queued downloads that need re-attempting
-- Downloads that exhaust all retries are marked as "Error"
+- HTTP segments and downloads retry according to configured retry settings (default 5 attempts).
+- Exponential backoff calculates wait times dynamically (`delay = min(initial_delay * factor^(attempt), max_delay)`).
+- When a download fails, its next retry timestamp is scheduled and the status shows a countdown message (e.g. `Retrying in 4s (attempt 2/5): Connection timed out`).
+- A 1-second background queue monitor checks for queued downloads whose retry windows have elapsed.
+- Downloads that exhaust all configured retries are marked as "Error".
 
 ### Resume on Restart
 

@@ -25,12 +25,24 @@ class GeneralConfig:
     default_segments: int = 8
     max_concurrent_downloads: int = 3
     max_retries: int = 5
+    retry_delay: float = 2.0
+    retry_backoff_factor: float = 2.0
+    retry_max_delay: float = 60.0
+    retry_exponential_backoff: bool = True
     auto_resume_startup: bool = True
     notify_on_completion: bool = True
     backlog_locations: list[str] = field(default_factory=list)
     clear_backlog_after_load: bool = True
     backlog_poll_interval: int = 60
     backlog_poll_enabled: bool = True
+
+    def get_retry_delay(self, attempt: int) -> float:
+        """Calculate retry delay in seconds for a given attempt index (0-indexed)."""
+        if not self.retry_exponential_backoff:
+            return max(0.1, float(self.retry_delay))
+        factor = max(1.0, float(self.retry_backoff_factor))
+        delay = float(self.retry_delay) * (factor ** max(0, attempt))
+        return max(0.1, min(delay, float(self.retry_max_delay)))
 
     def get_effective_save_path(self) -> str:
         """Returns the directory to prefill for a new download."""
@@ -78,6 +90,10 @@ class GeneralConfig:
             "default_segments": self.default_segments,
             "max_concurrent_downloads": self.max_concurrent_downloads,
             "max_retries": self.max_retries,
+            "retry_delay": self.retry_delay,
+            "retry_backoff_factor": self.retry_backoff_factor,
+            "retry_max_delay": self.retry_max_delay,
+            "retry_exponential_backoff": self.retry_exponential_backoff,
             "auto_resume_startup": self.auto_resume_startup,
             "notify_on_completion": self.notify_on_completion,
             "backlog_locations": list(self.backlog_locations),
@@ -103,6 +119,10 @@ class GeneralConfig:
             default_segments=int(data.get("default_segments", 8)),
             max_concurrent_downloads=int(data.get("max_concurrent_downloads", 3)),
             max_retries=int(data.get("max_retries", 5)),
+            retry_delay=float(data.get("retry_delay", 2.0)),
+            retry_backoff_factor=float(data.get("retry_backoff_factor", 2.0)),
+            retry_max_delay=float(data.get("retry_max_delay", 60.0)),
+            retry_exponential_backoff=bool(data.get("retry_exponential_backoff", True)),
             auto_resume_startup=bool(data.get("auto_resume_startup", True)),
             notify_on_completion=bool(data.get("notify_on_completion", True)),
             backlog_locations=locs,
@@ -122,6 +142,10 @@ class GeneralConfig:
         settings.setValue("default_segments", self.default_segments)
         settings.setValue("max_concurrent_downloads", self.max_concurrent_downloads)
         settings.setValue("max_retries", self.max_retries)
+        settings.setValue("retry_delay", self.retry_delay)
+        settings.setValue("retry_backoff_factor", self.retry_backoff_factor)
+        settings.setValue("retry_max_delay", self.retry_max_delay)
+        settings.setValue("retry_exponential_backoff", self.retry_exponential_backoff)
         settings.setValue("auto_resume_startup", self.auto_resume_startup)
         settings.setValue("notify_on_completion", self.notify_on_completion)
         settings.setValue("backlog_locations", self.backlog_locations)
@@ -142,6 +166,10 @@ class GeneralConfig:
         default_segments = settings.value("default_segments", 8, type=int)
         max_concurrent_downloads = settings.value("max_concurrent_downloads", 3, type=int)
         max_retries = settings.value("max_retries", 5, type=int)
+        retry_delay = settings.value("retry_delay", 2.0, type=float)
+        retry_backoff_factor = settings.value("retry_backoff_factor", 2.0, type=float)
+        retry_max_delay = settings.value("retry_max_delay", 60.0, type=float)
+        retry_exponential_backoff = settings.value("retry_exponential_backoff", True, type=bool)
         auto_resume_startup = settings.value("auto_resume_startup", True, type=bool)
         notify_on_completion = settings.value("notify_on_completion", True, type=bool)
         raw_locs = settings.value("backlog_locations", [])
@@ -163,6 +191,10 @@ class GeneralConfig:
             default_segments=int(default_segments),
             max_concurrent_downloads=int(max_concurrent_downloads),
             max_retries=int(max_retries),
+            retry_delay=float(retry_delay),
+            retry_backoff_factor=float(retry_backoff_factor),
+            retry_max_delay=float(retry_max_delay),
+            retry_exponential_backoff=bool(retry_exponential_backoff),
             auto_resume_startup=bool(auto_resume_startup),
             notify_on_completion=bool(notify_on_completion),
             backlog_locations=backlog_locations,

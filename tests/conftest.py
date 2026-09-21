@@ -31,6 +31,9 @@ QSettings.__init__ = _isolated_qsettings_init
 QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, _test_settings_dir)
 
 
+from pathlib import Path
+
+
 @pytest.fixture(autouse=True, scope="session")
 def isolate_qsettings_session():
     """Ensure user settings in registry / OS are never touched during test execution."""
@@ -39,3 +42,18 @@ def isolate_qsettings_session():
         shutil.rmtree(_test_settings_dir, ignore_errors=True)
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def isolate_qsettings_per_test():
+    """Ensure settings saved during a test do not leak into subsequent tests."""
+    yield
+    if Path(_test_settings_dir).exists():
+        for item in Path(_test_settings_dir).iterdir():
+            try:
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+            except Exception:
+                pass

@@ -37,8 +37,33 @@ class TestGeneralConfig(unittest.TestCase):
         self.assertEqual(cfg.default_segments, 8)
         self.assertEqual(cfg.max_concurrent_downloads, 3)
         self.assertEqual(cfg.max_retries, 5)
+        self.assertEqual(cfg.retry_delay, 2.0)
+        self.assertEqual(cfg.retry_backoff_factor, 2.0)
+        self.assertEqual(cfg.retry_max_delay, 60.0)
+        self.assertTrue(cfg.retry_exponential_backoff)
         self.assertTrue(cfg.auto_resume_startup)
         self.assertTrue(cfg.notify_on_completion)
+
+    def test_get_retry_delay_exponential(self):
+        cfg = GeneralConfig(
+            retry_delay=2.0,
+            retry_backoff_factor=2.0,
+            retry_max_delay=30.0,
+            retry_exponential_backoff=True,
+        )
+        self.assertEqual(cfg.get_retry_delay(0), 2.0)
+        self.assertEqual(cfg.get_retry_delay(1), 4.0)
+        self.assertEqual(cfg.get_retry_delay(2), 8.0)
+        self.assertEqual(cfg.get_retry_delay(3), 16.0)
+        # Cap at max delay 30.0
+        self.assertEqual(cfg.get_retry_delay(4), 30.0)
+        self.assertEqual(cfg.get_retry_delay(10), 30.0)
+
+        # Linear delay when exponential backoff is disabled
+        cfg.retry_exponential_backoff = False
+        self.assertEqual(cfg.get_retry_delay(0), 2.0)
+        self.assertEqual(cfg.get_retry_delay(3), 2.0)
+        self.assertEqual(cfg.get_retry_delay(10), 2.0)
 
     def test_save_and_load(self):
         cfg = GeneralConfig(
@@ -48,6 +73,10 @@ class TestGeneralConfig(unittest.TestCase):
             default_segments=16,
             max_concurrent_downloads=6,
             max_retries=3,
+            retry_delay=4.5,
+            retry_backoff_factor=3.0,
+            retry_max_delay=120.0,
+            retry_exponential_backoff=False,
             auto_resume_startup=False,
             notify_on_completion=False,
         )
@@ -60,6 +89,10 @@ class TestGeneralConfig(unittest.TestCase):
         self.assertEqual(loaded.default_segments, 16)
         self.assertEqual(loaded.max_concurrent_downloads, 6)
         self.assertEqual(loaded.max_retries, 3)
+        self.assertEqual(loaded.retry_delay, 4.5)
+        self.assertEqual(loaded.retry_backoff_factor, 3.0)
+        self.assertEqual(loaded.retry_max_delay, 120.0)
+        self.assertFalse(loaded.retry_exponential_backoff)
         self.assertFalse(loaded.auto_resume_startup)
         self.assertFalse(loaded.notify_on_completion)
 
@@ -203,6 +236,39 @@ class TestSettingsDialog(unittest.TestCase):
         self.assertEqual(dlg.security_config.scan_timing, "manual_only")
         self.assertIn("HackTool", dlg.security_config.ignored_threat_categories)
 
+    def test_settings_dialog_exponential_retry_controls(self):
+        gen_cfg = GeneralConfig(
+            max_retries=7,
+            retry_delay=3.0,
+            retry_backoff_factor=2.5,
+            retry_max_delay=90.0,
+            retry_exponential_backoff=True,
+        )
+        dlg = SettingsDialog(general_config=gen_cfg)
+        self.assertEqual(dlg._retries_spin.value(), 7)
+        self.assertTrue(dlg._retry_exp_cb.isChecked())
+        self.assertEqual(dlg._retry_delay_spin.value(), 3.0)
+        self.assertEqual(dlg._retry_factor_spin.value(), 2.5)
+        self.assertEqual(dlg._retry_max_delay_spin.value(), 90)
+        self.assertTrue(dlg._retry_factor_spin.isEnabled())
+
+        # Uncheck exponential backoff
+        dlg._retry_exp_cb.setChecked(False)
+        self.assertFalse(dlg._retry_factor_spin.isEnabled())
+        self.assertFalse(dlg._retry_max_delay_spin.isEnabled())
+
+        # Modify values and save
+        dlg._retries_spin.setValue(4)
+        dlg._retry_delay_spin.setValue(5.0)
+        dlg._on_save()
+
+        saved = dlg.general_config
+        self.assertEqual(saved.max_retries, 4)
+        self.assertFalse(saved.retry_exponential_backoff)
+        self.assertEqual(saved.retry_delay, 5.0)
+        GeneralConfig().save()
+        dlg.close()
+
 
 
     def test_preferences_window_width_and_db_persistence(self):
@@ -338,6 +404,7 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         self.assertFalse(dlg.general_config.clear_backlog_after_load)
         self.assertTrue(dlg.general_config.backlog_poll_enabled)
         self.assertEqual(dlg.general_config.backlog_poll_interval, 120)
+        GeneralConfig().save()
         dlg.close()
 
     def test_settings_dialog_test_antivirus_scanner(self):

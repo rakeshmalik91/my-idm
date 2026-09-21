@@ -64,6 +64,7 @@ commit after each features or set of fixes/enhancements
 - [x] left click on footer speed should also open its bandwidth context menu
 - [x] deleting files should move to trash, verify it is the behaviour
 - [x] Add startup splash screen with loading progress, logo, and stage indicators
+- [x] make retry exponential and configurable
 
 ----------------------
 ### Tor Support
