@@ -223,6 +223,9 @@ Every 10 seconds:
 
 ## Database Schema
 
+> [!NOTE]
+> For the comprehensive specification covering SQL types, migration details, indexing, the full `metadata_json` schema, and CRUD APIs, refer to the dedicated [**Database Architecture & Schema Specification**](database.md).
+
 ### `downloads` Table
 
 | Column | Type | Default | Description |

@@ -85,9 +85,12 @@ commit after each features or set of fixes/enhancements
 - [x] Add support total Up/Down Bandwidth limit in footer speed context menu (1kbps, 2kbps, 5kbps, 10kbps, 50kbps, 100kbps, 200kbps, 500kbps, 1mbps, 2mbps, 5mbps, 10mbps, 100 mbps, Unlimited, Custom)
   
 ----------------------
-
 ### Malware Scan
 - [x] BUG: test antivirus button in preferences window failing: tuple object has no object is_clean
 - [x] control what type of virus/malware to scan (for example ignore win/CrackTool, HackTool etc that are mostly harmless and commonly found on torrents). 
 - [x] control when to scan, before download start, after completes etc
 - [x] control what kind of malware to delete/quarrantine
+
+----------------------
+### Browser Integration
+- [ ] to check possibilities: chrome, mozilla

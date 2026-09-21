@@ -93,12 +93,14 @@ All settings and runtime data are persisted in the user profile:
 
 - [**User Guide**](docs/user-guide.md) — Complete user manual: GUI navigation, download management, and troubleshooting.
 - [**Architecture Guide**](docs/architecture/main.md) — System design, threading model (`asyncio` + `libtorrent` + Qt), and SQLite schema.
+- [**Database & Persistence**](docs/architecture/database.md) — SQLite schema specification, constraints, indexing, `metadata_json` contract, migrations, and self-healing.
 - [**Tor Privacy**](docs/architecture/tor.md) — SOCKS5 routing, daemon auto-discovery, startup gating, and exit termination.
 - [**VPN & Kill Switch**](docs/architecture/vpn.md) — Network interface binding, adapter watcher loop, and proxy configuration.
 - [**Antivirus & Security**](docs/architecture/antivirus.md) — Pre-download checks, Defender/custom scanning, and quarantine.
 - [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
+- [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.
 
 ---
 

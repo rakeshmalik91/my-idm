@@ -1,0 +1,319 @@
+# Database Architecture & Schema Specification
+
+This document provides the canonical technical specification for the **My-IDM** persistence layer, including table schemas, constraints, indexing strategies, metadata JSON contracts, migration lifecycle, and data synchronization patterns.
+
+---
+
+## 🏛️ Overview & Storage Model
+
+My-IDM utilizes an embedded **SQLite** database (`downloads.db`) situated in the application configuration directory:
+
+```
+Windows: %USERPROFILE%\.my-idm\downloads.db
+POSIX:   ~/.my-idm/downloads.db
+```
+
+### Key Characteristics
+
+- **WAL Journaling**: Configured with `PRAGMA journal_mode=WAL` (Write-Ahead Logging) to allow concurrent readers without blocking SQLite writes.
+- **Foreign Key Enforcement**: Configured with `PRAGMA foreign_keys=ON` to enforce relational integrity and cascade deletions.
+- **Thread Safety**: Initialized with `sqlite3.connect(..., check_same_thread=False)`. Database operations are synchronous and executed from background manager/engine threads without blocking the main Qt GUI event loop.
+- **State Separation**: Clear boundary between **persisted database columns** (stored on disk) and **transient runtime fields** (speeds, peer counts, ETAs computed during active transfers).
+
+---
+
+## 📊 Entity-Relationship Diagram
+
+```mermaid
+erDiagram
+    DOWNLOADS ||--o{ SEGMENTS : "1-to-N (Cascade Delete)"
+    
+    DOWNLOADS {
+        TEXT id PK "UUIDv4 identifier"
+        TEXT url "Download source URL or magnet link"
+        TEXT filename "Target file or folder name"
+        TEXT save_path "Destination folder path"
+        TEXT file_path "Full absolute path to file"
+        INTEGER total_size "File size in bytes (0 if unknown)"
+        INTEGER downloaded_size "Downloaded bytes on disk"
+        TEXT status "Current lifecycle state"
+        TEXT download_type "http | torrent"
+        INTEGER num_segments "Configured HTTP segment count"
+        TEXT error_message "Last failure or warning message"
+        INTEGER retry_count "Reconnection attempts executed"
+        INTEGER max_retries "Maximum allowed retry attempts"
+        TEXT added_at "ISO-8601 UTC creation timestamp"
+        TEXT last_tried_at "ISO-8601 UTC last attempt timestamp"
+        TEXT completed_at "ISO-8601 UTC completion timestamp"
+        TEXT etag "HTTP ETag header"
+        TEXT content_hash "Integrity hash (SHA-256 / MD5)"
+        TEXT torrent_info_hash "BitTorrent 40-char hex info-hash"
+        TEXT metadata_json "Extensible JSON attributes blob"
+        INTEGER queue_order "Priority order in active queue"
+    }
+
+    SEGMENTS {
+        TEXT id PK "UUIDv4 segment identifier"
+        TEXT download_id FK "References downloads(id)"
+        INTEGER idx "0-based segment sequence index"
+        INTEGER start_byte "Byte range start offset"
+        INTEGER end_byte "Byte range end offset"
+        INTEGER downloaded_bytes "Bytes written for this segment"
+        TEXT status "pending | downloading | completed | error"
+    }
+
+    UI_STATE {
+        TEXT key PK "Configuration or layout identifier"
+        TEXT value "JSON-serialized UI state payload"
+    }
+```
+
+---
+
+## 📑 Table Schemas
+
+### 1. `downloads` Table
+
+The primary entity table storing download tasks, progress state, connection parameters, and security reports.
+
+| Column | Type | Nullable | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `TEXT` | **NO** | *None* | **PRIMARY KEY**. Unique UUIDv4 string. |
+| `url` | `TEXT` | **NO** | *None* | Source URL (`http://`, `https://`), magnet URI (`magnet:?xt=...`), or local `.torrent` path. |
+| `filename` | `TEXT` | **NO** | `''` | Resolved file name or torrent root display name. |
+| `save_path` | `TEXT` | **NO** | `''` | Target directory where the download is stored. |
+| `file_path` | `TEXT` | **NO** | `''` | Full normalized path to the downloaded file or root folder on disk. |
+| `total_size` | `INTEGER` | **NO** | `0` | Expected file/payload size in bytes (`0` for chunked streams or unresolved magnets). |
+| `downloaded_size` | `INTEGER` | **NO** | `0` | Bytes written and verified on disk. |
+| `status` | `TEXT` | **NO** | `'queued'` | Lifecycle status (see [Status Values](#status-values)). |
+| `download_type` | `TEXT` | **NO** | `'http'` | Protocol type: `'http'` (direct/multi-segment) or `'torrent'` (BitTorrent). |
+| `num_segments` | `INTEGER` | **NO** | `8` | Number of parallel HTTP segment connections configured for this download. |
+| `error_message` | `TEXT` | **NO** | `''` | Descriptive error message when status is `'error'` or alert warnings. |
+| `retry_count` | `INTEGER` | **NO** | `0` | Number of automatic retries performed so far. |
+| `max_retries` | `INTEGER` | **NO** | `5` | Maximum retry attempts before transitioning to `'error'`. |
+| `added_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC timestamp when the download was added. |
+| `last_tried_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC timestamp of the most recent connection attempt. |
+| `completed_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC timestamp when the download finished successfully. |
+| `etag` | `TEXT` | **NO** | `''` | HTTP `ETag` response header used for resume validation. |
+| `content_hash` | `TEXT` | **NO** | `''` | Checksum/hash of the file content for integrity verification. |
+| `torrent_info_hash` | `TEXT` | **NO** | `''` | Lowercase 40-character hexadecimal BitTorrent SHA-1 info-hash. |
+| `metadata_json` | `TEXT` | **NO** | `'{}'` | Extensible JSON object storing subsystem-specific attributes. |
+| `queue_order` | `INTEGER` | **NO** | `0` | Sequential order position in the active download queue (`1` = highest). |
+
+#### Status Values
+
+| Status | Description |
+| :--- | :--- |
+| `'queued'` | Waiting in queue for an available concurrent download slot. |
+| `'downloading'` | Actively downloading payload data. |
+| `'paused'` | Paused by the user; retains incomplete chunks on disk. |
+| `'stopped'` | Stopped by the user; excluded from queue rotation and auto-resume. |
+| `'completed'` | All payload bytes downloaded and verified (100% progress). |
+| `'seeding'` | BitTorrent payload complete; actively uploading to peers in the swarm. |
+| `'checking'` | Validating existing file chunks on disk against torrent hash or HTTP segments. |
+| `'fetching_metadata'` | Resolving BitTorrent metadata (`.torrent` info dictionary) via DHT/PEX. |
+| `'stalled'` | Active download with zero transfer speed and no connected seeds/peers (>45s). |
+| `'scanning'` | Antivirus engine (Windows Defender / custom CLI) actively analyzing file. |
+| `'threat_detected'` | Malware detected by antivirus scanner; file flagged or quarantined. |
+| `'file_not_found'` | Target file was moved, renamed, or deleted outside of My-IDM. |
+| `'error'` | Unrecoverable failure or retry exhaustion. |
+
+---
+
+### 2. `segments` Table
+
+Stores byte ranges and progress for parallel chunked HTTP downloads.
+
+| Column | Type | Nullable | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `TEXT` | **NO** | *None* | **PRIMARY KEY**. Unique UUIDv4 string. |
+| `download_id` | `TEXT` | **NO** | *None* | **FOREIGN KEY** referencing `downloads(id)` with `ON DELETE CASCADE`. |
+| `idx` | `INTEGER` | **NO** | *None* | 0-based index of the segment (e.g. `0` to `num_segments - 1`). |
+| `start_byte` | `INTEGER` | **NO** | `0` | Byte offset where this segment begins. |
+| `end_byte` | `INTEGER` | **NO** | `0` | Byte offset where this segment ends (`0` if open-ended). |
+| `downloaded_bytes` | `INTEGER` | **NO** | `0` | Bytes downloaded and written to file for this segment. |
+| `status` | `TEXT` | **NO** | `'pending'` | Segment status: `'pending'`, `'downloading'`, `'completed'`, `'error'`. |
+
+---
+
+### 3. `ui_state` Table
+
+A lightweight key-value store used to preserve desktop GUI layout, window coordinates, and dialog geometries across application sessions.
+
+| Column | Type | Nullable | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `key` | `TEXT` | **NO** | *None* | **PRIMARY KEY**. Distinct UI state key. |
+| `value` | `TEXT` | **NO** | *None* | JSON-serialized string containing the configuration payload. |
+
+#### Standard `ui_state` Keys
+
+| Key | Format | Description |
+| :--- | :--- | :--- |
+| `'window_state'` | JSON Object | Stores `x`, `y`, `width`, `height`, `is_maximized`, `column_widths` (mapping of column index to pixel width), `header_state` (hex-encoded QHeaderView state), `splitter_sizes` (vertical splitter proportions), and `details_visible` (bool). |
+| `'preferences_dialog_size'` | JSON Object | Stores `{"width": int, "height": int}` for restoring resized preferences dialog window dimensions. |
+
+---
+
+## ⚡ Indexing Strategy
+
+To guarantee sub-millisecond query performance on large download histories:
+
+```sql
+-- Fast lookup and cascade deletion of HTTP segment records
+CREATE INDEX IF NOT EXISTS idx_segments_download ON segments(download_id);
+
+-- URL-based lookup for duplicate detection and backlog imports
+CREATE INDEX IF NOT EXISTS idx_downloads_url ON downloads(url);
+
+-- BitTorrent info-hash lookups for magnet matching and deduplication
+CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash);
+
+-- Fast retrieval and sorting of active queue ordering
+CREATE INDEX IF NOT EXISTS idx_downloads_queue_order ON downloads(queue_order);
+```
+
+---
+
+## 📦 Metadata JSON Schema (`metadata_json`)
+
+The `metadata_json` column in `downloads` holds an extensible dictionary managed via Python's [`_MetadataDict`](file:///d:/Projects/my-idm/my_idm/database.py) wrapper. Changes made to the dictionary automatically serialize back to `metadata_json`.
+
+### Schema Specification
+
+```json
+{
+  "files": [
+    {
+      "index": 0,
+      "path": "Ubuntu-24.04/ubuntu-24.04-desktop-amd64.iso",
+      "name": "ubuntu-24.04-desktop-amd64.iso",
+      "size": 6075949056,
+      "downloaded": 6075949056,
+      "progress": 100.0,
+      "priority": 4
+    }
+  ],
+  "trackers": [
+    {
+      "tier": 0,
+      "url": "https://torrent.ubuntu.com/announce",
+      "status": "Working",
+      "send_stats": true
+    }
+  ],
+  "seeds": 124,
+  "peers": 42,
+  "total_seeds": 850,
+  "total_peers": 310,
+  "bandwidth_allocation": "normal",
+  "explicit_filename": true,
+  "next_retry_at": 1789916672.45,
+  "custom_headers": {
+    "Authorization": "Bearer token...",
+    "User-Agent": "Custom-Agent"
+  },
+  "use_curl_cffi": false,
+  "antivirus_scanned": true,
+  "antivirus_report": "Windows Defender: Clean (Threat exclusions matched: HackTool)",
+  "threat_detected": false
+}
+```
+
+### Field Definitions
+
+| Field | Type | Subsystem | Description |
+| :--- | :--- | :--- | :--- |
+| `files` | `Array<Object>` | BitTorrent | Multi-file tree with path, size, progress, and priority (0 = skip, 1 = low, 4 = normal, 7 = high). |
+| `trackers` | `Array<Object>` | BitTorrent | Announced tracker list with tier, announce URL, working status, and stats flag. |
+| `seeds` / `peers` | `Integer` | BitTorrent | Number of connected seeders and leechers in the active session. |
+| `total_seeds` / `total_peers` | `Integer` | BitTorrent | Total estimated swarm count from tracker scrapes and DHT peer exchanges. |
+| `bandwidth_allocation` | `String` | Bandwidth | Torrent priority tier: `'low'`, `'normal'`, or `'high'`. |
+| `explicit_filename` | `Boolean` | Engine | `true` if the user manually renamed the download; suppresses automatic title overwrites from HTTP headers or torrent info dictionaries. |
+| `next_retry_at` | `Float` | Retries | Epoch timestamp (seconds) until which the download manager will skip retrying this entry (exponential backoff window). |
+| `custom_headers` | `Object` | HTTP | Custom HTTP request headers provided by the user or backlog directive. |
+| `use_curl_cffi` | `Boolean` | HTTP | Forces TLS/browser impersonation via `curl_cffi` rather than `aiohttp`. |
+| `antivirus_scanned` | `Boolean` | Security | `true` once post-download scanning has completed. |
+| `antivirus_report` | `String` | Security | Scanner output, engine name, or exclusion match details. |
+| `threat_detected` | `Boolean` | Security | `true` if malware or PUAs were detected and quarantined. |
+
+---
+
+## 🔄 Migrations & Self-Healing
+
+The database engine includes automated schema migrations and consistency self-healing executed inside [`Database.open()`](file:///d:/Projects/my-idm/my_idm/database.py#L173):
+
+### 1. In-Place Schema Migration
+When opening existing databases from older releases, `PRAGMA table_info(downloads)` inspects existing columns:
+```python
+cursor = self._conn.execute("PRAGMA table_info(downloads)")
+cols = [r["name"] for r in cursor.fetchall()]
+if "queue_order" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN queue_order INTEGER NOT NULL DEFAULT 0")
+if "torrent_info_hash" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN torrent_info_hash TEXT NOT NULL DEFAULT ''")
+if "metadata_json" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+```
+
+### 2. Orphaned Segment Pruning
+Cleans up any dangling segment records whose parent download was removed:
+```sql
+DELETE FROM segments WHERE download_id NOT IN (SELECT id FROM downloads);
+```
+
+### 3. Completed Size Invariant Repair
+Repairs legacy or interrupted records where completed downloads erroneously retained zero or partial `downloaded_size`:
+```sql
+UPDATE downloads SET downloaded_size = total_size
+WHERE status IN ('completed', 'seeding') AND total_size > 0 AND (downloaded_size <= 0 OR downloaded_size < total_size);
+```
+
+### 4. Row Normalization
+When instantiating [`DownloadEntry`](file:///d:/Projects/my-idm/my_idm/database.py#L36) from a database row, `_row_to_entry()` normalizes path separators and ensures that if a file is marked completed or seeding:
+- `downloaded_size` is normalized to `total_size`.
+- If `total_size <= 0`, inspects the physical file on disk (`os.stat().st_size`) to recover the exact byte count.
+- The computed property `entry.progress` returns `100.0%` unconditionally whenever `status IN ('completed', 'seeding')`.
+
+---
+
+## 🛠️ Python Database API Reference
+
+The [`Database`](file:///d:/Projects/my-idm/my_idm/database.py) class exposes high-level helper methods:
+
+```python
+db = Database(db_path=None)  # Defaults to ~/.my-idm/downloads.db
+db.open()
+```
+
+### Download Operations
+
+- `add_download(entry: DownloadEntry) -> DownloadEntry`: Inserts a new record, generates a UUID if missing, sets `added_at`, and assigns the next queue order position.
+- `update_download(entry: DownloadEntry)`: Persists all mutable columns for the given entry ID.
+- `update_progress(download_id: str, downloaded_size: int, status: str | None = None)`: Efficient single-query progress update.
+- `update_status(download_id: str, status: str, error_message: str = "")`: Updates status, sets `completed_at` (if completed) or `last_tried_at` (if downloading), and commits.
+- `increment_retry(download_id: str) -> int`: Increments retry counter and updates `last_tried_at`.
+- `delete_download(download_id: str)`: Deletes the download and cascades deletion of all associated segments.
+- `get_download(download_id: str) -> Optional[DownloadEntry]`: Retrieves a single download by ID.
+- `get_all_downloads() -> list[DownloadEntry]`: Retrieves all downloads ordered by `added_at DESC`.
+- `find_by_url(url: str) -> Optional[DownloadEntry]`: Searches for an existing entry with matching URL.
+- `find_by_info_hash(info_hash: str) -> Optional[DownloadEntry]`: Searches for an existing entry with matching BitTorrent info-hash.
+
+### Queue Ordering
+
+- `get_next_queue_order() -> int`: Returns `MAX(queue_order) + 1`.
+- `update_queue_order(download_id: str, new_order: int)`: Sets an explicit queue order position.
+- `swap_queue_order(id1: str, id2: str)`: Swaps queue order positions between two entries.
+
+### Segment Operations
+
+- `add_segments(segments: list[SegmentEntry])`: Batch-inserts parallel segment records.
+- `get_segments(download_id: str) -> list[SegmentEntry]`: Retrieves all segments for a download ordered by `idx ASC`.
+- `update_segment(segment_id: str, downloaded_bytes: int, status: str)`: Updates progress and status for an individual chunk.
+- `delete_segments(download_id: str)`: Deletes all segments associated with a download ID.
+
+### UI & Layout State
+
+- `set_ui_state(key: str, value: Any)`: Stores JSON-serialized UI state with `ON CONFLICT(key) DO UPDATE`.
+- `get_ui_state(key: str, default: Any = None) -> Any`: Retrieves and parses JSON state by key.
+- `save_window_state(state: dict)` / `get_window_state() -> dict`: Dedicated helpers for main window geometry and column widths.
+- `save_preferences_window_size(width: int, height: int)` / `get_preferences_window_size() -> dict`: Window size helpers for preferences dialog.
