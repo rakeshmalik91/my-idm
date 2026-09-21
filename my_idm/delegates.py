@@ -43,6 +43,8 @@ class ProgressBarDelegate(QStyledItemDelegate):
 
         progress = raw.get("progress", 0)
         status = raw.get("status", "queued")
+        if status in ("completed", "seeding"):
+            progress = 100.0
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)

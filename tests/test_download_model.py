@@ -682,6 +682,29 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(type_counts["http"], 2)
         self.assertEqual(type_counts["torrent"], 3)
 
+    def test_completed_download_progress_in_table_model_and_delegate(self):
+        """Completed downloads loaded into table model must return 100% progress for delegate."""
+        comp_entry = DownloadEntry(
+            id="comp_zero_bytes",
+            url="https://example.com/movie.mkv",
+            filename="movie.mkv",
+            save_path="C:/Downloads",
+            total_size=1048576,
+            downloaded_size=0,
+            status="completed",
+        )
+        self.model.load_entries([comp_entry])
+        idx = self.model.index(0, Col.PROGRESS)
+        data = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
+        self.assertIsInstance(data, dict)
+        self.assertEqual(data["progress"], 100.0)
+        self.assertEqual(data["status"], "completed")
+
+        # Calling update_progress with 0 must not downgrade completed download
+        self.model.update_progress("comp_zero_bytes", 0, 1048576, 0.0, 0.0)
+        data_after = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
+        self.assertEqual(data_after["progress"], 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

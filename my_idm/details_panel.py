@@ -538,9 +538,19 @@ class DetailsPanel(QWidget):
         self._ov_status.setText(f"<span style='color: {status_color}; font-weight: bold;'>{entry.status.capitalize()}</span>{err}")
 
         # Size & progress
-        total_str = humanize.naturalsize(entry.total_size, binary=True) if entry.total_size > 0 else "Unknown"
-        dl_str = humanize.naturalsize(entry.downloaded_size, binary=True)
-        pct = (entry.downloaded_size / entry.total_size * 100) if entry.total_size > 0 else 0.0
+        total_size = entry.total_size
+        downloaded_size = entry.downloaded_size
+        if entry.status in ("completed", "seeding"):
+            if total_size > 0:
+                downloaded_size = max(downloaded_size, total_size)
+            elif downloaded_size > 0:
+                total_size = downloaded_size
+            pct = 100.0
+        else:
+            pct = (downloaded_size / total_size * 100) if total_size > 0 else 0.0
+
+        total_str = humanize.naturalsize(total_size, binary=True) if total_size > 0 else "Unknown"
+        dl_str = humanize.naturalsize(downloaded_size, binary=True)
         self._ov_size.setText(f"{total_str} ({pct:.1f}%)")
         self._ov_downloaded.setText(f"{dl_str} / {total_str}")
 

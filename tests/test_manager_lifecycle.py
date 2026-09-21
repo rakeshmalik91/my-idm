@@ -851,6 +851,30 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
             mock_start.assert_called_once()
             self.assertEqual(mock_start.call_args[0][0].id, "d_future_retry")
 
+    def test_completed_download_recheck_single_stream_reads_disk_size(self):
+        """Recheck of single-stream HTTP download with no segment records reads disk file size."""
+        test_file = Path(self.tmp_dir.name) / "video_single.mp4"
+        test_file.write_bytes(b"V" * 50_000)
+
+        entry = DownloadEntry(
+            id="recheck-single",
+            url="https://example.com/video_single.mp4",
+            filename="video_single.mp4",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=50_000,
+            downloaded_size=0,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        self.manager.recheck_download("recheck-single")
+        updated = self.db.get_download("recheck-single")
+        self.assertEqual(updated.downloaded_size, 50_000)
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.progress, 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()

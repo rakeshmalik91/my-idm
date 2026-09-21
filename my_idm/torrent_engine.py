@@ -764,9 +764,26 @@ class TorrentEngine:
             s = handle.status()
             total_size = s.total_wanted
             downloaded = s.total_wanted_done
-            progress = s.progress * 100
+
+            if s.has_metadata:
+                ti = handle.torrent_file()
+                if ti:
+                    ti_size = ti.total_size()
+                    if ti_size > 0:
+                        total_size = ti_size
+
+            total_done = getattr(s, "total_done", 0)
+            if total_done > 0:
+                downloaded = max(downloaded, total_done)
+
             state_idx = int(s.state)
             state_name = _STATE_NAMES.get(state_idx, str(s.state))
+
+            if state_name in ("finished", "seeding") and total_size > 0:
+                downloaded = total_size
+                progress = 100.0
+            else:
+                progress = s.progress * 100
             speed = s.download_rate
             upload_speed = s.upload_rate
             seeds = s.num_seeds
@@ -834,8 +851,19 @@ class TorrentEngine:
                 continue
 
             # Update DB and entry transient attributes
-            entry.total_size = status.get("total_size", 0)
-            entry.downloaded_size = status.get("downloaded", 0)
+            new_total = status.get("total_size", 0)
+            new_dl = status.get("downloaded", 0)
+            if entry.status in ("completed", "seeding"):
+                if new_total > 0:
+                    entry.total_size = new_total
+                if new_dl > 0:
+                    entry.downloaded_size = new_dl
+                elif entry.total_size > 0:
+                    entry.downloaded_size = entry.total_size
+            else:
+                if new_total > 0 or entry.total_size == 0:
+                    entry.total_size = new_total
+                entry.downloaded_size = new_dl
             seeds = status.get("seeds", 0)
             peers = status.get("peers", 0)
             total_seeds = status.get("total_seeds", seeds)
@@ -897,12 +925,19 @@ class TorrentEngine:
                     )
                 continue
 
+            cb_dl = status["downloaded"]
+            cb_tot = status["total_size"]
+            if entry.status in ("completed", "seeding"):
+                if entry.total_size > 0:
+                    cb_tot = max(cb_tot, entry.total_size)
+                    cb_dl = max(cb_dl, entry.downloaded_size, cb_tot)
+
             # Emit progress
             if self._progress_cb:
                 self._progress_cb(
                     download_id,
-                    status["downloaded"],
-                    status["total_size"],
+                    cb_dl,
+                    cb_tot,
                     status["speed"],
                     status["eta"],
                     status["seeds"],

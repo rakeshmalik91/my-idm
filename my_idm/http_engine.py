@@ -429,8 +429,20 @@ class HTTPEngine:
                 await self._single_download(entry, cancel_evt)
 
             if not cancel_evt.is_set():
+                if entry.file_path and Path(entry.file_path).exists():
+                    try:
+                        f_size = Path(entry.file_path).stat().st_size
+                        if f_size > 0:
+                            entry.downloaded_size = f_size
+                            if entry.total_size <= 0:
+                                entry.total_size = f_size
+                    except Exception:
+                        pass
+                if entry.total_size > 0 and entry.downloaded_size < entry.total_size:
+                    entry.downloaded_size = entry.total_size
                 entry.status = "completed"
-                entry.downloaded_size = entry.total_size or entry.downloaded_size
+                self._db.update_download(entry)
+                self._db.update_progress(download_id, entry.downloaded_size, "completed")
                 self._db.update_status(download_id, "completed")
                 self._emit_status(download_id, "completed")
                 self._emit_progress(
@@ -863,6 +875,8 @@ class HTTPEngine:
                     entry.speed = speed
                     entry.eta_seconds = eta
                     self._emit_progress(entry.id, downloaded, entry.total_size, speed, eta)
+
+            self._db.update_progress(entry.id, downloaded)
 
     async def _single_download(self, entry: DownloadEntry,
                                cancel_evt: asyncio.Event):

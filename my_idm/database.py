@@ -68,6 +68,8 @@ class DownloadEntry:
 
     @property
     def progress(self) -> float:
+        if self.status in ("completed", "seeding"):
+            return 100.0
         if self.total_size <= 0:
             return 0.0
         return min(100.0, (self.downloaded_size / self.total_size) * 100.0)
@@ -242,6 +244,12 @@ class Database:
 
         # Clean up any orphaned segment rows from deleted downloads
         self._conn.execute("DELETE FROM segments WHERE download_id NOT IN (SELECT id FROM downloads)")
+
+        # Self-heal any completed/seeding downloads whose downloaded_size was zeroed or partial
+        self._conn.execute(
+            "UPDATE downloads SET downloaded_size = total_size "
+            "WHERE status IN ('completed', 'seeding') AND total_size > 0 AND (downloaded_size <= 0 OR downloaded_size < total_size)"
+        )
 
         self._conn.commit()
 
@@ -472,7 +480,23 @@ class Database:
             d["save_path"] = normalize_path(d["save_path"])
         if d.get("file_path"):
             d["file_path"] = normalize_path(d["file_path"])
-        return DownloadEntry(**d)
+        entry = DownloadEntry(**d)
+        if entry.status in ("completed", "seeding"):
+            if entry.total_size > 0 and entry.downloaded_size < entry.total_size:
+                entry.downloaded_size = entry.total_size
+            elif entry.total_size <= 0 and entry.downloaded_size > 0:
+                entry.total_size = entry.downloaded_size
+            elif entry.total_size <= 0 and entry.file_path:
+                try:
+                    fp = Path(entry.file_path)
+                    if fp.exists() and fp.is_file():
+                        st = fp.stat().st_size
+                        if st > 0:
+                            entry.total_size = st
+                            entry.downloaded_size = st
+                except Exception:
+                    pass
+        return entry
 
     @staticmethod
     def _row_to_segment(row: sqlite3.Row) -> SegmentEntry:

@@ -289,6 +289,9 @@ class DownloadTableModel(QAbstractTableModel):
                     e.total_seeds = self._to_int(e.metadata.get("total_seeds", 0))
                 if not getattr(e, "total_peers", 0) and "total_peers" in e.metadata:
                     e.total_peers = self._to_int(e.metadata.get("total_peers", 0))
+            if e.status in ("completed", "seeding") and e.total_size > 0:
+                if e.downloaded_size < e.total_size:
+                    e.downloaded_size = e.total_size
         self._entries = [e for e in self._all_entries if self._matches_filter(e)]
         if self._sort_column is not None:
             self._apply_sort()
@@ -506,7 +509,13 @@ class DownloadTableModel(QAbstractTableModel):
                     and downloaded > 0
                 ):
                     return
-                e.downloaded_size = downloaded
+                if e.status in ("completed", "seeding"):
+                    if downloaded > 0:
+                        e.downloaded_size = max(downloaded, e.downloaded_size)
+                    elif e.total_size > 0:
+                        e.downloaded_size = e.total_size
+                else:
+                    e.downloaded_size = downloaded
                 if total > 0:
                     e.total_size = total
                 e.speed = speed
@@ -813,8 +822,9 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.PROGRESS:
             # Return dict for ProgressBarDelegate
+            prog = 100.0 if entry.status in ("completed", "seeding") else entry.progress
             return {
-                "progress": entry.progress,
+                "progress": prog,
                 "status": entry.status,
             }
 

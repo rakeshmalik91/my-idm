@@ -1134,6 +1134,8 @@ class DownloadManager(QObject):
             return
 
         if entry.download_type == "torrent":
+            if download_id not in self._torrent._handles:
+                self._torrent.add_torrent(entry)
             self._db.update_status(download_id, "checking")
             self._torrent.recheck(download_id)
             self.status_changed.emit(download_id, "checking", "")
@@ -1163,8 +1165,11 @@ class DownloadManager(QObject):
                     all_complete = all(s.status == "completed" for s in segments)
                 else:
                     # No segment records (e.g. single-stream / non-segmented);
-                    # fall back to entry.downloaded_size stored in the DB.
-                    actual_downloaded = entry.downloaded_size
+                    # fall back to disk file size or entry.downloaded_size stored in the DB.
+                    disk_size = fp.stat().st_size if fp and fp.exists() and fp.is_file() else 0
+                    actual_downloaded = max(entry.downloaded_size, disk_size)
+                    if entry.total_size <= 0 and disk_size > 0:
+                        entry.total_size = disk_size
                     all_complete = (
                         entry.total_size > 0
                         and actual_downloaded >= entry.total_size
@@ -1348,7 +1353,13 @@ class DownloadManager(QObject):
             status = self._torrent.get_status(download_id)
             if status:
                 entry.total_size = status["total_size"] or entry.total_size
-                entry.downloaded_size = status["downloaded"]
+                if entry.status in ("completed", "seeding"):
+                    if status["downloaded"] > 0:
+                        entry.downloaded_size = max(status["downloaded"], entry.downloaded_size)
+                    elif entry.total_size > 0:
+                        entry.downloaded_size = entry.total_size
+                else:
+                    entry.downloaded_size = status["downloaded"]
                 entry.speed = status["speed"]
                 entry.upload_speed = status["upload_speed"]
                 entry.seeds = to_int(status["seeds"])
@@ -1361,6 +1372,9 @@ class DownloadManager(QObject):
                 entry.peers = to_int(entry.metadata.get("peers", 0))
                 entry.total_seeds = to_int(entry.metadata.get("total_seeds", 0))
                 entry.total_peers = to_int(entry.metadata.get("total_peers", 0))
+        if entry.status in ("completed", "seeding") and entry.total_size > 0:
+            if entry.downloaded_size < entry.total_size:
+                entry.downloaded_size = entry.total_size
         return entry
 
     # -- engine callbacks (called from async / background threads) -----------

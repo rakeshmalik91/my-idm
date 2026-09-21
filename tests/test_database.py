@@ -213,6 +213,49 @@ class TestDatabase(unittest.TestCase):
             except Exception:
                 pass
 
+    def test_completed_download_progress_always_100_percent(self):
+        """Completed or seeding downloads must always report 100% progress."""
+        entry = DownloadEntry(
+            id="comp-1",
+            url="https://example.com/comp.zip",
+            filename="comp.zip",
+            save_path="/tmp",
+            total_size=5000,
+            downloaded_size=0,
+            status="completed",
+        )
+        self.assertEqual(entry.progress, 100.0)
+
+        entry_seeding = DownloadEntry(
+            id="seed-1",
+            url="magnet:?xt=urn:btih:123",
+            filename="seed.torrent",
+            save_path="/tmp",
+            total_size=10000,
+            downloaded_size=0,
+            status="seeding",
+        )
+        self.assertEqual(entry_seeding.progress, 100.0)
+
+    def test_database_init_self_heals_completed_downloaded_size(self):
+        """On Database open, completed entries with 0 or partial downloaded_size are self-healed."""
+        # Insert a completed row with downloaded_size = 0 directly into SQLite
+        self.db._conn.execute(
+            "INSERT INTO downloads (id, url, filename, total_size, downloaded_size, status) "
+            "VALUES ('corrupt-1', 'https://example.com/test.zip', 'test.zip', 4096, 0, 'completed')"
+        )
+        self.db._conn.commit()
+
+        # Re-open database to simulate application restart
+        self.db.close()
+        self.db.open()
+
+        healed = self.db.get_download("corrupt-1")
+        self.assertIsNotNone(healed)
+        self.assertEqual(healed.downloaded_size, 4096)
+        self.assertEqual(healed.total_size, 4096)
+        self.assertEqual(healed.progress, 100.0)
+
 
 if __name__ == "__main__":
     unittest.main()
