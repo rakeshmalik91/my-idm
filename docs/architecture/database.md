@@ -149,7 +149,7 @@ A lightweight key-value store used to preserve desktop GUI layout, window coordi
 
 | Key | Format | Description |
 | :--- | :--- | :--- |
-| `'window_state'` | JSON Object | Stores `x`, `y`, `width`, `height`, `is_maximized`, `column_widths` (mapping of column index to pixel width), `header_state` (hex-encoded QHeaderView state), `splitter_sizes` (vertical splitter proportions), and `details_visible` (bool). |
+| `'window_state'` | JSON Object | Stores `x`, `y`, `width`, `height`, `is_maximized`, `column_widths` (mapping of column index to pixel width), `header_state` (hex-encoded QHeaderView state), `splitter_sizes` (vertical splitter proportions), `details_visible` (bool), `details_height` (int height in pixels), and `details_state` (JSON object including `current_tab`). |
 | `'preferences_dialog_size'` | JSON Object | Stores `{"width": int, "height": int}` for restoring resized preferences dialog window dimensions. |
 
 ---

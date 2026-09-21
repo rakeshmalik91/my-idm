@@ -135,6 +135,18 @@ QToolButton:pressed {{
     background-color: {Colors.BG_LIGHT};
 }}
 
+QToolButton:checked {{
+    background-color: {Colors.BG_LIGHT};
+    border-color: {Colors.ACCENT};
+    color: {Colors.ACCENT};
+}}
+
+QToolButton:checked:hover {{
+    background-color: {Colors.BG_HOVER};
+    border-color: {Colors.ACCENT_HOVER};
+    color: {Colors.ACCENT_HOVER};
+}}
+
 QToolButton:disabled {{
     color: {Colors.TEXT_DIM};
 }}

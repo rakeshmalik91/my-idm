@@ -45,14 +45,41 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.assertNotIn("📦 Add Torrent File…", action_texts)
 
     def test_removed_buttons_from_toolbar(self):
-        """Open File, Open Folder, and Details Panel buttons should be removed from toolbar."""
+        """Open File and Open Folder buttons should not be on the toolbar."""
         toolbar = self.win.findChild(QToolBar)
         self.assertIsNotNone(toolbar)
 
         actions = toolbar.actions()
         self.assertNotIn(self.win._act_open_file, actions)
         self.assertNotIn(self.win._act_open_folder, actions)
-        self.assertNotIn(self.win._act_toggle_details, actions)
+
+    def test_details_panel_button_on_top_right_of_toolbar(self):
+        """Details panel show/hide button should be present on the top right of the toolbar and toggle panel."""
+        self.win.show()
+        toolbar = self.win.findChild(QToolBar)
+        self.assertIsNotNone(toolbar)
+
+        btn = getattr(self.win, "_details_toolbar_btn", None)
+        self.assertIsNotNone(btn, "_details_toolbar_btn should exist on MainWindow")
+        self.assertIsInstance(btn, QToolButton)
+        self.assertEqual(btn.defaultAction(), self.win._act_toggle_details)
+        self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+
+        # Initially checked and details panel is visible
+        self.assertTrue(btn.isChecked())
+        self.assertTrue(self.win._details_panel.isVisible())
+        self.assertFalse(self.win._details_panel.isHidden())
+
+        # Click button to hide details panel
+        btn.click()
+        self.assertFalse(btn.isChecked())
+        self.assertTrue(self.win._details_panel.isHidden())
+
+        # Click button again to show details panel
+        btn.click()
+        self.assertTrue(btn.isChecked())
+        self.assertFalse(self.win._details_panel.isHidden())
+        self.assertTrue(self.win._details_panel.isVisible())
 
     def test_icon_only_buttons_on_toolbar(self):
         """Resume, Pause, Stop, Delete, Move, and Recheck must be icon-only on toolbar, while Preferences shows text."""

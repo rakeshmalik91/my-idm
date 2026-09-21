@@ -471,7 +471,61 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertIn("0 connected peer(s)", panel._lbl_peers_status.text())
         self.assertIn("20 seeds, 50 peers in swarm", panel._lbl_peers_status.text())
 
+    def test_details_panel_height_and_state_persistence_in_db(self):
+        """Details panel height, active tab, and visibility are persisted to DB and restored on restart."""
+        self.win.show()
+        # Set custom details height (e.g. 320px) and active tab (Files tab = index 1)
+        self.win._details_height = 320
+        self.win._splitter.setSizes([480, 320])
+        self.win._details_panel._tabs.setCurrentIndex(1)
+        self.win._save_ui_state_to_db()
+
+        # Check that DB contains details_height and details_state
+        state = self.db.get_window_state()
+        self.assertEqual(state.get("details_height"), 320)
+        self.assertTrue(state.get("details_visible"))
+        self.assertEqual(state.get("details_state", {}).get("current_tab"), 1)
+
+        # Launch a second window to verify restoration
+        win2 = MainWindow(self.manager)
+        win2.show()
+        try:
+            self.assertEqual(win2._details_height, 320)
+            self.assertTrue(win2._details_panel.isVisible())
+            self.assertEqual(win2._details_panel._tabs.currentIndex(), 1)
+            sizes2 = win2._splitter.sizes()
+            self.assertEqual(sizes2[1], 320)
+
+            # Now hide details panel in win2 and save state
+            win2._act_toggle_details.setChecked(False)
+            self.assertFalse(win2._details_panel.isVisible())
+            self.assertEqual(win2._details_height, 320)
+            win2._save_ui_state_to_db()
+
+            state2 = self.db.get_window_state()
+            self.assertFalse(state2.get("details_visible"))
+            self.assertEqual(state2.get("details_height"), 320)
+
+            # Launch a third window to verify it starts hidden with saved height intact
+            win3 = MainWindow(self.manager)
+            win3.show()
+            try:
+                self.assertFalse(win3._details_panel.isVisible())
+                self.assertFalse(win3._act_toggle_details.isChecked())
+                self.assertEqual(win3._details_height, 320)
+
+                # When user toggles it back ON, it restores to exactly 320px on the Files tab
+                win3._act_toggle_details.setChecked(True)
+                self.assertTrue(win3._details_panel.isVisible())
+                self.assertEqual(win3._splitter.sizes()[1], 320)
+                self.assertEqual(win3._details_panel._tabs.currentIndex(), 1)
+            finally:
+                win3.close()
+        finally:
+            win2.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

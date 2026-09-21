@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QSettings, QPointF, QTimer, QByteArray, QRect
+from PySide6.QtCore import Qt, QSize, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -18,6 +18,7 @@ from PySide6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
+    QPen,
     QPixmap,
     QPolygonF,
 )
@@ -148,6 +149,35 @@ def _create_emoji_icon(emoji: str, size: int = 32) -> QIcon:
     return QIcon(pix)
 
 
+def _create_details_panel_icon(size: int = 32) -> QIcon:
+    """Create a sleek icon showing window layout with bottom details panel highlighted."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    # Window outer outline
+    pen = QPen(QColor("#8b949e"), max(1.5, size * 0.065))
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    rect = QRectF(size * 0.12, size * 0.12, size * 0.76, size * 0.76)
+    p.drawRoundedRect(rect, 3, 3)
+
+    # Divider line
+    p.setPen(QPen(QColor("#8b949e"), max(1.2, size * 0.055)))
+    p.drawLine(QPointF(size * 0.12, size * 0.54), QPointF(size * 0.88, size * 0.54))
+
+    # Highlighted bottom details panel
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#58a6ff"))
+    bot_rect = QRectF(size * 0.16, size * 0.58, size * 0.68, size * 0.26)
+    p.drawRoundedRect(bot_rect, 2, 2)
+
+    p.end()
+    return QIcon(pix)
+
+
 class MainWindow(QMainWindow):
     """The main My-IDM window."""
 
@@ -265,9 +295,20 @@ class MainWindow(QMainWindow):
         self._details_panel.setMinimumHeight(140)
         self._splitter.addWidget(self._details_panel)
         self._splitter.setChildrenCollapsible(False)
-        self._splitter.setSizes([450, 250])
+        self._details_height: int = 250
+        self._splitter.setSizes([450, self._details_height])
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 0)
+        self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
         self.setCentralWidget(self._splitter)
+
+    def _on_splitter_moved(self, pos: int, index: int):
+        """Track user-adjusted details panel height in real time."""
+        if self._details_panel.isVisible():
+            sizes = self._splitter.sizes()
+            if len(sizes) == 2 and sizes[1] >= 50:
+                self._details_height = sizes[1]
 
     def _setup_actions(self):
         """Create all QActions."""
@@ -378,11 +419,11 @@ class MainWindow(QMainWindow):
         self._act_scan_antivirus.setToolTip("Scan the downloaded file with antivirus")
         self._act_scan_antivirus.triggered.connect(self._on_scan_selected_file)
 
-        self._act_toggle_details = QAction(_create_emoji_icon("📋"), "Details Panel", self)
+        self._act_toggle_details = QAction(_create_details_panel_icon(), "Details Panel", self)
         self._act_toggle_details.setCheckable(True)
         self._act_toggle_details.setChecked(True)
         self._act_toggle_details.setShortcut(QKeySequence("F4"))
-        self._act_toggle_details.setToolTip("Toggle bottom download details panel (F4)")
+        self._act_toggle_details.setToolTip("Hide bottom download details panel (F4)")
         self._act_toggle_details.toggled.connect(self._on_toggle_details)
         self._details_panel.close_requested.connect(
             lambda: self._act_toggle_details.setChecked(False)
@@ -458,6 +499,45 @@ class MainWindow(QMainWindow):
             btn = toolbar.widgetForAction(act)
             if isinstance(btn, QToolButton):
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+        # Expanding spacer pushes subsequent controls to the top right of the toolbar
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
+
+        # Top-right details panel show/hide button
+        self._details_toolbar_btn = QToolButton()
+        self._details_toolbar_btn.setObjectName("btn_details_toolbar")
+        self._details_toolbar_btn.setDefaultAction(self._act_toggle_details)
+        self._details_toolbar_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._details_toolbar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._details_toolbar_btn.setStyleSheet("""
+            QToolButton#btn_details_toolbar {
+                background: transparent;
+                color: #8892b0;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                padding: 3px 10px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QToolButton#btn_details_toolbar:hover {
+                background: #2e3440;
+                border-color: #484f58;
+                color: #d8dee9;
+            }
+            QToolButton#btn_details_toolbar:checked {
+                background: rgba(88, 166, 255, 0.15);
+                border: 1px solid #58a6ff;
+                color: #58a6ff;
+            }
+            QToolButton#btn_details_toolbar:checked:hover {
+                background: rgba(88, 166, 255, 0.25);
+                border: 1px solid #79c0ff;
+                color: #79c0ff;
+            }
+        """)
+        toolbar.addWidget(self._details_toolbar_btn)
 
         self.addToolBar(toolbar)
 
@@ -1391,16 +1471,28 @@ class MainWindow(QMainWindow):
     # -- details panel handlers ----------------------------------------------
 
     def _on_toggle_details(self, checked: bool):
-        self._details_panel.setVisible(checked)
         if checked:
+            self._details_panel.setVisible(True)
             sizes = self._splitter.sizes()
-            if len(sizes) == 2 and sizes[1] < 100:
-                total = sum(sizes) if sum(sizes) > 250 else (self.height() or 700)
-                bot_h = max(220, int(total * 0.35))
-                top_h = max(150, total - bot_h)
-                self._splitter.setSizes([top_h, bot_h])
+            total = sum(sizes) if sum(sizes) > 250 else (self.height() or 700)
+            bot_h = min(total - 100, max(140, getattr(self, "_details_height", 250)))
+            top_h = max(100, total - bot_h)
+            self._splitter.setSizes([top_h, bot_h])
             entry = self._first_selected_entry()
             self._details_panel.set_download_id(entry.id if entry else None)
+        else:
+            sizes = self._splitter.sizes()
+            if len(sizes) == 2 and sizes[1] >= 50:
+                self._details_height = sizes[1]
+            self._details_panel.setVisible(False)
+        tip = (
+            "Hide bottom download details panel (F4)"
+            if checked
+            else "Show bottom download details panel (F4)"
+        )
+        self._act_toggle_details.setToolTip(tip)
+        if hasattr(self, "_details_toolbar_btn"):
+            self._details_toolbar_btn.setToolTip(tip)
         if hasattr(self, "_details_status_btn"):
             self._details_status_btn.setText("📋 Details: ON" if checked else "📋 Details: OFF")
 
@@ -1428,14 +1520,17 @@ class MainWindow(QMainWindow):
             }
             header_hex = bytes(self._table.horizontalHeader().saveState().toHex()).decode()
             splitter_hex = bytes(self._splitter.saveState().toHex()).decode()
-            splitter_sizes = self._splitter.sizes()
+            sizes = self._splitter.sizes()
             details_vis = self._details_panel.isVisible()
 
-            # If details panel is hidden or collapsed (< 50px), preserve a healthy height in saved state
-            if len(splitter_sizes) == 2 and splitter_sizes[1] < 50:
-                total = sum(splitter_sizes) if sum(splitter_sizes) > 250 else 700
-                bot_s = max(220, int(total * 0.35))
-                splitter_sizes = [max(150, total - bot_s), bot_s]
+            if details_vis and len(sizes) == 2 and sizes[1] >= 50:
+                self._details_height = sizes[1]
+
+            total = sum(sizes) if sum(sizes) > 250 else 700
+            safe_bot = min(total - 100, max(140, getattr(self, "_details_height", 250)))
+            splitter_sizes = [max(100, total - safe_bot), safe_bot]
+
+            details_state = self._details_panel.get_state()
 
             sort_sec = self._table.horizontalHeader().sortIndicatorSection()
             try:
@@ -1458,6 +1553,8 @@ class MainWindow(QMainWindow):
                 "splitter_state": splitter_hex,
                 "splitter_sizes": splitter_sizes,
                 "details_visible": details_vis,
+                "details_height": safe_bot,
+                "details_state": details_state,
                 "sort_column": sort_sec,
                 "sort_order": sort_ord,
             }
@@ -1468,6 +1565,8 @@ class MainWindow(QMainWindow):
             settings.setValue("header_state", self._table.horizontalHeader().saveState())
             settings.setValue("splitter_state", self._splitter.saveState())
             settings.setValue("details_visible", details_vis)
+            settings.setValue("details_height", safe_bot)
+            settings.setValue("details_tab", details_state.get("current_tab", 0))
         except Exception as exc:
             log.warning("Failed to save window state to DB: %s", exc)
 
@@ -1484,15 +1583,49 @@ class MainWindow(QMainWindow):
                 splitter_state = settings.value("splitter_state")
                 if splitter_state:
                     self._splitter.restoreState(splitter_state)
+
+                details_h = settings.value("details_height")
+                if details_h is not None:
+                    try:
+                        self._details_height = max(140, int(details_h))
+                    except (ValueError, TypeError):
+                        self._details_height = 250
+                else:
+                    self._details_height = 250
+
+                details_tab = settings.value("details_tab")
+                if details_tab is not None:
+                    self._details_panel.restore_state({"current_tab": details_tab})
+
                 details_vis = settings.value("details_visible")
                 if details_vis is not None:
-                    self._act_toggle_details.setChecked(bool(details_vis))
-                    self._details_panel.setVisible(bool(details_vis))
+                    is_vis = bool(details_vis)
                 else:
-                    self._act_toggle_details.setChecked(True)
-                    self._details_panel.setVisible(True)
+                    is_vis = True
+
+                self._act_toggle_details.setChecked(is_vis)
+                self._details_panel.setVisible(is_vis)
+
+                sizes = self._splitter.sizes()
+                total = sum(sizes) if sum(sizes) > 250 else 700
+                safe_bot = min(total - 100, max(140, self._details_height))
+                safe_top = max(100, total - safe_bot)
+                if is_vis:
+                    self._splitter.setSizes([safe_top, safe_bot])
+                else:
+                    self._splitter.setSizes([total, 0])
+
+                tip = (
+                    "Hide bottom download details panel (F4)"
+                    if is_vis
+                    else "Show bottom download details panel (F4)"
+                )
+                self._act_toggle_details.setToolTip(tip)
+                if hasattr(self, "_details_toolbar_btn"):
+                    self._details_toolbar_btn.setToolTip(tip)
                 if hasattr(self, "_details_status_btn"):
-                    self._details_status_btn.setText("📋 Details: ON" if self._details_panel.isVisible() else "📋 Details: OFF")
+                    self._details_status_btn.setText("📋 Details: ON" if is_vis else "📋 Details: OFF")
+
                 self._table.horizontalHeader().setSectionsMovable(True)
                 self._table.horizontalHeader().setFirstSectionMovable(True)
                 self._table.horizontalHeader().setStretchLastSection(False)
@@ -1564,37 +1697,52 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            splitter_sizes = state.get("splitter_sizes")
-            if splitter_sizes and isinstance(splitter_sizes, list) and len(splitter_sizes) == 2:
-                top_s = int(splitter_sizes[0])
-                bot_s = int(splitter_sizes[1])
-                # Guard against collapsed bottom panel (< 50px)
-                if bot_s < 50:
-                    total = (top_s + bot_s) if (top_s + bot_s) > 250 else (self.height() or 700)
-                    bot_s = max(220, int(total * 0.35))
-                    top_s = max(150, total - bot_s)
-                self._splitter.setSizes([top_s, bot_s])
+            # Details height & state
+            details_h = state.get("details_height")
+            if details_h is not None:
+                try:
+                    self._details_height = max(140, int(details_h))
+                except (ValueError, TypeError):
+                    self._details_height = 250
+                details_vis = state.get("details_visible", True)
             else:
-                self._splitter.setSizes([450, 250])
+                splitter_sizes = state.get("splitter_sizes")
+                if splitter_sizes and isinstance(splitter_sizes, list) and len(splitter_sizes) == 2 and int(splitter_sizes[1]) >= 50:
+                    self._details_height = max(140, int(splitter_sizes[1]))
+                    details_vis = state.get("details_visible", True)
+                else:
+                    self._details_height = 250
+                    # Auto-heal vanished legacy state where collapsed to 0
+                    details_vis = True
 
-            # Details panel visibility:
-            # If saved as false while collapsed to 0, auto-heal to True so the panel reappears
-            details_vis = state.get("details_visible")
-            if details_vis is None:
-                details_vis = True
-            elif details_vis is False and splitter_sizes and len(splitter_sizes) == 2 and int(splitter_sizes[1]) < 50:
-                details_vis = True
+            details_state = state.get("details_state")
+            if details_state and isinstance(details_state, dict):
+                self._details_panel.restore_state(details_state)
 
-            self._act_toggle_details.setChecked(bool(details_vis))
-            self._details_panel.setVisible(bool(details_vis))
-            if bool(details_vis):
-                sizes = self._splitter.sizes()
-                if len(sizes) == 2 and sizes[1] < 100:
-                    total = sum(sizes) if sum(sizes) > 250 else 700
-                    bot_h = max(220, int(total * 0.35))
-                    self._splitter.setSizes([max(150, total - bot_h), bot_h])
+            details_vis = bool(details_vis)
+            self._act_toggle_details.setChecked(details_vis)
+            self._details_panel.setVisible(details_vis)
+
+            sizes = self._splitter.sizes()
+            total = sum(sizes) if sum(sizes) > 250 else (self.height() or 700)
+            safe_bot = min(total - 100, max(140, self._details_height))
+            safe_top = max(100, total - safe_bot)
+
+            if details_vis:
+                self._splitter.setSizes([safe_top, safe_bot])
+            else:
+                self._splitter.setSizes([total, 0])
+
+            tip = (
+                "Hide bottom download details panel (F4)"
+                if details_vis
+                else "Show bottom download details panel (F4)"
+            )
+            self._act_toggle_details.setToolTip(tip)
+            if hasattr(self, "_details_toolbar_btn"):
+                self._details_toolbar_btn.setToolTip(tip)
             if hasattr(self, "_details_status_btn"):
-                self._details_status_btn.setText("📋 Details: ON" if bool(details_vis) else "📋 Details: OFF")
+                self._details_status_btn.setText("📋 Details: ON" if details_vis else "📋 Details: OFF")
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
 

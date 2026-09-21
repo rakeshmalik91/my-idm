@@ -1228,3 +1228,24 @@ class DetailsPanel(QWidget):
                 os.startfile(folder)
         elif folder and Path(folder).exists():
             os.startfile(folder)
+
+    # -- State Persistence ----------------------------------------------------
+
+    def get_state(self) -> dict[str, Any]:
+        """Return serializable state of the details panel (active tab index, etc.)."""
+        return {
+            "current_tab": self._tabs.currentIndex(),
+        }
+
+    def restore_state(self, state: dict[str, Any]):
+        """Restore serializable state of the details panel."""
+        if not isinstance(state, dict):
+            return
+        tab_idx = state.get("current_tab")
+        if tab_idx is not None:
+            try:
+                idx = int(tab_idx)
+                if 0 <= idx < self._tabs.count():
+                    self._tabs.setCurrentIndex(idx)
+            except (ValueError, TypeError):
+                pass
