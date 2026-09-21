@@ -281,6 +281,13 @@ class SettingsDialog(QDialog):
         concurrent_row.addWidget(self._concurrent_spin)
         perf_layout.addLayout(concurrent_row)
 
+        layout.addWidget(perf_group)
+
+        # 3. Retry Configuration
+        retry_group = QGroupBox("Retry Configuration")
+        retry_layout = QVBoxLayout(retry_group)
+        retry_layout.setSpacing(10)
+
         retry_row = QHBoxLayout()
         retry_lbl = QLabel("Maximum automatic retries on connection failure:")
         retry_row.addWidget(retry_lbl, 1)
@@ -288,7 +295,7 @@ class SettingsDialog(QDialog):
         self._retries_spin.setRange(1, 20)
         self._retries_spin.setToolTip("Number of automatic reconnect attempts before marking as error")
         retry_row.addWidget(self._retries_spin)
-        perf_layout.addLayout(retry_row)
+        retry_layout.addLayout(retry_row)
 
         self._retry_exp_cb = QCheckBox("📈 Use exponential backoff for connection retries")
         self._retry_exp_cb.setToolTip(
@@ -296,7 +303,7 @@ class SettingsDialog(QDialog):
             "to reduce server pressure and prevent spamming failed connections."
         )
         self._retry_exp_cb.toggled.connect(self._on_retry_exp_toggled)
-        perf_layout.addWidget(self._retry_exp_cb)
+        retry_layout.addWidget(self._retry_exp_cb)
 
         retry_details_layout = QHBoxLayout()
         retry_details_layout.addWidget(QLabel("Initial retry delay:"))
@@ -325,11 +332,11 @@ class SettingsDialog(QDialog):
         self._retry_max_delay_spin.setToolTip("Maximum wait time ceiling for retries")
         retry_details_layout.addWidget(self._retry_max_delay_spin)
 
-        perf_layout.addLayout(retry_details_layout)
+        retry_layout.addLayout(retry_details_layout)
 
-        layout.addWidget(perf_group)
+        layout.addWidget(retry_group)
 
-        # 3. Application Startup & Notifications
+        # 4. Application Startup & Notifications
         app_group = QGroupBox("Application Behavior")
         app_layout = QVBoxLayout(app_group)
         app_layout.setSpacing(10)

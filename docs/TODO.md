@@ -66,12 +66,12 @@ commit after each features or set of fixes/enhancements
 - [x] deleting files should move to trash, verify it is the behaviour
 - [x] Add startup splash screen with loading progress, logo, and stage indicators
 - [x] make retry exponential and configurable
-- [ ] window is always placed a bit below compared to last launch
-- [ ] column filter button is blocking column resize trigger area. filter button is on right, and dropdown is on left
-- [ ] there are 2 column sort buttons overlapping
+- [x] window is always placed a bit below compared to last launch
+- [x] column filter button is blocking column resize trigger area. filter button is on right, and dropdown is on left
+- [x] there are 2 column sort buttons overlapping
 - [ ] make the white part of app logo transparent
-- [ ] make the horizontal scroll smooth, instead of snapping on colum start/end
-- [ ] move the retry configuration in preferences to a seperate group
+- [x] make the horizontal scroll smooth, instead of snapping on colum start/end
+- [x] move the retry configuration in preferences to a seperate group
 
 ----------------------
 ### Tor Support

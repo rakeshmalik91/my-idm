@@ -244,7 +244,7 @@ class FilterHeaderView(QHeaderView):
         width = self.sectionSize(logical_index)
         height = self.height()
         is_sorted = (logical_index == self.sortIndicatorSection())
-        right_offset = 32 if is_sorted else 18
+        right_offset = 40 if is_sorted else 26
         btn_x = pos + width - right_offset
         btn_y = (height - 16) // 2
         return QRect(btn_x, btn_y, 16, 16)
@@ -253,35 +253,8 @@ class FilterHeaderView(QHeaderView):
         # 1. Base header section rendering
         super().paintSection(painter, rect, logical_index)
 
-        # 2. Paint ASC/DESC sort indicator icon if this section is sorted
+        # 2. Paint filter icon for Name (Type) and Status columns
         is_sorted = (logical_index == self.sortIndicatorSection())
-        if is_sorted and self.isSortIndicatorShown():
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            arrow_cx = rect.right() - 14
-            arrow_cy = rect.top() + rect.height() / 2.0
-
-            if self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder:
-                # Upward pointing triangle (ASC)
-                poly = QPolygonF([
-                    QPointF(arrow_cx, arrow_cy - 3.5),
-                    QPointF(arrow_cx - 4.0, arrow_cy + 3.0),
-                    QPointF(arrow_cx + 4.0, arrow_cy + 3.0),
-                ])
-            else:
-                # Downward pointing triangle (DESC)
-                poly = QPolygonF([
-                    QPointF(arrow_cx, arrow_cy + 3.5),
-                    QPointF(arrow_cx - 4.0, arrow_cy - 3.0),
-                    QPointF(arrow_cx + 4.0, arrow_cy - 3.0),
-                ])
-
-            painter.setBrush(QColor(Colors.ACCENT))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawPolygon(poly)
-            painter.restore()
-
-        # 3. Paint filter icon for Name (Type) and Status columns
         if logical_index in (Col.NAME, Col.STATUS):
             model = self.model()
             is_filtered = False
@@ -391,9 +364,11 @@ class FilterHeaderView(QHeaderView):
         popup = MultiselectFilterPopup(logical_index, current_selection, counts, self)
         popup.filter_changed.connect(self._on_filter_changed)
 
-        # Position right under the header section
-        sec_pos = self.sectionViewportPosition(logical_index)
-        global_pt = self.viewport().mapToGlobal(QPoint(sec_pos, self.height() + 2))
+        # Position popup below the filter button
+        btn_rect = self._get_filter_btn_rect(logical_index)
+        popup_x = btn_rect.x()
+        popup_y = self.height() + 2
+        global_pt = self.viewport().mapToGlobal(QPoint(popup_x, popup_y))
         popup.move(global_pt)
         popup.show()
         self._active_popup = popup

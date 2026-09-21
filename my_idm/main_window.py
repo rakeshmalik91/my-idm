@@ -206,6 +206,7 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
         self._connect_signals()
 
+        self._saved_geometry = None
         # Restore window geometry, location, column lengths, and splitter from DB
         self._restore_ui_state_from_db()
 
@@ -236,6 +237,9 @@ class MainWindow(QMainWindow):
         self._table.setShowGrid(False)
         self._table.verticalHeader().setVisible(False)
         self._table.setWordWrap(False)
+        self._table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
 
         # Name column delegate (renders source website domain in cyan)
         self._name_delegate = DownloadNameDelegate(self._table)
@@ -1641,13 +1645,18 @@ class MainWindow(QMainWindow):
             # Window size & location
             w = state.get("width")
             h = state.get("height")
-            if w and h and w >= 400 and h >= 300:
-                self.resize(int(w), int(h))
-
             x = state.get("x")
             y = state.get("y")
-            if x is not None and y is not None:
+            has_valid_size = w and h and w >= 400 and h >= 300
+            has_valid_pos = x is not None and y is not None
+            if has_valid_size:
+                self.resize(int(w), int(h))
+            if has_valid_pos:
                 self.move(int(x), int(y))
+            if has_valid_size and has_valid_pos:
+                self._saved_geometry = (int(x), int(y), int(w), int(h))
+            else:
+                self._saved_geometry = None
 
             # Maximized or not
             if state.get("is_maximized"):
@@ -1749,6 +1758,13 @@ class MainWindow(QMainWindow):
                 self._details_status_btn.setText("📋 Details: ON" if details_vis else "📋 Details: OFF")
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
+
+    def showEvent(self, event):
+        if self._saved_geometry:
+            x, y, w, h = self._saved_geometry
+            self.setGeometry(x, y, w, h)
+            self._saved_geometry = None
+        super().showEvent(event)
 
     def closeEvent(self, event):
         if getattr(self, "_is_closing", False):
