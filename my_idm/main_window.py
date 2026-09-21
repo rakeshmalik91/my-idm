@@ -455,6 +455,8 @@ class MainWindow(QMainWindow):
 
         # Tor toolbar control with embedded progress bar
         self._tor_toolbar_container = QWidget()
+        self._tor_toolbar_container.setObjectName("tor_toolbar_container")
+        self._tor_toolbar_container.setStyleSheet("background: transparent;")
         self._tor_toolbar_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         tor_tb_layout = QVBoxLayout(self._tor_toolbar_container)
         tor_tb_layout.setContentsMargins(0, 0, 0, 0)
@@ -502,6 +504,8 @@ class MainWindow(QMainWindow):
 
         # Expanding spacer pushes subsequent controls to the top right of the toolbar
         spacer = QWidget()
+        spacer.setObjectName("toolbar_spacer")
+        spacer.setStyleSheet("background: transparent;")
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
 

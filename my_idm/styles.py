@@ -111,6 +111,10 @@ QToolBar {{
     spacing: 4px;
 }}
 
+QToolBar > QWidget {{
+    background-color: transparent;
+}}
+
 QToolBar::separator {{
     width: 1px;
     background: {Colors.BORDER};
