@@ -602,6 +602,155 @@ class TestDetailsPanel(unittest.TestCase):
             win2.close()
 
 
+    def test_details_panel_displays_persisted_file_hierarchy_and_progress_when_offline(self):
+        """Details panel displays full file hierarchy, progress details, trackers, and swarm metrics loaded from DB metadata."""
+        tor_entry = DownloadEntry(
+            id="persisted-hierarchy-test",
+            url="magnet:?xt=urn:btih:ffff000011112222333344445555666677778888",
+            filename="MultiFileProject",
+            download_type="torrent",
+            status="paused",
+            total_size=100000,
+            downloaded_size=60000,
+            metadata_json='''{
+                "seeds": 14,
+                "peers": 38,
+                "total_seeds": 45,
+                "total_peers": 90,
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "MultiFileProject/docs/manual.pdf",
+                        "name": "manual.pdf",
+                        "size": 20000,
+                        "downloaded": 20000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "completed"
+                    },
+                    {
+                        "index": 1,
+                        "path": "MultiFileProject/src/main.py",
+                        "name": "main.py",
+                        "size": 50000,
+                        "downloaded": 30000,
+                        "progress": 60.0,
+                        "priority": 7,
+                        "priority_label": "Max (100%)",
+                        "status": "downloading"
+                    },
+                    {
+                        "index": 2,
+                        "path": "MultiFileProject/assets/logo.png",
+                        "name": "logo.png",
+                        "size": 15000,
+                        "downloaded": 0,
+                        "progress": 0.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "pending"
+                    },
+                    {
+                        "index": 3,
+                        "path": "MultiFileProject/temp.tmp",
+                        "name": "temp.tmp",
+                        "size": 15000,
+                        "downloaded": 0,
+                        "progress": 0.0,
+                        "priority": 0,
+                        "priority_label": "Don\'t Download",
+                        "status": "skipped"
+                    }
+                ],
+                "trackers": [
+                    {
+                        "tier": 0,
+                        "url": "udp://tracker.openbittorrent.com:80/announce",
+                        "status": "Working",
+                        "seeds": 14,
+                        "peers": 38,
+                        "send_stats": true
+                    },
+                    {
+                        "tier": 1,
+                        "url": "http://tracker.backup.org/announce",
+                        "status": "Updating",
+                        "seeds": 0,
+                        "peers": 0,
+                        "send_stats": false
+                    }
+                ],
+                "peer_list": [
+                    {
+                        "ip": "10.0.0.1:6881",
+                        "client": "Transmission/4.0.0",
+                        "progress": 0.85,
+                        "down_speed": 102400.0,
+                        "up_speed": 20480.0,
+                        "flags": "D H"
+                    }
+                ]
+            }'''
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        # Ensure database reloads entry with seeds and peers populated from metadata
+        loaded = self.db.get_download("persisted-hierarchy-test")
+        self.assertEqual(loaded.seeds, 14)
+        self.assertEqual(loaded.peers, 38)
+        self.assertEqual(loaded.total_seeds, 45)
+        self.assertEqual(loaded.total_peers, 90)
+
+        # Set panel to this entry
+        panel = self.win._details_panel
+        panel.set_download_id("persisted-hierarchy-test")
+
+        # Verify Overview swarm display
+        self.assertIn("14 (45) seeds, 38 (90) peers connected", panel._ov_swarm.text())
+
+        # Verify Files Tree hierarchy
+        self.assertEqual(panel._tree_files.topLevelItemCount(), 1)
+        root = panel._tree_files.topLevelItem(0)
+        self.assertEqual(root.text(0), "📁 MultiFileProject")
+        self.assertEqual(root.childCount(), 4)  # docs, src, assets, temp.tmp
+
+        # Find items by file_index
+        item_manual = panel._file_item_map[0]
+        item_main = panel._file_item_map[1]
+        item_logo = panel._file_item_map[2]
+        item_temp = panel._file_item_map[3]
+
+        self.assertEqual(item_manual.text(0), "📄 manual.pdf")
+        self.assertEqual(item_manual.text(4), "Completed")
+        self.assertEqual(item_manual.checkState(0), Qt.CheckState.Checked)
+
+        self.assertEqual(item_main.text(0), "📄 main.py")
+        self.assertIn("Paused", item_main.text(4))  # since entry is paused and downloaded > 0
+        self.assertEqual(item_main.checkState(0), Qt.CheckState.Checked)
+
+        self.assertEqual(item_logo.text(0), "📄 logo.png")
+        self.assertEqual(item_logo.text(4), "Paused")
+        self.assertEqual(item_logo.checkState(0), Qt.CheckState.Checked)
+
+        self.assertEqual(item_temp.text(0), "📄 temp.tmp")
+        self.assertEqual(item_temp.text(4), "Skipped")
+        self.assertEqual(item_temp.checkState(0), Qt.CheckState.Unchecked)
+
+        # Verify Trackers tab populated from metadata
+        self.assertEqual(panel._table_trackers.rowCount(), 2)
+        self.assertEqual(panel._table_trackers.item(0, 1).text(), "udp://tracker.openbittorrent.com:80/announce")
+        self.assertEqual(panel._table_trackers.item(0, 2).text(), "Working")
+        self.assertEqual(panel._table_trackers.item(1, 1).text(), "http://tracker.backup.org/announce")
+        self.assertEqual(panel._table_trackers.item(1, 2).text(), "Updating")
+
+        # Verify Peers tab populated from metadata
+        self.assertEqual(panel._table_peers.rowCount(), 1)
+        self.assertEqual(panel._table_peers.item(0, 0).text(), "10.0.0.1:6881")
+        self.assertEqual(panel._table_peers.item(0, 1).text(), "Transmission/4.0.0")
+
+
 if __name__ == "__main__":
     unittest.main()
 

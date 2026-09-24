@@ -50,6 +50,19 @@ _STATE_NAMES = {
 }
 
 
+def _priority_to_label(prio: int) -> str:
+    """Map libtorrent priority integer to human-readable label."""
+    if prio >= 7:
+        return "Max (100%)"
+    if prio >= 6:
+        return "High (75%)"
+    if prio >= 3:
+        return "Medium (50%)"
+    if prio >= 1:
+        return "Low (25%)"
+    return "Don't Download"
+
+
 def _get_info_hash_from_params(params: Any) -> str:
     """Extract lowercase hex info hash from add_torrent_params."""
     if not params:
@@ -656,6 +669,21 @@ class TorrentEngine:
     def pause(self, download_id: str):
         handle = self._handles.get(download_id)
         if handle:
+            entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+            if entry:
+                try:
+                    files = self.get_torrent_files(download_id)
+                    if files:
+                        entry.metadata["files"] = files
+                    trackers = self.get_torrent_trackers(download_id)
+                    if trackers:
+                        entry.metadata["trackers"] = trackers
+                    peers = self.get_torrent_peers(download_id)
+                    if peers:
+                        entry.metadata["peer_list"] = peers
+                    self._db.update_download(entry)
+                except Exception:
+                    pass
             try:
                 if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
@@ -998,17 +1026,28 @@ class TorrentEngine:
                 entry.file_path = str(
                     Path(entry.save_path) / entry.filename
                 )
+                if self._filename_cb:
+                    self._filename_cb(download_id, entry.filename)
+
+            # Store file hierarchy and progress details, trackers, and peers in DB
+            has_meta = False
+            try:
+                if hasattr(handle, "status"):
+                    has_meta = bool(getattr(handle.status(), "has_metadata", False))
+            except Exception:
+                pass
+            if has_meta or bool(resolved_name) or bool(entry.filename):
                 files = self.get_torrent_files(download_id)
                 if files:
                     entry.metadata["files"] = files
                 trackers = self.get_torrent_trackers(download_id)
                 if trackers:
                     entry.metadata["trackers"] = trackers
-                self._db.update_download(entry)
-                if self._filename_cb:
-                    self._filename_cb(download_id, entry.filename)
-            else:
-                self._db.update_download(entry)
+                peers = self.get_torrent_peers(download_id)
+                if peers:
+                    entry.metadata["peer_list"] = peers
+
+            self._db.update_download(entry)
 
             # If download is paused or stopped in DB, make sure torrent handle stays paused and reports 0 speed
             if entry.status in ("paused", "stopped", "suspended"):
@@ -1179,29 +1218,66 @@ class TorrentEngine:
 
     def get_torrent_files(self, download_id: str) -> list[dict]:
         """Returns details for each file in the torrent."""
+        entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+        is_completed = bool(entry and entry.status in ("completed", "seeding"))
         handle = self._handles.get(download_id)
         if not handle or not _HAS_LIBTORRENT:
+            if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                cached = entry.metadata["files"]
+                if is_completed:
+                    for f in cached:
+                        if f.get("priority", 4) > 0:
+                            f["downloaded"] = f.get("size", 0)
+                            f["progress"] = 100.0
+                            f["status"] = "completed"
+                        else:
+                            f["status"] = "skipped"
+                return cached
             return []
 
         try:
             if not handle.is_valid():
+                if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                    return entry.metadata["files"]
                 return []
-            ti = handle.torrent_file()
+            ti = None
+            try:
+                ti = handle.torrent_file() if hasattr(handle, "torrent_file") else None
+            except Exception:
+                pass
             if not ti:
+                if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                    return entry.metadata["files"]
                 return []
 
             num_files = ti.num_files()
             files_info = ti.files()
-            progress_list = handle.file_progress()
-            priorities = handle.get_file_priorities()
+            progress_list = handle.file_progress() if hasattr(handle, "file_progress") else []
+            priorities = handle.get_file_priorities() if hasattr(handle, "get_file_priorities") else []
 
             result = []
             for i in range(num_files):
                 f_size = files_info.file_size(i)
                 f_path = files_info.file_path(i)
-                f_prog = progress_list[i] if i < len(progress_list) else 0
                 f_prio = priorities[i] if i < len(priorities) else 4
-                pct = (f_prog / f_size * 100.0) if f_size > 0 else 100.0
+                if is_completed and f_prio > 0:
+                    f_prog = f_size
+                    pct = 100.0
+                    f_status = "completed"
+                elif f_prio == 0:
+                    f_prog = progress_list[i] if i < len(progress_list) else 0
+                    pct = (f_prog / f_size * 100.0) if f_size > 0 else 0.0
+                    f_status = "skipped"
+                else:
+                    f_prog = progress_list[i] if i < len(progress_list) else 0
+                    pct = (f_prog / f_size * 100.0) if f_size > 0 else 100.0
+                    if pct >= 100.0 or f_prog >= f_size:
+                        f_status = "completed"
+                    elif f_prog > 0:
+                        f_status = "downloading"
+                    else:
+                        f_status = "pending"
+
                 result.append({
                     "index": i,
                     "path": f_path,
@@ -1210,10 +1286,14 @@ class TorrentEngine:
                     "progress": min(pct, 100.0),
                     "downloaded": f_prog,
                     "priority": f_prio,
+                    "priority_label": _priority_to_label(f_prio),
+                    "status": f_status,
                 })
             return result
         except Exception as exc:
             log.debug("Failed to get torrent files for %s: %s", download_id, exc)
+            if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                return entry.metadata["files"]
             return []
 
     def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:
@@ -1228,6 +1308,8 @@ class TorrentEngine:
                     for f in entry.metadata["files"]:
                         if f.get("index") == file_index:
                             f["priority"] = priority
+                            f["priority_label"] = _priority_to_label(priority)
+                            f["status"] = "skipped"
                             break
                     self._db.update_download(entry)
                 return True
@@ -1242,18 +1324,27 @@ class TorrentEngine:
                 return False
             handle.file_priority(file_index, priority)
 
+            s = handle.status()
+            total_wanted = getattr(s, "total_wanted", 0)
+            total_wanted_done = getattr(s, "total_wanted_done", 0)
+            is_all_done = (total_wanted > 0 and total_wanted_done >= total_wanted) or getattr(s, "is_finished", False) or getattr(s, "is_seeding", False)
+
             # Update file metadata if stored
             if entry and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
                 for f in entry.metadata["files"]:
                     if f.get("index") == file_index:
                         f["priority"] = priority
+                        f["priority_label"] = _priority_to_label(priority)
+                        if priority == 0:
+                            f["status"] = "skipped"
+                        elif f.get("progress", 0.0) >= 100.0 or is_all_done:
+                            f["status"] = "completed"
+                        elif f.get("downloaded", 0) > 0:
+                            f["status"] = "downloading"
+                        else:
+                            f["status"] = "pending"
                         break
                 self._db.update_download(entry)
-
-            s = handle.status()
-            total_wanted = getattr(s, "total_wanted", 0)
-            total_wanted_done = getattr(s, "total_wanted_done", 0)
-            is_all_done = (total_wanted > 0 and total_wanted_done >= total_wanted) or getattr(s, "is_finished", False) or getattr(s, "is_seeding", False)
 
             # If unchecked file is checked (priority > 0) after download was complete:
             if priority > 0 and not is_all_done and entry and entry.status in ("completed", "seeding"):
@@ -1300,15 +1391,24 @@ class TorrentEngine:
             return val.decode("utf-8", errors="replace")
         return str(val)
 
-
     def get_torrent_peers(self, download_id: str) -> list[dict]:
         """Returns connected peers information."""
         handle = self._handles.get(download_id)
         if not handle or not _HAS_LIBTORRENT:
+            entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+            if entry and entry.metadata:
+                cached = entry.metadata.get("peer_list") or entry.metadata.get("peers")
+                if isinstance(cached, list):
+                    return cached
             return []
 
         try:
             if not handle.is_valid():
+                entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+                if entry and entry.metadata:
+                    cached = entry.metadata.get("peer_list") or entry.metadata.get("peers")
+                    if isinstance(cached, list):
+                        return cached
                 return []
             peer_info_list = handle.get_peer_info()
             peers = []
@@ -1355,28 +1455,80 @@ class TorrentEngine:
             return peers
         except Exception as exc:
             log.debug("Failed to get torrent peers for %s: %s", download_id, exc)
+            entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+            if entry and entry.metadata:
+                cached = entry.metadata.get("peer_list") or entry.metadata.get("peers")
+                if isinstance(cached, list):
+                    return cached
             return []
 
     def get_torrent_trackers(self, download_id: str) -> list[dict]:
         """Returns tracker status information."""
         handle = self._handles.get(download_id)
         if not handle or not _HAS_LIBTORRENT:
+            entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+            if entry and entry.metadata and "trackers" in entry.metadata and isinstance(entry.metadata["trackers"], list):
+                return entry.metadata["trackers"]
             return []
 
         try:
             if not handle.is_valid():
+                entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+                if entry and entry.metadata and "trackers" in entry.metadata and isinstance(entry.metadata["trackers"], list):
+                    return entry.metadata["trackers"]
                 return []
             trackers_list = handle.trackers()
             trackers = []
             for t in trackers_list:
+                status_str = "Working"
+                msg = self._safe_str(getattr(t, "message", "")).strip()
+                fails = getattr(t, "fails", 0)
+                endpoints = getattr(t, "endpoints", [])
+                updating = False
+                seeds = -1
+                peers = -1
+                if endpoints:
+                    for ep in endpoints:
+                        if getattr(ep, "updating", False):
+                            updating = True
+                        info_hashes = getattr(ep, "info_hashes", [])
+                        for ih in info_hashes:
+                            if getattr(ih, "updating", False):
+                                updating = True
+                            sc = getattr(ih, "scrape_complete", -1)
+                            si = getattr(ih, "scrape_incomplete", -1)
+                            if sc >= 0:
+                                seeds = max(seeds, sc)
+                            if si >= 0:
+                                peers = max(peers, si)
+                            ih_msg = self._safe_str(getattr(ih, "message", "")).strip()
+                            if ih_msg and not msg:
+                                msg = ih_msg
+                if updating:
+                    status_str = "Updating"
+                elif fails > 0 and msg:
+                    status_str = f"Error: {msg}"
+                elif fails > 0:
+                    status_str = "Unreachable"
+                elif msg:
+                    status_str = msg
+                else:
+                    status_str = "Working"
+
                 trackers.append({
                     "url": self._safe_str(getattr(t, "url", "")),
                     "tier": getattr(t, "tier", 0),
+                    "status": status_str,
+                    "seeds": seeds if seeds >= 0 else 0,
+                    "peers": peers if peers >= 0 else 0,
                     "send_stats": getattr(t, "send_stats", False),
                 })
             return trackers
         except Exception as exc:
             log.debug("Failed to get torrent trackers for %s: %s", download_id, exc)
+            entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+            if entry and entry.metadata and "trackers" in entry.metadata and isinstance(entry.metadata["trackers"], list):
+                return entry.metadata["trackers"]
             return []
 
     # -- alert processing ----------------------------------------------------

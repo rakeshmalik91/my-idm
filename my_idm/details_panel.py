@@ -807,6 +807,8 @@ class DetailsPanel(QWidget):
 
     def _get_file_status(self, f: dict, entry: DownloadEntry) -> str:
         """Derive display status for a torrent file from entry status and file progress."""
+        if f.get("priority", 4) == 0:
+            return "skipped"
         entry_status = entry.status if entry else "pending"
         if entry_status in ("completed", "seeding"):
             return "completed"
@@ -814,8 +816,14 @@ class DetailsPanel(QWidget):
         pct = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
         if pct >= 100.0:
             return "completed"
-        if pct > 0.0:
+        if pct > 0.0 or f.get("downloaded", 0) > 0:
+            if entry_status == "paused":
+                return "paused"
+            if entry_status == "stopped":
+                return "stopped"
             return "downloading"
+        if entry_status in ("paused", "stopped"):
+            return entry_status
         return "pending"
 
     def _update_file_values(self, files: list[dict], is_torrent: bool):
@@ -830,14 +838,21 @@ class DetailsPanel(QWidget):
             item.setData(0, Qt.ItemDataRole.UserRole, data)
 
             size_val = f.get("size", 0)
+            dl_val = f.get("downloaded", 0)
             size_str = humanize.naturalsize(size_val, binary=True) if size_val > 0 else "—"
             item.setText(1, size_str)
+            if dl_val > 0 and size_val > 0 and dl_val < size_val:
+                item.setToolTip(1, f"Downloaded: {humanize.naturalsize(dl_val, binary=True)} of {size_str}")
+            else:
+                item.setToolTip(1, f"Size: {size_str}")
 
             pct_raw = f.get("progress", 0.0)
             pct_val = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
             pb = self._tree_files.itemWidget(item, 2)
             if isinstance(pb, QProgressBar):
                 pb.setValue(int(min(max(pct_val, 0.0), 100.0)))
+                dl_str = humanize.naturalsize(dl_val, binary=True) if dl_val > 0 else "0 B"
+                pb.setToolTip(f"{pct_val:.1f}% ({dl_str} / {size_str})")
 
             status_str = self._get_file_status(f, self._current_entry)
             item.setText(4, _to_str(status_str).capitalize())
@@ -1069,8 +1084,8 @@ class DetailsPanel(QWidget):
         peers = self._manager.get_torrent_peers(entry.id)
         if not isinstance(peers, list):
             peers = []
-        ts = getattr(entry, "total_seeds", 0) or (entry.metadata.get("total_seeds", 0) if entry.metadata else 0)
-        tp = getattr(entry, "total_peers", 0) or (entry.metadata.get("total_peers", 0) if entry.metadata else 0)
+        ts = to_int(getattr(entry, "total_seeds", 0)) or (to_int(entry.metadata.get("total_seeds", 0)) if entry.metadata else 0)
+        tp = to_int(getattr(entry, "total_peers", 0)) or (to_int(entry.metadata.get("total_peers", 0)) if entry.metadata else 0)
         swarm_str = f" ({ts} seeds, {tp} peers in swarm)" if (ts > 0 or tp > 0) else ""
         self._lbl_peers_status.setText(f"{len(peers)} connected peer(s) in active swarm{swarm_str}")
 

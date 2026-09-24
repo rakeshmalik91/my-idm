@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from my_idm.utils import normalize_path
+from my_idm.utils import normalize_path, to_int
 
 
 APP_DIR = Path.home() / ".my-idm"
@@ -503,6 +503,16 @@ class Database:
         if d.get("file_path"):
             d["file_path"] = normalize_path(d["file_path"])
         entry = DownloadEntry(**d)
+        if entry.metadata:
+            meta = entry.metadata
+            if "seeds" in meta:
+                entry.seeds = to_int(meta["seeds"])
+            if "peers" in meta:
+                entry.peers = to_int(meta["peers"])
+            if "total_seeds" in meta:
+                entry.total_seeds = to_int(meta["total_seeds"])
+            if "total_peers" in meta:
+                entry.total_peers = to_int(meta["total_peers"])
         if entry.status in ("completed", "seeding"):
             if entry.total_size > 0 and entry.downloaded_size < entry.total_size:
                 entry.downloaded_size = entry.total_size
