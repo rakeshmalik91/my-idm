@@ -215,9 +215,12 @@ class TorrentConfig:
     """Stores BitTorrent engine preferences, seeding behavior, and bandwidth limits."""
 
     seeding_after_complete: bool = True
-    max_seeding_speed: int = 0  # in KB/s (0 = unlimited)
-    download_to_seeding_ratio: float = 2.0  # ratio of download speed to seeding speed (e.g. 2.0 = 2:1)
+    max_seeding_speed: int = 200  # in KB/s (0 = unlimited, default 200 KB/s)
+    download_to_seeding_ratio: float = 10.0  # ratio of download speed to seeding speed (e.g. 10.0 = 10:1 ratio, seeding is 10% of download speed)
     metadata_fetch_timeout_days: int = 1  # in days (0 = disabled)
+    seeding_time_limit_minutes: int = 240  # max seeding duration in minutes (0 = unlimited, default 4 hours / 240 min)
+    seeding_ratio_limit: float = 0.0  # max share ratio (total_upload / downloaded) (0.0 = unlimited)
+    resume_seeding_on_startup: bool = True  # whether to resume seeding torrents on application startup
 
     def get_effective_seeding_speed_limit(self, download_limit_bytes: int = 0) -> int:
         """Calculate effective upload/seeding speed limit in bytes/sec.
@@ -244,15 +247,21 @@ class TorrentConfig:
             "max_seeding_speed": self.max_seeding_speed,
             "download_to_seeding_ratio": self.download_to_seeding_ratio,
             "metadata_fetch_timeout_days": self.metadata_fetch_timeout_days,
+            "seeding_time_limit_minutes": self.seeding_time_limit_minutes,
+            "seeding_ratio_limit": self.seeding_ratio_limit,
+            "resume_seeding_on_startup": self.resume_seeding_on_startup,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TorrentConfig:
         return cls(
             seeding_after_complete=bool(data.get("seeding_after_complete", True)),
-            max_seeding_speed=int(data.get("max_seeding_speed", 0)),
-            download_to_seeding_ratio=float(data.get("download_to_seeding_ratio", 2.0)),
+            max_seeding_speed=int(data.get("max_seeding_speed", 200)),
+            download_to_seeding_ratio=float(data.get("download_to_seeding_ratio", 10.0)),
             metadata_fetch_timeout_days=int(data.get("metadata_fetch_timeout_days", 1)),
+            seeding_time_limit_minutes=int(data.get("seeding_time_limit_minutes", 240)),
+            seeding_ratio_limit=float(data.get("seeding_ratio_limit", 0.0)),
+            resume_seeding_on_startup=bool(data.get("resume_seeding_on_startup", True)),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -264,6 +273,9 @@ class TorrentConfig:
         settings.setValue("max_seeding_speed", self.max_seeding_speed)
         settings.setValue("download_to_seeding_ratio", self.download_to_seeding_ratio)
         settings.setValue("metadata_fetch_timeout_days", self.metadata_fetch_timeout_days)
+        settings.setValue("seeding_time_limit_minutes", self.seeding_time_limit_minutes)
+        settings.setValue("seeding_ratio_limit", self.seeding_ratio_limit)
+        settings.setValue("resume_seeding_on_startup", self.resume_seeding_on_startup)
         settings.endGroup()
 
     @classmethod
@@ -273,10 +285,13 @@ class TorrentConfig:
             settings = QSettings("MyIDM", "My-IDM")
         settings.beginGroup("Torrent")
         seeding_after_complete = settings.value("seeding_after_complete", True, type=bool)
-        max_seeding_speed = settings.value("max_seeding_speed", 0, type=int)
-        download_to_seeding_ratio = settings.value("download_to_seeding_ratio", 2.0, type=float)
+        max_seeding_speed = settings.value("max_seeding_speed", 200, type=int)
+        download_to_seeding_ratio = settings.value("download_to_seeding_ratio", 10.0, type=float)
         # Fall back to General/metadata_fetch_timeout_days if not set in Torrent
         metadata_fetch_timeout_days = settings.value("metadata_fetch_timeout_days", None)
+        seeding_time_limit_minutes = settings.value("seeding_time_limit_minutes", 240, type=int)
+        seeding_ratio_limit = settings.value("seeding_ratio_limit", 0.0, type=float)
+        resume_seeding_on_startup = settings.value("resume_seeding_on_startup", True, type=bool)
         settings.endGroup()
 
         if metadata_fetch_timeout_days is None:
@@ -291,6 +306,9 @@ class TorrentConfig:
             max_seeding_speed=int(max_seeding_speed),
             download_to_seeding_ratio=float(download_to_seeding_ratio),
             metadata_fetch_timeout_days=int(metadata_fetch_timeout_days),
+            seeding_time_limit_minutes=int(seeding_time_limit_minutes),
+            seeding_ratio_limit=float(seeding_ratio_limit),
+            resume_seeding_on_startup=bool(resume_seeding_on_startup),
         )
 
 

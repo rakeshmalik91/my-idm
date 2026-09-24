@@ -50,6 +50,7 @@ erDiagram
         TEXT torrent_info_hash "BitTorrent 40-char hex info-hash"
         TEXT metadata_json "Extensible JSON attributes blob"
         INTEGER queue_order "Priority order in active queue"
+        TEXT fetching_metadata_since "ISO-8601 UTC magnet resolution start"
     }
 
     SEGMENTS {
@@ -76,29 +77,30 @@ erDiagram
 
 The primary entity table storing download tasks, progress state, connection parameters, and security reports.
 
-| Column | Type | Nullable | Default | Description |
-| :--- | :--- | :---: | :--- | :--- |
-| `id` | `TEXT` | **NO** | *None* | **PRIMARY KEY**. Unique UUIDv4 string. |
-| `url` | `TEXT` | **NO** | *None* | Source URL (`http://`, `https://`), magnet URI (`magnet:?xt=...`), or local `.torrent` path. |
-| `filename` | `TEXT` | **NO** | `''` | Resolved file name or torrent root display name. |
-| `save_path` | `TEXT` | **NO** | `''` | Target directory where the download is stored. |
-| `file_path` | `TEXT` | **NO** | `''` | Full normalized path to the downloaded file or root folder on disk. |
-| `total_size` | `INTEGER` | **NO** | `0` | Expected file/payload size in bytes (`0` for chunked streams or unresolved magnets). |
-| `downloaded_size` | `INTEGER` | **NO** | `0` | Bytes written and verified on disk. |
-| `status` | `TEXT` | **NO** | `'queued'` | Lifecycle status (see [Status Values](#status-values)). |
-| `download_type` | `TEXT` | **NO** | `'http'` | Protocol type: `'http'` (direct/multi-segment) or `'torrent'` (BitTorrent). |
-| `num_segments` | `INTEGER` | **NO** | `8` | Number of parallel HTTP segment connections configured for this download. |
-| `error_message` | `TEXT` | **NO** | `''` | Descriptive error message when status is `'error'` or alert warnings. |
-| `retry_count` | `INTEGER` | **NO** | `0` | Number of automatic retries performed so far. |
-| `max_retries` | `INTEGER` | **NO** | `5` | Maximum retry attempts before transitioning to `'error'`. |
-| `added_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC timestamp when the download was added. |
-| `last_tried_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC timestamp of the most recent connection attempt. |
-| `completed_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC timestamp when the download finished successfully. |
-| `etag` | `TEXT` | **NO** | `''` | HTTP `ETag` response header used for resume validation. |
-| `content_hash` | `TEXT` | **NO** | `''` | Checksum/hash of the file content for integrity verification. |
-| `torrent_info_hash` | `TEXT` | **NO** | `''` | Lowercase 40-character hexadecimal BitTorrent SHA-1 info-hash. |
-| `metadata_json` | `TEXT` | **NO** | `'{}'` | Extensible JSON object storing subsystem-specific attributes. |
-| `queue_order` | `INTEGER` | **NO** | `0` | Sequential order position in the active download queue (`1` = highest). |
+| Column                    | Type      | Nullable | Default    | Description                                                                                  |
+| :--------------------------| :----------| :--------:| :-----------| :---------------------------------------------------------------------------------------------|
+| `id`                      | `TEXT`    | **NO**   | *None*     | **PRIMARY KEY**. Unique UUIDv4 string.                                                       |
+| `url`                     | `TEXT`    | **NO**   | *None*     | Source URL (`http://`, `https://`), magnet URI (`magnet:?xt=...`), or local `.torrent` path. |
+| `filename`                | `TEXT`    | **NO**   | `''`       | Resolved file name or torrent root display name.                                             |
+| `save_path`               | `TEXT`    | **NO**   | `''`       | Target directory where the download is stored.                                               |
+| `file_path`               | `TEXT`    | **NO**   | `''`       | Full normalized path to the downloaded file or root folder on disk.                          |
+| `total_size`              | `INTEGER` | **NO**   | `0`        | Expected file/payload size in bytes (`0` for chunked streams or unresolved magnets).         |
+| `downloaded_size`         | `INTEGER` | **NO**   | `0`        | Bytes written and verified on disk.                                                          |
+| `status`                  | `TEXT`    | **NO**   | `'queued'` | Lifecycle status (see [Status Values](#status-values)).                                      |
+| `download_type`           | `TEXT`    | **NO**   | `'http'`   | Protocol type: `'http'` (direct/multi-segment) or `'torrent'` (BitTorrent).                  |
+| `num_segments`            | `INTEGER` | **NO**   | `8`        | Number of parallel HTTP segment connections configured for this download.                    |
+| `error_message`           | `TEXT`    | **NO**   | `''`       | Descriptive error message when status is `'error'` or alert warnings.                        |
+| `retry_count`             | `INTEGER` | **NO**   | `0`        | Number of automatic retries performed so far.                                                |
+| `max_retries`             | `INTEGER` | **NO**   | `5`        | Maximum retry attempts before transitioning to `'error'`.                                    |
+| `added_at`                | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp when the download was added.                                          |
+| `last_tried_at`           | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp of the most recent connection attempt.                                |
+| `completed_at`            | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp when the download finished successfully.                              |
+| `etag`                    | `TEXT`    | **NO**   | `''`       | HTTP `ETag` response header used for resume validation.                                      |
+| `content_hash`            | `TEXT`    | **NO**   | `''`       | Checksum/hash of the file content for integrity verification.                                |
+| `torrent_info_hash`       | `TEXT`    | **NO**   | `''`       | Lowercase 40-character hexadecimal BitTorrent SHA-1 info-hash.                               |
+| `metadata_json`           | `TEXT`    | **NO**   | `'{}'`     | Extensible JSON object storing subsystem-specific attributes.                                |
+| `queue_order`             | `INTEGER` | **NO**   | `0`        | Sequential order position in the active download queue (`1` = highest).                      |
+| `fetching_metadata_since` | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp when magnet metadata fetching began.                                  |
 
 #### Status Values
 
@@ -150,7 +152,7 @@ A lightweight key-value store used to preserve desktop GUI layout, window coordi
 
 | Key | Format | Description |
 | :--- | :--- | :--- |
-| `'window_state'` | JSON Object | Stores `x`, `y`, `width`, `height`, `is_maximized`, `column_widths` (mapping of column index to pixel width), `header_state` (hex-encoded QHeaderView state), `splitter_sizes` (vertical splitter proportions), `details_visible` (bool), `details_height` (int height in pixels), and `details_state` (JSON object including `current_tab`). |
+| `'window_state'` | JSON Object | Stores window geometry and visual configuration: `x`, `y`, `width`, `height`, `is_maximized`, `column_widths` (mapping of column index to pixel width), `header_state` (hex-encoded QHeaderView state), `splitter_sizes` (vertical splitter proportions), `details_visible` (bool), `details_height` (int height in pixels), `details_state` (JSON object storing `current_tab`), `sort_column` (int), and `sort_order` (int Qt.SortOrder). |
 | `'preferences_dialog_size'` | JSON Object | Stores `{"width": int, "height": int}` for restoring resized preferences dialog window dimensions. |
 
 ---
@@ -191,7 +193,9 @@ The `metadata_json` column in `downloads` holds an extensible dictionary managed
       "size": 6075949056,
       "downloaded": 6075949056,
       "progress": 100.0,
-      "priority": 4
+      "priority": 4,
+      "priority_label": "Normal",
+      "status": "completed"
     }
   ],
   "trackers": [
@@ -199,9 +203,22 @@ The `metadata_json` column in `downloads` holds an extensible dictionary managed
       "tier": 0,
       "url": "https://torrent.ubuntu.com/announce",
       "status": "Working",
+      "seeds": 124,
+      "peers": 42,
       "send_stats": true
     }
   ],
+  "peer_list": [
+    {
+      "ip": "198.51.100.24:6881",
+      "client": "qBittorrent/4.6.3",
+      "progress": 0.852,
+      "down_speed": 1245000,
+      "up_speed": 34000,
+      "flags": "DUXE"
+    }
+  ],
+  "seeding_since": "2026-09-24T14:30:00Z",
   "seeds": 124,
   "peers": 42,
   "total_seeds": 850,
@@ -209,10 +226,13 @@ The `metadata_json` column in `downloads` holds an extensible dictionary managed
   "bandwidth_allocation": "normal",
   "explicit_filename": true,
   "next_retry_at": 1789916672.45,
-  "custom_headers": {
+  "retry_delay": 5.0,
+  "headers": {
     "Authorization": "Bearer token...",
     "User-Agent": "Custom-Agent"
   },
+  "referer": "https://example.com/download-page",
+  "security_warning": "Warning: Executable file (.exe) detected.",
   "use_curl_cffi": false,
   "antivirus_scanned": true,
   "antivirus_report": "Windows Defender: Clean (Threat exclusions matched: HackTool)",
@@ -224,24 +244,61 @@ The `metadata_json` column in `downloads` holds an extensible dictionary managed
 
 | Field | Type | Subsystem | Description |
 | :--- | :--- | :--- | :--- |
-| `files` | `Array<Object>` | BitTorrent | Multi-file tree with path, size, progress, and priority (0 = skip, 1 = low, 4 = normal, 7 = high). |
-| `trackers` | `Array<Object>` | BitTorrent | Announced tracker list with tier, announce URL, working status, and stats flag. |
-| `seeds` / `peers` | `Integer` | BitTorrent | Number of connected seeders and leechers in the active session. |
-| `total_seeds` / `total_peers` | `Integer` | BitTorrent | Total estimated swarm count from tracker scrapes and DHT peer exchanges. |
+| `files` | `Array<Object>` | BitTorrent | Multi-file tree storing file records with `index`, `path`, `name`, `size`, `downloaded`, `progress`, `priority` (0 = do not download, 1 = low, 4 = normal, 7 = high), `priority_label` (`'Do Not Download'`, `'Low'`, `'Normal'`, `'High'`), and granular `status` (`'completed'`, `'downloading'`, `'skipped'`, `'paused'`, `'pending'`). |
+| `trackers` | `Array<Object>` | BitTorrent | Announced tracker list with `tier`, `url`, `status` (`'Working'`, `'Contacting'`, `'Error'`), `seeds`, `peers`, and `send_stats` flag. |
+| `peer_list` | `Array<Object>` | BitTorrent | Connected peers snapshot with `ip`, `client`, `progress` (0.0 to 1.0), `down_speed` (B/s), `up_speed` (B/s), and formatted BitTorrent `flags` (`S`, `D`, `U`, `O`, `K`, `E`, `H`, `X`, `I`). |
+| `seeding_since` | `String` | BitTorrent | ISO-8601 UTC timestamp recorded when the torrent entered `'seeding'` status. Used to evaluate elapsed seeding time against `TorrentConfig.seeding_time_limit_minutes`. |
+| `seeds` / `peers` | `Integer` | BitTorrent | Number of currently connected seeders and leechers in the active session. |
+| `total_seeds` / `total_peers` | `Integer` | BitTorrent | Total estimated swarm count aggregated from tracker scrapes and DHT peer exchanges. |
 | `bandwidth_allocation` | `String` | Bandwidth | Torrent priority tier: `'low'`, `'normal'`, or `'high'`. |
-| `explicit_filename` | `Boolean` | Engine | `true` if the user manually renamed the download; suppresses automatic title overwrites from HTTP headers or torrent info dictionaries. |
+| `explicit_filename` | `Boolean` | Engine | `true` if the user manually specified or renamed the download name; suppresses automatic title overwrites from HTTP headers or torrent info dictionaries. |
 | `next_retry_at` | `Float` | Retries | Epoch timestamp (seconds) until which the download manager will skip retrying this entry (exponential backoff window). |
-| `custom_headers` | `Object` | HTTP | Custom HTTP request headers provided by the user or backlog directive. |
+| `retry_delay` | `Float` | Retries | Current exponential backoff interval in seconds. |
+| `headers` | `Object` | HTTP | Custom HTTP request headers provided by the user or backlog directive. |
+| `referer` | `String` | HTTP | Custom HTTP Referer header URL passed to network engine requests. |
+| `security_warning` | `String` | Security | Pre-download URL / file inspection warnings (e.g., dangerous extensions or high-risk formats). |
 | `use_curl_cffi` | `Boolean` | HTTP | Forces TLS/browser impersonation via `curl_cffi` rather than `aiohttp`. |
 | `antivirus_scanned` | `Boolean` | Security | `true` once post-download scanning has completed. |
 | `antivirus_report` | `String` | Security | Scanner output, engine name, or exclusion match details. |
 | `threat_detected` | `Boolean` | Security | `true` if malware or PUAs were detected and quarantined. |
 
+### File Trashing & Priority Invariant
+When a user sets a file's priority to 0 ("Do Not Download") in the GUI:
+1. If the file has already been partially or fully downloaded on disk and the user confirms deletion, the physical file on disk is moved to the OS recycle bin/trash via `send2trash`.
+2. The `files` record in `metadata_json` is immediately synchronized:
+   ```python
+   f["priority"] = 0
+   f["priority_label"] = "Do Not Download"
+   f["downloaded"] = 0
+   f["progress"] = 0.0
+   f["status"] = "skipped"
+   ```
+3. If the user later re-checks the file (`priority > 0`):
+   - The status is updated to `'pending'` or `'downloading'`.
+   - If the torrent was in `'completed'` or `'seeding'` state, it automatically resumes downloading the missing wanted file chunks.
+
+---
+
+## 💾 Libtorrent Fastresume & Filesystem Cache
+
+BitTorrent resume states are stored cooperatively between the SQLite database and binary fastresume files on disk:
+
+```
+Windows: %USERPROFILE%\.my-idm\fastresume\<download_id>.fastresume
+POSIX:   ~/.my-idm/fastresume/<download_id>.fastresume
+```
+
+### Lifecycle & Storage Invariants
+- **Generation**: Generated by `libtorrent` during session checkpoints, pauses, stops, and graceful shutdown via `lt.save_resume_data()`. When the `save_resume_data_alert` fires, the bencoded payload is written to `FASTRESUME_DIR / f"{entry.id}.fastresume"`.
+- **Content**: Contains validated piece bitmasks, physical chunk allocation maps, per-file priorities, and unchoke/choke state.
+- **Startup Restoration**: On application launch, [`TorrentEngine.load_torrents()`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) queries all `'torrent'` entries from the database. If a corresponding `.fastresume` file exists, its buffer is injected into `lt.add_torrent_params.resume_data`. This bypasses expensive piece re-checking on disk and immediately restores the exact file priorities and download progress.
+- **Deletion Cleanup**: When an entry is permanently removed via [`Database.delete_download(download_id)`](file:///d:/Projects/my-idm/my_idm/database.py#L409) or manager purge, any corresponding `.fastresume` file on disk is deleted.
+
 ---
 
 ## 🔄 Migrations & Self-Healing
 
-The database engine includes automated schema migrations and consistency self-healing executed inside [`Database.open()`](file:///d:/Projects/my-idm/my_idm/database.py#L173):
+The database engine includes automated schema migrations and consistency self-healing executed inside [`Database.open()`](file:///d:/Projects/my-idm/my_idm/database.py#L174):
 
 ### 1. In-Place Schema Migration
 When opening existing databases from older releases, `PRAGMA table_info(downloads)` inspects existing columns:
@@ -254,6 +311,8 @@ if "torrent_info_hash" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN torrent_info_hash TEXT NOT NULL DEFAULT ''")
 if "metadata_json" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+if "fetching_metadata_since" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN fetching_metadata_since TEXT NOT NULL DEFAULT ''")
 ```
 
 ### 2. Orphaned Segment Pruning
@@ -274,6 +333,7 @@ When instantiating [`DownloadEntry`](file:///d:/Projects/my-idm/my_idm/database.
 - `downloaded_size` is normalized to `total_size`.
 - If `total_size <= 0`, inspects the physical file on disk (`os.stat().st_size`) to recover the exact byte count.
 - The computed property `entry.progress` returns `100.0%` unconditionally whenever `status IN ('completed', 'seeding')`.
+- Restores transient swarm counts (`entry.seeds`, `entry.peers`, `entry.total_seeds`, `entry.total_peers`) from `metadata_json`.
 
 ---
 
@@ -294,6 +354,8 @@ db.open()
 - `update_status(download_id: str, status: str, error_message: str = "")`: Updates status, sets `completed_at` (if completed) or `last_tried_at` (if downloading), and commits.
 - `increment_retry(download_id: str) -> int`: Increments retry counter and updates `last_tried_at`.
 - `delete_download(download_id: str)`: Deletes the download and cascades deletion of all associated segments.
+- `move_download(download_id: str, new_save_path: str, new_file_path: str)`: Updates directory and full path locations for relocated files.
+- `get_recent_save_paths(limit: int = 5) -> list[str]`: Retrieves distinct recent save paths ordered by usage recency.
 - `get_download(download_id: str) -> Optional[DownloadEntry]`: Retrieves a single download by ID.
 - `get_all_downloads() -> list[DownloadEntry]`: Retrieves all downloads ordered by `added_at DESC`.
 - `find_by_url(url: str) -> Optional[DownloadEntry]`: Searches for an existing entry with matching URL.
@@ -316,5 +378,6 @@ db.open()
 
 - `set_ui_state(key: str, value: Any)`: Stores JSON-serialized UI state with `ON CONFLICT(key) DO UPDATE`.
 - `get_ui_state(key: str, default: Any = None) -> Any`: Retrieves and parses JSON state by key.
-- `save_window_state(state: dict)` / `get_window_state() -> dict`: Dedicated helpers for main window geometry and column widths.
-- `save_preferences_window_size(width: int, height: int)` / `get_preferences_window_size() -> dict`: Window size helpers for preferences dialog.
+- `save_window_state(state: dict)` / `get_window_state() -> dict`: Dedicated helpers for main window geometry, column widths, sort order, and details panel state.
+- `save_preferences_window_size(width: int, height: int)` / `get_preferences_window_size() -> dict`: Dedicated helpers for preferences dialog window dimensions.
+

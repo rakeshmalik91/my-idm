@@ -90,9 +90,9 @@ commit after each features or set of fixes/enhancements
 - [x] after successful download torrent should go to seeding state. make max seeding speed and download to seeedin g speed ration configurable in preferences
 - [x] seperate torrent specific preferences to seperate tab in preferences window
 - [x] store seeders, trackers, file hierarchy details with progress details in db & handle them in details panel
-- [ ] setting a downloaded file to "Do not download" or unchecking it should ask for confirmation and move it to trash.
-- [ ] make how long to seed configurable
-- [ ] resume seeding downloads in seeding status on startup. (make it configurable)
+- [x] setting a downloaded file to "Do not download" or unchecking it should ask for confirmation and move it to trash.
+- [x] make how long to seed configurable
+- [x] resume seeding downloads in seeding status on startup. (make it configurable)
 
 ----------------------
 ### Tor Support

@@ -789,6 +789,88 @@ class TestTorrentEngine(unittest.TestCase):
         te._apply_seeding_limits()
         mock_handle.set_upload_limit.assert_called_with(500_000)
 
+    def test_seeding_duration_limit_transitions_to_completed(self):
+        """Seeding torrent transitions to completed when seeding duration exceeds configured limit."""
+        from datetime import datetime, timezone, timedelta
+        from my_idm.config import TorrentConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        te.set_torrent_config(TorrentConfig(seeding_time_limit_minutes=30))
+
+        past_time = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat()
+        entry = DownloadEntry(
+            id="t_seeding_time_limit",
+            url="magnet:?xt=urn:btih:1111222233334444555566667777888899990001",
+            filename="TimedSeedingTorrent",
+            status="seeding",
+            download_type="torrent",
+            total_size=10000,
+            downloaded_size=10000,
+            metadata_json=f'{{"seeding_since": "{past_time}"}}',
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.is_valid.return_value = True
+        te._handles["t_seeding_time_limit"] = mock_handle
+
+        status_updates = []
+        te.set_callbacks(None, lambda did, stat, err: status_updates.append((did, stat)))
+
+        with patch.object(te, "get_status", return_value={
+            "total_size": 10000, "downloaded": 10000, "progress": 100.0,
+            "state": "seeding", "speed": 0.0, "upload_speed": 1024.0,
+            "seeds": 5, "peers": 10, "eta": 0, "name": "TimedSeedingTorrent",
+            "total_upload": 1000, "total_download": 10000,
+        }):
+            te.poll_all()
+
+        updated = self.db.get_download("t_seeding_time_limit")
+        self.assertEqual(updated.status, "completed")
+        mock_handle.pause.assert_called()
+        self.assertIn(("t_seeding_time_limit", "completed"), status_updates)
+
+    def test_seeding_ratio_limit_transitions_to_completed(self):
+        """Seeding torrent transitions to completed when share ratio exceeds configured limit."""
+        from my_idm.config import TorrentConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        te.set_torrent_config(TorrentConfig(seeding_ratio_limit=1.5))
+
+        entry = DownloadEntry(
+            id="t_seeding_ratio_limit",
+            url="magnet:?xt=urn:btih:1111222233334444555566667777888899990002",
+            filename="RatioSeedingTorrent",
+            status="seeding",
+            download_type="torrent",
+            total_size=2000,
+            downloaded_size=2000,
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.is_valid.return_value = True
+        te._handles["t_seeding_ratio_limit"] = mock_handle
+
+        status_updates = []
+        te.set_callbacks(None, lambda did, stat, err: status_updates.append((did, stat)))
+
+        # Uploaded 3500 B / downloaded 2000 B = ratio 1.75 >= 1.5
+        with patch.object(te, "get_status", return_value={
+            "total_size": 2000, "downloaded": 2000, "progress": 100.0,
+            "state": "seeding", "speed": 0.0, "upload_speed": 512.0,
+            "seeds": 3, "peers": 8, "eta": 0, "name": "RatioSeedingTorrent",
+            "total_upload": 3500, "total_download": 2000,
+        }):
+            te.poll_all()
+
+        updated = self.db.get_download("t_seeding_ratio_limit")
+        self.assertEqual(updated.status, "completed")
+        mock_handle.pause.assert_called()
+        self.assertIn(("t_seeding_ratio_limit", "completed"), status_updates)
+
 
 if __name__ == "__main__":
     unittest.main()

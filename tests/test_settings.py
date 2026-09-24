@@ -147,8 +147,9 @@ class TestTorrentConfig(unittest.TestCase):
     def test_default_values(self):
         cfg = TorrentConfig()
         self.assertTrue(cfg.seeding_after_complete)
-        self.assertEqual(cfg.max_seeding_speed, 0)
-        self.assertEqual(cfg.download_to_seeding_ratio, 2.0)
+        self.assertEqual(cfg.max_seeding_speed, 200)
+        self.assertEqual(cfg.download_to_seeding_ratio, 10.0)
+        self.assertEqual(cfg.seeding_time_limit_minutes, 240)
         self.assertEqual(cfg.metadata_fetch_timeout_days, 1)
 
     def test_effective_seeding_speed_limit(self):
@@ -540,6 +541,35 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
                 mock_warn.assert_called_once()
                 self.assertIn("Threat detected", mock_warn.call_args[0][2])
 
+        dlg.close()
+
+    def test_torrent_seeding_config_load_and_save(self):
+        """BitTorrent seeding duration, ratio limit, and startup resume load and save in SettingsDialog."""
+        from unittest.mock import patch
+        cfg = TorrentConfig(
+            seeding_after_complete=True,
+            seeding_time_limit_minutes=45,
+            seeding_ratio_limit=2.5,
+            resume_seeding_on_startup=False,
+        )
+        dlg = SettingsDialog(torrent_config=cfg)
+
+        self.assertTrue(dlg._seeding_after_complete_cb.isChecked())
+        self.assertFalse(dlg._resume_seeding_cb.isChecked())
+        self.assertEqual(dlg._seeding_time_spin.value(), 45)
+        self.assertEqual(dlg._seeding_ratio_limit_spin.value(), 2.5)
+
+        # Modify values
+        dlg._resume_seeding_cb.setChecked(True)
+        dlg._seeding_time_spin.setValue(90)
+        dlg._seeding_ratio_limit_spin.setValue(3.0)
+
+        with patch("os.path.exists", return_value=True):
+            dlg._on_save()
+
+        self.assertTrue(dlg.torrent_config.resume_seeding_on_startup)
+        self.assertEqual(dlg.torrent_config.seeding_time_limit_minutes, 90)
+        self.assertEqual(dlg.torrent_config.seeding_ratio_limit, 3.0)
         dlg.close()
 
 

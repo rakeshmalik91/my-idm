@@ -440,7 +440,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(14, 16, 14, 14)
 
         # 1. Seeding & State Configuration
-        seeding_group = QGroupBox("BitTorrent Seeding & State")
+        seeding_group = QGroupBox("BitTorrent Seeding && State")
         seeding_layout = QVBoxLayout(seeding_group)
         seeding_layout.setSpacing(10)
 
@@ -452,6 +452,45 @@ class SettingsDialog(QDialog):
             "rather than stopping immediately."
         )
         seeding_layout.addWidget(self._seeding_after_complete_cb)
+
+        self._resume_seeding_cb = QCheckBox(
+            "🔄 Resume seeding torrents on startup"
+        )
+        self._resume_seeding_cb.setToolTip(
+            "When checked, torrents that were in the 'seeding' status when My-IDM was closed "
+            "will automatically resume seeding upon startup."
+        )
+        seeding_layout.addWidget(self._resume_seeding_cb)
+
+        time_row = QHBoxLayout()
+        time_lbl = QLabel("Maximum seeding duration:")
+        time_row.addWidget(time_lbl, 1)
+        self._seeding_time_spin = QSpinBox()
+        self._seeding_time_spin.setRange(0, 525_600)  # Up to 1 year in minutes
+        self._seeding_time_spin.setSingleStep(15)
+        self._seeding_time_spin.setSuffix(" min")
+        self._seeding_time_spin.setSpecialValueText("Unlimited (Indefinite)")
+        self._seeding_time_spin.setToolTip(
+            "Automatically stop seeding after the torrent has been seeding for this many minutes.\n"
+            "Set to 0 to seed indefinitely."
+        )
+        time_row.addWidget(self._seeding_time_spin)
+        seeding_layout.addLayout(time_row)
+
+        ratio_limit_row = QHBoxLayout()
+        ratio_limit_lbl = QLabel("Maximum share ratio limit:")
+        ratio_limit_row.addWidget(ratio_limit_lbl, 1)
+        self._seeding_ratio_limit_spin = QDoubleSpinBox()
+        self._seeding_ratio_limit_spin.setRange(0.0, 100.0)
+        self._seeding_ratio_limit_spin.setSingleStep(0.1)
+        self._seeding_ratio_limit_spin.setSuffix(" x")
+        self._seeding_ratio_limit_spin.setSpecialValueText("Unlimited (0.0x)")
+        self._seeding_ratio_limit_spin.setToolTip(
+            "Automatically stop seeding when the upload to download share ratio reaches this limit.\n"
+            "Set to 0.0 for unlimited share ratio."
+        )
+        ratio_limit_row.addWidget(self._seeding_ratio_limit_spin)
+        seeding_layout.addLayout(ratio_limit_row)
 
         speed_row = QHBoxLayout()
         speed_lbl = QLabel("Maximum upload / seeding speed limit:")
@@ -475,7 +514,7 @@ class SettingsDialog(QDialog):
         self._seeding_ratio_spin.setSingleStep(0.5)
         self._seeding_ratio_spin.setSuffix(" : 1")
         self._seeding_ratio_spin.setToolTip(
-            "Ratio of download speed to seeding speed (e.g. 2.0 = 2:1 ratio).\n"
+            "Ratio of download speed to seeding speed (e.g. 10.0 = 10:1 ratio, seeding is 10% of download speed).\n"
             "When a global download limit is configured, seeding upload limit is derived as:\n"
             "download limit / ratio."
         )
@@ -485,7 +524,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(seeding_group)
 
         # 2. Metadata Fetching & Timeouts
-        meta_group = QGroupBox("Metadata Fetching & Timeouts")
+        meta_group = QGroupBox("Metadata Fetching && Timeouts")
         meta_layout = QVBoxLayout(meta_group)
         meta_layout.setSpacing(10)
 
@@ -599,7 +638,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(14, 16, 14, 14)
 
         # 1. Startup & Activation
-        startup_group = QGroupBox("Tor Activation & Startup")
+        startup_group = QGroupBox("Tor Activation && Startup")
         startup_inner = QVBoxLayout(startup_group)
         startup_inner.setSpacing(8)
 
@@ -689,7 +728,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(14, 16, 14, 14)
 
         # Pre-Download
-        pre_group = QGroupBox("Pre-Download URL & Payload Safety")
+        pre_group = QGroupBox("Pre-Download URL && Payload Safety")
         pre_inner = QVBoxLayout(pre_group)
         pre_inner.setSpacing(10)
 
@@ -838,6 +877,9 @@ class SettingsDialog(QDialog):
 
         # BitTorrent tab
         self._seeding_after_complete_cb.setChecked(self._torrent_cfg.seeding_after_complete)
+        self._resume_seeding_cb.setChecked(self._torrent_cfg.resume_seeding_on_startup)
+        self._seeding_time_spin.setValue(self._torrent_cfg.seeding_time_limit_minutes)
+        self._seeding_ratio_limit_spin.setValue(self._torrent_cfg.seeding_ratio_limit)
         self._max_seeding_speed_spin.setValue(self._torrent_cfg.max_seeding_speed)
         self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
         self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
@@ -1210,6 +1252,9 @@ class SettingsDialog(QDialog):
 
         # 2. Collect BitTorrent settings
         self._torrent_cfg.seeding_after_complete = self._seeding_after_complete_cb.isChecked()
+        self._torrent_cfg.resume_seeding_on_startup = self._resume_seeding_cb.isChecked()
+        self._torrent_cfg.seeding_time_limit_minutes = self._seeding_time_spin.value()
+        self._torrent_cfg.seeding_ratio_limit = self._seeding_ratio_limit_spin.value()
         self._torrent_cfg.max_seeding_speed = self._max_seeding_speed_spin.value()
         self._torrent_cfg.download_to_seeding_ratio = self._seeding_ratio_spin.value()
         self._torrent_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()

@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QSplitter, QTableWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QMessageBox, QSplitter, QTableWidget
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.details_panel import DetailsPanel
@@ -223,18 +223,20 @@ class TestDetailsPanel(unittest.TestCase):
         combo_file1.setCurrentText("Low (25%)")
         self.manager._torrent.set_torrent_file_priority.assert_called_with("test-torrent-1", 1, 1)
 
-        # Uncheck checkbox on file 1 -> priority becomes 0 (Don't Download)
-        file1.setCheckState(0, Qt.CheckState.Unchecked)
-        panel._on_tree_item_changed(file1, 0)
+        # Uncheck checkbox on file 1 -> priority becomes 0 (Don't Download) with prompt confirmed
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            file1.setCheckState(0, Qt.CheckState.Unchecked)
+            panel._on_tree_item_changed(file1, 0)
         self.manager._torrent.set_torrent_file_priority.assert_called_with("test-torrent-1", 1, 0)
         self.assertEqual(combo_file1.currentText(), "Don't Download")
 
         # Folder checkState becomes partially checked because file0 is checked and file1 is unchecked
         self.assertEqual(root_folder.checkState(0), Qt.CheckState.PartiallyChecked)
 
-        # Uncheck root folder -> unchecks all child files and sets priorities to 0
-        root_folder.setCheckState(0, Qt.CheckState.Unchecked)
-        panel._on_tree_item_changed(root_folder, 0)
+        # Uncheck root folder -> unchecks all child files and sets priorities to 0 with prompt confirmed
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes):
+            root_folder.setCheckState(0, Qt.CheckState.Unchecked)
+            panel._on_tree_item_changed(root_folder, 0)
         self.assertEqual(file0.checkState(0), Qt.CheckState.Unchecked)
         self.assertIn(unittest.mock.call("test-torrent-1", 0, 0), self.manager._torrent.set_torrent_file_priority.mock_calls)
         self.assertIn(unittest.mock.call("test-torrent-1", 1, 0), self.manager._torrent.set_torrent_file_priority.mock_calls)
@@ -749,6 +751,138 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(panel._table_peers.rowCount(), 1)
         self.assertEqual(panel._table_peers.item(0, 0).text(), "10.0.0.1:6881")
         self.assertEqual(panel._table_peers.item(0, 1).text(), "Transmission/4.0.0")
+
+
+    def test_uncheck_downloaded_file_cancels_when_prompt_rejected(self):
+        """Unchecking a downloaded file prompts confirmation; clicking No reverts check state without trashing."""
+        tor_entry = DownloadEntry(
+            id="test-trash-prompt-1",
+            url="magnet:?xt=urn:btih:3333444455556666777788889999000011112222",
+            filename="TestTrashPrompt",
+            download_type="torrent",
+            status="downloading",
+            save_path="C:/Downloads/TestTrashPrompt",
+            metadata_json='''{
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "TestTrashPrompt/doc.pdf",
+                        "size": 1000,
+                        "downloaded": 1000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "completed"
+                    }
+                ]
+            }'''
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-trash-prompt-1")
+        item = panel._file_item_map[0]
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.No) as mock_q, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash:
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            mock_q.assert_called_once()
+            mock_trash.assert_not_called()
+            # Must be reverted back to Checked
+            self.assertEqual(item.checkState(0), Qt.CheckState.Checked)
+
+    def test_uncheck_downloaded_file_trashes_when_prompt_accepted(self):
+        """Unchecking a downloaded file and confirming moves the file to trash and sets priority to 0."""
+        tor_entry = DownloadEntry(
+            id="test-trash-prompt-2",
+            url="magnet:?xt=urn:btih:4444555566667777888899990000111122223333",
+            filename="TestTrashAccepted",
+            download_type="torrent",
+            status="downloading",
+            save_path="C:/Downloads/TestTrashAccepted",
+            metadata_json='''{
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "TestTrashAccepted/data.bin",
+                        "size": 5000,
+                        "downloaded": 2500,
+                        "progress": 50.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "downloading"
+                    }
+                ]
+            }'''
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-trash-prompt-2")
+        item = panel._file_item_map[0]
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as mock_q, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash, \
+             unittest.mock.patch("pathlib.Path.exists", return_value=True), \
+             unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            mock_q.assert_called_once()
+            mock_trash.assert_called_once()
+            mock_set_prio.assert_called_with("test-trash-prompt-2", 0, 0)
+            self.assertEqual(item.text(4), "Skipped")
+
+    def test_combo_dont_download_prompts_and_trashes(self):
+        """Setting priority combo to 'Don't Download' prompts user and trashes file if accepted."""
+        tor_entry = DownloadEntry(
+            id="test-trash-combo-1",
+            url="magnet:?xt=urn:btih:5555666677778888999900001111222233334444",
+            filename="TestTrashCombo",
+            download_type="torrent",
+            status="downloading",
+            save_path="C:/Downloads/TestTrashCombo",
+            metadata_json='''{
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "TestTrashCombo/video.mp4",
+                        "size": 10000,
+                        "downloaded": 10000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "completed"
+                    }
+                ]
+            }'''
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-trash-combo-1")
+        item = panel._file_item_map[0]
+        combo = panel._tree_files.itemWidget(item, 3)
+
+        # 1. User rejects prompt -> combo reverts
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.No) as mock_q, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash:
+            combo.setCurrentText("Don't Download")
+            mock_q.assert_called_once()
+            mock_trash.assert_not_called()
+            self.assertNotEqual(combo.currentText(), "Don't Download")
+
+        # 2. User accepts prompt -> file is trashed and priority set to 0
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as mock_q2, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash2, \
+             unittest.mock.patch("pathlib.Path.exists", return_value=True), \
+             unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
+            combo.setCurrentText("Don't Download")
+            mock_q2.assert_called_once()
+            mock_trash2.assert_called_once()
+            mock_set_prio.assert_called_with("test-trash-combo-1", 0, 0)
+            self.assertEqual(item.text(4), "Skipped")
 
 
 if __name__ == "__main__":

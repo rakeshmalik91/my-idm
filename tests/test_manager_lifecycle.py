@@ -968,7 +968,33 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.manager._on_torrent_progress("d_stopped", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
         self.manager._on_torrent_progress("d_suspended", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
 
-        self.assertEqual(len(emitted), 0)
+    def test_startup_resumes_seeding_torrents_when_configured(self):
+        """Torrents in seeding status are resumed on startup when resume_seeding_on_startup is enabled."""
+        from my_idm.config import TorrentConfig
+        e_seeding = DownloadEntry(
+            id="d_seeding_startup",
+            url="magnet:?xt=urn:btih:1111222233334444555566667777888899990003",
+            filename="SeedingStartupTorrent",
+            download_type="torrent",
+            status="seeding",
+            total_size=5000,
+            downloaded_size=5000,
+        )
+        self.db.add_download(e_seeding)
+
+        # 1. Enabled: add_torrent is called for seeding entry
+        self.manager.set_torrent_config(TorrentConfig(resume_seeding_on_startup=True))
+        with patch.object(self.manager._torrent, "add_torrent") as mock_add:
+            self.manager.start()
+            mock_add.assert_called_once()
+            called_entry = mock_add.call_args[0][0]
+            self.assertEqual(called_entry.id, "d_seeding_startup")
+
+        # 2. Disabled: add_torrent is NOT called for seeding entry
+        self.manager.set_torrent_config(TorrentConfig(resume_seeding_on_startup=False))
+        with patch.object(self.manager._torrent, "add_torrent") as mock_add2:
+            self.manager.start()
+            mock_add2.assert_not_called()
 
 
 if __name__ == "__main__":

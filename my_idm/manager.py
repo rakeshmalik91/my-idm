@@ -347,6 +347,9 @@ class DownloadManager(QObject):
             elif self._general_config.auto_resume_startup and entry.status in ("downloading", "checking", "fetching_metadata"):
                 log.info("Auto-resuming interrupted download on startup: %s (order=%s)", entry.id, entry.queue_order)
                 self.resume_download(entry.id)
+            elif entry.status == "seeding" and getattr(self._torrent_config, "resume_seeding_on_startup", True):
+                log.info("Auto-resuming seeding torrent on startup: %s (order=%s)", entry.id, entry.queue_order)
+                self._torrent.add_torrent(entry)
 
         log.info("DownloadManager started")
 

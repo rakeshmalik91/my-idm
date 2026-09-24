@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -37,7 +38,7 @@ from my_idm.database import DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
 from my_idm.manager import DownloadManager
 from my_idm.styles import Colors
-from my_idm.utils import to_int
+from my_idm.utils import send_to_trash, to_int
 
 
 _TORRENT_PRIORITY_MAP = {
@@ -875,17 +876,109 @@ class DetailsPanel(QWidget):
         for folder_item in reversed(self._folder_items):
             self._refresh_folder_aggregates(folder_item, is_torrent)
 
+    def _is_file_downloaded(self, item: QTreeWidgetItem) -> tuple[bool, Optional[Path]]:
+        """Return (is_downloaded, disk_path) for a file item."""
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if data.get("is_folder"):
+            return False, None
+        f_data = data.get("data", {})
+        file_path_rel = f_data.get("path")
+        entry = self._current_entry or (self._manager.get_entry(self._download_id) if self._download_id else None)
+        disk_path = None
+        if entry and entry.save_path and file_path_rel:
+            disk_path = Path(entry.save_path) / file_path_rel
+
+        disk_exists = disk_path.exists() if disk_path else False
+        dl_bytes = f_data.get("downloaded", 0)
+        pct_raw = f_data.get("progress", 0.0)
+        pct = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
+
+        is_dl = disk_exists or dl_bytes > 0 or pct >= 100.0
+        return is_dl, disk_path
+
+    def _reset_file_item_trashed(self, f_it: QTreeWidgetItem):
+        """Reset progress and status display for a trashed file item."""
+        data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
+        f_data = data.get("data")
+        if isinstance(f_data, dict):
+            f_data["downloaded"] = 0
+            f_data["progress"] = 0.0
+            f_data["status"] = "skipped"
+            f_data["priority"] = 0
+        pb = self._tree_files.itemWidget(f_it, 2)
+        if isinstance(pb, QProgressBar):
+            pb.setValue(0)
+            pb.setToolTip("0.0% (0 B)")
+        f_it.setText(4, "Skipped")
+        size_str = f_it.text(1)
+        f_it.setToolTip(1, f"Size: {size_str}")
+
     def _on_tree_item_changed(self, item: QTreeWidgetItem, column: int):
         if column != 0 or self._tree_updating or not self._download_id:
             return
         new_state = item.checkState(0)
         if new_state == Qt.CheckState.PartiallyChecked:
             return
+
         self._tree_updating = True
         try:
             data = item.data(0, Qt.ItemDataRole.UserRole) or {}
             is_folder = data.get("is_folder", False)
             is_checked = (new_state == Qt.CheckState.Checked)
+
+            if not is_checked:
+                # Unchecking file or folder: check for downloaded files to confirm trashing
+                if is_folder:
+                    descendants = self._get_descendant_file_items(item)
+                    if all(f_it.checkState(0) == Qt.CheckState.Unchecked for f_it in descendants):
+                        return
+                    dl_descendants = []
+                    for f_it in descendants:
+                        f_is_dl, f_disk_path = self._is_file_downloaded(f_it)
+                        if f_is_dl:
+                            dl_descendants.append((f_it, f_disk_path))
+
+                    if dl_descendants:
+                        folder_name = item.text(0).lstrip("📁 ").strip()
+                        reply = QMessageBox.question(
+                            self,
+                            "Move Downloaded Files to Trash?",
+                            f"Folder '{folder_name}' contains {len(dl_descendants)} downloaded (or partially downloaded) file(s).\n\n"
+                            "Setting this folder to 'Don't Download' will move these files to the Trash / Recycle Bin.\n\n"
+                            "Do you want to continue?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No,
+                        )
+                        if reply != QMessageBox.StandardButton.Yes:
+                            self._tree_files.blockSignals(True)
+                            item.setCheckState(0, Qt.CheckState.Checked)
+                            self._tree_files.blockSignals(False)
+                            return
+                        for f_it, f_disk_path in dl_descendants:
+                            if f_disk_path and f_disk_path.exists():
+                                send_to_trash(f_disk_path)
+                            self._reset_file_item_trashed(f_it)
+                else:
+                    f_is_dl, f_disk_path = self._is_file_downloaded(item)
+                    if f_is_dl:
+                        file_name = item.text(0).lstrip("📄 ").strip()
+                        reply = QMessageBox.question(
+                            self,
+                            "Move Downloaded File to Trash?",
+                            f"'{file_name}' has already been downloaded (or partially downloaded).\n\n"
+                            "Setting it to 'Don't Download' will move the downloaded file to the Trash / Recycle Bin.\n\n"
+                            "Do you want to continue?",
+                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                            QMessageBox.StandardButton.No,
+                        )
+                        if reply != QMessageBox.StandardButton.Yes:
+                            self._tree_files.blockSignals(True)
+                            item.setCheckState(0, Qt.CheckState.Checked)
+                            self._tree_files.blockSignals(False)
+                            return
+                        if f_disk_path and f_disk_path.exists():
+                            send_to_trash(f_disk_path)
+                        self._reset_file_item_trashed(item)
 
             if is_folder:
                 descendants = self._get_descendant_file_items(item)
@@ -957,6 +1050,31 @@ class DetailsPanel(QWidget):
         if f_idx is None:
             return
 
+        if prio_val == 0:
+            f_is_dl, f_disk_path = self._is_file_downloaded(item)
+            if f_is_dl:
+                file_name = item.text(0).lstrip("📄 ").strip()
+                reply = QMessageBox.question(
+                    self,
+                    "Move Downloaded File to Trash?",
+                    f"'{file_name}' has already been downloaded (or partially downloaded).\n\n"
+                    "Setting it to 'Don't Download' will move the downloaded file to the Trash / Recycle Bin.\n\n"
+                    "Do you want to continue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    curr_prio = data.get("data", {}).get("priority", 4)
+                    if curr_prio == 0:
+                        curr_prio = 4
+                    combo.blockSignals(True)
+                    combo.setCurrentText(_priority_to_label(curr_prio))
+                    combo.blockSignals(False)
+                    return
+                if f_disk_path and f_disk_path.exists():
+                    send_to_trash(f_disk_path)
+                self._reset_file_item_trashed(item)
+
         self._tree_updating = True
         try:
             new_state = Qt.CheckState.Checked if prio_val > 0 else Qt.CheckState.Unchecked
@@ -983,9 +1101,37 @@ class DetailsPanel(QWidget):
         if prio_val is None or prio_val < 0:
             return
 
+        descendants = self._get_descendant_file_items(item)
+        if prio_val == 0:
+            dl_descendants = []
+            for f_it in descendants:
+                f_is_dl, f_disk_path = self._is_file_downloaded(f_it)
+                if f_is_dl:
+                    dl_descendants.append((f_it, f_disk_path))
+
+            if dl_descendants:
+                folder_name = item.text(0).lstrip("📁 ").strip()
+                reply = QMessageBox.question(
+                    self,
+                    "Move Downloaded Files to Trash?",
+                    f"Folder '{folder_name}' contains {len(dl_descendants)} downloaded (or partially downloaded) file(s).\n\n"
+                    "Setting this folder to 'Don't Download' will move these files to the Trash / Recycle Bin.\n\n"
+                    "Do you want to continue?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    combo.blockSignals(True)
+                    combo.setCurrentText("Medium (50%)")
+                    combo.blockSignals(False)
+                    return
+                for f_it, f_disk_path in dl_descendants:
+                    if f_disk_path and f_disk_path.exists():
+                        send_to_trash(f_disk_path)
+                    self._reset_file_item_trashed(f_it)
+
         self._tree_updating = True
         try:
-            descendants = self._get_descendant_file_items(item)
             for f_it in descendants:
                 f_data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
                 f_idx = f_data.get("file_index")
