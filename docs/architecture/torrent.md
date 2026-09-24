@@ -14,6 +14,11 @@ With advanced multi-peer piece verification, DHT, Peer Exchange (PEX), selective
 - **Magnet URIs**: Full support for `magnet:?xt=urn:btih:...` links with embedded trackers and display names.
 - **`.torrent` Files**: Add torrent descriptor files via the Add Download dialog, file picker, clipboard monitor, or direct drag-and-drop.
 - **Asynchronous Metadata Resolution**: While fetching metadata (`downloading_metadata` state), My-IDM connects to DHT nodes and swarm peers, automatically renaming the task and populating the file tree once metadata is decoded.
+- **Metadata Timeout & Suspended State**: Magnet links remaining in the `fetching_metadata` state longer than the configured timeout (`metadata_fetch_timeout_days`, default: `1` day) automatically transition to `'suspended'`.
+  - The libtorrent handle is paused with `auto_managed` unset so it consumes 0 network bandwidth.
+  - Its `queue_order` is reset to `0`, freeing up a concurrent download slot for queued downloads.
+  - The `fetching_metadata_since` timestamp persists in the database across application restarts, ensuring time isn't reset on reboot.
+  - A manual resume or successful progress (`downloaded > 0` or metadata resolution) resets the timer.
 
 ### 2. High-Speed Multi-Peer Pipelining
 - **Swarm Discovery**: Leverages DHT (Distributed Hash Table), PEX (Peer Exchange), and LSD (Local Peer Discovery) to discover seeds and peers rapidly.
@@ -59,7 +64,16 @@ Selecting any torrent download in the main table activates rich diagnostic tabs 
   - **Seeds & Peers**: Number of peers reported by each tracker.
   - **Next Announce**: Countdown timer to the next tracker update.
 
-### 5. Privacy & Network Integration
+### 5. Seeding Lifecycle & Upload Bandwidth Control
+- **Seeding State Transition**: Upon completing 100% download, torrents automatically transition to `'seeding'` (if configured in BitTorrent preferences) rather than stopping immediately.
+- **Concurrency Management**: Seeding torrents do **not** consume active downloading concurrency slots (`max_concurrent_downloads`), allowing subsequent queued downloads to start without delay.
+- **Seeding Bandwidth Controls**:
+  - **Maximum Seeding Speed**: Direct upload rate cap in KB/s (0 = unlimited).
+  - **Download-to-Seeding Speed Ratio**: Dynamically derives upload limit from the global download speed limit (`upload_limit = download_limit / ratio`, e.g. `2:1`).
+  - The effective upload rate applied to libtorrent handles (`handle.set_upload_limit(...)`) automatically chooses the lowest non-zero cap among configured limits.
+- **Dedicated Preferences Tab**: BitTorrent-specific settings (seeding behavior, upload limits, ratio, and metadata timeout) are organized in a dedicated **🧲 BitTorrent** tab in the Preferences window (`Ctrl+,` or `Tools -> BitTorrent Settings…`).
+
+### 6. Privacy & Network Integration
 - **VPN Binding & Kill Switch**: If interface binding is enabled in [VPN Settings](file:///d:/Projects/my-idm/docs/vpn.md), libtorrent binds both `listen_interfaces` and `outgoing_interfaces` strictly to the VPN adapter IP. If the VPN drops, torrent transfers freeze instantly.
 - **Tor Network Routing**: When Tor routing is enabled in [Tor Settings](file:///d:/Projects/my-idm/docs/tor.md), all peer connections and tracker announces are forced through the Tor SOCKS5 proxy (`force_proxy=True`, `proxy_peer_connections=True`, `proxy_tracker_connections=True`).
 
@@ -96,6 +110,7 @@ Selecting any torrent download in the main table activates rich diagnostic tabs 
 | **Download Manager** | [`my_idm.manager.DownloadManager`](file:///d:/Projects/my-idm/my_idm/manager.py) | Coordinates download lifecycle, transitions, speed aggregation, and database persistence. |
 | **Network Binding** | [`TorrentEngine.apply_network_config`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Sets `outgoing_interfaces` and `listen_interfaces` on `libtorrent.session_settings`. |
 | **Tor Routing** | [`TorrentEngine.apply_tor_config`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Configures SOCKS5 proxy and privacy flags on `libtorrent.session_settings`. |
+| **State Machine & Lifecycle** | [`docs/architecture/state-machines.md`](file:///d:/Projects/my-idm/docs/architecture/state-machines.md) | Dedicated BitTorrent state diagram, metadata timeout lifecycle, seeding rules, and slot allocation. |
 
 ---
 

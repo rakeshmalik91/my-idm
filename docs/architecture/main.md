@@ -10,11 +10,15 @@ Technical documentation for developers working on the My-IDM codebase.
 - [Module Map](#module-map)
 - [Threading Model](#threading-model)
 - [Data Flow](#data-flow)
-- [Database Schema](#database-schema)
+- [Download Lifecycle & State Machine](#download-lifecycle--state-machine)
+- [Concurrency & Queue Prioritization](#concurrency--queue-prioritization)
+- [Database & Persistence Subsystem](#database--persistence-subsystem)
 - [HTTP Engine Internals](#http-engine-internals)
-- [Torrent Engine Internals](#torrent-engine-internals)
-- [VPN & Network Privacy Architecture](#vpn--network-privacy-architecture)
-- [Antivirus & Security Architecture](#antivirus--security-architecture)
+- [BitTorrent Engine Subsystem](#bittorrent-engine-subsystem)
+- [VPN & Network Privacy Subsystem](#vpn--network-privacy-subsystem)
+- [Tor Privacy Subsystem](#tor-privacy-subsystem)
+- [Antivirus & Security Subsystem](#antivirus--security-subsystem)
+- [Backlog Processing Subsystem](#backlog-processing-subsystem)
 - [Preferences & Configuration Architecture](#preferences--configuration-architecture)
 - [Dynamic Filename Resolution & Crash Resilience](#dynamic-filename-resolution--crash-resilience)
 - [GUI Architecture](#gui-architecture)
@@ -67,8 +71,8 @@ my_idm/
 ├── manager.py           # Central orchestrator (QObject with signals)
 ├── main_window.py       # QMainWindow with toolbar, menus, table, splitter
 ├── details_panel.py     # Bottom panel (Overview, Files, Peers, Trackers, Segments)
-├── download_model.py    # QAbstractTableModel (12 columns)
-├── delegates.py         # DownloadNameDelegate, ProgressBarDelegate for QTableView
+├── download_model.py    # QAbstractTableModel (13 columns)
+├── delegates.py         # DownloadNameDelegate and ProgressBarDelegate for QTableView
 ├── dialogs.py           # AddDownloadDialog, MoveDialog, DeleteDialog
 ├── single_instance.py   # Single-instance enforcement via QLocalServer / QLocalSocket IPC
 └── styles.py            # Dark theme QSS stylesheet, color palette
@@ -221,87 +225,116 @@ Every 10 seconds:
 
 ---
 
-## Database Schema
+## Download Lifecycle & State Machine
+
+Every download entry in My-IDM progresses through a state machine managed by `DownloadManager` and synchronized with the SQLite database.
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: Add Download / Backlog Ingestion
+    
+    queued --> downloading: Slot Available (Active < Max Concurrent)
+    queued --> fetching_metadata: Magnet Link (Slot Available)
+    
+    fetching_metadata --> downloading: Metadata Resolved
+    fetching_metadata --> suspended: Metadata Timeout (> Configured Days)
+    
+    downloading --> stalled: Speed=0 & Seeds=0 (> 45s)
+    stalled --> downloading: Speed > 0 or Peers Connected
+    
+    downloading --> checking: Force Recheck / Hash Verification
+    checking --> downloading: Incomplete Data
+    checking --> completed: 100% Data Verified
+    
+    downloading --> scanning: Download Complete (Antivirus Active)
+    downloading --> completed: Download Complete (HTTP)
+    downloading --> seeding: Download Complete (BitTorrent)
+    
+    scanning --> completed: File Clean (HTTP)
+    scanning --> seeding: File Clean (BitTorrent)
+    scanning --> threat_detected: Malware Detected
+    
+    threat_detected --> [*]: Quarantined / Deleted
+    
+    downloading --> queued: Network Error (Retry Backoff)
+    downloading --> error: Max Retries Exhausted
+    
+    downloading --> paused: User Pauses
+    fetching_metadata --> paused: User Pauses
+    queued --> paused: User Pauses
+    paused --> queued: User Resumes
+    
+    downloading --> stopped: User Stops
+    fetching_metadata --> stopped: User Stops
+    queued --> stopped: User Stops
+    suspended --> queued: User Resumes
+    stopped --> queued: User Resumes
+    
+    completed --> file_not_found: Target File Moved/Deleted Externally
+    file_not_found --> checking: User Rechecks / Re-locates File
+    
+    completed --> [*]: User Deletes
+    stopped --> [*]: User Deletes
+```
+
+### Lifecycle States
+
+| State | Protocol | Description | Active Slot? |
+| :--- | :--- | :--- | :---: |
+| `queued` | HTTP & Torrent | Awaiting available concurrent transfer slot or retry backoff window. | No |
+| `downloading` | HTTP & Torrent | Actively streaming payload chunks across network sockets. | **Yes** |
+| `fetching_metadata` | Torrent | Resolving magnet URI metadata via DHT/PEX before file allocation. | **Yes** |
+| `stalled` | Torrent | Active transfer with 0 B/s speed and no connected peers for >45s. | **Yes** |
+| `checking` | HTTP & Torrent | Validating on-disk chunks against torrent piece hash or HTTP segments. | **Yes** |
+| `scanning` | HTTP & Torrent | Post-download antivirus scan running via Windows Defender or custom CLI. | No |
+| `threat_detected` | HTTP & Torrent | Malicious signature detected; file quarantined or removed. | No |
+| `completed` | HTTP & Torrent | Download finished and 100% verified on disk. | No |
+| `seeding` | Torrent | BitTorrent payload complete; uploading to peers in the swarm. | No |
+| `paused` | HTTP & Torrent | Paused by user; network connections closed, progress halted. | No |
+| `stopped` | HTTP & Torrent | Stopped by user; excluded from automatic startup resumption. | No |
+| `suspended` | Torrent | Metadata resolution timed out (> configured days); paused with 0 network usage. | No |
+| `file_not_found` | HTTP & Torrent | Downloaded target file missing from configured destination path. | No |
+| `error` | HTTP & Torrent | Unrecoverable failure or retry attempts exhausted. | No |
 
 > [!NOTE]
-> For the comprehensive specification covering SQL types, migration details, indexing, the full `metadata_json` schema, and CRUD APIs, refer to the dedicated [**Database Architecture & Schema Specification**](database.md).
+> For dedicated, separate state diagrams for the HTTP and BitTorrent engines, detailed transition matrices, retry backoff algorithms, and fallback flows, refer to the [**State Machines & Lifecycle Architecture**](state-machines.md).
 
-### `downloads` Table
+---
 
-| Column | Type | Default | Description |
-|--------|------|---------|-------------|
-| `id` | TEXT PK | UUID | Unique download identifier |
-| `url` | TEXT | — | Source URL or magnet link |
-| `filename` | TEXT | `''` | Resolved filename |
-| `save_path` | TEXT | `''` | Parent directory |
-| `file_path` | TEXT | `''` | Full path to file on disk |
-| `total_size` | INTEGER | `0` | Expected file size in bytes |
-| `downloaded_size` | INTEGER | `0` | Bytes downloaded so far |
-| `status` | TEXT | `'queued'` | Current state |
-| `download_type` | TEXT | `'http'` | `http` or `torrent` |
-| `num_segments` | INTEGER | `8` | Parallel connections (HTTP) |
-| `error_message` | TEXT | `''` | Last error description |
-| `retry_count` | INTEGER | `0` | Retry attempts so far |
-| `max_retries` | INTEGER | `5` | Maximum retry attempts |
-| `added_at` | TEXT | `''` | ISO 8601 timestamp |
-| `last_tried_at` | TEXT | `''` | ISO 8601 timestamp |
-| `completed_at` | TEXT | `''` | ISO 8601 timestamp |
-| `etag` | TEXT | `''` | HTTP ETag for resume validation |
-| `content_hash` | TEXT | `''` | File hash for integrity |
-| `torrent_info_hash` | TEXT | `''` | BitTorrent info-hash |
-| `metadata_json` | TEXT | `'{}'` | Extensible JSON blob |
+## Concurrency & Queue Prioritization
 
-### `segments` Table
+My-IDM enforces concurrency limits and strict queue priority ordering:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | TEXT PK | Segment identifier |
-| `download_id` | TEXT FK | References `downloads.id` |
-| `idx` | INTEGER | Segment index (0-based) |
-| `start_byte` | INTEGER | First byte of this segment |
-| `end_byte` | INTEGER | Last byte of this segment |
-| `downloaded_bytes` | INTEGER | Bytes written so far |
-| `status` | TEXT | `pending`, `downloading`, `completed`, `error` |
+1. **Active Concurrency Counting**:
+   - Downloads in `downloading`, `checking`, `fetching_metadata`, and `stalled` states consume concurrency slots.
+   - Any currently dispatching entries (`_starting_downloads`) are counted to prevent race conditions during rapid batch additions.
+2. **Queue Slot Allocation**:
+   - If active downloads reach `max_concurrent_downloads`, newly added or resumed downloads remain in `queued`.
+   - When an active download finishes (`completed`, `seeding`), pauses, stops, errors, or is deleted—or when the user increases the concurrency limit—`_process_queue()` automatically starts the next queued item.
+3. **Priority Ordering Rules**:
+   - Queued downloads are sorted by `(queue_order if queue_order > 0 else 999999, added_at or "")`.
+   - Lower order numbers represent higher priority (`order 1` starts first).
+   - Among items with equal or unassigned queue order, earlier additions are prioritized; the latest added download is processed last.
+   - On application startup, downloads are auto-resumed in strict ascending queue order.
+4. **Strict Pause State Protection**:
+   - Paused, stopped, and suspended downloads are fully halted at the engine level (`lt.torrent_flags.auto_managed` unset and handle paused).
+   - In-flight or lingering progress callbacks for paused/stopped/suspended tasks are immediately discarded and never emitted to the GUI or database.
 
-### `ui_state` Table
+---
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `key` | TEXT PK | Setting key (e.g. `window_state`) |
-| `value` | TEXT | JSON-serialized or string state |
+## Database & Persistence Subsystem
 
-Persists window geometry (`x`, `y`, `width`, `height`), `is_maximized` state, table column lengths/widths (`column_widths`), QHeaderView state, details panel visibility, and splitter sizes across application launches.
+My-IDM relies on SQLite configured with Write-Ahead Logging (`journal_mode=WAL`) and `check_same_thread=False` for atomic, concurrent local persistence across application sessions.
 
-### Indexes
+The persistence layer models three primary entities:
+- **`downloads`**: Primary download records, status values, cryptographic hashes, queue order positions, and extensible attributes stored in `metadata_json`.
+- **`segments`**: Parallel HTTP chunk ranges, byte offsets, downloaded totals, and per-segment states.
+- **`ui_state`**: Key-value store persisting window geometries, splitter proportions, details panel visibility, and header column widths.
 
-- `idx_segments_download` on `segments(download_id)` — fast segment lookups
-- `idx_downloads_url` on `downloads(url)` — deduplication by URL
-- `idx_downloads_infohash` on `downloads(torrent_info_hash)` — deduplication by info-hash
+Data models are represented in memory using dataclasses ([`DownloadEntry`](file:///d:/Projects/my-idm/my_idm/database.py) and [`SegmentEntry`](file:///d:/Projects/my-idm/my_idm/database.py)), providing computed properties for progress calculations, dynamic metadata wrapping, and status representations.
 
-### Data Classes
-
-```python
-@dataclass
-class DownloadEntry:
-    # Persisted fields (20 columns)
-    id, url, filename, save_path, file_path, total_size,
-    downloaded_size, status, download_type, num_segments,
-    error_message, retry_count, max_retries, added_at,
-    last_tried_at, completed_at, etag, content_hash,
-    torrent_info_hash, metadata_json
-
-    # Transient fields (not stored in DB, used by GUI)
-    speed, eta_seconds, seeds, peers, upload_speed
-
-    # Computed properties
-    progress → float (0-100%)
-    metadata → dict (parsed from metadata_json)
-
-@dataclass
-class SegmentEntry:
-    id, download_id, index, start_byte, end_byte,
-    downloaded_bytes, status
-```
+> [!NOTE]
+> For the exhaustive specification covering SQL column definitions, migration mechanics, query indexing strategy, CRUD APIs, and the full `metadata_json` contract, refer to the dedicated [**Database Architecture & Schema Specification**](database.md).
 
 ---
 
@@ -371,187 +404,64 @@ The segmented download falls back to single-stream when:
 
 ---
 
-## Torrent Engine Internals
+## BitTorrent Engine Subsystem
 
-### Session Lifecycle
+BitTorrent downloads in My-IDM are managed by [`TorrentEngine`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py), an abstraction layer wrapping `libtorrent`:
+- **Alert Dispatching**: Periodically polls session alerts (`save_resume_data_alert`, DHT status, peer metadata) to update database state and GUI progress.
+- **Asynchronous Metadata Resolution**: Resolves magnet URIs via DHT and PEX. Enforces a configurable timeout (`metadata_fetch_timeout_days`, default 1 day) that pauses handles, releases queue slots, and transitions stuck magnets to `'suspended'`.
+- **Fastresume State Persistence**: Caches bencoded resume buffers (`~/.my-idm/fastresume/<id>.fastresume`) verified cryptographically against info-hashes to allow instantaneous session resumption without re-checking payloads.
+- **Granular File Prioritization**: Allows skipping files (`Priority 0`) or prioritizing specific files (`Priority 7`) in multi-file torrent archives.
 
-```
-start():
-  lt.session_params() + lt.default_settings()
-  → Set alert_mask (status | error | storage)
-  → Create lt.session(params)
-
-stop():
-  → For each handle: save_resume_data()
-  → Delete session
-```
-
-### Torrent Handle Management
-
-| Operation | libtorrent Call |
-|-----------|----------------|
-| Add magnet | `lt.parse_magnet_uri(url)` → `session.add_torrent(params)` |
-| Add .torrent | `lt.torrent_info(path)` → `session.add_torrent(params)` |
-| Pause | `handle.pause()` |
-| Resume | `handle.resume()` |
-| Recheck | `handle.force_recheck()` |
-| Move | `handle.move_storage(new_path)` |
-| Remove | `session.remove_torrent(handle, [delete_files])` |
-
-### Progress Polling
-
-A `QTimer` fires every 1 second in the main thread:
-
-```python
-def poll_all():
-    for download_id, handle in self._handles.items():
-        s = handle.status()
-        → total_size = s.total_wanted
-        → downloaded = s.total_wanted_done
-        → speed = s.download_rate
-        → seeds = s.num_seeds
-        → peers = s.num_peers
-        → Emit progress callback
-        → Check for completion
-```
-
-### Fast Resume
-
-- On pause/stop: `handle.save_resume_data()` → save to `~/.my-idm/fastresume/{id}.fastresume`
-- On start: if file exists, load resume data into `add_torrent_params.resume_data`
-
-### Dynamic Metadata Resolution
-
-When adding magnet links, torrent file metadata is initially absent:
-1. The torrent enters the `downloading_metadata` state.
-2. During 1-second polling ticks, the engine checks `handle.status().has_metadata`.
-3. Once metadata is received from peers or DHT:
-   - The engine reads `handle.torrent_file().name()`.
-   - Updates the database `filename` and `total_size`.
-   - Invokes `self._filename_cb(download_id, filename)`, which emits `manager.filename_resolved`.
-   - The GUI table immediately updates the displayed name.
-
-### Torrent Network & Proxy Enforcement
-
-When network binding or proxying is configured:
-1. `TorrentEngine.apply_network_config(network_cfg)` updates the active session settings pack.
-2. Interface binding: sets `listen_interfaces` to `"{bind_ip}:6881"` and `outgoing_interfaces` to `"{bind_ip}"`.
-3. Proxy routing: sets `proxy_type` (HTTP or SOCKS5), `proxy_hostname`, `proxy_port`, `proxy_username`, and `proxy_password` on the session.
+> [!NOTE]
+> For complete details on swarm diagnostics, fastresume alert matching, piece allocation, and tracker tiers, refer to the dedicated [**BitTorrent Engine Architecture**](torrent.md).
 
 ---
 
-## VPN & Network Privacy Architecture
+## VPN & Network Privacy Subsystem
 
-My-IDM incorporates native network privacy controls to prevent IP leaks and enforce strict adapter routing:
+My-IDM provides native network adapter binding and IP leak prevention:
+- **Socket Interface Binding**: Routes HTTP `aiohttp.TCPConnector` sockets and libtorrent listen/outgoing interfaces exclusively through a configured physical or virtual adapter (e.g. WireGuard, OpenVPN, Wintun).
+- **Instant Kill Switch**: Actively monitors bound adapter status. If the VPN interface disconnects, the kill switch instantly pauses active downloads, halts the retry queue, and notifies the user via status bar badges.
+- **Proxy Support**: Full support for HTTP and SOCKS5 proxies with optional authentication.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        DownloadManager                                 │
-│                                                                        │
-│   NetworkConfig (QSettings: [Network])                                 │
-│     ├── interface_name, interface_ip                                   │
-│     ├── kill_switch (bool)                                             │
-│     └── proxy_enabled, proxy_type, host, port, user, pass              │
-└───────────────────┬─────────────────────────────────┬──────────────────┘
-                    │                                 │
-                    ▼                                 ▼
-        ┌───────────────────────┐         ┌───────────────────────┐
-        │      HTTPEngine       │         │     TorrentEngine     │
-        │                       │         │                       │
-        │ aiohttp.TCPConnector  │         │ lt.settings_pack      │
-        │ local_addr=(ip, 0)    │         │ listen_interfaces     │
-        │ proxy="http://..."    │         │ outgoing_interfaces   │
-        └───────────────────────┘         └───────────────────────┘
-                    ▲                                 ▲
-                    │                                 │
-                    └───────────────┬─────────────────┘
-                                    │
-                         [Kill Switch Watcher]
-                         Monitors adapter status.
-                         If bound interface drops:
-                           1. Pauses all active downloads
-                           2. Sets status: "VPN / Bound interface disconnected"
-                           3. Suspends auto-retry queue
-                           4. Updates GUI status bar badge
-```
-
-### Network Adapter Discovery & Classification
-
-- **`my_idm/network.py:get_available_interfaces()`** uses `psutil.net_if_addrs()` and `psutil.net_if_stats()` to enumerate active network adapters.
-- **VPN Identification**: Heuristic matching checks adapter names against `_VPN_KEYWORDS` (`vpn`, `wireguard`, `wintun`, `nord`, `tap`, `tun`, `tailscale`, `proton`, `mullvad`, `openvpn`, etc.) to automatically badge VPNs with `🛡️ VPN: [Adapter]`.
-
-### Kill Switch Enforcement
-
-1. **State Detection**: `is_interface_active(name, ip)` validates that the adapter exists, is flagged `isup`, and holds its assigned IP address.
-2. **Transfer Interruption**: If the bound interface disappears or disconnects:
-   - Active HTTP connections abort and mark status `"VPN / Bound interface disconnected (Kill switch active)"`.
-   - Libtorrent session stops routing traffic.
-   - `_process_retry_queue()` skips scheduling retries until the adapter returns.
-3. **Status Bar Visual Feedback**: The clickable status bar badge dynamically updates between:
-   - `🌐 Net: Default` (standard routing)
-   - `🛡️ VPN: [Adapter]` (bound and active)
-   - `⚠️ VPN: Disconnected` (traffic halted by kill switch)
-
-### Proxy Integration & Live Connection Prober
-
-- Supports **HTTP** and **SOCKS5** protocols with optional username/password authentication.
-- **Connection Test**: `SettingsDialog._on_test_network()` performs an asynchronous HTTP GET against `https://httpbin.org/ip` using the bound interface address and proxy settings to display the external IP address and verify reachability before saving.
+> [!NOTE]
+> For the complete kill switch state machine, heuristic VPN detection, and proxy testing procedures, refer to the dedicated [**VPN & Network Privacy Architecture**](vpn.md).
 
 ---
 
-## Antivirus & Security Architecture
+## Tor Privacy Subsystem
 
-My-IDM incorporates a two-layer defense system against malware, dangerous scripts, and social engineering attacks:
+My-IDM provides integrated Tor onion routing for maximum privacy:
+- **Tor Service Manager**: Manages background `tor.exe` process lifecycle, automatic binary discovery, and port availability.
+- **Selective Routing**: Configurable routing of HTTP downloads, torrent traffic, or both through local SOCKS5 proxy (`127.0.0.1:9050`).
+- **Startup Gating & Clean Teardown**: Ensures Tor is verified reachable before routing traffic and guarantees background process termination upon application exit.
 
-```
-                  ┌───────────────────────────────┐
-                  │          User Input           │
-                  │ (URL / Magnet / .torrent file)│
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-           [Pre-Download Safety Inspection (URL/Extension)]
-             ├── Dangerous executable/script alert (.exe, .bat, etc.)
-             ├── Deceptive double-extension check (.pdf.exe)
-             ├── Bare IP hosting check
-             └── VirusTotal API online threat lookup (optional)
-                                  │
-                                  ▼
-                        Download Execution
-                    (HTTP segmented / BitTorrent)
-                                  │
-                                  ▼
-             [Post-Download Antivirus Scan (Background)]
-             ├── Status set to 'scanning' (Cyan)
-             ├── Background Daemon Thread (non-blocking)
-             ├── Windows Defender (MpCmdRun.exe) or Custom CLI Scanner
-             │     ├── Clean → Status set to 'completed' (Green)
-             │     └── Threat → Status set to 'threat_detected' (Red)
-             └── Action: Alert user / Quarantine (.quarantine_malware) / Delete
-```
+> [!NOTE]
+> For Tor SOCKS5 routing, daemon lifecycle management, and privacy leak prevention, refer to the dedicated [**Tor Network Privacy Architecture**](tor.md).
 
-### Pre-Download Safety Inspection (`check_url_safety`)
+---
 
-Evaluates the download target before any payload bytes are transferred:
-- **High-Risk Extension Blacklist**: Identifies `.exe`, `.scr`, `.bat`, `.cmd`, `.vbs`, `.js`, `.msi`, `.iso`, `.ps1`, etc.
-- **Deceptive Double Extension Detection**: Flags files where an executable extension follows a document/media extension (e.g., `document.docx.exe`, `invoice.pdf.scr`).
-- **Bare IP Addresses**: Warns if the host is a raw IP without a domain name (frequently used in malware distribution).
-- **VirusTotal API v3 Integration**: Computes SHA-256 of the target URL, queries `/api/v3/urls/{id}`, and checks engine detection statistics.
+## Antivirus & Security Subsystem
 
-### Post-Download Antivirus Scanning (`scan_file`)
+My-IDM implements a two-phase defense model to protect against malicious downloads:
+- **Pre-Download Safety Inspection**: Inspects URLs, double extensions (e.g. `.pdf.exe`), bare IP hosts, and queries online reputation via VirusTotal v3 before writing bytes.
+- **Post-Download Antivirus Scanning**: Automatically triggers asynchronous background scans upon completion using Windows Defender (`MpCmdRun.exe`) or configurable CLI scanners without blocking the UI thread.
+- **Automated Remediation**: Configurable actions on detected threats (alert warning, `.quarantine_malware` isolation, or file deletion).
 
-Upon completion of either HTTP or Torrent downloads:
-- **Non-Blocking Execution**: `DownloadManager._handle_completed_scan()` spawns a daemon thread (`threading.Thread`) so lengthy virus scans never stutter the GUI.
-- **Windows Defender (`MpCmdRun.exe`)**:
-  - Automatically discovered under `C:\Program Files\Windows Defender\MpCmdRun.exe` or `C:\ProgramData\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe`.
-  - Invoked with `-Scan -ScanType 3 -File "<path>" -DisableRemediation`.
-  - Exit code `0` indicates clean; exit code `2` indicates a detected threat.
-- **Custom Antivirus Scanners**: Allows configuring third-party tools (ClamAV, Malwarebytes, ESET) with tokenized argument strings using `%file%`.
-- **Remediation**:
-  - **Warn**: Marks status as `Threat Detected ⚠` (Red) and displays scanner diagnostic details.
-  - **Quarantine**: Safely isolates the file by renaming it with the `.quarantine_malware` extension to prevent accidental execution.
-  - **Delete**: Removes the infected payload from disk.
-- **On-Demand Rescanning**: Users can right-click any completed download in the table and select **🛡️ Scan with Antivirus**.
+> [!NOTE]
+> For scanner discovery logic, command-line arguments, VirusTotal API mechanics, and quarantine formatting, refer to the dedicated [**Antivirus & Security Architecture**](antivirus.md).
+
+---
+
+## Backlog Processing Subsystem
+
+My-IDM supports unattended bulk download ingestion via text-based backlog queues:
+- **Multi-Location Auto-Discovery**: Periodically scans project and user directories for `backlog.txt` files.
+- **Flexible Directive Syntax**: Supports pipe-delimited paths, custom filenames, referer headers, and directory directives.
+- **Auto-Clearing Lifecycle**: Processed lines are atomically cleared on success while failed lines are preserved for manual inspection.
+
+> [!NOTE]
+> For backlog file syntax, multi-directory polling, and line-level persistence rules, refer to the dedicated [**Backlog Processing Architecture**](backlog.md).
 
 ---
 
@@ -630,8 +540,9 @@ QMainWindow (MainWindow)
   ├── QSplitter (central widget, vertical orientation)
   │     ├── QTableView (top pane)
   │     │     ├── Model: DownloadTableModel
-  │     │     ├── Delegate: DownloadNameDelegate (column 1: filename + cyan source domain)
-  │     │     └── Delegate: ProgressBarDelegate (column 2)
+  │     │     ├── Delegate: DownloadNameDelegate (Name column)
+  │     │     ├── Source Domain column (cyan URL hostname)
+  │     │     └── Delegate: ProgressBarDelegate (Progress column)
   │     └── DetailsPanel (bottom pane, collapsible)
   │           ├── Header (Icon, Title, Transfer Type Badge, Open Folder, Close)
   │           └── QTabWidget
@@ -693,19 +604,24 @@ Defined in the `Col` class as integer constants:
 
 ```python
 class Col:
-    NAME = 0         # Filename or URL[:60]
-    SIZE = 1         # humanize.naturalsize(total_size)
-    PROGRESS = 2     # dict → ProgressBarDelegate
-    STATUS = 3       # Capitalized status with color
-    SPEED = 4        # Speed or upload speed
-    ETA = 5          # Estimated time remaining
-    TYPE = 6         # "HTTP" or "TORRENT"
-    SEEDS_PEERS = 7  # "S:5 P:12" or "8 seg"
-    ADDED = 8        # ISO → "YYYY-MM-DD HH:MM"
-    LAST_TRIED = 9   # ISO → "YYYY-MM-DD HH:MM"
-    COMPLETED = 10   # ISO → "YYYY-MM-DD HH:MM"
-    SAVE_PATH = 11   # Directory path
+    QUEUE = 0          # Active queue position
+    NAME = 1           # Filename or URL[:60]
+    SOURCE_DOMAIN = 2  # Extracted URL hostname
+    SIZE = 3           # humanize.naturalsize(total_size)
+    PROGRESS = 4       # dict → ProgressBarDelegate
+    STATUS = 5         # Capitalized status with color
+    SPEED = 6          # Speed or upload speed
+    ETA = 7            # Estimated time remaining
+    SEEDS_PEERS = 8    # "S:5 P:12" or "8 seg"
+    ADDED = 9          # ISO → "YYYY-MM-DD HH:MM"
+    LAST_TRIED = 10    # ISO → "YYYY-MM-DD HH:MM"
+    COMPLETED = 11     # ISO → "YYYY-MM-DD HH:MM"
+    SAVE_PATH = 12     # Directory path
 ```
+
+### Source Domain Column
+
+The `SOURCE_DOMAIN` column displays the hostname extracted from each download URL or magnet tracker/webseed. It is rendered separately from the filename in the `NAME` column, formatted with a cyan foreground role, and supports sorting. The `NAME` column remains dedicated to the filename or fallback URL, while its decoration role provides file-type and Tor routing icons.
 
 ### ProgressBarDelegate
 
@@ -725,18 +641,11 @@ Colors per status:
 - Error → `#da3633` (red)
 - Seeding → `#8957e5` (purple)
 
-### DownloadNameDelegate
-
-The Name column uses `DownloadNameDelegate` (subclass of `QStyledItemDelegate`) to:
-1. Preserve standard selection backgrounds, hover states, and decoration file type / Tor icons.
-2. Render the download filename in standard text color (`#e6edf3`).
-3. Render the source website domain (e.g. `releases.ubuntu.com`, `tracker.opentrackr.org`) at the end in distinct cyan (`#39c5bb`).
-4. Apply intelligent proportional text layout: if the column is narrowed, the filename and domain are trimmed with ellipses (`...`), preserving visibility of both elements.
-
 ### Interactive Table Sorting Architecture
 
 `DownloadTableModel.sort(column, order)` implements data-type-aware comparator logic:
 - **Col.NAME**: Natural case-insensitive string sorting.
+- **Col.SOURCE_DOMAIN**: Case-insensitive hostname sorting.
 - **Col.SIZE**: Numerical comparison based on `entry.total_size` in bytes.
 - **Col.PROGRESS**: Float percentage comparison `entry.progress`.
 - **Col.STATUS**: String comparison of localized status string.

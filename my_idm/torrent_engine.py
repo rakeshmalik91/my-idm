@@ -6,10 +6,11 @@ import logging
 import os
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable, Any
 
-from my_idm.config import TorConfig
+from my_idm.config import TorConfig, TorrentConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.utils import normalize_path
@@ -24,6 +25,8 @@ try:
 except ImportError:
     _HAS_LIBTORRENT = False
     lt = None  # type: ignore
+
+HAS_LIBTORRENT = _HAS_LIBTORRENT
 
 FASTRESUME_DIR = Path.home() / ".my-idm" / "fastresume"
 
@@ -125,12 +128,18 @@ class TorrentEngine:
         self._session: Optional[object] = None  # lt.session
         self._network_config: Optional[NetworkConfig] = None
         self._tor_config: Optional[TorConfig] = None
+        self._torrent_config: Optional[TorrentConfig] = None
+        self._general_config: Optional[object] = None  # GeneralConfig
         self._handles: dict[str, object] = {}   # download_id → lt.torrent_handle
         self._progress_cb: Optional[ProgressCallback] = None
         self._status_cb: Optional[StatusCallback] = None
         self._filename_cb: Optional[Callable[[str, str], None]] = None
         self._running = False
         self._last_active_time: dict[str, float] = {}
+
+    def set_general_config(self, config: object):
+        """Set general configuration for timeout settings."""
+        self._general_config = config
 
     @property
     def available(self) -> bool:
@@ -243,15 +252,56 @@ class TorrentEngine:
     def tor_config(self) -> Optional[TorConfig]:
         return self._tor_config
 
+    @property
+    def torrent_config(self) -> Optional[TorrentConfig]:
+        return self._torrent_config
+
     def apply_tor_config(self, config: TorConfig):
         """Apply Tor SOCKS5 proxy settings to libtorrent if routing torrents."""
         self._tor_config = config
         self._apply_all_settings()
 
+    def apply_torrent_config(self, config: TorrentConfig):
+        """Apply Torrent engine preferences and update active seeding speed limits."""
+        self._torrent_config = config
+        self._apply_seeding_limits()
+
+    def set_torrent_config(self, config: TorrentConfig):
+        """Alias for apply_torrent_config."""
+        self.apply_torrent_config(config)
+
     def apply_network_config(self, config: NetworkConfig):
         """Apply network interface binding and proxy settings to libtorrent."""
         self._network_config = config
         self._apply_all_settings()
+        self._apply_seeding_limits()
+
+    def _apply_seeding_limit_to_handle(self, handle: Any):
+        if not _HAS_LIBTORRENT or not handle:
+            return
+        try:
+            if not handle.is_valid():
+                return
+            if not self._torrent_config:
+                return
+            dl_limit = self._network_config.download_limit if self._network_config else 0
+            limit = self._torrent_config.get_effective_seeding_speed_limit(dl_limit)
+            if limit > 0:
+                handle.set_upload_limit(limit)
+            elif self._network_config and self._network_config.upload_limit > 0:
+                handle.set_upload_limit(self._network_config.upload_limit)
+            else:
+                handle.set_upload_limit(-1)
+        except Exception as exc:
+            log.debug("Failed setting seeding upload limit on handle: %s", exc)
+
+    def _apply_seeding_limits(self):
+        if not _HAS_LIBTORRENT or not self._session or not self._torrent_config:
+            return
+        for download_id, handle in list(self._handles.items()):
+            entry = self._db.get_download(download_id)
+            if entry and entry.status == "seeding":
+                self._apply_seeding_limit_to_handle(handle)
 
     def _apply_all_settings(self):
         if not _HAS_LIBTORRENT or not self._session:
@@ -341,6 +391,7 @@ class TorrentEngine:
             sett["upload_rate_limit"] = int(upload_limit or 0)
             self._session.apply_settings(sett)
             log.info("Applied libtorrent session limits: down=%d, up=%d", download_limit, upload_limit)
+            self._apply_seeding_limits()
         except Exception as exc:
             log.warning("Failed to apply session rate limits: %s", exc)
 
@@ -564,7 +615,7 @@ class TorrentEngine:
 
         if entry.status == "paused":
             try:
-                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
             except Exception:
                 pass
@@ -574,15 +625,15 @@ class TorrentEngine:
                 self._status_cb(entry.id, "paused", "")
         elif entry.status == "completed":
             try:
-                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
             except Exception:
                 pass
             handle.pause()
             # Preserve completed status — do not switch to fetching_metadata
         elif entry.status == "seeding":
-            # Keep seeding active
-            pass
+            # Keep seeding active and apply seeding upload limit
+            self._apply_seeding_limit_to_handle(handle)
         else:
             has_meta = False
             try:
@@ -592,6 +643,10 @@ class TorrentEngine:
                 pass
             initial_status = "downloading" if has_meta else "fetching_metadata"
             self._db.update_status(entry.id, initial_status)
+            if initial_status == "fetching_metadata":
+                if not entry.fetching_metadata_since:
+                    entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                    self._db.update_download(entry)
             if self._status_cb:
                 self._status_cb(entry.id, initial_status, "")
 
@@ -602,7 +657,7 @@ class TorrentEngine:
         handle = self._handles.get(download_id)
         if handle:
             try:
-                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
             except Exception as e:
                 log.debug("Could not unset auto_managed flag on pause: %s", e)
@@ -620,28 +675,86 @@ class TorrentEngine:
         handle = self._handles.get(download_id)
         if handle:
             try:
-                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.set_flags(lt.torrent_flags.auto_managed)
             except Exception as e:
                 log.debug("Could not set auto_managed flag on resume: %s", e)
             handle.resume()
-            self._db.update_status(download_id, "downloading")
+            s = None
+            has_meta = False
+            is_done = False
+            try:
+                if hasattr(handle, "status"):
+                    s = handle.status()
+                    has_meta = getattr(s, "has_metadata", False)
+                    tot = getattr(s, "total_wanted", 0)
+                    tot_done = getattr(s, "total_wanted_done", 0)
+                    if tot > 0 and tot_done >= tot:
+                        is_done = True
+                    elif getattr(s, "is_finished", False) or getattr(s, "is_seeding", False):
+                        is_done = True
+            except Exception:
+                pass
+
+            entry = self._db.get_download(download_id)
+            if not is_done and entry and entry.total_size > 0 and entry.downloaded_size >= entry.total_size:
+                is_done = True
+
+            if is_done:
+                new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
+                if new_status == "seeding":
+                    self._apply_seeding_limit_to_handle(handle)
+            else:
+                new_status = "downloading" if has_meta else "fetching_metadata"
+            self._db.update_status(download_id, new_status)
+            if entry and new_status == "fetching_metadata" and not entry.fetching_metadata_since:
+                entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                self._db.update_download(entry)
             if self._status_cb:
-                self._status_cb(download_id, "downloading", "")
+                self._status_cb(download_id, new_status, "")
 
     def force_start(self, download_id: str):
         """Force start torrent by disabling auto-managed queue limits and resuming immediately."""
         handle = self._handles.get(download_id)
         if handle:
             try:
-                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
             except Exception as e:
                 log.debug("Could not unset auto_managed flag on handle: %s", e)
             handle.resume()
-            self._db.update_status(download_id, "downloading")
+            s = None
+            has_meta = False
+            is_done = False
+            try:
+                if hasattr(handle, "status"):
+                    s = handle.status()
+                    has_meta = getattr(s, "has_metadata", False)
+                    tot = getattr(s, "total_wanted", 0)
+                    tot_done = getattr(s, "total_wanted_done", 0)
+                    if tot > 0 and tot_done >= tot:
+                        is_done = True
+                    elif getattr(s, "is_finished", False) or getattr(s, "is_seeding", False):
+                        is_done = True
+            except Exception:
+                pass
+
+            entry = self._db.get_download(download_id)
+            if not is_done and entry and entry.total_size > 0 and entry.downloaded_size >= entry.total_size:
+                is_done = True
+
+            if is_done:
+                new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
+                if new_status == "seeding":
+                    self._apply_seeding_limit_to_handle(handle)
+            else:
+                new_status = "downloading" if has_meta else "fetching_metadata"
+            self._db.update_status(download_id, new_status)
+            if entry and new_status == "fetching_metadata" and not entry.fetching_metadata_since:
+                entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                self._db.update_download(entry)
             if self._status_cb:
-                self._status_cb(download_id, "downloading", "")
+                self._status_cb(download_id, new_status, "")
 
 
     def remove(self, download_id: str, delete_files: bool = False):
@@ -662,7 +775,7 @@ class TorrentEngine:
             self._db.update_status(download_id, "checking")
             # Ensure the handle is unpaused so checking can proceed
             try:
-                if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.set_flags(lt.torrent_flags.auto_managed)
             except Exception:
                 pass
@@ -898,7 +1011,7 @@ class TorrentEngine:
                 self._db.update_download(entry)
 
             # If download is paused or stopped in DB, make sure torrent handle stays paused and reports 0 speed
-            if entry.status in ("paused", "stopped"):
+            if entry.status in ("paused", "stopped", "suspended"):
                 try:
                     s = handle.status()
                     raw_paused = getattr(s, "paused", None)
@@ -907,7 +1020,7 @@ class TorrentEngine:
                     else:
                         is_paused = bool(getattr(s, "is_paused", False))
                     if not is_paused:
-                        if HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                        if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                             handle.unset_flags(lt.torrent_flags.auto_managed)
                         handle.pause()
                 except Exception:
@@ -915,8 +1028,8 @@ class TorrentEngine:
                 if self._progress_cb:
                     self._progress_cb(
                         download_id,
-                        status["downloaded"],
-                        status["total_size"],
+                        entry.downloaded_size,
+                        entry.total_size,
                         0.0,
                         0.0,
                         status.get("seeds", 0),
@@ -955,28 +1068,57 @@ class TorrentEngine:
                     trackers = self.get_torrent_trackers(download_id)
                     if trackers:
                         entry.metadata["trackers"] = trackers
+                    if not entry.completed_at:
+                        entry.completed_at = datetime.now(timezone.utc).isoformat()
+                    target_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
+                    entry.status = target_status
                     self._db.update_download(entry)
-                    self._db.update_status(download_id, "completed")
+                    self._db.update_status(download_id, target_status)
+                    if target_status == "seeding":
+                        self._apply_seeding_limit_to_handle(handle)
+                    elif target_status == "completed":
+                        try:
+                            if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                                handle.unset_flags(lt.torrent_flags.auto_managed)
+                            handle.pause()
+                        except Exception:
+                            pass
                     if self._status_cb:
-                        self._status_cb(download_id, "completed", "")
+                        self._status_cb(download_id, target_status, "")
                     try:
                         if handle.is_valid():
                             handle.save_resume_data()
                     except Exception:
                         pass
             elif state == "downloading_metadata":
-                if entry.status not in ("fetching_metadata", "completed", "seeding", "paused", "stopped"):
+                if entry.status not in ("fetching_metadata", "completed", "seeding", "paused", "stopped", "suspended"):
                     self._db.update_status(download_id, "fetching_metadata")
+                    if not entry.fetching_metadata_since:
+                        entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                        self._db.update_download(entry)
                     if self._status_cb:
                         self._status_cb(download_id, "fetching_metadata", "")
-            elif entry.status == "fetching_metadata" and (state in ("downloading", "finished", "seeding") or status.get("name")):
-                new_status = "completed" if state in ("finished", "seeding") else "downloading"
+                elif entry.status == "fetching_metadata" and not entry.fetching_metadata_since:
+                    entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                    self._db.update_download(entry)
+            elif entry.status == "fetching_metadata" and (state in ("downloading", "finished", "seeding") or status.get("name") or status["downloaded"] > 0):
+                if state in ("finished", "seeding"):
+                    new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
+                    if new_status == "seeding":
+                        self._apply_seeding_limit_to_handle(handle)
+                else:
+                    new_status = "downloading"
+                entry.status = new_status
+                entry.fetching_metadata_since = ""
+                self._db.update_download(entry)
                 self._db.update_status(download_id, new_status)
                 if self._status_cb:
                     self._status_cb(download_id, new_status, "")
             elif entry.status == "checking" and state not in ("checking_files", "queued_for_checking"):
                 if status["total_size"] > 0 and status["downloaded"] >= status["total_size"]:
-                    new_status = "completed"
+                    new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
+                    if new_status == "seeding":
+                        self._apply_seeding_limit_to_handle(handle)
                 else:
                     try:
                         s = handle.status()
@@ -1015,7 +1157,7 @@ class TorrentEngine:
                 if last_act == 0:
                     self._last_active_time[download_id] = now
                 elif now - last_act > 45.0:
-                    if entry.status not in ("stalled", "paused", "stopped", "completed", "error"):
+                    if entry.status not in ("stalled", "paused", "stopped", "completed", "error", "suspended"):
                         self._db.update_status(download_id, "stalled")
                         if self._status_cb:
                             self._status_cb(download_id, "stalled", "")
@@ -1029,6 +1171,9 @@ class TorrentEngine:
                     self._db.update_status(download_id, "downloading")
                     if self._status_cb:
                         self._status_cb(download_id, "downloading", "")
+
+            # Check for fetching_metadata timeout -> suspend
+            self._check_fetching_metadata_timeout(download_id, entry, status)
 
     # -- details queries -----------------------------------------------------
 
@@ -1295,3 +1440,56 @@ class TorrentEngine:
             log.debug("Saved fastresume for %s", matched_did)
         except Exception as exc:
             log.warning("Failed saving fastresume for %s: %s", matched_did, exc)
+
+    def _check_fetching_metadata_timeout(self, download_id: str, entry: DownloadEntry, status: dict):
+        """Check if torrent has been in fetching_metadata state too long and suspend if needed."""
+        timeout_days = 1
+        if self._torrent_config is not None:
+            timeout_days = getattr(self._torrent_config, "metadata_fetch_timeout_days", 1)
+        elif self._general_config is not None:
+            timeout_days = getattr(self._general_config, "metadata_fetch_timeout_days", 1)
+        else:
+            return
+        
+        if timeout_days <= 0:
+            return
+        
+        # Only check if currently in fetching_metadata state
+        if entry.status != "fetching_metadata":
+            return
+        
+        if not entry.fetching_metadata_since:
+            return
+        
+        try:
+            started_dt = datetime.fromisoformat(entry.fetching_metadata_since)
+            elapsed_days = (datetime.now(timezone.utc) - started_dt).total_seconds() / 86400
+            
+            if elapsed_days >= timeout_days:
+                # Suspend the torrent
+                log.info("Suspending torrent %s after %.1f days in fetching_metadata (timeout: %d days)",
+                         download_id, elapsed_days, timeout_days)
+                
+                # Pause the torrent handle
+                handle = self._handles.get(download_id)
+                if handle:
+                    try:
+                        if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                            handle.unset_flags(lt.torrent_flags.auto_managed)
+                        handle.pause()
+                    except Exception as exc:
+                        log.debug("Failed to pause torrent %s for suspension: %s", download_id, exc)
+                
+                # Update status to suspended and clear queue_order
+                entry.status = "suspended"
+                entry.queue_order = 0
+                entry.fetching_metadata_since = ""
+                self._db.update_download(entry)
+                self._db.update_status(download_id, "suspended")
+                self._db.update_queue_order(download_id, 0)
+                
+                if self._status_cb:
+                    self._status_cb(download_id, "suspended", 
+                                    f"Suspended after {timeout_days} day(s) of fetching metadata")
+        except (ValueError, TypeError) as exc:
+            log.debug("Error parsing fetching_metadata_since for %s: %s", download_id, exc)

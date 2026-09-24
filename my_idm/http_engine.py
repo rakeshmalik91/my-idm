@@ -1025,6 +1025,8 @@ class HTTPEngine:
                     self._db.update_progress(entry.id, file_path.stat().st_size)
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                if cancel_evt.is_set():
+                    return
                 delay = self._get_retry_delay(attempt)
                 log.warning(
                     "Single-stream attempt %d failed: %s — retrying in %.1fs",

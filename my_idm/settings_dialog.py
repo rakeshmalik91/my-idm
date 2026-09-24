@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 import asyncio
 import aiohttp
-from my_idm.config import GeneralConfig, TorConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import GeneralConfig, TorConfig, TorrentConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
 from my_idm.database import Database, APP_DIR
 from my_idm.utils import normalize_path
 from my_idm.tor_service import find_tor_executable
@@ -53,11 +53,12 @@ log = logging.getLogger(__name__)
 
 
 class SettingsDialog(QDialog):
-    """Preferences / Settings dialog for general downloads, network, Tor, and security."""
+    """Preferences / Settings dialog for general downloads, torrent, network, Tor, and security."""
 
     def __init__(
         self,
         general_config: Optional[GeneralConfig] = None,
+        torrent_config: Optional[TorrentConfig] = None,
         network_config: Optional[NetworkConfig] = None,
         security_config: Optional[SecurityConfig] = None,
         tor_config: Optional[TorConfig] = None,
@@ -79,6 +80,11 @@ class SettingsDialog(QDialog):
             GeneralConfig.from_dict(general_config.to_dict())
             if general_config
             else GeneralConfig.load()
+        )
+        self._torrent_cfg = (
+            TorrentConfig.from_dict(torrent_config.to_dict())
+            if torrent_config
+            else TorrentConfig.load()
         )
         self._network_cfg = (
             NetworkConfig.from_dict(network_config.to_dict())
@@ -199,6 +205,7 @@ class SettingsDialog(QDialog):
 
         # Tabs
         self._tabs.addTab(self._wrap_scrollable(self._create_general_tab()), "📁 General && Downloads")
+        self._tabs.addTab(self._wrap_scrollable(self._create_torrent_tab()), "🧲 BitTorrent")
         self._tabs.addTab(self._wrap_scrollable(self._create_network_tab()), "🌐 Network && VPN")
         self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor Network")
         self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus && Security")
@@ -423,6 +430,80 @@ class SettingsDialog(QDialog):
         self._backlog_poll_cb.toggled.connect(self._backlog_poll_spin.setEnabled)
 
         layout.addWidget(backlog_group)
+        layout.addStretch()
+        return tab
+
+    def _create_torrent_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        # 1. Seeding & State Configuration
+        seeding_group = QGroupBox("BitTorrent Seeding & State")
+        seeding_layout = QVBoxLayout(seeding_group)
+        seeding_layout.setSpacing(10)
+
+        self._seeding_after_complete_cb = QCheckBox(
+            "🌱 Continue seeding torrent after download finishes"
+        )
+        self._seeding_after_complete_cb.setToolTip(
+            "When checked, completed torrents automatically transition into the 'seeding' state "
+            "rather than stopping immediately."
+        )
+        seeding_layout.addWidget(self._seeding_after_complete_cb)
+
+        speed_row = QHBoxLayout()
+        speed_lbl = QLabel("Maximum upload / seeding speed limit:")
+        speed_row.addWidget(speed_lbl, 1)
+        self._max_seeding_speed_spin = QSpinBox()
+        self._max_seeding_speed_spin.setRange(0, 10_000_000)
+        self._max_seeding_speed_spin.setSingleStep(10)
+        self._max_seeding_speed_spin.setSuffix(" KB/s")
+        self._max_seeding_speed_spin.setSpecialValueText("Unlimited (0 KB/s)")
+        self._max_seeding_speed_spin.setToolTip(
+            "Cap the seeding upload speed in KB/s. Set to 0 for unlimited speed."
+        )
+        speed_row.addWidget(self._max_seeding_speed_spin)
+        seeding_layout.addLayout(speed_row)
+
+        ratio_row = QHBoxLayout()
+        ratio_lbl = QLabel("Download to seeding speed ratio:")
+        ratio_row.addWidget(ratio_lbl, 1)
+        self._seeding_ratio_spin = QDoubleSpinBox()
+        self._seeding_ratio_spin.setRange(0.1, 100.0)
+        self._seeding_ratio_spin.setSingleStep(0.5)
+        self._seeding_ratio_spin.setSuffix(" : 1")
+        self._seeding_ratio_spin.setToolTip(
+            "Ratio of download speed to seeding speed (e.g. 2.0 = 2:1 ratio).\n"
+            "When a global download limit is configured, seeding upload limit is derived as:\n"
+            "download limit / ratio."
+        )
+        ratio_row.addWidget(self._seeding_ratio_spin)
+        seeding_layout.addLayout(ratio_row)
+
+        layout.addWidget(seeding_group)
+
+        # 2. Metadata Fetching & Timeouts
+        meta_group = QGroupBox("Metadata Fetching & Timeouts")
+        meta_layout = QVBoxLayout(meta_group)
+        meta_layout.setSpacing(10)
+
+        meta_row = QHBoxLayout()
+        meta_lbl = QLabel("Auto-suspend BitTorrent after stuck in metadata fetch:")
+        meta_row.addWidget(meta_lbl, 1)
+        self._metadata_timeout_spin = QSpinBox()
+        self._metadata_timeout_spin.setRange(0, 365)
+        self._metadata_timeout_spin.setSingleStep(1)
+        self._metadata_timeout_spin.setSuffix(" day(s)")
+        self._metadata_timeout_spin.setToolTip(
+            "If a BitTorrent magnet link stays stuck fetching metadata longer than "
+            "this many days, it is automatically suspended. Set to 0 to disable."
+        )
+        meta_row.addWidget(self._metadata_timeout_spin)
+        meta_layout.addLayout(meta_row)
+
+        layout.addWidget(meta_group)
         layout.addStretch()
         return tab
 
@@ -754,6 +835,12 @@ class SettingsDialog(QDialog):
         self._on_retry_exp_toggled(self._general_cfg.retry_exponential_backoff)
         self._auto_resume_cb.setChecked(self._general_cfg.auto_resume_startup)
         self._notify_cb.setChecked(self._general_cfg.notify_on_completion)
+
+        # BitTorrent tab
+        self._seeding_after_complete_cb.setChecked(self._torrent_cfg.seeding_after_complete)
+        self._max_seeding_speed_spin.setValue(self._torrent_cfg.max_seeding_speed)
+        self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
+        self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
 
         # Backlog locations
         self._backlog_list.clear()
@@ -1113,6 +1200,7 @@ class SettingsDialog(QDialog):
         self._general_cfg.retry_max_delay = float(self._retry_max_delay_spin.value())
         self._general_cfg.auto_resume_startup = self._auto_resume_cb.isChecked()
         self._general_cfg.notify_on_completion = self._notify_cb.isChecked()
+        self._general_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
         locs = [self._backlog_list.item(i).text().strip() for i in range(self._backlog_list.count())]
         self._general_cfg.backlog_locations = [l for l in locs if l]
         self._general_cfg.clear_backlog_after_load = self._clear_backlog_cb.isChecked()
@@ -1120,7 +1208,14 @@ class SettingsDialog(QDialog):
         self._general_cfg.backlog_poll_interval = self._backlog_poll_spin.value()
         self._general_cfg.save()
 
-        # 2. Collect Network settings
+        # 2. Collect BitTorrent settings
+        self._torrent_cfg.seeding_after_complete = self._seeding_after_complete_cb.isChecked()
+        self._torrent_cfg.max_seeding_speed = self._max_seeding_speed_spin.value()
+        self._torrent_cfg.download_to_seeding_ratio = self._seeding_ratio_spin.value()
+        self._torrent_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
+        self._torrent_cfg.save()
+
+        # 3. Collect Network settings
         idx = self._iface_combo.currentIndex()
         if idx > 0 and idx - 1 < len(self._interfaces):
             self._network_cfg.interface_name = self._interfaces[idx - 1].name
@@ -1138,7 +1233,7 @@ class SettingsDialog(QDialog):
         self._network_cfg.proxy_password = self._proxy_pass_edit.text()
         self._network_cfg.save()
 
-        # 3. Collect Security settings
+        # 4. Collect Security settings
         self._security_cfg.scan_before_download = self._scan_before_cb.isChecked()
         self._security_cfg.warn_high_risk_extensions = self._warn_ext_cb.isChecked()
         self._security_cfg.block_dangerous_urls = self._block_dangerous_cb.isChecked()
@@ -1161,7 +1256,7 @@ class SettingsDialog(QDialog):
         self._security_cfg.ignored_threat_patterns = ""
         self._security_cfg.save()
 
-        # 4. Collect Tor settings
+        # 5. Collect Tor settings
         self._tor_cfg.enabled = self._tor_enable_cb.isChecked()
         self._tor_cfg.auto_start_at_startup = self._tor_autostart_cb.isChecked()
         self._tor_cfg.route_http = self._tor_route_http_cb.isChecked()
@@ -1176,6 +1271,10 @@ class SettingsDialog(QDialog):
     @property
     def general_config(self) -> GeneralConfig:
         return self._general_cfg
+
+    @property
+    def torrent_config(self) -> TorrentConfig:
+        return self._torrent_cfg
 
     @property
     def network_config(self) -> NetworkConfig:

@@ -5,12 +5,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
-from PySide6.QtCore import Qt, QModelIndex
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QTableView
 
 from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import DownloadTableModel, Col
-from my_idm.delegates import DownloadNameDelegate, ProgressBarDelegate
+from my_idm.delegates import ProgressBarDelegate
 from my_idm.manager import DownloadManager
 from my_idm.main_window import MainWindow
 
@@ -57,9 +57,11 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(Col.QUEUE, 0)
         self.assertEqual(Col.HEADERS[Col.QUEUE], "#")
         self.assertEqual(Col.NAME, 1)
-        self.assertEqual(Col.SIZE, 2)
-        self.assertEqual(Col.PROGRESS, 3)
-        self.assertEqual(Col.STATUS, 4)
+        self.assertEqual(Col.SOURCE_DOMAIN, 2)
+        self.assertEqual(Col.HEADERS[Col.SOURCE_DOMAIN], "Source Domain")
+        self.assertEqual(Col.SIZE, 3)
+        self.assertEqual(Col.PROGRESS, 4)
+        self.assertEqual(Col.STATUS, 5)
 
     def test_queue_column_display_and_alignment(self):
         """Queue column displays 1-based order for active downloads and empty for completed."""
@@ -426,92 +428,68 @@ class TestMainWindowSortingIntegration(unittest.TestCase):
         self.assertEqual(self.win._table.horizontalHeader().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
 
 
-class TestDownloadNameDelegate(unittest.TestCase):
-    """Tests for DownloadNameDelegate: text layout, domain display, and trimming."""
-
-    def setUp(self):
-        self.delegate = DownloadNameDelegate()
-
-    def test_model_user_role_returns_domain(self):
-        """DownloadTableModel returns extracted domain under UserRole for Col.NAME."""
+class TestSourceDomainColumn(unittest.TestCase):
+    def test_source_domain_is_separate_from_name(self):
         model = DownloadTableModel()
-        e1 = DownloadEntry(
+        entry = DownloadEntry(
             id="e1",
             url="https://releases.ubuntu.com/noble/ubuntu-24.04.iso",
             filename="ubuntu-24.04.iso",
         )
-        e2 = DownloadEntry(
-            id="e2",
-            url="magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=Debian&tr=http%3A%2F%2Ftracker.debian.org%3A80%2Fannounce",
-            filename="Debian",
-        )
-        e3 = DownloadEntry(
-            id="e3",
-            url="C:/local/file.iso",
-            filename="file.iso",
-        )
-        model.load_entries([e1, e2, e3])
+        model.load_entries([entry])
 
-        self.assertEqual(model.data(model.index(0, Col.NAME), Qt.ItemDataRole.UserRole), "releases.ubuntu.com")
-        self.assertEqual(model.data(model.index(1, Col.NAME), Qt.ItemDataRole.UserRole), "tracker.debian.org")
-        self.assertEqual(model.data(model.index(2, Col.NAME), Qt.ItemDataRole.UserRole), "")
-
-    def test_layout_texts_wide_width(self):
-        """Wide available width displays full filename and full domain."""
-        from PySide6.QtGui import QFont, QFontMetrics
-        fm = QFontMetrics(QFont("Segoe UI", 10))
-        name, domain = self.delegate._layout_texts(
-            "ubuntu.iso", "releases.ubuntu.com", 600, fm, 8
+        name = model.data(model.index(0, Col.NAME), Qt.ItemDataRole.DisplayRole)
+        domain = model.data(
+            model.index(0, Col.SOURCE_DOMAIN), Qt.ItemDataRole.DisplayRole
         )
-        self.assertEqual(name, "ubuntu.iso")
+
+        self.assertEqual(name, "ubuntu-24.04.iso")
         self.assertEqual(domain, "releases.ubuntu.com")
-
-    def test_layout_texts_narrow_width_elides_filename_first(self):
-        """Medium/narrow width trims filename with ellipses while keeping domain intact."""
-        from PySide6.QtGui import QFont, QFontMetrics
-        fm = QFontMetrics(QFont("Segoe UI", 10))
-        name, domain = self.delegate._layout_texts(
-            "ubuntu-24.04-desktop-amd64.iso", "releases.ubuntu.com", 250, fm, 8
+        self.assertEqual(
+            model.data(model.index(0, Col.SOURCE_DOMAIN), Qt.ItemDataRole.UserRole),
+            "releases.ubuntu.com",
         )
-        self.assertTrue(name.endswith("…") or name.endswith("..."))
-        self.assertEqual(domain, "releases.ubuntu.com")
 
-    def test_layout_texts_very_narrow_width_elides_both(self):
-        """Very narrow width trims both filename and domain with ellipses."""
-        from PySide6.QtGui import QFont, QFontMetrics
-        fm = QFontMetrics(QFont("Segoe UI", 10))
-        name, domain = self.delegate._layout_texts(
-            "ubuntu-24.04-desktop-amd64.iso", "releases.ubuntu.com", 140, fm, 8
-        )
-        self.assertTrue(name.endswith("…") or name.endswith("..."))
-        self.assertTrue(domain.endswith("…") or domain.endswith("..."))
-
-    def test_paint_renders_without_text_overlap(self):
-        """paint() clears opt.text before style.drawControl to ensure single-pass rendering without overlap."""
-        from PySide6.QtGui import QImage, QPainter
-        from PySide6.QtWidgets import QStyleOptionViewItem
-        from PySide6.QtCore import QRect
-
+    def test_source_domain_sorting(self):
         model = DownloadTableModel()
-        e = DownloadEntry(
-            id="e_test",
-            url="https://releases.ubuntu.com/noble/ubuntu-24.04.iso",
-            filename="ubuntu-24.04.iso",
+        model.load_entries([
+            DownloadEntry(
+                id="e1",
+                url="https://beta.example.org/file.iso",
+                filename="file.iso",
+            ),
+            DownloadEntry(
+                id="e2",
+                url="https://alpha.example.com/file.iso",
+                filename="file.iso",
+            ),
+        ])
+
+        model.sort(Col.SOURCE_DOMAIN, Qt.SortOrder.AscendingOrder)
+
+        self.assertEqual(
+            [model.data(model.index(row, Col.SOURCE_DOMAIN)) for row in range(2)],
+            ["alpha.example.com", "beta.example.org"],
         )
-        model.load_entries([e])
 
-        table = QTableView()
-        table.setModel(model)
+    def test_source_domain_is_empty_for_local_paths(self):
+        model = DownloadTableModel()
+        model.load_entries([
+            DownloadEntry(id="e1", url="C:/Downloads/file.iso", filename="file.iso")
+        ])
 
-        img = QImage(300, 30, QImage.Format.Format_ARGB32)
-        painter = QPainter(img)
-        opt = QStyleOptionViewItem()
-        opt.widget = table
-        opt.rect = QRect(0, 0, 300, 30)
-
-        # Should execute cleanly without errors or double-rendering
-        self.delegate.paint(painter, opt, model.index(0, Col.NAME))
-        painter.end()
+        self.assertEqual(
+            model.data(model.index(0, Col.SOURCE_DOMAIN)),
+            "",
+        )
+        self.assertEqual(
+            model.data(model.index(0, Col.SOURCE_DOMAIN), Qt.ItemDataRole.UserRole),
+            "",
+        )
+        foreground = model.data(
+            model.index(0, Col.SOURCE_DOMAIN), Qt.ItemDataRole.ForegroundRole
+        )
+        self.assertEqual(foreground.name(), "#39c5bb")
 
 
 class TestStoppedStatusDisplay(unittest.TestCase):
@@ -523,12 +501,12 @@ class TestStoppedStatusDisplay(unittest.TestCase):
         self.model = DownloadTableModel()
 
     def test_stopped_status_display_text(self):
-        """Stopped status should show 'Stopped ⏹'."""
+        """Stopped status should show 'Stopped'."""
         entry = _make_entry("d_stopped_1", "file.zip", status="stopped")
         self.model.load_entries([entry])
         idx = self.model.index(0, Col.STATUS)
         text = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
-        self.assertEqual(text, "Stopped ⏹")
+        self.assertEqual(text, "Stopped")
 
     def test_stopped_status_no_queue_number(self):
         """Stopped downloads should not show a queue number."""

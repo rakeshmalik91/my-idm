@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from PySide6.QtCore import QModelIndex, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
@@ -13,6 +16,84 @@ from PySide6.QtWidgets import (
 )
 
 from my_idm.styles import Colors
+from my_idm.utils import normalize_path
+
+
+def _shorten_path(path: str, max_width: int, font_metrics: QFontMetrics) -> str:
+    """Shorten a path to fit within max_width, prioritizing leaf nodes.
+
+    The leaf folder (last component) is always kept visible; earlier parts are
+    collapsed into an ellipsis marker. As the column narrows further the leaf
+    itself is elided, then finally only the drive/root marker is shown.
+
+    Examples:
+        "C:/Users/Name/Downloads/Movies" -> "C:/…/Movies" (when narrow)
+        "C:/Users/Name/Downloads/Movies" -> "C:/…/Down…" (when leaf too long)
+        "C:/Users/Name/Downloads/Movies" -> "C:/…" (when very narrow)
+        "/home/user/Downloads/Movies" -> ".../Movies" (when narrow)
+    """
+    if not path:
+        return ""
+
+    path = normalize_path(path)
+    if font_metrics.horizontalAdvance(path) <= max_width:
+        return path
+
+    # Split into parts
+    parts = [p for p in Path(path).parts if p]
+    if not parts:
+        return path
+
+    # Check if first part is a drive letter (Windows: "C:", "C:\", "D:", etc.)
+    has_drive = len(parts) > 0 and len(parts[0]) >= 2 and parts[0][1] == ':' and parts[0][0].isalpha()
+    drive_letter = parts[0].rstrip('\\/') if has_drive else ""  # Normalize to "C:"
+    path_parts = parts[1:] if has_drive else parts
+
+    ellipsis = "…"
+    ellipsis_width = font_metrics.horizontalAdvance(ellipsis)
+
+    # When there are path components beyond the root, prioritize the leaf.
+    if path_parts:
+        leaf = path_parts[-1]
+
+        # Try keeping the leaf plus an increasing number of parent parts,
+        # collapsing the omitted prefix with an ellipsis marker.
+        for n in (1, 2, 3):
+            if n > len(path_parts):
+                break
+            tail = path_parts[-n:]
+            if has_drive:
+                candidate = f"{drive_letter}/{ellipsis}/{'/'.join(tail)}"
+            else:
+                candidate = f"{ellipsis}/{'/'.join(tail)}"
+            if font_metrics.horizontalAdvance(candidate) <= max_width:
+                return candidate
+
+        # The leaf itself is too long: keep the drive/root marker and elide the
+        # leaf so it still renders (e.g. "C:/…/Down…") instead of dropping to just
+        # the drive letter (e.g. "C:").
+        if has_drive:
+            prefix = f"{drive_letter}/{ellipsis}/"
+        else:
+            prefix = f"{ellipsis}/"
+        prefix_width = font_metrics.horizontalAdvance(prefix)
+        leaf_space = max_width - prefix_width
+        if leaf_space >= ellipsis_width:
+            return prefix + font_metrics.elidedText(
+                leaf, Qt.TextElideMode.ElideRight, leaf_space
+            )
+
+        # Very narrow: drop the leaf entirely, keep the drive/root marker.
+        if has_drive:
+            short = f"{drive_letter}/{ellipsis}"
+        else:
+            short = ellipsis
+        if font_metrics.horizontalAdvance(short) <= max_width:
+            return short
+
+    # No path components beyond the root (root-only path): elide the root.
+    root = drive_letter if has_drive else path
+    return font_metrics.elidedText(root, Qt.TextElideMode.ElideRight, max_width)
 
 
 class ProgressBarDelegate(QStyledItemDelegate):
@@ -32,6 +113,7 @@ class ProgressBarDelegate(QStyledItemDelegate):
         "fetching_metadata": QColor(Colors.CYAN),
         "file_not_found":    QColor(Colors.RED),
         "stalled":           QColor(Colors.ORANGE),
+        "suspended":         QColor(Colors.TEXT_DIM),
     }
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
@@ -107,86 +189,51 @@ class ProgressBarDelegate(QStyledItemDelegate):
 
 
 class DownloadNameDelegate(QStyledItemDelegate):
-    """Renders the download filename along with its source domain in a different color at the end."""
+    """Renders the filename while preserving its decoration and Tor indicator."""
 
-    _DOMAIN_COLOR = QColor(Colors.CYAN)
-
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index: QModelIndex):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
-
-        name = opt.text
-        domain = index.data(Qt.ItemDataRole.UserRole) or ""
+        if not opt.icon.isNull() and opt.text.startswith("🧅 "):
+            opt.text = opt.text[2:].lstrip()
 
         widget = opt.widget
         style = widget.style() if widget else QApplication.style()
-
-        # Draw panel background (selection, hover) and decoration icon only (without text)
-        # Note: Do not call super().paint as it re-invokes initStyleOption and draws text
-        opt.text = ""
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
 
-        if not name:
+
+class SavePathDelegate(QStyledItemDelegate):
+    """Renders the save path with intelligent shortening that prioritizes leaf nodes."""
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index: QModelIndex):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        
+        # Get the full path from the model
+        full_path = opt.text
+        if not full_path:
+            super().paint(painter, opt, index)
             return
+        
+        # Calculate available width (with some padding)
+        padding = 8
+        max_width = opt.rect.width() - padding
+        
+        # Shorten the path
+        font_metrics = QFontMetrics(opt.font)
+        shortened = _shorten_path(full_path, max_width, font_metrics)
+        
+        # Update the text to display
+        opt.text = shortened
+        
+        widget = opt.widget
+        style = widget.style() if widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
 
-        if not opt.icon.isNull() and name.startswith("🧅 "):
-            name = name[2:].lstrip()
-
-        text_rect: QRect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, widget)
-        if text_rect.width() <= 0:
-            text_rect = option.rect.adjusted(24, 0, -4, 0)
-
-        avail_w = text_rect.width()
-        if avail_w <= 10:
-            return
-
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setFont(opt.font)
-        fm = QFontMetrics(opt.font)
-        gap = 8
-
-        elided_name, elided_domain = self._layout_texts(name, domain, avail_w, fm, gap)
-        text_flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-
-        # Draw filename in standard text color
-        name_w = fm.horizontalAdvance(elided_name)
-        name_rect = QRect(text_rect.x(), text_rect.y(), name_w + 4, text_rect.height())
-        painter.setPen(QPen(QColor(Colors.TEXT)))
-        painter.drawText(name_rect, text_flags, elided_name)
-
-        # Draw source domain at end in cyan
-        if elided_domain:
-            dom_x = text_rect.x() + name_w + gap
-            dom_w = fm.horizontalAdvance(elided_domain)
-            dom_rect = QRect(dom_x, text_rect.y(), dom_w + 4, text_rect.height())
-            painter.setPen(QPen(self._DOMAIN_COLOR))
-            painter.drawText(dom_rect, text_flags, elided_domain)
-
-        painter.restore()
-
-    def _layout_texts(self, name: str, domain: str, avail_w: int, fm: QFontMetrics, gap: int) -> tuple[str, str]:
-        if not domain:
-            return fm.elidedText(name, Qt.TextElideMode.ElideRight, avail_w), ""
-
-        name_w = fm.horizontalAdvance(name)
-        dom_w = fm.horizontalAdvance(domain)
-        if name_w + gap + dom_w <= avail_w:
-            return name, domain
-
-        # If full domain fits leaving reasonable space for filename (>= 80px), keep full domain
-        if avail_w - dom_w - gap >= 80:
-            elided_name = fm.elidedText(name, Qt.TextElideMode.ElideRight, avail_w - dom_w - gap)
-            return elided_name, domain
-
-        # Under tighter space, allocate proportionately
-        dom_avail = min(dom_w, max(int(avail_w * 0.4), 45))
-        avail_for_name = max(avail_w - gap - dom_avail, 35)
-        elided_name = fm.elidedText(name, Qt.TextElideMode.ElideRight, avail_for_name)
-        actual_dom_avail = avail_w - fm.horizontalAdvance(elided_name) - gap
-        if actual_dom_avail >= 25:
-            elided_domain = fm.elidedText(domain, Qt.TextElideMode.ElideRight, actual_dom_avail)
-        else:
-            elided_domain = ""
-            elided_name = fm.elidedText(name, Qt.TextElideMode.ElideRight, avail_w)
-        return elided_name, elided_domain
+    def sizeHint(self, option: QStyleOptionViewItem,
+                 index: QModelIndex):
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), 28))
+        return size

@@ -42,7 +42,7 @@ class DownloadEntry:
     file_path: str = ""          # full path to file
     total_size: int = 0
     downloaded_size: int = 0
-    status: str = "queued"       # queued | downloading | paused | completed | error | seeding | stopped
+    status: str = "queued"       # queued | downloading | paused | completed | error | seeding | stopped | suspended
     download_type: str = "http"  # http | torrent
     num_segments: int = 8
     error_message: str = ""
@@ -56,6 +56,7 @@ class DownloadEntry:
     torrent_info_hash: str = ""
     metadata_json: str = "{}"
     queue_order: int = 0
+    fetching_metadata_since: str = ""  # ISO timestamp when fetching_metadata started
 
     # --- transient (not stored in DB) ---
     speed: float = 0.0
@@ -147,7 +148,7 @@ _DOWNLOAD_DB_COLUMNS = [
     "num_segments", "error_message", "retry_count", "max_retries",
     "added_at", "last_tried_at", "completed_at",
     "etag", "content_hash", "torrent_info_hash", "metadata_json",
-    "queue_order",
+    "queue_order", "fetching_metadata_since",
 ]
 
 _SEGMENT_DB_COLUMNS = [
@@ -205,7 +206,8 @@ class Database:
                 content_hash    TEXT NOT NULL DEFAULT '',
                 torrent_info_hash TEXT NOT NULL DEFAULT '',
                 metadata_json   TEXT NOT NULL DEFAULT '{}',
-                queue_order     INTEGER NOT NULL DEFAULT 0
+                queue_order     INTEGER NOT NULL DEFAULT 0,
+                fetching_metadata_since TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS segments (
@@ -237,6 +239,8 @@ class Database:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN torrent_info_hash TEXT NOT NULL DEFAULT ''")
         if "metadata_json" not in cols:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+        if "fetching_metadata_since" not in cols:
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN fetching_metadata_since TEXT NOT NULL DEFAULT ''")
 
         # Create indexes after ensuring columns exist
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")
@@ -383,6 +387,24 @@ class Database:
             "SELECT * FROM downloads WHERE torrent_info_hash = ?", (info_hash,)
         ).fetchone()
         return self._row_to_entry(row) if row else None
+
+    def get_recent_save_paths(self, limit: int = 5) -> list[str]:
+        """Get the most recent unique save paths ordered by added_at DESC."""
+        rows = self._conn.execute(
+            """
+            SELECT save_path
+            FROM (
+                SELECT save_path, MAX(added_at) as max_added
+                FROM downloads
+                WHERE save_path IS NOT NULL AND save_path != ''
+                GROUP BY save_path
+            )
+            ORDER BY max_added DESC
+            LIMIT ?
+            """,
+            (limit,)
+        ).fetchall()
+        return [normalize_path(r["save_path"]) for r in rows if r["save_path"]]
 
     def delete_download(self, download_id: str):
         self._conn.execute("DELETE FROM downloads WHERE id = ?", (download_id,))

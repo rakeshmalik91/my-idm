@@ -32,19 +32,20 @@ def _get_icon(emoji: str):
 class Col:
     QUEUE = 0
     NAME = 1
-    SIZE = 2
-    PROGRESS = 3
-    STATUS = 4
-    SPEED = 5
-    ETA = 6
-    SEEDS_PEERS = 7
-    ADDED = 8
-    LAST_TRIED = 9
-    COMPLETED = 10
-    SAVE_PATH = 11
+    SOURCE_DOMAIN = 2
+    SIZE = 3
+    PROGRESS = 4
+    STATUS = 5
+    SPEED = 6
+    ETA = 7
+    SEEDS_PEERS = 8
+    ADDED = 9
+    LAST_TRIED = 10
+    COMPLETED = 11
+    SAVE_PATH = 12
 
     HEADERS = [
-        "#", "Name", "Size", "Progress", "Status", "Speed", "ETA",
+        "#", "Name", "Source Domain", "Size", "Progress", "Status", "Speed", "ETA",
         "Seeds / Peers", "Added", "Last Tried", "Completed",
         "Save Path",
     ]
@@ -65,6 +66,7 @@ _STATUS_COLORS = {
     "file_not_found":    QColor(Colors.RED),
     "stalled":           QColor(Colors.ORANGE),
     "stopped":           QColor(Colors.RED),
+    "suspended":         QColor(Colors.TEXT_DIM),
 }
 
 ACTIVE_QUEUE_STATUSES = {
@@ -108,6 +110,7 @@ STATUS_FILTER_GROUPS: dict[str, set[str]] = {
     "queued": {"queued"},
     "paused": {"paused"},
     "stopped": {"stopped"},
+    "suspended": {"suspended"},
     "completed": {"completed"},
     "seeding": {"seeding"},
     "error": {"error", "threat_detected", "file_not_found"},
@@ -118,6 +121,7 @@ STATUS_FILTER_LABELS: dict[str, str] = {
     "queued": "Queued",
     "paused": "Paused",
     "stopped": "Stopped",
+    "suspended": "Suspended",
     "completed": "Completed",
     "seeding": "Seeding",
     "error": "Error",
@@ -378,6 +382,9 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.NAME:
             return (entry.filename or entry.url or "").lower()
+
+        if col == Col.SOURCE_DOMAIN:
+            return extract_source_domain(entry.url).lower()
 
         if col == Col.SIZE:
             return entry.total_size if entry.total_size > 0 else -1
@@ -765,6 +772,8 @@ class DownloadTableModel(QAbstractTableModel):
                 if self.is_tor_active_for(entry):
                     return QColor(Colors.PURPLE)
                 return _STATUS_COLORS.get(entry.status, QColor(Colors.TEXT))
+            if col == Col.SOURCE_DOMAIN:
+                return QColor(Colors.CYAN)
 
         if role == Qt.ItemDataRole.ToolTipRole:
             is_tor = self.is_tor_active_for(entry)
@@ -783,7 +792,7 @@ class DownloadTableModel(QAbstractTableModel):
                     return f"Active Tor Transfer: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
 
         if role == Qt.ItemDataRole.UserRole:
-            if col == Col.NAME:
+            if col == Col.SOURCE_DOMAIN:
                 return extract_source_domain(entry.url)
 
         return None
@@ -815,6 +824,9 @@ class DownloadTableModel(QAbstractTableModel):
                 return f"🧅 {raw_name}"
             return raw_name
 
+        if col == Col.SOURCE_DOMAIN:
+            return extract_source_domain(entry.url)
+
         if col == Col.SIZE:
             if entry.total_size > 0:
                 return humanize.naturalsize(entry.total_size, binary=True)
@@ -840,7 +852,7 @@ class DownloadTableModel(QAbstractTableModel):
             if entry.status == "stalled":
                 return "Stalled"
             if entry.status == "stopped":
-                return "Stopped ⏹"
+                return "Stopped"
             s = entry.status.capitalize()
             if entry.status == "error" and entry.error_message:
                 s += f" ⚠"

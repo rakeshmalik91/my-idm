@@ -57,7 +57,7 @@ commit after each features or set of fixes/enhancements
 - [x] Add Download should also accept multiple URLs, one per line. make the textbox multiline
 - [x] Add support to change the root file or folder name of a Torrent/HTTP download (at any point of time, during download or after completion)
 - [x] If a torrent or HTTP download is already completed, dont try to fetch metadata when clicked on it. Leave it as it is unless recheck/force-start etc.
-- [x] In name column, show source website domain in different colour (at end, trim with ellipses if too long)
+- [x] show source website domain in a separate column with a distinct colour
 - [x] seed/peer data isnt showing up in the seed/peer column or details panel anymore
 - [x] Add a stop button that puts a download to Stopped state, that dis never retried unless manually resumed, and not considered as active, doesnt have an order number
 - [x] Add filters over Status & Name (for Type) columns. A filter icon on header that opens a opoup for multiselect. 
@@ -66,16 +66,34 @@ commit after each features or set of fixes/enhancements
 - [x] deleting files should move to trash, verify it is the behaviour
 - [x] Add startup splash screen with loading progress, logo, and stage indicators
 - [x] make retry exponential and configurable
+- [x] Torrent in fetching_metadata for > configurable day should go to Suspended
 - [x] window is always placed a bit below compared to last launch
 - [x] column filter button is blocking column resize trigger area. filter button is on right, and dropdown is on left
 - [x] there are 2 column sort buttons overlapping
 - [x] make the white part of app logo transparent
+- [x] why are the images in 2 places, assets and my_idm/resources
 - [x] make the horizontal scroll smooth, instead of snapping on colum start/end
 - [x] move the retry configuration in preferences to a seperate group
+- [x] in move & add download popup: suggest last 5 unique folders where files were moved
+- [x] move source domain to a seperate column instead of Name
+- [x] in Save Path column, when resized, change shortning logic to prioritize leaf nodes. eg "D:/.../Folder", "D:/.../Fol...", "D:/..."
+- [x] add a reset view button under Manu > View, to reset columns/filters/sorting/width etc
+- [x] in delete download popup, preselct the delete file checkbox
+- [x] remove the emoji for Stopped status
+
+----------------------
+### Torrent
+- [x] UNVERIFIED - Torrent in "fetching metadata" state for more than 1 (configurable) day should go to Suspended state. Suspended state shouldnt be considered active, shouldnt have an order. timer calculation should be regardless of app restart. Manual resume or successful progress should reset the timer.
+- [x] for completed torrents, in details panel, files are showing Pending status
+- [x] double clicking a file in details panel should open it
+- [x] max parallel download limit not working, ones that are limited should be in queued state and not downloading. queued ones should automatically move to downloading when another one finishes/paused/stopped/deleted etc or limit is increased. verify ordering, last added download should be processed last. order 1 is for high priority, higher number for lower priority. downloads sometimes progressing even in paused state.
+- [x] after successful download torrent should go to seeding state. make max seeding speed and download to seeedin g speed ration configurable in preferences
+- [x] seperate torrent specific preferences to seperate tab in preferences window
+- [ ] store seeders, trackers, file hierarchy details in db
 
 ----------------------
 ### Tor Support
-- [x] add support for activating tor, add as a button in toolbar. 
+- [ ] UNVERIFIED - add support for activating tor, add as a button in toolbar. 
   - [x] make what to run inside tor configurable in settings, usual download or torrent etc. 
   - [x] make whether to activate tor at startup or not configurable too. configurable
   - [x] when exiting with tor on, stop it and exit
@@ -83,7 +101,6 @@ commit after each features or set of fixes/enhancements
   - [x] fix progressbar glitch when tor is turned on/off during download
   - [x] while connecting or disconnecting tor, show a progressbar on both toolbar and footer tor buttons. when ON make the buttons green.
   - [x] before tor start/stop pause all ongoing downloads, and resume on tor stop/start. ensure switching works seemslessly and doesnt mess up downloads data.
-  - [ ] to verify tor connectivity is actually working as expected
   - [x] to verify what happens if another instance of tor or tor browser running in parallel
 
 ----------------------
@@ -101,3 +118,9 @@ commit after each features or set of fixes/enhancements
 ----------------------
 ### Browser Integration
 - [ ] to check possibilities: chrome, mozilla
+
+----------------------
+### Tools
+- [ ] Youtube scraper
+- [ ] inbuilt Animepahe scraper
+- [ ] Mangareader scraper

@@ -557,6 +557,238 @@ class TestTorrentEngine(unittest.TestCase):
         self.assertIn("X", peers[1]["flags"])
         self.assertIn("I", peers[1]["flags"])
 
+    def test_fetching_metadata_timeout_suspends_and_clears_queue_order(self):
+        """Torrent in fetching_metadata for more than configured timeout becomes suspended with queue order 0."""
+        from datetime import datetime, timezone, timedelta
+        from my_idm.config import GeneralConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        cfg = GeneralConfig(metadata_fetch_timeout_days=1)
+        te.set_general_config(cfg)
+
+        two_days_ago = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        entry = DownloadEntry(
+            id="t_timeout",
+            url="magnet:?xt=urn:btih:aabbccddeeff1122&dn=StuckTorrent",
+            filename="StuckTorrent",
+            status="fetching_metadata",
+            download_type="torrent",
+            queue_order=5,
+            fetching_metadata_since=two_days_ago,
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.status.return_value = MagicMock(paused=False, is_paused=False)
+        te._handles["t_timeout"] = mock_handle
+
+        status_reports = []
+        te._status_cb = lambda did, st, msg: status_reports.append((did, st))
+
+        with patch.object(te, "get_status", return_value={
+            "total_size": 0, "downloaded": 0, "progress": 0.0,
+            "state": "downloading_metadata", "speed": 0.0, "upload_speed": 0.0,
+            "seeds": 0, "peers": 0, "eta": 0, "name": "",
+        }):
+            te.poll_all()
+
+        updated = self.db.get_download("t_timeout")
+        self.assertEqual(updated.status, "suspended")
+        self.assertEqual(updated.queue_order, 0)
+        self.assertEqual(updated.fetching_metadata_since, "")
+        mock_handle.pause.assert_called()
+        self.assertIn(("t_timeout", "suspended"), status_reports)
+
+    def test_fetching_metadata_timer_persists_across_restart(self):
+        """When an interrupted fetching_metadata torrent is resumed on startup, fetching_metadata_since is preserved."""
+        from datetime import datetime, timezone, timedelta
+        from my_idm.manager import DownloadManager
+        from my_idm.config import GeneralConfig, TorConfig
+        from my_idm.network import NetworkConfig
+        from my_idm.security import SecurityConfig
+
+        start_time = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+        entry = DownloadEntry(
+            id="t_resume_timer",
+            url="magnet:?xt=urn:btih:1122334455667788&dn=OngoingMeta",
+            filename="OngoingMeta",
+            status="fetching_metadata",
+            download_type="torrent",
+            queue_order=3,
+            fetching_metadata_since=start_time,
+        )
+        self.db.add_download(entry)
+
+        mgr = DownloadManager(self.db)
+        with patch.object(mgr, "_start_entry"):
+            mgr.resume_download("t_resume_timer")
+
+        updated = self.db.get_download("t_resume_timer")
+        # fetching_metadata_since must NOT be wiped
+        self.assertEqual(updated.fetching_metadata_since, start_time)
+
+    def test_manual_resume_of_suspended_torrent_resets_timer(self):
+        """Manually resuming a suspended torrent resets fetching_metadata_since."""
+        from datetime import datetime, timezone, timedelta
+        from my_idm.manager import DownloadManager
+
+        start_time = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        entry = DownloadEntry(
+            id="t_manual_resume",
+            url="magnet:?xt=urn:btih:3344556677889900&dn=SuspendedTorrent",
+            filename="SuspendedTorrent",
+            status="suspended",
+            download_type="torrent",
+            queue_order=0,
+            fetching_metadata_since=start_time,
+        )
+        self.db.add_download(entry)
+
+        mgr = DownloadManager(self.db)
+        with patch.object(mgr, "_start_entry"):
+            mgr.resume_download("t_manual_resume")
+
+        updated = self.db.get_download("t_manual_resume")
+        self.assertEqual(updated.fetching_metadata_since, "")
+        self.assertGreater(updated.queue_order, 0)
+        self.assertEqual(updated.status, "queued")
+
+    def test_successful_progress_clears_fetching_metadata_timer(self):
+        """When torrent receives metadata or progresses, fetching_metadata_since is cleared."""
+        from datetime import datetime, timezone, timedelta
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+
+        two_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        entry = DownloadEntry(
+            id="t_prog_clear",
+            url="magnet:?xt=urn:btih:4455667788990011&dn=ResolvedTorrent",
+            filename="ResolvedTorrent",
+            status="fetching_metadata",
+            download_type="torrent",
+            fetching_metadata_since=two_hours_ago,
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.status.return_value = MagicMock(paused=False, is_paused=False)
+        te._handles["t_prog_clear"] = mock_handle
+
+        with patch.object(te, "get_status", return_value={
+            "total_size": 1000, "downloaded": 100, "progress": 10.0,
+            "state": "downloading", "speed": 50000.0, "upload_speed": 0.0,
+            "seeds": 5, "peers": 10, "eta": 18, "name": "ResolvedTorrent",
+        }):
+            te.poll_all()
+
+        updated = self.db.get_download("t_prog_clear")
+        self.assertEqual(updated.status, "downloading")
+        self.assertEqual(updated.fetching_metadata_since, "")
+
+    def test_torrent_transitions_to_seeding_on_completion(self):
+        """When seeding_after_complete is True, completed torrent transitions to seeding."""
+        from my_idm.config import TorrentConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        te.set_torrent_config(TorrentConfig(seeding_after_complete=True, max_seeding_speed=200))
+
+        entry = DownloadEntry(
+            id="t_seeding",
+            url="magnet:?xt=urn:btih:5566778899001122&dn=CompleteTorrent",
+            filename="CompleteTorrent",
+            status="downloading",
+            download_type="torrent",
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.status.return_value = MagicMock(paused=False, is_paused=False)
+        mock_handle.is_valid.return_value = True
+        te._handles["t_seeding"] = mock_handle
+
+        status_reports = []
+        te.set_callbacks(
+            lambda *args: None,
+            lambda did, status, err: status_reports.append((did, status)),
+        )
+
+        with patch.object(te, "get_status", return_value={
+            "total_size": 2048, "downloaded": 2048, "progress": 100.0,
+            "state": "seeding", "speed": 0.0, "upload_speed": 50000.0,
+            "seeds": 10, "peers": 20, "eta": 0, "name": "CompleteTorrent",
+        }), patch.object(te, "get_torrent_files", return_value=[]), \
+           patch.object(te, "get_torrent_trackers", return_value=[]):
+            te.poll_all()
+
+        updated = self.db.get_download("t_seeding")
+        self.assertEqual(updated.status, "seeding")
+        self.assertIn(("t_seeding", "seeding"), status_reports)
+        mock_handle.set_upload_limit.assert_called_with(200 * 1024)
+
+    def test_torrent_transitions_to_completed_when_seeding_disabled(self):
+        """When seeding_after_complete is False, finished torrent transitions to completed."""
+        from my_idm.config import TorrentConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        te.set_torrent_config(TorrentConfig(seeding_after_complete=False))
+
+        entry = DownloadEntry(
+            id="t_completed_no_seed",
+            url="magnet:?xt=urn:btih:6677889900112233&dn=NoSeedTorrent",
+            filename="NoSeedTorrent",
+            status="downloading",
+            download_type="torrent",
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.status.return_value = MagicMock(paused=False, is_paused=False)
+        mock_handle.is_valid.return_value = True
+        te._handles["t_completed_no_seed"] = mock_handle
+
+        with patch.object(te, "get_status", return_value={
+            "total_size": 2048, "downloaded": 2048, "progress": 100.0,
+            "state": "finished", "speed": 0.0, "upload_speed": 0.0,
+            "seeds": 10, "peers": 20, "eta": 0, "name": "NoSeedTorrent",
+        }), patch.object(te, "get_torrent_files", return_value=[]), \
+           patch.object(te, "get_torrent_trackers", return_value=[]):
+            te.poll_all()
+
+        updated = self.db.get_download("t_completed_no_seed")
+        self.assertEqual(updated.status, "completed")
+        mock_handle.pause.assert_called()
+
+    def test_seeding_speed_limit_ratio(self):
+        """Seeding upload limit is derived from network download limit and ratio."""
+        from my_idm.config import TorrentConfig
+        from my_idm.network import NetworkConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        # 1,000,000 B/s download limit / 2.0 ratio = 500,000 B/s upload limit
+        te.apply_network_config(NetworkConfig(download_limit=1_000_000))
+        te.set_torrent_config(TorrentConfig(seeding_after_complete=True, max_seeding_speed=0, download_to_seeding_ratio=2.0))
+
+        entry = DownloadEntry(
+            id="t_ratio",
+            url="magnet:?xt=urn:btih:7788990011223344&dn=RatioTorrent",
+            filename="RatioTorrent",
+            status="seeding",
+            download_type="torrent",
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.is_valid.return_value = True
+        te._handles["t_ratio"] = mock_handle
+
+        te._apply_seeding_limits()
+        mock_handle.set_upload_limit.assert_called_with(500_000)
+
 
 if __name__ == "__main__":
     unittest.main()

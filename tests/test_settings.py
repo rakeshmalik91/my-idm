@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import GeneralConfig, TorrentConfig, DEFAULT_DOWNLOADS_DIR
 from my_idm.database import Database
 from my_idm.dialogs import AddDownloadDialog
 from my_idm.manager import DownloadManager
@@ -127,18 +127,85 @@ class TestAddDownloadDialogSettings(unittest.TestCase):
             cfg.save()
 
             dlg = AddDownloadDialog(initial_url="https://example.com/file.zip")
-            self.assertEqual(dlg._save_edit.text(), custom_dir)
+            self.assertEqual(dlg._save_edit.currentText(), custom_dir)
             self.assertEqual(dlg._seg_spin.value(), 8)
 
             # Simulate user changing folder and checking "Set as default download folder"
             with tempfile.TemporaryDirectory() as new_default_dir:
-                dlg._save_edit.setText(new_default_dir)
+                dlg._save_edit.setEditText(new_default_dir)
                 dlg._set_as_default_cb.setChecked(True)
                 dlg._accept()
 
                 # Verify GeneralConfig was updated
                 reloaded = GeneralConfig.load()
                 self.assertEqual(reloaded.default_save_path, new_default_dir)
+
+
+class TestTorrentConfig(unittest.TestCase):
+    """Test TorrentConfig persistence and speed limit calculations."""
+
+    def test_default_values(self):
+        cfg = TorrentConfig()
+        self.assertTrue(cfg.seeding_after_complete)
+        self.assertEqual(cfg.max_seeding_speed, 0)
+        self.assertEqual(cfg.download_to_seeding_ratio, 2.0)
+        self.assertEqual(cfg.metadata_fetch_timeout_days, 1)
+
+    def test_effective_seeding_speed_limit(self):
+        # 1. Unlimited by default
+        cfg = TorrentConfig(max_seeding_speed=0, download_to_seeding_ratio=2.0)
+        self.assertEqual(cfg.get_effective_seeding_speed_limit(0), 0)
+
+        # 2. Fixed speed limit only (100 KB/s = 102400 B/s)
+        cfg = TorrentConfig(max_seeding_speed=100, download_to_seeding_ratio=0.0)
+        self.assertEqual(cfg.get_effective_seeding_speed_limit(0), 102400)
+
+        # 3. Derived ratio only (download_limit = 1,000,000 B/s, ratio = 2.0 -> 500,000 B/s)
+        cfg = TorrentConfig(max_seeding_speed=0, download_to_seeding_ratio=2.0)
+        self.assertEqual(cfg.get_effective_seeding_speed_limit(1_000_000), 500_000)
+
+        # 4. Both configured -> takes minimum (max_seeding_speed 100 KB/s vs derived 500 KB/s -> 102400 B/s)
+        cfg = TorrentConfig(max_seeding_speed=100, download_to_seeding_ratio=2.0)
+        self.assertEqual(cfg.get_effective_seeding_speed_limit(1_000_000), 102400)
+
+        # 5. Both configured -> derived is lower (derived 200 KB/s vs max 500 KB/s -> 204800 B/s)
+        cfg = TorrentConfig(max_seeding_speed=500, download_to_seeding_ratio=2.0)
+        self.assertEqual(cfg.get_effective_seeding_speed_limit(409_600), 204800)
+
+    def test_to_and_from_dict(self):
+        cfg = TorrentConfig(
+            seeding_after_complete=False,
+            max_seeding_speed=128,
+            download_to_seeding_ratio=1.5,
+            metadata_fetch_timeout_days=3,
+        )
+        d = cfg.to_dict()
+        self.assertEqual(d["seeding_after_complete"], False)
+        self.assertEqual(d["max_seeding_speed"], 128)
+        self.assertEqual(d["download_to_seeding_ratio"], 1.5)
+        self.assertEqual(d["metadata_fetch_timeout_days"], 3)
+
+        reconstructed = TorrentConfig.from_dict(d)
+        self.assertEqual(reconstructed.seeding_after_complete, False)
+        self.assertEqual(reconstructed.max_seeding_speed, 128)
+        self.assertEqual(reconstructed.download_to_seeding_ratio, 1.5)
+        self.assertEqual(reconstructed.metadata_fetch_timeout_days, 3)
+
+    def test_save_and_load(self):
+        cfg = TorrentConfig(
+            seeding_after_complete=False,
+            max_seeding_speed=300,
+            download_to_seeding_ratio=2.5,
+            metadata_fetch_timeout_days=7,
+        )
+        cfg.save()
+        loaded = TorrentConfig.load()
+        self.assertEqual(loaded.seeding_after_complete, False)
+        self.assertEqual(loaded.max_seeding_speed, 300)
+        self.assertEqual(loaded.download_to_seeding_ratio, 2.5)
+        self.assertEqual(loaded.metadata_fetch_timeout_days, 7)
+        # Restore default
+        TorrentConfig().save()
 
 
 class TestSettingsDialog(unittest.TestCase):
@@ -195,11 +262,59 @@ class TestSettingsDialog(unittest.TestCase):
                 self.assertEqual(persisted.default_segments, 16)
 
     def test_initial_tab(self):
-        dlg_net = SettingsDialog(initial_tab=1)
-        self.assertEqual(dlg_net._tabs.currentIndex(), 1)
+        dlg_gen = SettingsDialog(initial_tab=0)
+        self.assertEqual(dlg_gen._tabs.currentIndex(), 0)
 
-        dlg_sec = SettingsDialog(initial_tab=2)
-        self.assertEqual(dlg_sec._tabs.currentIndex(), 2)
+        dlg_tor = SettingsDialog(initial_tab=1)
+        self.assertEqual(dlg_tor._tabs.currentIndex(), 1)
+
+        dlg_net = SettingsDialog(initial_tab=2)
+        self.assertEqual(dlg_net._tabs.currentIndex(), 2)
+
+        dlg_tor_net = SettingsDialog(initial_tab=3)
+        self.assertEqual(dlg_tor_net._tabs.currentIndex(), 3)
+
+        dlg_sec = SettingsDialog(initial_tab=4)
+        self.assertEqual(dlg_sec._tabs.currentIndex(), 4)
+
+    def test_torrent_tab_settings(self):
+        tor_cfg = TorrentConfig(
+            seeding_after_complete=True,
+            max_seeding_speed=256,
+            download_to_seeding_ratio=3.0,
+            metadata_fetch_timeout_days=2,
+        )
+        dlg = SettingsDialog(torrent_config=tor_cfg)
+
+        # Check populated values
+        self.assertTrue(dlg._seeding_after_complete_cb.isChecked())
+        self.assertEqual(dlg._max_seeding_speed_spin.value(), 256)
+        self.assertEqual(dlg._seeding_ratio_spin.value(), 3.0)
+        self.assertEqual(dlg._metadata_timeout_spin.value(), 2)
+
+        # Modify values
+        dlg._seeding_after_complete_cb.setChecked(False)
+        dlg._max_seeding_speed_spin.setValue(1024)
+        dlg._seeding_ratio_spin.setValue(1.5)
+        dlg._metadata_timeout_spin.setValue(5)
+
+        with tempfile.TemporaryDirectory() as td:
+            dlg._save_path_edit.setText(td)
+            dlg._on_save()
+
+        # Verify saved values on dialog
+        saved_tor = dlg.torrent_config
+        self.assertFalse(saved_tor.seeding_after_complete)
+        self.assertEqual(saved_tor.max_seeding_speed, 1024)
+        self.assertEqual(saved_tor.download_to_seeding_ratio, 1.5)
+        self.assertEqual(saved_tor.metadata_fetch_timeout_days, 5)
+
+        # Verify persistence
+        persisted = TorrentConfig.load()
+        self.assertFalse(persisted.seeding_after_complete)
+        self.assertEqual(persisted.max_seeding_speed, 1024)
+        self.assertEqual(persisted.download_to_seeding_ratio, 1.5)
+        self.assertEqual(persisted.metadata_fetch_timeout_days, 5)
 
     def test_settings_dialog_threat_exclusions_list_and_scan_timing(self):
         sec_cfg = SecurityConfig(

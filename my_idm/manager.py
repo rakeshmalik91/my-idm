@@ -19,7 +19,7 @@ from PySide6.QtCore import QObject, Signal, QTimer
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry, _now_iso
 from my_idm.http_engine import HTTPEngine
-from my_idm.config import GeneralConfig, TorConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import GeneralConfig, TorConfig, TorrentConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
 from my_idm.tor_service import TorServiceManager, find_tor_executable
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.security import (
@@ -236,6 +236,7 @@ class DownloadManager(QObject):
     download_moved = Signal(str)          # download_id
     download_renamed = Signal(str, str)   # download_id, new_filename
     general_config_changed = Signal(object)   # GeneralConfig
+    torrent_config_changed = Signal(object)   # TorrentConfig
     network_config_changed = Signal(object)  # NetworkConfig
     security_config_changed = Signal(object)  # SecurityConfig
     tor_config_changed = Signal(object)       # TorConfig
@@ -248,6 +249,7 @@ class DownloadManager(QObject):
         super().__init__(parent)
         self._db = db
         self._general_config = GeneralConfig.load()
+        self._torrent_config = TorrentConfig.load()
         self._network_config = NetworkConfig.load()
         self._security_config = SecurityConfig.load()
         self._tor_config = TorConfig.load()
@@ -262,6 +264,8 @@ class DownloadManager(QObject):
         self._http.set_general_config_sync(self._general_config)
         self._http.set_network_config_sync(self._network_config)
         self._http.set_tor_config_sync(self._tor_config)
+        self._torrent.set_general_config(self._general_config)
+        self._torrent.apply_torrent_config(self._torrent_config)
         self._torrent.apply_network_config(self._network_config)
         self._torrent.apply_tor_config(self._tor_config)
         self._torrent.set_session_limits(self._network_config.download_limit, self._network_config.upload_limit)
@@ -333,13 +337,15 @@ class DownloadManager(QObject):
                 self._http.set_tor_config_sync(self._tor_config)
                 self._torrent.apply_tor_config(self._tor_config)
 
-        # Auto-resume queued and interrupted downloads on startup
-        for entry in self._db.get_all_downloads():
+        # Auto-resume queued and interrupted downloads on startup in priority order
+        all_entries = self._db.get_all_downloads()
+        all_entries.sort(key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or ""))
+        for entry in all_entries:
             if entry.status == "queued":
-                log.info("Auto-starting queued download on startup: %s", entry.id)
+                log.info("Auto-starting queued download on startup: %s (order=%s)", entry.id, entry.queue_order)
                 self.resume_download(entry.id)
             elif self._general_config.auto_resume_startup and entry.status in ("downloading", "checking", "fetching_metadata"):
-                log.info("Auto-resuming interrupted download on startup: %s", entry.id)
+                log.info("Auto-resuming interrupted download on startup: %s (order=%s)", entry.id, entry.queue_order)
                 self.resume_download(entry.id)
 
         log.info("DownloadManager started")
@@ -555,6 +561,18 @@ class DownloadManager(QObject):
         config.save()
         self._apply_backlog_timer_config()
         self.general_config_changed.emit(config)
+        self._process_queue()
+
+    @property
+    def torrent_config(self) -> TorrentConfig:
+        return self._torrent_config
+
+    def set_torrent_config(self, config: TorrentConfig):
+        """Update BitTorrent engine preferences and seeding configuration."""
+        self._torrent_config = config
+        self._torrent.apply_torrent_config(config)
+        config.save()
+        self.torrent_config_changed.emit(config)
 
     def _apply_backlog_timer_config(self):
         interval_ms = max(1, self._general_config.backlog_poll_interval) * 1000
@@ -694,13 +712,74 @@ class DownloadManager(QObject):
         self._db.add_download(entry)
         self.download_added.emit(entry.id)
 
-        # Start it
-        self._start_entry(entry)
+        # Start if within concurrent limit; otherwise stays queued
+        max_concurrent = self._general_config.max_concurrent_downloads
+        if max_concurrent <= 0:
+            max_concurrent = 3
+        if self._get_active_download_count() < max_concurrent:
+            self._start_entry(entry)
+        else:
+            entry.status = "queued"
+            self._db.update_download(entry)
+            self.status_changed.emit(entry.id, "queued", "")
 
         return entry.id
 
+    def _get_active_download_count(self) -> int:
+        """Count downloads currently in active transferring states or starting."""
+        entries = self._db.get_all_downloads()
+        active_ids = {
+            e.id for e in entries
+            if e.status in ("downloading", "checking", "fetching_metadata", "stalled")
+        }
+        active_ids.update(self._starting_downloads)
+        return len(active_ids)
+
+    def _process_queue(self):
+        """Start queued downloads up to the concurrent limit, ordered by priority."""
+        max_concurrent = self._general_config.max_concurrent_downloads
+        if max_concurrent <= 0:
+            max_concurrent = 3
+
+        active = self._get_active_download_count()
+        available = max_concurrent - active
+        if available <= 0:
+            return
+
+        now = time.time()
+        queued = [
+            e for e in self._db.get_all_downloads()
+            if e.status == "queued"
+        ]
+        eligible = []
+        for e in queued:
+            if e.retry_count > 0:
+                next_retry_at = e.metadata.get("next_retry_at", 0) if e.metadata else 0
+                if now < next_retry_at or e.retry_count >= e.max_retries:
+                    continue
+            eligible.append(e)
+
+        eligible.sort(key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or ""))
+
+        started = 0
+        for entry in eligible:
+            if started >= available:
+                break
+            if self._get_active_download_count() >= max_concurrent:
+                break
+            if entry.retry_count > 0:
+                log.info(
+                    "Auto-retrying queued download %s (attempt %d/%d, order=%s)",
+                    entry.id, entry.retry_count + 1, entry.max_retries, entry.queue_order,
+                )
+            else:
+                log.info("Starting queued download %s (order=%s)", entry.id, entry.queue_order)
+            self._start_entry(entry)
+            started += 1
+
     def _start_entry(self, entry: DownloadEntry):
         """Dispatch download to the right engine."""
+        self._starting_downloads.add(entry.id)
         # Kill switch check
         if (
             self._network_config
@@ -711,6 +790,7 @@ class DownloadManager(QObject):
                 self._network_config.interface_name,
                 self._network_config.interface_ip,
             ):
+                self._starting_downloads.discard(entry.id)
                 err = (
                     f"VPN / Bound interface '{self._network_config.interface_name}' "
                     "disconnected (Kill switch active)"
@@ -727,6 +807,7 @@ class DownloadManager(QObject):
                 )
         elif entry.download_type == "torrent":
             if not self._torrent.available:
+                self._starting_downloads.discard(entry.id)
                 self._db.update_status(
                     entry.id, "error",
                     "libtorrent not installed — torrent support disabled",
@@ -737,6 +818,7 @@ class DownloadManager(QObject):
                 )
                 return
             if not self._torrent.add_torrent(entry):
+                self._starting_downloads.discard(entry.id)
                 err = f"Failed to add torrent — invalid source or parse error: {entry.url}"
                 log.warning(err)
                 self._db.update_status(entry.id, "error", err)
@@ -764,6 +846,7 @@ class DownloadManager(QObject):
         self.progress_updated.emit(
             download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
+        self._process_queue()
 
     def stop_download(self, download_id: str):
         """Permanently stop a download. It will never be auto-retried or auto-resumed.
@@ -795,6 +878,7 @@ class DownloadManager(QObject):
         self.progress_updated.emit(
             download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
+        self._process_queue()
 
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
@@ -807,36 +891,29 @@ class DownloadManager(QObject):
         if download_id in self._starting_downloads:
             log.warning("Download %s is already starting, skipping duplicate resume", download_id)
             return
-        self._starting_downloads.add(download_id)
 
         # Reset retries and error state so manual or auto-resume always gets fresh attempts
+        # If download was already fetching_metadata, keep its timer; if suspended/stopped/paused, reset it
+        if entry.status != "fetching_metadata":
+            entry.fetching_metadata_since = ""
         entry.status = "queued"
         entry.retry_count = 0
         entry.error_message = ""
         entry.last_tried_at = _now_iso()
+        if entry.queue_order <= 0:
+            entry.queue_order = self._db.get_next_queue_order()
         if not entry.file_path and entry.filename and entry.save_path:
             entry.file_path = str(Path(entry.save_path) / entry.filename)
         self._db.update_download(entry)
+        self.status_changed.emit(download_id, "queued", "")
 
-        if entry.download_type == "http":
-            if not self._http.is_active(download_id):
-                if self._loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self._http.add(entry), self._loop
-                    )
-        elif entry.download_type == "torrent":
-            if download_id in self._torrent._handles:
-                self._torrent.resume(download_id)
-            else:
-                if not self._torrent.add_torrent(entry):
-                    err = f"Failed to add torrent on resume — invalid source: {entry.url}"
-                    log.warning(err)
-                    self._db.update_status(entry.id, "error", err)
-                    self.status_changed.emit(entry.id, "error", err)
-                    self._starting_downloads.discard(download_id)
-                    return
+        max_concurrent = self._general_config.max_concurrent_downloads
+        if max_concurrent <= 0:
+            max_concurrent = 3
+        if self._get_active_download_count() >= max_concurrent:
+            return
 
-        self.status_changed.emit(download_id, "downloading", "")
+        self._start_entry(entry)
 
     def force_start_download(self, download_id: str):
         """Immediately force start a download, resetting retries/errors and bypassing paused/queued limits."""
@@ -848,6 +925,8 @@ class DownloadManager(QObject):
         entry.retry_count = 0
         entry.error_message = ""
         entry.last_tried_at = _now_iso()
+        # Clear fetching_metadata_since when force starting (resets the timer)
+        entry.fetching_metadata_since = ""
         if not entry.file_path and entry.filename and entry.save_path:
             entry.file_path = str(Path(entry.save_path) / entry.filename)
         self._db.update_download(entry)
@@ -905,6 +984,7 @@ class DownloadManager(QObject):
         self._db.delete_segments(download_id)
         self._db.delete_download(download_id)
         self.download_removed.emit(download_id)
+        self._process_queue()
 
     def delete_download_file(self, download_id: str):
         """Delete downloaded files from disk while keeping the entry in DB paused at 0%."""
@@ -952,6 +1032,7 @@ class DownloadManager(QObject):
         self.progress_updated.emit(
             download_id, 0, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
+        self._process_queue()
 
     # -- move ----------------------------------------------------------------
 
@@ -1197,6 +1278,7 @@ class DownloadManager(QObject):
                         download_id, actual_downloaded, entry.total_size,
                         0.0, 0.0, 0, 0, 0.0,
                     )
+                    self._process_queue()
                 else:
                     # Partial — update size and reset to paused
                     entry.downloaded_size = actual_downloaded
@@ -1211,6 +1293,7 @@ class DownloadManager(QObject):
                         download_id, actual_downloaded, entry.total_size,
                         0.0, 0.0, 0, 0, 0.0,
                     )
+                    self._process_queue()
 
     # -- backlog -------------------------------------------------------------
 
@@ -1392,23 +1475,21 @@ class DownloadManager(QObject):
     def _on_http_progress(self, download_id: str, downloaded: int,
                           total: int, speed: float, eta: float):
         entry = self._db.get_download(download_id)
-        if entry and entry.status == "paused":
-            speed = 0.0
-            eta = 0.0
+        if entry and entry.status in ("paused", "stopped", "suspended"):
+            return
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta, 0, 0, 0.0
         )
 
     def _on_http_status(self, download_id: str, status: str,
-                        error_msg: str):
+                          error_msg: str):
         self._starting_downloads.discard(download_id)
         current = self._db.get_download(download_id)
-        if current and current.status == "paused" and status in ("queued", "downloading"):
-            log.debug("Ignoring status %s for paused download %s", status, download_id)
+        if current and current.status in ("paused", "stopped", "suspended") and status in ("queued", "downloading"):
+            log.debug("Ignoring status %s for %s download %s", status, current.status, download_id)
             return
-        if current and current.status == "stopped" and status in ("queued", "downloading"):
-            log.debug("Ignoring status %s for stopped download %s", status, download_id)
-            return
+        if current and current.status != status and status in ("completed", "paused", "stopped", "error"):
+            self._db.update_status(download_id, status)
         if (
             status == "completed"
             and self._security_config.scan_after_download
@@ -1417,15 +1498,15 @@ class DownloadManager(QObject):
             self._handle_completed_scan(download_id)
         else:
             self.status_changed.emit(download_id, status, error_msg)
+        if status in ("completed", "paused", "stopped", "error"):
+            self._process_queue()
 
     def _on_torrent_progress(self, download_id: str, downloaded: int,
                              total: int, speed: float, eta: float,
                              seeds: int, peers: int, upload_speed: float):
         entry = self._db.get_download(download_id)
-        if entry and entry.status == "paused":
-            speed = 0.0
-            upload_speed = 0.0
-            eta = 0.0
+        if entry and entry.status in ("paused", "stopped", "suspended"):
+            return
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta,
             seeds, peers, upload_speed,
@@ -1435,11 +1516,8 @@ class DownloadManager(QObject):
                            error_msg: str):
         self._starting_downloads.discard(download_id)
         current = self._db.get_download(download_id)
-        if current and current.status == "paused" and status in ("queued", "downloading", "fetching_metadata"):
-            log.debug("Ignoring status %s for paused torrent %s", status, download_id)
-            return
-        if current and current.status == "stopped" and status in ("queued", "downloading", "fetching_metadata"):
-            log.debug("Ignoring status %s for stopped torrent %s", status, download_id)
+        if current and current.status in ("paused", "stopped", "suspended") and status in ("queued", "downloading", "fetching_metadata"):
+            log.debug("Ignoring status %s for %s torrent %s", status, current.status, download_id)
             return
         if (
             status in ("finished", "seeding")
@@ -1451,11 +1529,14 @@ class DownloadManager(QObject):
                 self._handle_completed_scan(download_id, is_torrent=True)
                 return
         self.status_changed.emit(download_id, status, error_msg)
+        if status in ("completed", "seeding", "paused", "stopped", "error", "suspended"):
+            self._process_queue()
 
     def _handle_completed_scan(self, download_id: str, is_torrent: bool = False):
         entry = self._db.get_download(download_id)
+        target_seeding = bool(self._torrent_config and self._torrent_config.seeding_after_complete) if is_torrent else False
         if not entry or not entry.file_path:
-            final_status = "completed" if not is_torrent else "seeding"
+            final_status = "seeding" if target_seeding else "completed"
             self.status_changed.emit(download_id, final_status, "")
             return
 
@@ -1463,27 +1544,34 @@ class DownloadManager(QObject):
         self.status_changed.emit(download_id, "scanning", "Scanning file for malware...")
 
         def _do_scan():
-            is_clean, report = scan_file(entry.file_path, self._security_config)
-            meta = entry.metadata
-            meta["antivirus_scanned"] = True
-            meta["antivirus_report"] = report
+            try:
+                is_clean, report = scan_file(entry.file_path, self._security_config)
+                meta = entry.metadata
+                meta["antivirus_scanned"] = True
+                meta["antivirus_report"] = report
 
-            if is_clean:
-                final_status = "completed" if not is_torrent else "seeding"
-                entry.metadata = meta
-                self._db.update_download(entry)
-                self._db.update_status(download_id, final_status)
-                self.status_changed.emit(download_id, final_status, report)
-            else:
-                meta["threat_detected"] = True
-                if self._security_config.action_on_threat == "delete":
-                    quarantine_or_delete_file(entry.file_path)
-                    report += " (Infected file deleted)"
-                entry.metadata = meta
-                self._db.update_download(entry)
-                self._db.update_status(download_id, "threat_detected", report)
-                self.status_changed.emit(download_id, "threat_detected", report)
-                self.threat_detected.emit(download_id, report)
+                if is_clean:
+                    final_status = "seeding" if target_seeding else "completed"
+                    entry.metadata = meta
+                    self._db.update_download(entry)
+                    self._db.update_status(download_id, final_status)
+                    if final_status == "seeding":
+                        h = self._torrent._handles.get(download_id)
+                        if h:
+                            self._torrent._apply_seeding_limit_to_handle(h)
+                    self.status_changed.emit(download_id, final_status, report)
+                else:
+                    meta["threat_detected"] = True
+                    if self._security_config.action_on_threat == "delete":
+                        quarantine_or_delete_file(entry.file_path)
+                        report += " (Infected file deleted)"
+                    entry.metadata = meta
+                    self._db.update_download(entry)
+                    self._db.update_status(download_id, "threat_detected", report)
+                    self.status_changed.emit(download_id, "threat_detected", report)
+                    self.threat_detected.emit(download_id, report)
+            except Exception as exc:
+                log.debug("Antivirus scan background task error for %s: %s", download_id, exc)
 
         threading.Thread(
             target=_do_scan, daemon=True, name=f"scan-{download_id}"
@@ -1642,35 +1730,7 @@ class DownloadManager(QObject):
                 log.debug("Skipping retry queue: VPN/interface is disconnected")
                 return
 
-        now = time.time()
-        QUEUED_STARTUP_TIMEOUT = 30
-        for entry in self._db.get_all_downloads():
-            if entry.status == "queued" and entry.retry_count > 0:
-                if entry.retry_count < entry.max_retries:
-                    next_retry_at = entry.metadata.get("next_retry_at", 0) if entry.metadata else 0
-                    if now < next_retry_at:
-                        continue
-                    log.info(
-                        "Auto-retrying %s (attempt %d/%d)",
-                        entry.id, entry.retry_count + 1, entry.max_retries,
-                    )
-                    self._start_entry(entry)
-            elif entry.status == "queued" and entry.retry_count == 0:
-                added_at = entry.added_at
-                if not added_at:
-                    continue
-                try:
-                    added_dt = datetime.fromisoformat(added_at)
-                    elapsed = (datetime.now(timezone.utc) - added_dt).total_seconds()
-                except (ValueError, TypeError):
-                    continue
-                if elapsed < QUEUED_STARTUP_TIMEOUT:
-                    continue
-                log.info(
-                    "Re-starting stuck queued download %s (queued for %.0fs, no retries yet)",
-                    entry.id, elapsed,
-                )
-                self._start_entry(entry)
+        self._process_queue()
 
     # -- helpers -------------------------------------------------------------
 

@@ -281,17 +281,18 @@ Once a download finishes (for both HTTP segmented transfers and BitTorrent downl
 
 ## The Download List
 
-The main table shows 12 columns of information for each download:
+The main table shows 13 columns of information for each download:
 
 | Column | Description |
 |--------|-------------|
+| **#** | Queue position for active downloads |
 | **Name** | Filename (auto-updates when resolved from headers or metadata; hover for full path) |
+| **Source Domain** | Hostname extracted from the source URL, magnet webseed, or tracker |
 | **Size** | Total file size (human-readable, e.g. "1.5 GiB") |
 | **Progress** | Color-coded progress bar with percentage |
 | **Status** | Current state (see below) |
 | **Speed** | Download speed (or upload speed when seeding) |
 | **ETA** | Estimated time remaining |
-| **Type** | `HTTP` or `TORRENT` |
 | **Seeds / Peers** | For torrents: `S:5 P:12`. For HTTP: `8 seg` |
 | **Added** | When the download was first added |
 | **Last Tried** | When the last download attempt started |
@@ -328,7 +329,7 @@ The download list supports full column sorting:
 
 - **Default Sort**: By **Added** date, **Descending (DESC)** — newest downloads always appear at the top.
 - **Click Column Headers**: Click any column header to sort by that column. Click again to toggle between Ascending (▲) and Descending (▼) order.
-- **View Menu**: Use **View → Sort By** to select a sort column (Date Added, Name, Size, Progress, Status, Speed, ETA, Date Completed) and choose Ascending or Descending order.
+- **View Menu**: Use **View → Sort By** to select a sort column (Date Added, Name, Source Domain, Size, Progress, Status, Speed, ETA, Date Completed) and choose Ascending or Descending order.
 - **Selection Preserved**: Sorting keeps your selected rows highlighted even when their row positions change.
 - **Smart Sorting**: 
   - Downloads with active ETAs appear before inactive ones.

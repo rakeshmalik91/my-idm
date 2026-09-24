@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="My-IDM Logo" width="160" height="160" />
+  <img src="my_idm/resources/logo.png" alt="My-IDM Logo" width="160" height="160" />
 </p>
 
 <h1 align="center">My-IDM — Download Manager</h1>

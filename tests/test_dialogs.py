@@ -111,7 +111,7 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
             dlg = AddDownloadDialog()
             try:
                 self.assertEqual(dlg.save_path, custom_dir)
-                self.assertEqual(dlg._save_edit.text(), custom_dir)
+                self.assertEqual(dlg._save_edit.currentText(), custom_dir)
             finally:
                 dlg.close()
 
@@ -150,7 +150,7 @@ class TestDialogsScrollable(unittest.TestCase):
 
         dlg = SettingsDialog()
         try:
-            self.assertEqual(dlg._tabs.count(), 4)
+            self.assertEqual(dlg._tabs.count(), 5)
             for i in range(dlg._tabs.count()):
                 widget = dlg._tabs.widget(i)
                 self.assertIsInstance(widget, QScrollArea)
@@ -248,9 +248,9 @@ class TestDeleteConfirmDialog(unittest.TestCase):
         dlg = DeleteConfirmDialog(count=1)
         try:
             self.assertIn("Trash", dlg._files_cb.text())
-            self.assertFalse(dlg.delete_files)
+            self.assertTrue(dlg.delete_files)
             dlg._accept()
-            self.assertFalse(dlg.delete_files)
+            self.assertTrue(dlg.delete_files)
         finally:
             dlg.close()
 

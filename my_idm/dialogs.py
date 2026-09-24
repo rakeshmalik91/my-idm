@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QGroupBox,
@@ -97,7 +98,21 @@ class AddDownloadDialog(QDialog):
         save_layout.setSpacing(6)
 
         path_row = QHBoxLayout()
-        self._save_edit = QLineEdit(self._save_path)
+        db = self._manager._db if self._manager and hasattr(self._manager, "_db") else None
+        recent_folders = db.get_recent_save_paths(5) if db else []
+        self._save_edit = QComboBox()
+        self._save_edit.setEditable(True)
+        self._save_edit.setInsertPolicy(QComboBox.NoInsert)
+        self._save_edit.setEditText(self._save_path)
+        seen: set[str] = set()
+        all_paths: list[str] = []
+        for folder in [self._save_path] + recent_folders:
+            norm = folder.lower() if folder else ""
+            if norm and norm not in seen:
+                seen.add(norm)
+                all_paths.append(folder)
+        for folder in all_paths:
+            self._save_edit.addItem(folder)
         path_row.addWidget(self._save_edit, 1)
 
         save_browse_btn = QPushButton("Browse …")
@@ -221,10 +236,10 @@ class AddDownloadDialog(QDialog):
 
     def _browse_save_path(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Select Save Directory", self._save_edit.text()
+            self, "Select Save Directory", self._save_edit.currentText()
         )
         if path:
-            self._save_edit.setText(path)
+            self._save_edit.setEditText(path)
 
     @staticmethod
     def _is_valid_download_url(text: str) -> bool:
@@ -260,7 +275,7 @@ class AddDownloadDialog(QDialog):
         raw_text = self._url_edit.toPlainText().strip()
         self._urls = [l.strip() for l in raw_text.splitlines() if l.strip()]
         self._url = self._urls[0] if self._urls else ""
-        self._save_path = self._save_edit.text().strip()
+        self._save_path = self._save_edit.currentText().strip()
         self._num_segments = self._seg_spin.value()
         if self._urls:
             if self._save_path:
@@ -299,13 +314,14 @@ class AddDownloadDialog(QDialog):
 class MoveDownloadDialog(QDialog):
     """Dialog to choose a new save location for a download."""
 
-    def __init__(self, current_path: str = "", parent=None):
+    def __init__(self, current_path: str = "", parent=None, db=None):
         super().__init__(parent)
         self.setWindowTitle("Move Download")
-        self.setMinimumWidth(450)
+        self.setMinimumWidth(500)
         self.setModal(True)
 
         self._new_path = ""
+        self._db = db
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -314,8 +330,22 @@ class MoveDownloadDialog(QDialog):
         layout.addWidget(QLabel("Select new save directory:"))
 
         path_layout = QHBoxLayout()
-        self._path_edit = QLineEdit(current_path)
-        path_layout.addWidget(self._path_edit)
+        recent_folders = self._db.get_recent_save_paths(5) if self._db else []
+        default_path = GeneralConfig.load().get_effective_save_path()
+        self._path_edit = QComboBox()
+        self._path_edit.setEditable(True)
+        self._path_edit.setInsertPolicy(QComboBox.NoInsert)
+        self._path_edit.setEditText(current_path)
+        seen: set[str] = set()
+        all_paths: list[str] = []
+        for folder in [current_path, default_path] + recent_folders:
+            norm = folder.lower() if folder else ""
+            if norm and norm not in seen:
+                seen.add(norm)
+                all_paths.append(folder)
+        for folder in all_paths:
+            self._path_edit.addItem(folder)
+        path_layout.addWidget(self._path_edit, 1)
 
         browse_btn = QPushButton("Browse …")
         browse_btn.clicked.connect(self._browse)
@@ -340,13 +370,13 @@ class MoveDownloadDialog(QDialog):
 
     def _browse(self):
         path = QFileDialog.getExistingDirectory(
-            self, "Select Directory", self._path_edit.text()
+            self, "Select Directory", self._path_edit.currentText()
         )
         if path:
-            self._path_edit.setText(path)
+            self._path_edit.setEditText(path)
 
     def _accept(self):
-        self._new_path = self._path_edit.text().strip()
+        self._new_path = self._path_edit.currentText().strip()
         if self._new_path:
             self.accept()
 
@@ -364,7 +394,7 @@ class DeleteConfirmDialog(QDialog):
         self.setMinimumWidth(380)
         self.setModal(True)
 
-        self._delete_files = False
+        self._delete_files = True
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -376,6 +406,7 @@ class DeleteConfirmDialog(QDialog):
         ))
 
         self._files_cb = QCheckBox("Also delete downloaded files from disk (move to Trash)")
+        self._files_cb.setChecked(True)
         layout.addWidget(self._files_cb)
 
         layout.addSpacing(8)

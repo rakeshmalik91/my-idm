@@ -347,6 +347,7 @@ class DetailsPanel(QWidget):
         """)
 
         self._tree_files.itemChanged.connect(self._on_tree_item_changed)
+        self._tree_files.itemDoubleClicked.connect(self._on_tree_item_double_clicked)
         self._tree_files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree_files.customContextMenuRequested.connect(self._show_files_context_menu)
         self._table_files = self._tree_files
@@ -750,7 +751,7 @@ class DetailsPanel(QWidget):
             if it.checkState(0) == Qt.CheckState.Checked:
                 checked_count += 1
 
-            st = f.get("status", "pending")
+            st = self._get_file_status(f, self._current_entry)
             if st != "completed":
                 all_completed = False
             if st in ("downloading", "fetching_metadata"):
@@ -804,6 +805,19 @@ class DetailsPanel(QWidget):
         else:
             folder_item.setText(4, "Pending")
 
+    def _get_file_status(self, f: dict, entry: DownloadEntry) -> str:
+        """Derive display status for a torrent file from entry status and file progress."""
+        entry_status = entry.status if entry else "pending"
+        if entry_status in ("completed", "seeding"):
+            return "completed"
+        pct_raw = f.get("progress", 0.0)
+        pct = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
+        if pct >= 100.0:
+            return "completed"
+        if pct > 0.0:
+            return "downloading"
+        return "pending"
+
     def _update_file_values(self, files: list[dict], is_torrent: bool):
         for f in files:
             f_idx = f.get("index", 0)
@@ -825,7 +839,7 @@ class DetailsPanel(QWidget):
             if isinstance(pb, QProgressBar):
                 pb.setValue(int(min(max(pct_val, 0.0), 100.0)))
 
-            status_str = f.get("status", "pending")
+            status_str = self._get_file_status(f, self._current_entry)
             item.setText(4, _to_str(status_str).capitalize())
 
             if is_torrent:
@@ -897,6 +911,21 @@ class DetailsPanel(QWidget):
                 self._refresh_folder_aggregates(fld, is_torrent=True)
         finally:
             self._tree_updating = False
+
+    def _on_tree_item_double_clicked(self, item: QTreeWidgetItem):
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        if data.get("is_folder", False):
+            return
+        if not self._current_entry:
+            return
+        file_path = data.get("data", {}).get("path")
+        if not file_path:
+            return
+        full_path = str(Path(self._current_entry.save_path) / file_path)
+        if Path(full_path).exists():
+            os.startfile(full_path)
+        else:
+            self._manager.mark_file_not_found(self._current_entry.id)
 
     def _on_file_priority_combo_changed(self, item: QTreeWidgetItem):
         if self._tree_updating or not self._download_id:

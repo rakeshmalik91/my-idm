@@ -47,7 +47,7 @@ If Tor is not already running on your system, My-IDM automatically discovers you
    - Clicking the badge directly opens the **🧅 Tor Network** settings tab.
 
 8. **Live Download Listing Indicator**:
-   - Downloads actively transferring through the Tor network display a prominent onion (`🧅`) indicator in the table view across the **Name**, **Type**, and **Status** columns (e.g. `🧅 ubuntu.iso`, `🧅 TORRENT`, `Downloading (Tor 🧅)`).
+   - Downloads actively transferring through the Tor network display a prominent onion (`🧅`) indicator in the table view across the **Name** and **Status** columns (e.g. `🧅 ubuntu.iso`, `Downloading (Tor 🧅)`).
    - Status text is highlighted in vibrant neon purple (`#bd93f9`).
    - Toggling Tor ON or OFF immediately refreshes all table rows in real-time.
    - Pausing an active transfer or completing it instantly removes the active routing indicator.

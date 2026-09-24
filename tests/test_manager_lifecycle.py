@@ -875,6 +875,101 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual(updated.status, "completed")
         self.assertEqual(updated.progress, 100.0)
 
+    def test_max_concurrent_downloads_limits_active_and_leaves_excess_queued(self):
+        """When max_concurrent_downloads is set, extra downloads stay in queued state."""
+        self.manager._general_config.max_concurrent_downloads = 2
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            # Add 4 downloads
+            id1 = self.manager.add_download("http://example.com/1.zip", save_path=self.tmp_dir.name, filename="1.zip")
+            id2 = self.manager.add_download("http://example.com/2.zip", save_path=self.tmp_dir.name, filename="2.zip")
+            # Simulate id1 and id2 transitioning to downloading
+            self.db.update_status(id1, "downloading")
+            self.db.update_status(id2, "downloading")
+            id3 = self.manager.add_download("http://example.com/3.zip", save_path=self.tmp_dir.name, filename="3.zip")
+            id4 = self.manager.add_download("http://example.com/4.zip", save_path=self.tmp_dir.name, filename="4.zip")
+
+        # First 2 were started, 3rd and 4th stayed queued
+        self.assertEqual(mock_start.call_count, 2)
+        e3 = self.db.get_download(id3)
+        e4 = self.db.get_download(id4)
+        self.assertEqual(e3.status, "queued")
+        self.assertEqual(e4.status, "queued")
+
+    def test_queued_download_starts_when_active_finishes_paused_stopped_or_deleted(self):
+        """Queued downloads start automatically when active slots are freed."""
+        self.manager._general_config.max_concurrent_downloads = 1
+        with patch.object(self.manager, "_start_entry"):
+            id1 = self.manager.add_download("http://example.com/1.zip", save_path=self.tmp_dir.name, filename="1.zip")
+            self.db.update_status(id1, "downloading")
+            id2 = self.manager.add_download("http://example.com/2.zip", save_path=self.tmp_dir.name, filename="2.zip")
+            self.assertEqual(self.db.get_download(id2).status, "queued")
+
+        # When id1 finishes, id2 should automatically start
+        self.db.update_status(id1, "completed")
+        with patch.object(self.manager, "_start_entry") as mock_start, \
+             patch.object(self.manager, "_handle_completed_scan"):
+            self.manager._on_http_status(id1, "completed", "")
+            mock_start.assert_called_once()
+            self.assertEqual(mock_start.call_args[0][0].id, id2)
+
+    def test_queue_priority_order_processing(self):
+        """Queue processor starts downloads in ascending order (order 1 first, last added last)."""
+        self.manager._general_config.max_concurrent_downloads = 1
+        e_active = DownloadEntry(id="d_act", url="http://example.com/a.zip", status="downloading", queue_order=1)
+        e_q2 = DownloadEntry(id="d_q2", url="http://example.com/2.zip", status="queued", queue_order=2, added_at="2026-01-01T10:00:00")
+        e_q3 = DownloadEntry(id="d_q3", url="http://example.com/3.zip", status="queued", queue_order=3, added_at="2026-01-01T11:00:00")
+        self.db.add_download(e_active)
+        self.db.add_download(e_q3)
+        self.db.add_download(e_q2)
+
+        # Free slot by pausing active download
+        started_ids = []
+        with patch.object(self.manager, "_start_entry", side_effect=lambda e: started_ids.append(e.id)):
+            self.manager.pause_download("d_act")
+
+        # Highest priority (order 2) should start before order 3
+        self.assertEqual(started_ids, ["d_q2"])
+
+    def test_startup_resume_order_respects_queue_priority(self):
+        """Startup auto-resume resumes order 1 before higher numbers, processing last added last."""
+        e1 = DownloadEntry(id="d1", url="http://example.com/1.zip", status="queued", queue_order=1, added_at="2026-01-01T10:00:00")
+        e2 = DownloadEntry(id="d2", url="http://example.com/2.zip", status="queued", queue_order=2, added_at="2026-01-01T11:00:00")
+        e3 = DownloadEntry(id="d3", url="http://example.com/3.zip", status="queued", queue_order=3, added_at="2026-01-01T12:00:00")
+        # Add in reverse to ensure sorting is tested
+        self.db.add_download(e3)
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+
+        resumed_order = []
+        with patch.object(self.manager, "resume_download", side_effect=lambda did: resumed_order.append(did)):
+            self.manager.start()
+
+        self.assertEqual(resumed_order, ["d1", "d2", "d3"])
+
+    def test_progress_not_emitted_when_download_paused_stopped_or_suspended(self):
+        """Progress updates must NOT be emitted when download is paused, stopped, or suspended."""
+        e_paused = DownloadEntry(id="d_paused", url="http://example.com/p.zip", status="paused")
+        e_stopped = DownloadEntry(id="d_stopped", url="http://example.com/s.zip", status="stopped")
+        e_suspended = DownloadEntry(id="d_suspended", url="http://example.com/sus.zip", status="suspended")
+        self.db.add_download(e_paused)
+        self.db.add_download(e_stopped)
+        self.db.add_download(e_suspended)
+
+        emitted = []
+        self.manager.progress_updated.connect(lambda *args: emitted.append(args))
+
+        # HTTP progress callbacks
+        self.manager._on_http_progress("d_paused", 500, 1000, 100.0, 5.0)
+        self.manager._on_http_progress("d_stopped", 500, 1000, 100.0, 5.0)
+        self.manager._on_http_progress("d_suspended", 500, 1000, 100.0, 5.0)
+
+        # Torrent progress callbacks
+        self.manager._on_torrent_progress("d_paused", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
+        self.manager._on_torrent_progress("d_stopped", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
+        self.manager._on_torrent_progress("d_suspended", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
+
+        self.assertEqual(len(emitted), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

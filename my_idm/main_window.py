@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from my_idm.database import Database, DownloadEntry
-from my_idm.delegates import DownloadNameDelegate, ProgressBarDelegate
+from my_idm.delegates import DownloadNameDelegate, ProgressBarDelegate, SavePathDelegate
 from my_idm.details_panel import DetailsPanel
 from my_idm.dialogs import (
     AddDownloadDialog,
@@ -241,7 +241,6 @@ class MainWindow(QMainWindow):
             QAbstractItemView.ScrollMode.ScrollPerPixel
         )
 
-        # Name column delegate (renders source website domain in cyan)
         self._name_delegate = DownloadNameDelegate(self._table)
         self._table.setItemDelegateForColumn(
             Col.NAME, self._name_delegate
@@ -251,6 +250,12 @@ class MainWindow(QMainWindow):
         self._progress_delegate = ProgressBarDelegate(self._table)
         self._table.setItemDelegateForColumn(
             Col.PROGRESS, self._progress_delegate
+        )
+
+        # Save path delegate with intelligent shortening
+        self._save_path_delegate = SavePathDelegate(self._table)
+        self._table.setItemDelegateForColumn(
+            Col.SAVE_PATH, self._save_path_delegate
         )
 
         # Filterable and movable column header with sort indicators
@@ -272,6 +277,7 @@ class MainWindow(QMainWindow):
         # Set specific default column widths
         self._table.setColumnWidth(Col.QUEUE, 45)
         self._table.setColumnWidth(Col.NAME, 270)
+        self._table.setColumnWidth(Col.SOURCE_DOMAIN, 160)
         self._table.setColumnWidth(Col.SIZE, 90)
         self._table.setColumnWidth(Col.PROGRESS, 160)
         self._table.setColumnWidth(Col.STATUS, 135)
@@ -403,6 +409,14 @@ class MainWindow(QMainWindow):
             lambda: self._on_open_preferences(0)
         )
 
+        self._act_torrent_settings = QAction(_create_emoji_icon("🧲"), "BitTorrent Settings…", self)
+        self._act_torrent_settings.setToolTip(
+            "Configure BitTorrent seeding behavior, speed limits, and metadata timeout"
+        )
+        self._act_torrent_settings.triggered.connect(
+            self._on_open_torrent_settings
+        )
+
         self._act_network_settings = QAction(_create_emoji_icon("🌐"), "VPN & Network Settings…", self)
         self._act_network_settings.setToolTip(
             "Configure VPN adapter binding, Kill Switch, and Proxy"
@@ -432,6 +446,10 @@ class MainWindow(QMainWindow):
         self._details_panel.close_requested.connect(
             lambda: self._act_toggle_details.setChecked(False)
         )
+
+        self._act_reset_view = QAction(_create_emoji_icon("🔄"), "Reset View", self)
+        self._act_reset_view.setToolTip("Reset column visibility, filters, sorting, and column widths to defaults")
+        self._act_reset_view.triggered.connect(self._on_reset_view)
 
         self._act_tor = QAction(_create_emoji_icon("🧅"), "Tor: OFF", self)
         self._act_tor.setCheckable(False)
@@ -590,11 +608,15 @@ class MainWindow(QMainWindow):
         view_menu.addAction(select_all_act)
 
         view_menu.addSeparator()
+        view_menu.addAction(self._act_reset_view)
+
+        view_menu.addSeparator()
         sort_menu = view_menu.addMenu("&Sort By")
         sort_menu.setIcon(_create_emoji_icon("↕️"))
         sort_columns = [
             ("Date Added (Default)", Col.ADDED),
             ("Name", Col.NAME),
+            ("Source Domain", Col.SOURCE_DOMAIN),
             ("Size", Col.SIZE),
             ("Progress", Col.PROGRESS),
             ("Status", Col.STATUS),
@@ -625,6 +647,8 @@ class MainWindow(QMainWindow):
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
         tools_menu.addAction(self._act_preferences)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self._act_torrent_settings)
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_tor)
         self._act_tor_settings = QAction(_create_emoji_icon("🧅"), "Tor Network Settings…", self)
@@ -871,7 +895,7 @@ class MainWindow(QMainWindow):
         entry = self._first_selected_entry()
         if not entry:
             return
-        dlg = MoveDownloadDialog(entry.save_path, self)
+        dlg = MoveDownloadDialog(entry.save_path, self, self._manager._db)
         if dlg.exec() == MoveDownloadDialog.DialogCode.Accepted:
             for did in self._selected_ids():
                 self._manager.move_download(did, dlg.new_path)
@@ -1186,6 +1210,7 @@ class MainWindow(QMainWindow):
     def _on_open_preferences(self, initial_tab: int = 0):
         dlg = SettingsDialog(
             general_config=self._manager.general_config,
+            torrent_config=self._manager.torrent_config,
             network_config=self._manager.network_config,
             security_config=self._manager.security_config,
             tor_config=self._manager.tor_config,
@@ -1195,6 +1220,7 @@ class MainWindow(QMainWindow):
         )
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             self._manager.set_general_config(dlg.general_config)
+            self._manager.set_torrent_config(dlg.torrent_config)
             self._manager.set_network_config(dlg.network_config)
             self._manager.set_security_config(dlg.security_config)
             old_tor_enabled = self._manager.tor_config.enabled
@@ -1202,14 +1228,17 @@ class MainWindow(QMainWindow):
             if dlg.tor_config.enabled != old_tor_enabled:
                 self._on_toggle_tor(dlg.tor_config.enabled)
 
-    def _on_open_network_settings(self):
+    def _on_open_torrent_settings(self):
         self._on_open_preferences(1)
 
-    def _on_open_tor_settings(self):
+    def _on_open_network_settings(self):
         self._on_open_preferences(2)
 
-    def _on_open_security_settings(self):
+    def _on_open_tor_settings(self):
         self._on_open_preferences(3)
+
+    def _on_open_security_settings(self):
+        self._on_open_preferences(4)
 
     def _on_scan_selected_file(self):
         for did in self._selected_ids():
@@ -1503,6 +1532,52 @@ class MainWindow(QMainWindow):
             self._details_toolbar_btn.setToolTip(tip)
         if hasattr(self, "_details_status_btn"):
             self._details_status_btn.setText("📋 Details: ON" if checked else "📋 Details: OFF")
+
+    def _on_reset_view(self):
+        """Reset all table/grid settings to defaults: column visibility, filters, sorting, and column widths."""
+        # 1. Reset column widths to defaults
+        self._table.setColumnWidth(Col.QUEUE, 45)
+        self._table.setColumnWidth(Col.NAME, 270)
+        self._table.setColumnWidth(Col.SOURCE_DOMAIN, 160)
+        self._table.setColumnWidth(Col.SIZE, 90)
+        self._table.setColumnWidth(Col.PROGRESS, 160)
+        self._table.setColumnWidth(Col.STATUS, 135)
+        self._table.setColumnWidth(Col.SPEED, 110)
+        self._table.setColumnWidth(Col.ETA, 80)
+        self._table.setColumnWidth(Col.SEEDS_PEERS, 100)
+        self._table.setColumnWidth(Col.ADDED, 130)
+        self._table.setColumnWidth(Col.LAST_TRIED, 130)
+        self._table.setColumnWidth(Col.COMPLETED, 130)
+        self._table.setColumnWidth(Col.SAVE_PATH, 220)
+
+        # 2. Show all columns (reset column visibility)
+        header = self._header_view
+        for col in range(Col.COUNT):
+            header.setSectionHidden(col, False)
+
+        # 3. Reset column order to default (0, 1, 2, ...)
+        header_state = header.saveState()
+        header.restoreState(header_state)  # This doesn't change order, but we need to reset visual order
+        # Actually reset visual order by moving sections back to logical positions
+        for visual in range(Col.COUNT - 1, -1, -1):
+            logical = header.logicalIndex(visual)
+            if logical != visual:
+                header.moveSection(visual, logical)
+
+        # 4. Clear all filters (status and type filters)
+        self._model.clear_filters()
+
+        # 5. Reset sorting to default: Date Added, Descending
+        self._table.sortByColumn(Col.ADDED, Qt.SortOrder.DescendingOrder)
+        self._last_sort_section = Col.ADDED
+
+        # 6. Reset row height to default
+        self._table.verticalHeader().setDefaultSectionSize(36)
+
+        # 7. Update UI state in database
+        self._save_ui_state_to_db()
+
+        self._status_label.setText("View reset to defaults")
 
     def _on_table_selection_changed(self, *args):
         entry = self._first_selected_entry()

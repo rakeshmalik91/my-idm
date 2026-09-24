@@ -35,6 +35,7 @@ class GeneralConfig:
     clear_backlog_after_load: bool = True
     backlog_poll_interval: int = 60
     backlog_poll_enabled: bool = True
+    metadata_fetch_timeout_days: int = 1
 
     def get_retry_delay(self, attempt: int) -> float:
         """Calculate retry delay in seconds for a given attempt index (0-indexed)."""
@@ -100,6 +101,7 @@ class GeneralConfig:
             "clear_backlog_after_load": self.clear_backlog_after_load,
             "backlog_poll_interval": self.backlog_poll_interval,
             "backlog_poll_enabled": self.backlog_poll_enabled,
+            "metadata_fetch_timeout_days": self.metadata_fetch_timeout_days,
         }
 
     @classmethod
@@ -129,6 +131,7 @@ class GeneralConfig:
             clear_backlog_after_load=bool(data.get("clear_backlog_after_load", True)),
             backlog_poll_interval=int(data.get("backlog_poll_interval", 60)),
             backlog_poll_enabled=bool(data.get("backlog_poll_enabled", True)),
+            metadata_fetch_timeout_days=int(data.get("metadata_fetch_timeout_days", 1)),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -152,6 +155,7 @@ class GeneralConfig:
         settings.setValue("clear_backlog_after_load", self.clear_backlog_after_load)
         settings.setValue("backlog_poll_interval", self.backlog_poll_interval)
         settings.setValue("backlog_poll_enabled", self.backlog_poll_enabled)
+        settings.setValue("metadata_fetch_timeout_days", self.metadata_fetch_timeout_days)
         settings.endGroup()
 
     @classmethod
@@ -182,6 +186,7 @@ class GeneralConfig:
         clear_backlog_after_load = settings.value("clear_backlog_after_load", True, type=bool)
         backlog_poll_interval = settings.value("backlog_poll_interval", 60, type=int)
         backlog_poll_enabled = settings.value("backlog_poll_enabled", True, type=bool)
+        metadata_fetch_timeout_days = settings.value("metadata_fetch_timeout_days", 1, type=int)
         settings.endGroup()
 
         return cls(
@@ -201,6 +206,91 @@ class GeneralConfig:
             clear_backlog_after_load=bool(clear_backlog_after_load),
             backlog_poll_interval=int(backlog_poll_interval),
             backlog_poll_enabled=bool(backlog_poll_enabled),
+            metadata_fetch_timeout_days=int(metadata_fetch_timeout_days),
+        )
+
+
+@dataclass
+class TorrentConfig:
+    """Stores BitTorrent engine preferences, seeding behavior, and bandwidth limits."""
+
+    seeding_after_complete: bool = True
+    max_seeding_speed: int = 0  # in KB/s (0 = unlimited)
+    download_to_seeding_ratio: float = 2.0  # ratio of download speed to seeding speed (e.g. 2.0 = 2:1)
+    metadata_fetch_timeout_days: int = 1  # in days (0 = disabled)
+
+    def get_effective_seeding_speed_limit(self, download_limit_bytes: int = 0) -> int:
+        """Calculate effective upload/seeding speed limit in bytes/sec.
+
+        Uses max_seeding_speed (converted from KB/s to B/s) if > 0.
+        If download_to_seeding_ratio > 0 and download_limit_bytes > 0:
+            derives limit as download_limit_bytes / download_to_seeding_ratio.
+        Returns the lowest non-zero limit in bytes/sec, or 0 for unlimited.
+        """
+        limits = []
+        if self.max_seeding_speed > 0:
+            limits.append(int(self.max_seeding_speed * 1024))
+        if self.download_to_seeding_ratio > 0 and download_limit_bytes > 0:
+            derived = int(download_limit_bytes / self.download_to_seeding_ratio)
+            if derived > 0:
+                limits.append(derived)
+        if limits:
+            return min(limits)
+        return 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "seeding_after_complete": self.seeding_after_complete,
+            "max_seeding_speed": self.max_seeding_speed,
+            "download_to_seeding_ratio": self.download_to_seeding_ratio,
+            "metadata_fetch_timeout_days": self.metadata_fetch_timeout_days,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TorrentConfig:
+        return cls(
+            seeding_after_complete=bool(data.get("seeding_after_complete", True)),
+            max_seeding_speed=int(data.get("max_seeding_speed", 0)),
+            download_to_seeding_ratio=float(data.get("download_to_seeding_ratio", 2.0)),
+            metadata_fetch_timeout_days=int(data.get("metadata_fetch_timeout_days", 1)),
+        )
+
+    def save(self, settings: Optional[QSettings] = None):
+        """Persists Torrent preferences into QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("Torrent")
+        settings.setValue("seeding_after_complete", self.seeding_after_complete)
+        settings.setValue("max_seeding_speed", self.max_seeding_speed)
+        settings.setValue("download_to_seeding_ratio", self.download_to_seeding_ratio)
+        settings.setValue("metadata_fetch_timeout_days", self.metadata_fetch_timeout_days)
+        settings.endGroup()
+
+    @classmethod
+    def load(cls, settings: Optional[QSettings] = None) -> TorrentConfig:
+        """Loads Torrent preferences from QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("Torrent")
+        seeding_after_complete = settings.value("seeding_after_complete", True, type=bool)
+        max_seeding_speed = settings.value("max_seeding_speed", 0, type=int)
+        download_to_seeding_ratio = settings.value("download_to_seeding_ratio", 2.0, type=float)
+        # Fall back to General/metadata_fetch_timeout_days if not set in Torrent
+        metadata_fetch_timeout_days = settings.value("metadata_fetch_timeout_days", None)
+        settings.endGroup()
+
+        if metadata_fetch_timeout_days is None:
+            settings.beginGroup("General")
+            metadata_fetch_timeout_days = settings.value("metadata_fetch_timeout_days", 1, type=int)
+            settings.endGroup()
+        else:
+            metadata_fetch_timeout_days = int(metadata_fetch_timeout_days)
+
+        return cls(
+            seeding_after_complete=bool(seeding_after_complete),
+            max_seeding_speed=int(max_seeding_speed),
+            download_to_seeding_ratio=float(download_to_seeding_ratio),
+            metadata_fetch_timeout_days=int(metadata_fetch_timeout_days),
         )
 
 

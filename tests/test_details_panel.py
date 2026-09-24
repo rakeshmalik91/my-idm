@@ -248,6 +248,83 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(panel._table_trackers.rowCount(), 1)
         self.assertEqual(panel._table_trackers.item(0, 1).text(), "udp://tracker.opentrackr.org:1337/announce")
 
+    def test_details_panel_files_tree_double_click_opens_file(self):
+        """Double-clicking a file in the Files tree opens it via os.startfile."""
+        entry = DownloadEntry(
+            id="test-dbl-1",
+            url="https://example.com/file.zip",
+            filename="file.zip",
+            save_path="C:/Downloads",
+            file_path="C:/Downloads/file.zip",
+            total_size=1048576,
+            downloaded_size=1048576,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+        self.win._model.add_entry(entry)
+
+        # Mock get_download_files to return file list
+        mock_files = [
+            {
+                "index": 0,
+                "path": "file.zip",
+                "size": 1048576,
+                "downloaded": 1048576,
+                "progress": 1.0,
+                "priority": 4,
+                "status": "completed",
+            },
+        ]
+        self.manager.get_download_files = MagicMock(return_value=mock_files)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-dbl-1")
+
+        # Mock os.startfile and Path.exists
+        with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile, \
+                unittest.mock.patch("my_idm.details_panel.Path.exists", return_value=True):
+            file_item = panel._tree_files.topLevelItem(0)
+            panel._on_tree_item_double_clicked(file_item)
+            mock_startfile.assert_called_once_with(str(Path("C:/Downloads") / "file.zip"))
+
+    def test_details_panel_files_tree_double_click_folder_ignored(self):
+        """Double-clicking a folder in the Files tree does nothing."""
+        entry = DownloadEntry(
+            id="test-dbl-folder-1",
+            url="https://example.com/archive.zip",
+            filename="archive.zip",
+            save_path="C:/Downloads",
+            file_path="C:/Downloads/archive.zip",
+            total_size=1048576,
+            downloaded_size=1048576,
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+        self.win._model.add_entry(entry)
+
+        mock_files = [
+            {
+                "index": 0,
+                "path": "folder/sub/file.txt",
+                "size": 100,
+                "downloaded": 100,
+                "progress": 1.0,
+                "priority": 4,
+                "status": "completed",
+            },
+        ]
+        self.manager.get_download_files = MagicMock(return_value=mock_files)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-dbl-folder-1")
+
+        with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile:
+            folder_item = panel._tree_files.topLevelItem(0)
+            panel._on_tree_item_double_clicked(folder_item)
+            mock_startfile.assert_not_called()
+
     def test_toggle_details_panel_visibility(self):
         """Toggle action F4 and close button manage panel visibility."""
         panel = self.win._details_panel

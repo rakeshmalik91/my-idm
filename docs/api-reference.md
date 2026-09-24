@@ -310,19 +310,20 @@ Column index constants and header labels.
 
 | Constant | Index | Header |
 |----------|-------|--------|
-| `NAME` | 0 | "Name" |
-| `SIZE` | 1 | "Size" |
-| `PROGRESS` | 2 | "Progress" |
-| `STATUS` | 3 | "Status" |
-| `SPEED` | 4 | "Speed" |
-| `ETA` | 5 | "ETA" |
-| `TYPE` | 6 | "Type" |
-| `SEEDS_PEERS` | 7 | "Seeds / Peers" |
-| `ADDED` | 8 | "Added" |
-| `LAST_TRIED` | 9 | "Last Tried" |
-| `COMPLETED` | 10 | "Completed" |
-| `SAVE_PATH` | 11 | "Save Path" |
-| `COUNT` | 12 | Number of columns |
+| `QUEUE` | 0 | "#" |
+| `NAME` | 1 | "Name" |
+| `SOURCE_DOMAIN` | 2 | "Source Domain" |
+| `SIZE` | 3 | "Size" |
+| `PROGRESS` | 4 | "Progress" |
+| `STATUS` | 5 | "Status" |
+| `SPEED` | 6 | "Speed" |
+| `ETA` | 7 | "ETA" |
+| `SEEDS_PEERS` | 8 | "Seeds / Peers" |
+| `ADDED` | 9 | "Added" |
+| `LAST_TRIED` | 10 | "Last Tried" |
+| `COMPLETED` | 11 | "Completed" |
+| `SAVE_PATH` | 12 | "Save Path" |
+| `COUNT` | 13 | Number of columns |
 
 ### `DownloadTableModel`
 
@@ -330,7 +331,7 @@ Column index constants and header labels.
 class DownloadTableModel(QAbstractTableModel)
 ```
 
-Table model backed by a list of `DownloadEntry` objects.
+Table model backed by a list of `DownloadEntry` objects. The `SOURCE_DOMAIN` column displays the hostname extracted from each URL or magnet tracker/webseed, while `NAME` contains only the filename or fallback URL.
 
 | Method / Property | Signature | Description |
 |---|---|---|
@@ -391,15 +392,9 @@ Renders a styled, color-coded progress bar in a `QTableView` cell.
 class DownloadNameDelegate(QStyledItemDelegate)
 ```
 
-Renders the download filename in standard text color followed by its source website domain at the end in cyan (`#39c5bb`), with automatic proportional trimming with ellipses (`...`) if column space is restricted.
-
-**Data roles used:**
-- `Qt.DisplayRole`: Filename / title string.
-- `Qt.DecorationRole`: Filetype / Tor icon.
-- `Qt.UserRole`: Source website domain (e.g. `releases.ubuntu.com`, `tracker.debian.org`).
+Renders the filename in the `NAME` column while preserving decoration icons and removing the duplicate text form of the active Tor indicator. Source domains are supplied by the model's separate `SOURCE_DOMAIN` column rather than this delegate.
 
 ---
-
 ## `my_idm.dialogs`
 
 ### `AddDownloadDialog`

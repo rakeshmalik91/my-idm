@@ -237,7 +237,7 @@ class FilterHeaderView(QHeaderView):
         self._hover_filter_btn: bool = False
         self._active_popup: Optional[MultiselectFilterPopup] = None
 
-    FILTER_BTN_OFFSET = 50
+    FILTER_BTN_OFFSET = 20
 
     def _get_filter_btn_rect(self, logical_index: int) -> QRect:
         if logical_index not in (Col.NAME, Col.STATUS):

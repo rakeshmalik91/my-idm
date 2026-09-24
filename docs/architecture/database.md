@@ -113,6 +113,7 @@ The primary entity table storing download tasks, progress state, connection para
 | `'checking'` | Validating existing file chunks on disk against torrent hash or HTTP segments. |
 | `'fetching_metadata'` | Resolving BitTorrent metadata (`.torrent` info dictionary) via DHT/PEX. |
 | `'stalled'` | Active download with zero transfer speed and no connected seeds/peers (>45s). |
+| `'suspended'` | BitTorrent magnet metadata resolution timed out (> configured days, default 1); excluded from active concurrency rotation and queue order. |
 | `'scanning'` | Antivirus engine (Windows Defender / custom CLI) actively analyzing file. |
 | `'threat_detected'` | Malware detected by antivirus scanner; file flagged or quarantined. |
 | `'file_not_found'` | Target file was moved, renamed, or deleted outside of My-IDM. |
