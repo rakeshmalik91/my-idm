@@ -131,11 +131,13 @@ commit after each features or set of fixes/enhancements
 
 ----------------------
 ### Tools
-- [ ] Animepahe scraper
-  - [ ] add a new tab for external tools in preferences, add any related configs
-    - [ ] repo location
-    - [ ] toggle to launch animepahe scraper at launch, in cli mode, should send downloads to myidm in backlog file
-    - [ ] buttons to view console logs (redirect them in a file, open that file) & debug logs (should be there alreaady, open the file)
-  - [ ] add a button in tools menu to launch animepahe downloader gui
+- [x] Animepahe scraper
+  - [x] add a new tab for external tools in preferences, add any related configs
+    - [x] repo location
+    - [x] toggle to launch animepahe scraper at launch, in cli mode, should send downloads to myidm in backlog file
+    - [x] buttons to view console logs (redirect them in a file, open that file) & debug logs (should be there alreaady, open the file)
+  - [x] add a button in tools menu to launch animepahe downloader gui
+  - [x] show footer badge while background CLI scraper is active (status popup for logs, stop/start, GUI, settings)
+  - [x] active console log bottom panel (stream logs in real-time when clicking console log from footer while animepahe cli is active)
 - [ ] Youtube scraper
 - [ ] Mangareader scraper

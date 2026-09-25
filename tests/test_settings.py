@@ -5,11 +5,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from my_idm.config import GeneralConfig, TorrentConfig, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import GeneralConfig, TorrentConfig, ExternalToolsConfig, DEFAULT_DOWNLOADS_DIR
 from my_idm.database import Database
 from my_idm.dialogs import AddDownloadDialog
 from my_idm.manager import DownloadManager
@@ -570,6 +571,77 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         self.assertTrue(dlg.torrent_config.resume_seeding_on_startup)
         self.assertEqual(dlg.torrent_config.seeding_time_limit_minutes, 90)
         self.assertEqual(dlg.torrent_config.seeding_ratio_limit, 3.0)
+        dlg.close()
+
+
+class TestExternalToolsSettings(unittest.TestCase):
+    """Tests for ExternalToolsConfig and SettingsDialog External Tools tab."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.ini_path = Path(self.tmp_dir.name) / "test_settings.ini"
+        self.settings = QSettings(str(self.ini_path), QSettings.Format.IniFormat)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_external_tools_config_defaults_and_save_load(self):
+        cfg = ExternalToolsConfig(
+            animepahe_repo_path="/custom/animepahe",
+            animepahe_launch_on_startup=True,
+        )
+        cfg.save(self.settings)
+
+        loaded = ExternalToolsConfig.load(self.settings)
+        self.assertEqual(loaded.animepahe_repo_path, "/custom/animepahe")
+        self.assertTrue(loaded.animepahe_launch_on_startup)
+
+    def test_settings_dialog_external_tools_tab(self):
+        cfg = ExternalToolsConfig(
+            animepahe_repo_path="/path/to/repo",
+            animepahe_launch_on_startup=False,
+        )
+        dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5)
+        self.assertEqual(dlg._tabs.currentIndex(), 5)
+        self.assertEqual(dlg._animepahe_repo_edit.text(), "/path/to/repo")
+        self.assertFalse(dlg._animepahe_startup_cb.isChecked())
+
+        dlg._animepahe_repo_edit.setText("/new/path")
+        dlg._animepahe_startup_cb.setChecked(True)
+
+        with patch("os.path.exists", return_value=True):
+            dlg._on_save()
+
+        self.assertEqual(dlg.external_tools_config.animepahe_repo_path, "/new/path")
+        self.assertTrue(dlg.external_tools_config.animepahe_launch_on_startup)
+        dlg.close()
+
+    def test_settings_dialog_run_cli_button(self):
+        """SettingsDialog includes Run CLI button that starts/stops AnimePahe scraper."""
+        from unittest.mock import MagicMock
+        mock_mgr = MagicMock()
+        mock_mgr.is_animepahe_running.return_value = False
+        mock_mgr.start_animepahe_scraper.return_value = (True, "Started PID: 1234")
+        mock_mgr.stop_animepahe_scraper.return_value = (True, "Stopped scraper")
+
+        cfg = ExternalToolsConfig(animepahe_repo_path="/valid/path")
+        dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5, manager=mock_mgr)
+        self.assertIn("Run CLI Now", dlg._btn_run_cli_now.text())
+
+        with patch("os.path.isdir", return_value=True), patch("PySide6.QtWidgets.QMessageBox.information") as mock_info:
+            dlg._on_run_animepahe_cli_from_settings()
+            mock_mgr.start_animepahe_scraper.assert_called_once()
+            mock_info.assert_called_once()
+
+            # Simulate scraper now running
+            mock_mgr.is_animepahe_running.return_value = True
+            dlg._on_animepahe_status_changed(True)
+            self.assertIn("Stop CLI Scraper", dlg._btn_run_cli_now.text())
+
+            # Clicking again stops scraper
+            dlg._on_run_animepahe_cli_from_settings()
+            mock_mgr.stop_animepahe_scraper.assert_called_once()
+
         dlg.close()
 
 

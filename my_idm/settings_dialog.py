@@ -33,8 +33,16 @@ from PySide6.QtWidgets import (
 
 import asyncio
 import aiohttp
-from my_idm.config import GeneralConfig, TorConfig, TorrentConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import (
+    GeneralConfig,
+    TorConfig,
+    TorrentConfig,
+    ExternalToolsConfig,
+    is_tor_reachable,
+    DEFAULT_DOWNLOADS_DIR,
+)
 from my_idm.database import Database, APP_DIR
+from my_idm.external_tools import launch_animepahe_cli, launch_animepahe_gui, open_file_in_default_app
 from my_idm.utils import normalize_path
 from my_idm.tor_service import find_tor_executable
 from my_idm.network import (
@@ -62,9 +70,11 @@ class SettingsDialog(QDialog):
         network_config: Optional[NetworkConfig] = None,
         security_config: Optional[SecurityConfig] = None,
         tor_config: Optional[TorConfig] = None,
+        external_tools_config: Optional[ExternalToolsConfig] = None,
         db: Optional[Database] = None,
         parent=None,
         initial_tab: int = 0,
+        manager=None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Preferences & Settings")
@@ -72,6 +82,7 @@ class SettingsDialog(QDialog):
         self.setMinimumHeight(560)
         self.setModal(True)
         self._db = db
+        self._manager = manager if manager is not None else getattr(parent, "_manager", None)
 
         from my_idm.resources import get_app_icon
         self.setWindowIcon(get_app_icon())
@@ -101,11 +112,18 @@ class SettingsDialog(QDialog):
             if tor_config
             else TorConfig.load()
         )
+        self._external_tools_cfg = (
+            ExternalToolsConfig.from_dict(external_tools_config.to_dict())
+            if external_tools_config
+            else ExternalToolsConfig.load()
+        )
 
         self._interfaces: list[NetworkInterfaceInfo] = []
         self._tabs = QTabWidget()
 
         self._setup_ui()
+        if self._manager and hasattr(self._manager, "animepahe_status_changed"):
+            self._manager.animepahe_status_changed.connect(self._on_animepahe_status_changed)
         self._populate_fields()
         self._restore_size_from_db()
 
@@ -209,6 +227,7 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._wrap_scrollable(self._create_network_tab()), "🌐 Network && VPN")
         self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor Network")
         self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus && Security")
+        self._tabs.addTab(self._wrap_scrollable(self._create_external_tools_tab()), "🛠️ External Tools")
         root_layout.addWidget(self._tabs)
 
         # Dialog Buttons
@@ -856,6 +875,89 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return tab
 
+    def _create_external_tools_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        # AnimePahe Scraper Group
+        ap_group = QGroupBox("AnimePahe Auto-Downloader / Scraper")
+        ap_layout = QVBoxLayout(ap_group)
+        ap_layout.setSpacing(12)
+
+        # 1. Repository Location
+        repo_lbl = QLabel("Repository Location:")
+        ap_layout.addWidget(repo_lbl)
+
+        repo_row = QHBoxLayout()
+        self._animepahe_repo_edit = QLineEdit()
+        self._animepahe_repo_edit.setPlaceholderText(r"e.g. D:\Projects\animepahe-downloader")
+        repo_row.addWidget(self._animepahe_repo_edit, 1)
+
+        browse_btn = QPushButton("Browse …")
+        browse_btn.clicked.connect(self._on_browse_animepahe_repo)
+        repo_row.addWidget(browse_btn)
+
+        open_folder_btn = QPushButton("📁 Open Folder")
+        open_folder_btn.setToolTip("Open AnimePahe repository directory in File Explorer")
+        open_folder_btn.clicked.connect(self._on_open_animepahe_folder)
+        repo_row.addWidget(open_folder_btn)
+
+        ap_layout.addLayout(repo_row)
+
+        # 2. Startup Option
+        self._animepahe_startup_cb = QCheckBox(
+            "Launch AnimePahe scraper on startup (CLI mode, forwards downloads to My-IDM backlog)"
+        )
+        self._animepahe_startup_cb.setToolTip(
+            "When enabled, My-IDM automatically runs animepahe_download.py in CLI mode at startup.\n"
+            "Discovered episodes are sent directly to the My-IDM backlog file for automatic downloading."
+        )
+        ap_layout.addWidget(self._animepahe_startup_cb)
+
+        desc_lbl = QLabel(
+            "ℹ️ In CLI mode, the scraper performs an automated library check in the background. "
+            "All new episodes will be queued into the backlog file and ingested automatically."
+        )
+        desc_lbl.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+        desc_lbl.setWordWrap(True)
+        ap_layout.addWidget(desc_lbl)
+
+        # 3. Logs & Actions Group
+        logs_group = QGroupBox("Diagnostics && Logs")
+        logs_layout = QVBoxLayout(logs_group)
+        logs_layout.setSpacing(8)
+
+        log_btns_layout = QHBoxLayout()
+
+        self._btn_view_console_log = QPushButton("📄 View Console Logs")
+        self._btn_view_console_log.setToolTip("Open CLI stdout/stderr redirection log file")
+        self._btn_view_console_log.clicked.connect(self._on_view_animepahe_console_log)
+        log_btns_layout.addWidget(self._btn_view_console_log)
+
+        self._btn_view_debug_log = QPushButton("🔍 View Debug Logs")
+        self._btn_view_debug_log.setToolTip("Open AnimePahe debug_log.txt")
+        self._btn_view_debug_log.clicked.connect(self._on_view_animepahe_debug_log)
+        log_btns_layout.addWidget(self._btn_view_debug_log)
+
+        self._btn_run_cli_now = QPushButton("▶️ Run CLI Now")
+        self._btn_run_cli_now.setToolTip("Launch AnimePahe background scraper in CLI mode")
+        self._btn_run_cli_now.clicked.connect(self._on_run_animepahe_cli_from_settings)
+        log_btns_layout.addWidget(self._btn_run_cli_now)
+
+        self._btn_launch_gui_now = QPushButton("🎬 Launch GUI Now")
+        self._btn_launch_gui_now.setToolTip("Launch AnimePahe standalone desktop interface")
+        self._btn_launch_gui_now.clicked.connect(self._on_launch_animepahe_gui_from_settings)
+        log_btns_layout.addWidget(self._btn_launch_gui_now)
+
+        logs_layout.addLayout(log_btns_layout)
+        ap_layout.addWidget(logs_group)
+
+        layout.addWidget(ap_group)
+        layout.addStretch()
+        return tab
+
     # -----------------------------------------------------------------------
     # Population & Handlers
     # -----------------------------------------------------------------------
@@ -957,6 +1059,16 @@ class SettingsDialog(QDialog):
         detected_tor = self._tor_cfg.tor_executable_path or find_tor_executable() or ""
         self._tor_path_edit.setText(detected_tor)
 
+        # External Tools tab
+        self._animepahe_repo_edit.setText(self._external_tools_cfg.animepahe_repo_path)
+        self._animepahe_startup_cb.setChecked(self._external_tools_cfg.animepahe_launch_on_startup)
+        if self._manager and hasattr(self._manager, "is_animepahe_running") and self._manager.is_animepahe_running():
+            self._btn_run_cli_now.setText("⏹️ Stop CLI Scraper")
+            self._btn_run_cli_now.setToolTip("Stop running AnimePahe background scraper")
+        else:
+            self._btn_run_cli_now.setText("▶️ Run CLI Now")
+            self._btn_run_cli_now.setToolTip("Launch AnimePahe background scraper in CLI mode")
+
     def _on_test_tor(self):
         host = self._tor_host_edit.text().strip() or "127.0.0.1"
         port = self._tor_port_spin.value()
@@ -981,6 +1093,75 @@ class SettingsDialog(QDialog):
                 else:
                     self._tor_test_status_lbl.setText(f"✗ Tor proxy not reachable and tor.exe not found")
                     self._tor_test_status_lbl.setStyleSheet("color: #ff5555; font-weight: bold;")
+
+    def _on_browse_animepahe_repo(self):
+        cur = self._animepahe_repo_edit.text().strip() or str(Path.home())
+        path = QFileDialog.getExistingDirectory(self, "Select AnimePahe Repository Directory", cur)
+        if path:
+            self._animepahe_repo_edit.setText(normalize_path(path))
+
+    def _on_open_animepahe_folder(self):
+        target = self._animepahe_repo_edit.text().strip()
+        if not target or not os.path.isdir(target):
+            QMessageBox.warning(self, "Folder Not Found", f"The directory does not exist:\n{target}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+
+    def _on_view_animepahe_console_log(self):
+        self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
+        log_path = self._external_tools_cfg.get_console_log_path()
+        ok, msg = open_file_in_default_app(log_path, create_if_missing=True)
+        if not ok:
+            QMessageBox.warning(self, "Cannot Open Console Log", msg)
+
+    def _on_view_animepahe_debug_log(self):
+        self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
+        log_path = self._external_tools_cfg.get_debug_log_path()
+        ok, msg = open_file_in_default_app(log_path, create_if_missing=True)
+        if not ok:
+            QMessageBox.warning(self, "Cannot Open Debug Log", msg)
+
+    def _on_launch_animepahe_gui_from_settings(self):
+        self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
+        ok, msg = launch_animepahe_gui(self._external_tools_cfg)
+        if ok:
+            QMessageBox.information(self, "AnimePahe GUI", msg)
+        else:
+            QMessageBox.warning(self, "Launch Failed", msg)
+
+    def _on_run_animepahe_cli_from_settings(self):
+        self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
+        repo = self._external_tools_cfg.get_effective_repo_path()
+        if not repo or not os.path.isdir(repo):
+            QMessageBox.warning(
+                self,
+                "Repository Not Found",
+                f"AnimePahe repository directory does not exist:\n{self._external_tools_cfg.animepahe_repo_path}",
+            )
+            return
+
+        if self._manager is not None:
+            self._manager.set_external_tools_config(self._external_tools_cfg)
+            if self._manager.is_animepahe_running():
+                ok, msg = self._manager.stop_animepahe_scraper()
+            else:
+                ok, msg = self._manager.start_animepahe_scraper()
+        else:
+            ok, msg, proc = launch_animepahe_cli(self._external_tools_cfg)
+
+        if ok:
+            QMessageBox.information(self, "AnimePahe Scraper CLI", msg)
+        else:
+            QMessageBox.warning(self, "CLI Scraper", msg)
+
+    def _on_animepahe_status_changed(self, is_running: bool):
+        if hasattr(self, "_btn_run_cli_now"):
+            if is_running:
+                self._btn_run_cli_now.setText("⏹️ Stop CLI Scraper")
+                self._btn_run_cli_now.setToolTip("Stop running AnimePahe background scraper")
+            else:
+                self._btn_run_cli_now.setText("▶️ Run CLI Now")
+                self._btn_run_cli_now.setToolTip("Launch AnimePahe background scraper in CLI mode")
 
     def _on_browse_tor_path(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1311,6 +1492,11 @@ class SettingsDialog(QDialog):
         self._tor_cfg.tor_executable_path = self._tor_path_edit.text().strip()
         self._tor_cfg.save()
 
+        # 6. Collect External Tools settings
+        self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
+        self._external_tools_cfg.animepahe_launch_on_startup = self._animepahe_startup_cb.isChecked()
+        self._external_tools_cfg.save()
+
         self.accept()
 
     @property
@@ -1332,3 +1518,7 @@ class SettingsDialog(QDialog):
     @property
     def tor_config(self) -> TorConfig:
         return self._tor_cfg
+
+    @property
+    def external_tools_config(self) -> ExternalToolsConfig:
+        return self._external_tools_cfg

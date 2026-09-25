@@ -47,6 +47,8 @@ class Col:
     SAVE_PATH = 12
     FILE_NAME = 13
 
+    DATE_COLUMNS = (ADDED, LAST_TRIED, COMPLETED)
+
     HEADERS = [
         "#", "Name", "Source Domain", "Size", "Progress", "Status", "Speed", "ETA",
         "Seeds / Peers", "Added", "Last Tried", "Completed",

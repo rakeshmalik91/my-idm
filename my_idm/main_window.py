@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF
+from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -66,6 +66,7 @@ from my_idm.security import SecurityConfig
 from my_idm.config import TorConfig
 from my_idm.security_dialog import SecuritySettingsDialog
 from my_idm.settings_dialog import SettingsDialog
+from my_idm.external_tools import launch_animepahe_gui
 from my_idm.styles import Colors
 
 log = logging.getLogger(__name__)
@@ -231,9 +232,6 @@ class MainWindow(QMainWindow):
         self._table.sortByColumn(
             Col.ADDED, Qt.SortOrder.DescendingOrder
         )
-        self._table.horizontalHeader().sectionClicked.connect(
-            self._on_header_section_clicked
-        )
         self._table.setShowGrid(False)
         self._table.verticalHeader().setVisible(False)
         self._table.setWordWrap(False)
@@ -275,6 +273,7 @@ class MainWindow(QMainWindow):
         header.setFirstSectionMovable(True)
         header.sectionMoved.connect(self._on_section_moved)
         header.filter_requested.connect(self._on_header_filter_requested)
+        header.sectionClicked.connect(self._on_header_section_clicked)
 
         self._model.set_tor_config(self._manager.tor_config)
         self._table.clicked.connect(self._on_table_clicked)
@@ -565,46 +564,12 @@ class MainWindow(QMainWindow):
             if isinstance(btn, QToolButton):
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
-        # Expanding spacer pushes subsequent controls to the top right of the toolbar
+        # Expanding spacer pushes subsequent controls to the right
         spacer = QWidget()
         spacer.setObjectName("toolbar_spacer")
         spacer.setStyleSheet("background: transparent;")
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
-
-        # Top-right details panel show/hide button
-        self._details_toolbar_btn = QToolButton()
-        self._details_toolbar_btn.setObjectName("btn_details_toolbar")
-        self._details_toolbar_btn.setDefaultAction(self._act_toggle_details)
-        self._details_toolbar_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._details_toolbar_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._details_toolbar_btn.setStyleSheet("""
-            QToolButton#btn_details_toolbar {
-                background: transparent;
-                color: #8892b0;
-                border: 1px solid #3b4252;
-                border-radius: 4px;
-                padding: 3px 10px;
-                font-size: 12px;
-                font-weight: 500;
-            }
-            QToolButton#btn_details_toolbar:hover {
-                background: #2e3440;
-                border-color: #484f58;
-                color: #d8dee9;
-            }
-            QToolButton#btn_details_toolbar:checked {
-                background: rgba(88, 166, 255, 0.15);
-                border: 1px solid #58a6ff;
-                color: #58a6ff;
-            }
-            QToolButton#btn_details_toolbar:checked:hover {
-                background: rgba(88, 166, 255, 0.25);
-                border: 1px solid #79c0ff;
-                color: #79c0ff;
-            }
-        """)
-        toolbar.addWidget(self._details_toolbar_btn)
 
         self.addToolBar(toolbar)
 
@@ -673,6 +638,7 @@ class MainWindow(QMainWindow):
             ("Status", Col.STATUS),
             ("Speed", Col.SPEED),
             ("ETA", Col.ETA),
+            ("Date Last Tried", Col.LAST_TRIED),
             ("Date Completed", Col.COMPLETED),
         ]
         for title, col_idx in sort_columns:
@@ -711,6 +677,16 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_network_settings)
         tools_menu.addAction(self._act_security_settings)
+        tools_menu.addSeparator()
+        self._act_launch_animepahe_gui = QAction(_create_emoji_icon("🎬"), "Launch AnimePahe Downloader…", self)
+        self._act_launch_animepahe_gui.triggered.connect(self._on_launch_animepahe_gui)
+        tools_menu.addAction(self._act_launch_animepahe_gui)
+        self._act_run_animepahe_cli = QAction(_create_emoji_icon("▶️"), "Run AnimePahe Scraper (CLI)", self)
+        self._act_run_animepahe_cli.triggered.connect(self._on_start_animepahe_cli)
+        tools_menu.addAction(self._act_run_animepahe_cli)
+        self._act_external_tools_settings = QAction(_create_emoji_icon("🛠️"), "External Tools Settings…", self)
+        self._act_external_tools_settings.triggered.connect(self._on_open_external_tools_settings)
+        tools_menu.addAction(self._act_external_tools_settings)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -774,20 +750,57 @@ class MainWindow(QMainWindow):
         )
         self._vpn_status_btn.clicked.connect(self._on_open_network_settings)
 
-        self._details_status_btn = QPushButton("📋 Details")
+        self._details_status_btn = QPushButton("📋 Details: ON")
         self._details_status_btn.setFlat(True)
         self._details_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._details_status_btn.setToolTip("Toggle bottom download details panel (F4)")
-        self._details_status_btn.clicked.connect(lambda: self._act_toggle_details.trigger())
+        self._details_status_btn.clicked.connect(self._on_toggle_details_btn_clicked)
+
+        self._console_status_btn = QPushButton("📄 Console: OFF")
+        self._console_status_btn.setFlat(True)
+        self._console_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._console_status_btn.setToolTip("Toggle bottom AnimePahe CLI Console panel")
+        self._console_status_btn.clicked.connect(self._on_toggle_console_btn_clicked)
+        self._animepahe_console_btn = self._console_status_btn
+
+        # AnimePahe background scraper status badge
+        self._animepahe_status_btn = QPushButton("🎬 AnimePahe: Active")
+        self._animepahe_status_btn.setFlat(True)
+        self._animepahe_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._animepahe_status_btn.setToolTip(
+            "AnimePahe CLI Scraper is running in the background\nClick for options (View Logs, Stop, Settings)"
+        )
+        self._animepahe_status_btn.clicked.connect(self._show_animepahe_status_menu)
+        self._animepahe_status_btn.setVisible(False)
+        self._animepahe_status_btn.setStyleSheet("""
+            QPushButton {
+                background: #193524;
+                color: #50fa7b;
+                border: 1px solid #50fa7b;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #2a4030;
+                border-color: #69ff94;
+            }
+        """)
 
         status_bar = QStatusBar()
         status_bar.addWidget(self._status_label, 1)
+        status_bar.addPermanentWidget(self._animepahe_status_btn)
         status_bar.addPermanentWidget(self._tor_footer_container)
         status_bar.addPermanentWidget(self._vpn_status_btn)
         status_bar.addPermanentWidget(self._details_status_btn)
+        status_bar.addPermanentWidget(self._console_status_btn)
         status_bar.addPermanentWidget(self._speed_label)
         status_bar.addPermanentWidget(self._count_label)
         self.setStatusBar(status_bar)
+
+        self._on_animepahe_status_changed(self._manager.is_animepahe_running())
+        self._sync_panel_buttons()
 
         self._update_network_status_badge(self._manager.network_config)
         self._on_tor_config_changed(self._manager.tor_config)
@@ -810,6 +823,10 @@ class MainWindow(QMainWindow):
         self._manager.threat_detected.connect(self._on_threat_detected)
         self._manager.queue_order_changed.connect(self._on_queue_order_changed)
         self._manager.bandwidth_limits_changed.connect(self._on_bandwidth_limits_changed)
+        self._manager.animepahe_status_changed.connect(
+            self._on_animepahe_status_changed
+        )
+        self._details_panel.mode_changed.connect(lambda _: self._sync_panel_buttons())
 
         # Connect table selection to bottom details panel
         self._table.selectionModel().selectionChanged.connect(
@@ -849,21 +866,23 @@ class MainWindow(QMainWindow):
         self._update_count_label()
 
     def _on_section_moved(self, logical_index: int, old_visual: int, new_visual: int):
+        if not hasattr(self, "_splitter"):
+            return
         if old_visual != new_visual:
             self._save_ui_state_to_db()
 
     def _on_header_section_clicked(self, logical_index: int):
-        if logical_index == Col.ADDED:
-            # If switching to Date Added from another column, ensure it defaults to Descending (newest first)
-            if self._last_sort_section != Col.ADDED:
-                self._table.sortByColumn(Col.ADDED, Qt.SortOrder.DescendingOrder)
+        if logical_index in Col.DATE_COLUMNS:
+            # If switching to a date column from another column, ensure it defaults to Descending (newest first)
+            if self._last_sort_section != logical_index:
+                self._table.sortByColumn(logical_index, Qt.SortOrder.DescendingOrder)
         self._last_sort_section = logical_index
 
     def _sort_by_column(self, col: int):
-        if col == Col.ADDED:
+        if col in Col.DATE_COLUMNS:
             curr_sec = self._table.horizontalHeader().sortIndicatorSection()
             curr_ord = self._table.horizontalHeader().sortIndicatorOrder()
-            if curr_sec == Col.ADDED:
+            if curr_sec == col:
                 order = (
                     Qt.SortOrder.AscendingOrder
                     if curr_ord == Qt.SortOrder.DescendingOrder
@@ -1404,6 +1423,7 @@ class MainWindow(QMainWindow):
             network_config=self._manager.network_config,
             security_config=self._manager.security_config,
             tor_config=self._manager.tor_config,
+            external_tools_config=self._manager.external_tools_config,
             db=self._manager._db,
             parent=self,
             initial_tab=initial_tab,
@@ -1413,6 +1433,7 @@ class MainWindow(QMainWindow):
             self._manager.set_torrent_config(dlg.torrent_config)
             self._manager.set_network_config(dlg.network_config)
             self._manager.set_security_config(dlg.security_config)
+            self._manager.set_external_tools_config(dlg.external_tools_config)
             old_tor_enabled = self._manager.tor_config.enabled
             self._manager.set_tor_config(dlg.tor_config)
             if dlg.tor_config.enabled != old_tor_enabled:
@@ -1429,6 +1450,174 @@ class MainWindow(QMainWindow):
 
     def _on_open_security_settings(self):
         self._on_open_preferences(4)
+
+    def _on_open_external_tools_settings(self):
+        self._on_open_preferences(5)
+
+    def _on_launch_animepahe_gui(self):
+        cfg = self._manager.external_tools_config
+        repo = cfg.get_effective_repo_path()
+        if not repo or not os.path.isdir(repo):
+            res = QMessageBox.question(
+                self,
+                "AnimePahe Not Configured",
+                "The AnimePahe repository folder is not configured or does not exist.\n\n"
+                "Would you like to configure the repository location in Preferences now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if res == QMessageBox.StandardButton.Yes:
+                self._on_open_external_tools_settings()
+            return
+
+        ok, msg = launch_animepahe_gui(cfg)
+        if ok:
+            self._status_label.setText("Launched AnimePahe Downloader GUI")
+        else:
+            QMessageBox.warning(self, "Failed to Launch AnimePahe GUI", msg)
+
+    def _on_start_animepahe_cli(self):
+        cfg = self._manager.external_tools_config
+        repo = cfg.get_effective_repo_path()
+        if not repo or not os.path.isdir(repo):
+            res = QMessageBox.question(
+                self,
+                "AnimePahe Not Configured",
+                "The AnimePahe repository folder is not configured or does not exist.\n\n"
+                "Would you like to configure the repository location in Preferences now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if res == QMessageBox.StandardButton.Yes:
+                self._on_open_external_tools_settings()
+            return
+
+        ok, msg = self._manager.start_animepahe_scraper()
+        self._status_label.setText(msg)
+        if not ok:
+            QMessageBox.warning(self, "Failed to Start Scraper", msg)
+
+    def _on_toggle_details_btn_clicked(self):
+        if self._details_panel.isVisible() and self._details_panel.current_mode() == "details":
+            self._act_toggle_details.setChecked(False)
+        else:
+            self._details_panel.set_mode("details")
+            self._act_toggle_details.setChecked(True)
+
+    def _on_toggle_console_btn_clicked(self):
+        if self._details_panel.isVisible() and self._details_panel.current_mode() == "console":
+            self._act_toggle_details.setChecked(False)
+        else:
+            self._details_panel.set_mode("console")
+            self._act_toggle_details.setChecked(True)
+
+    def _on_view_animepahe_console_log(self):
+        self._on_toggle_console_btn_clicked()
+
+    def _footer_toggle_style(self, active: bool) -> str:
+        if active:
+            return """
+                QPushButton {
+                    background: rgba(88, 166, 255, 0.15);
+                    color: #58a6ff;
+                    border: 1px solid #58a6ff;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: rgba(88, 166, 255, 0.25);
+                    border-color: #79c0ff;
+                    color: #79c0ff;
+                }
+            """
+        return """
+            QPushButton {
+                background: transparent;
+                color: #8892b0;
+                border: 1px solid #3b4252;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: #2e3440;
+                color: #d8dee9;
+            }
+        """
+
+    def _sync_panel_buttons(self):
+        is_vis = getattr(self, "_act_toggle_details", None) is not None and self._act_toggle_details.isChecked() and not self._details_panel.isHidden()
+        is_console = (self._details_panel.current_mode() == "console")
+        details_on = is_vis and not is_console
+        console_on = is_vis and is_console
+
+        if hasattr(self, "_details_status_btn"):
+            self._details_status_btn.setText("📋 Details: ON" if details_on else "📋 Details: OFF")
+            self._details_status_btn.setStyleSheet(self._footer_toggle_style(details_on))
+
+        if hasattr(self, "_console_status_btn"):
+            self._console_status_btn.setText("📄 Console: ON" if console_on else "📄 Console: OFF")
+            self._console_status_btn.setStyleSheet(self._footer_toggle_style(console_on))
+
+    def _on_open_animepahe_console_log_file(self):
+        from my_idm.external_tools import open_file_in_default_app
+        log_path = self._manager.external_tools_config.get_console_log_path()
+        ok, msg = open_file_in_default_app(log_path, create_if_missing=True)
+        if not ok:
+            QMessageBox.warning(self, "Cannot Open Console Log", msg)
+
+    def _on_view_animepahe_debug_log(self):
+        from my_idm.external_tools import open_file_in_default_app
+        log_path = self._manager.external_tools_config.get_debug_log_path()
+        ok, msg = open_file_in_default_app(log_path, create_if_missing=True)
+        if not ok:
+            QMessageBox.warning(self, "Cannot Open Debug Log", msg)
+
+    def _on_animepahe_status_changed(self, is_running: bool):
+        self._animepahe_status_btn.setVisible(is_running)
+        if is_running:
+            self._animepahe_status_btn.setText("🎬 AnimePahe: Active")
+
+    def _show_animepahe_status_menu(self):
+        menu = QMenu(self)
+
+        act_console = QAction(_create_emoji_icon("📄"), "View Console Logs (Bottom Panel)", self)
+        act_console.triggered.connect(self._on_view_animepahe_console_log)
+        menu.addAction(act_console)
+
+        act_file = QAction(_create_emoji_icon("↗️"), "Open Console Log in Editor…", self)
+        act_file.triggered.connect(self._on_open_animepahe_console_log_file)
+        menu.addAction(act_file)
+
+        act_debug = QAction(_create_emoji_icon("🔍"), "View Debug Logs…", self)
+        act_debug.triggered.connect(self._on_view_animepahe_debug_log)
+        menu.addAction(act_debug)
+
+        menu.addSeparator()
+
+        act_gui = QAction(_create_emoji_icon("🎬"), "Launch AnimePahe GUI…", self)
+        act_gui.triggered.connect(self._on_launch_animepahe_gui)
+        menu.addAction(act_gui)
+
+        if self._manager.is_animepahe_running():
+            act_stop = QAction(_create_emoji_icon("⏹️"), "Stop Background Scraper", self)
+            def _stop():
+                ok, msg = self._manager.stop_animepahe_scraper()
+                self._status_label.setText(msg)
+            act_stop.triggered.connect(_stop)
+            menu.addAction(act_stop)
+        else:
+            act_start = QAction(_create_emoji_icon("▶️"), "Start Background Scraper (CLI)", self)
+            act_start.triggered.connect(self._on_start_animepahe_cli)
+            menu.addAction(act_start)
+
+        menu.addSeparator()
+        act_settings = QAction(_create_emoji_icon("🛠️"), "External Tools Settings…", self)
+        act_settings.triggered.connect(self._on_open_external_tools_settings)
+        menu.addAction(act_settings)
+
+        btn_pos = self._animepahe_status_btn.mapToGlobal(QPoint(0, -menu.sizeHint().height()))
+        menu.exec(btn_pos)
 
     def _on_scan_selected_file(self):
         for did in self._selected_ids():
@@ -1713,15 +1902,12 @@ class MainWindow(QMainWindow):
                 self._details_height = sizes[1]
             self._details_panel.setVisible(False)
         tip = (
-            "Hide bottom download details panel (F4)"
+            "Hide bottom panel (F4)"
             if checked
-            else "Show bottom download details panel (F4)"
+            else "Show bottom panel (F4)"
         )
         self._act_toggle_details.setToolTip(tip)
-        if hasattr(self, "_details_toolbar_btn"):
-            self._details_toolbar_btn.setToolTip(tip)
-        if hasattr(self, "_details_status_btn"):
-            self._details_status_btn.setText("📋 Details: ON" if checked else "📋 Details: OFF")
+        self._sync_panel_buttons()
 
     def _on_reset_view(self):
         """Reset all table/grid settings to defaults: column visibility, filters, sorting, and column widths."""
@@ -1889,15 +2075,12 @@ class MainWindow(QMainWindow):
                     self._splitter.setSizes([total, 0])
 
                 tip = (
-                    "Hide bottom download details panel (F4)"
+                    "Hide bottom panel (F4)"
                     if is_vis
-                    else "Show bottom download details panel (F4)"
+                    else "Show bottom panel (F4)"
                 )
                 self._act_toggle_details.setToolTip(tip)
-                if hasattr(self, "_details_toolbar_btn"):
-                    self._details_toolbar_btn.setToolTip(tip)
-                if hasattr(self, "_details_status_btn"):
-                    self._details_status_btn.setText("📋 Details: ON" if is_vis else "📋 Details: OFF")
+                self._sync_panel_buttons()
 
                 self._table.horizontalHeader().setSectionsMovable(True)
                 self._table.horizontalHeader().setFirstSectionMovable(True)
@@ -2018,15 +2201,12 @@ class MainWindow(QMainWindow):
                 self._splitter.setSizes([total, 0])
 
             tip = (
-                "Hide bottom download details panel (F4)"
+                "Hide bottom panel (F4)"
                 if details_vis
-                else "Show bottom download details panel (F4)"
+                else "Show bottom panel (F4)"
             )
             self._act_toggle_details.setToolTip(tip)
-            if hasattr(self, "_details_toolbar_btn"):
-                self._details_toolbar_btn.setToolTip(tip)
-            if hasattr(self, "_details_status_btn"):
-                self._details_status_btn.setText("📋 Details: ON" if details_vis else "📋 Details: OFF")
+            self._sync_panel_buttons()
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
 

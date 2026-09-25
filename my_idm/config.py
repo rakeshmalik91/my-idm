@@ -407,3 +407,91 @@ class TorConfig:
             route_torrent=bool(route_torrent),
             tor_executable_path=str(tor_path),
         )
+
+
+@dataclass
+class ExternalToolsConfig:
+    """Stores configuration for external scrapers and tools (e.g. AnimePahe)."""
+
+    animepahe_repo_path: str = ""
+    animepahe_launch_on_startup: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "animepahe_repo_path": self.animepahe_repo_path,
+            "animepahe_launch_on_startup": self.animepahe_launch_on_startup,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExternalToolsConfig:
+        return cls(
+            animepahe_repo_path=str(data.get("animepahe_repo_path", "")),
+            animepahe_launch_on_startup=bool(data.get("animepahe_launch_on_startup", False)),
+        )
+
+    def save(self, settings: Optional[QSettings] = None):
+        """Persists external tools preferences into QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("ExternalTools")
+        settings.setValue("animepahe_repo_path", self.animepahe_repo_path)
+        settings.setValue("animepahe_launch_on_startup", self.animepahe_launch_on_startup)
+        settings.endGroup()
+
+    @classmethod
+    def load(cls, settings: Optional[QSettings] = None) -> ExternalToolsConfig:
+        """Loads external tools preferences from QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("ExternalTools")
+        animepahe_repo_path = settings.value("animepahe_repo_path", "", type=str)
+        animepahe_launch_on_startup = settings.value("animepahe_launch_on_startup", False, type=bool)
+        settings.endGroup()
+
+        # Auto-detect default if not explicitly configured
+        if not animepahe_repo_path:
+            candidates = [
+                Path(r"D:\Projects\animepahe-downloader"),
+                Path.home() / "Projects" / "animepahe-downloader",
+            ]
+            for c in candidates:
+                if c.is_dir() and (c / "animepahe_download.py").is_file():
+                    animepahe_repo_path = normalize_path(str(c))
+                    break
+
+        return cls(
+            animepahe_repo_path=str(animepahe_repo_path or ""),
+            animepahe_launch_on_startup=bool(animepahe_launch_on_startup),
+        )
+
+    def get_effective_repo_path(self) -> str:
+        """Returns the configured or auto-detected path to animepahe-downloader directory."""
+        if self.animepahe_repo_path:
+            return normalize_path(self.animepahe_repo_path) if os.path.isdir(self.animepahe_repo_path) else ""
+        candidates = [
+            Path(r"D:\Projects\animepahe-downloader"),
+            Path.home() / "Projects" / "animepahe-downloader",
+        ]
+        for c in candidates:
+            if c.is_dir() and (c / "animepahe_download.py").is_file():
+                return normalize_path(str(c))
+        return ""
+
+    def get_console_log_path(self) -> Path:
+        """Returns path to console stdout/stderr log file."""
+        repo = self.get_effective_repo_path()
+        if repo and os.path.isdir(repo):
+            return Path(repo) / "console_log.txt"
+        log_dir = APP_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / "animepahe_console.log"
+
+    def get_debug_log_path(self) -> Path:
+        """Returns path to debug_log.txt file."""
+        repo = self.get_effective_repo_path()
+        if repo and os.path.isdir(repo):
+            return Path(repo) / "debug_log.txt"
+        log_dir = APP_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir / "animepahe_debug.log"
+

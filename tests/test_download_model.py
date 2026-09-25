@@ -438,20 +438,47 @@ class TestMainWindowSortingIntegration(unittest.TestCase):
         self.win._set_sort_order(Qt.SortOrder.AscendingOrder)
         self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
 
-        # Switching back to Added column defaults to Descending order
-        self.win._sort_by_column(Col.ADDED)
-        self.assertEqual(header.sortIndicatorSection(), Col.ADDED)
-        self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+        # Switching back to date columns defaults to Descending order
+        for date_col in Col.DATE_COLUMNS:
+            self.win._sort_by_column(Col.NAME)
+            self.win._sort_by_column(date_col)
+            self.assertEqual(header.sortIndicatorSection(), date_col)
+            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
 
-    def test_main_window_header_section_clicked_added_defaults_descending(self):
-        """Clicking Date Added column header switches to it in descending order."""
-        self.win._table.sortByColumn(Col.NAME, Qt.SortOrder.AscendingOrder)
-        self.win._last_sort_section = Col.NAME
-        self.assertEqual(self.win._table.horizontalHeader().sortIndicatorSection(), Col.NAME)
+            # Invoking sort_by_column again on the same date column toggles to Ascending
+            self.win._sort_by_column(date_col)
+            self.assertEqual(header.sortIndicatorSection(), date_col)
+            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
 
-        self.win._on_header_section_clicked(Col.ADDED)
-        self.assertEqual(self.win._table.horizontalHeader().sortIndicatorSection(), Col.ADDED)
-        self.assertEqual(self.win._table.horizontalHeader().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+    def test_main_window_header_section_clicked_date_columns_default_descending(self):
+        """Clicking any date column header switches to it in descending order first, then toggles."""
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import QPoint
+
+        self.win.show()
+        header = self.win._table.horizontalHeader()
+
+        for date_col in Col.DATE_COLUMNS:
+            # Set to non-date column first
+            name_x = header.sectionPosition(Col.NAME) + 20
+            QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(name_x, 10))
+            self.assertEqual(header.sortIndicatorSection(), Col.NAME)
+
+            # Click date column -> must default to DescendingOrder first
+            col_x = header.sectionPosition(date_col) + 20
+            QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(col_x, 10))
+            self.assertEqual(header.sortIndicatorSection(), date_col)
+            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+
+            # Clicking again on the same date column toggles to Ascending
+            QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(col_x, 10))
+            self.assertEqual(header.sortIndicatorSection(), date_col)
+            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+
+            # Clicking a third time toggles back to Descending
+            QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(col_x, 10))
+            self.assertEqual(header.sortIndicatorSection(), date_col)
+            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
 
 
 class TestSourceDomainColumn(unittest.TestCase):

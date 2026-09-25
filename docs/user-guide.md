@@ -226,11 +226,39 @@ The settings popup is organized into three tabs:
   - **Automatically resume incomplete downloads when application starts**: Interrupted or actively downloading items resume immediately on launch.
   - **Show desktop / status notification when a download completes**: Notifies you when files finish.
 
-### 2. Network & VPN Tab
+### 2. BitTorrent Tab
+Configure seeding behavior after download completion, seeding time and ratio limits, maximum seeding speed, and startup seeding resumption.
+
+### 3. Network & VPN Tab
 Access adapter binding, kill switch, and HTTP/SOCKS5 proxy settings directly from the unified preferences window.
 
-### 3. Antivirus & Security Tab
+### 4. Tor Network Tab
+Configure Tor SOCKS5 proxy routing, executable auto-discovery, and startup gating.
+
+### 5. Antivirus & Security Tab
 Configure pre-download safety checks, executable warnings, double-extension blocking, VirusTotal API key, and post-download antivirus scanning engines.
+
+### 6. External Tools Tab
+Manage integration with external scrapers and download tools (e.g. AnimePahe Auto-Downloader):
+- **Repository Location**: Specify or auto-detect the path to the AnimePahe repository folder.
+- **Launch on Startup (CLI mode)**: When enabled, My-IDM executes `animepahe_download.py --my-idm` in the background on startup. Discovered anime episodes are forwarded to the My-IDM backlog file and downloaded automatically.
+- **Footer Status Badge & Quick Console Button**: While the AnimePahe scraper is actively running in the background, a green badge (`🎬 AnimePahe: Active`) and a quick button (`📄 Console Log`) are displayed in the main window status bar (footer):
+  - **Clicking `📄 Console Log`**: Toggles the bottom details panel directly to the **🎬 AnimePahe Console** tab to actively stream live CLI scraper output in real time.
+  - **Clicking `🎬 AnimePahe: Active`**: Displays a quick popup menu allowing you to:
+    - View Console Logs in the bottom panel
+    - Open Console Log in default external text editor (`console_log.txt`)
+    - View Debug Logs (`debug_log.txt`)
+    - Launch AnimePahe GUI
+    - Stop or Start the background scraper process
+    - Open External Tools Settings
+- **Bottom Panel AnimePahe Console**: Provides a built-in terminal-like console viewer at the bottom of the window:
+  - **Live Output Streaming**: Actively polls and appends stdout/stderr in real time as the CLI runs.
+  - **Auto-Scroll & Text Wrap**: Keep pinned to the latest output or pause auto-scrolling to inspect earlier lines.
+  - **Real-Time Log Filtering**: Filter output lines dynamically by typing into the search filter input.
+  - **Controls**: Includes instant Clear, Open Log File, and Start/Stop Scraper buttons.
+- **View Debug Logs**: Open `debug_log.txt` located in the AnimePahe repository folder.
+- **Run CLI Now**: Start or stop the AnimePahe CLI scraper in background mode directly from Preferences settings.
+- **Launch GUI**: Launch the standalone AnimePahe desktop GUI detached from My-IDM.
 
 ---
 

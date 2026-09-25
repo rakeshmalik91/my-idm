@@ -19,7 +19,15 @@ from PySide6.QtCore import QObject, Signal, QTimer
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry, _now_iso
 from my_idm.http_engine import HTTPEngine
-from my_idm.config import GeneralConfig, TorConfig, TorrentConfig, is_tor_reachable, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import (
+    GeneralConfig,
+    TorConfig,
+    TorrentConfig,
+    ExternalToolsConfig,
+    is_tor_reachable,
+    DEFAULT_DOWNLOADS_DIR,
+)
+from my_idm.external_tools import launch_animepahe_cli, launch_animepahe_gui
 from my_idm.tor_service import TorServiceManager, find_tor_executable
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.security import (
@@ -244,6 +252,8 @@ class DownloadManager(QObject):
     queue_order_changed = Signal()
     tor_status_changed = Signal(str, str)     # status ("connecting"|"connected"|"disconnecting"|"disconnected"|"error"), message
     bandwidth_limits_changed = Signal(int, int)  # download_limit, upload_limit
+    external_tools_config_changed = Signal(object)  # ExternalToolsConfig
+    animepahe_status_changed = Signal(bool)  # is_running
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -253,6 +263,8 @@ class DownloadManager(QObject):
         self._network_config = NetworkConfig.load()
         self._security_config = SecurityConfig.load()
         self._tor_config = TorConfig.load()
+        self._external_tools_config = ExternalToolsConfig.load()
+        self._animepahe_process: Optional[subprocess.Popen] = None
         # Enforce that Tor is only enabled on startup if auto_start_at_startup is True
         if not self._tor_config.auto_start_at_startup:
             self._tor_config.enabled = False
@@ -351,6 +363,10 @@ class DownloadManager(QObject):
                 log.info("Auto-resuming seeding torrent on startup: %s (order=%s)", entry.id, entry.queue_order)
                 self._torrent.add_torrent(entry)
 
+        # Launch external tools (e.g. AnimePahe scraper) if configured
+        if self._external_tools_config.animepahe_launch_on_startup:
+            self.start_animepahe_scraper()
+
         log.info("DownloadManager started")
 
     def stop(self, status_cb=None):
@@ -400,6 +416,14 @@ class DownloadManager(QObject):
         if self._thread:
             self._thread.join(timeout=3)
 
+        # Stop AnimePahe background scraper process if running
+        if self._animepahe_process and self._animepahe_process.poll() is None:
+            try:
+                self._animepahe_process.terminate()
+            except Exception:
+                pass
+            self._animepahe_process = None
+
         if status_cb:
             status_cb("Shutdown complete.", 100)
         log.info("DownloadManager stopped")
@@ -415,6 +439,59 @@ class DownloadManager(QObject):
     @property
     def tor_service(self) -> TorServiceManager:
         return self._tor_service
+
+    @property
+    def external_tools_config(self) -> ExternalToolsConfig:
+        return self._external_tools_config
+
+    def set_external_tools_config(self, config: ExternalToolsConfig):
+        """Update external tools configuration."""
+        self._external_tools_config = config
+        config.save()
+        self.external_tools_config_changed.emit(config)
+
+    def start_animepahe_scraper(self) -> tuple[bool, str]:
+        """Launch the AnimePahe scraper in CLI mode in the background."""
+        if self._animepahe_process and self._animepahe_process.poll() is None:
+            return True, "AnimePahe scraper is already running."
+
+        ok, msg, proc = launch_animepahe_cli(
+            self._external_tools_config,
+            my_idm_dir=str(Path(__file__).resolve().parent.parent),
+        )
+        if ok and proc:
+            self._animepahe_process = proc
+            self.animepahe_status_changed.emit(True)
+
+            def _monitor():
+                try:
+                    proc.wait()
+                except Exception:
+                    pass
+                if self._animepahe_process == proc:
+                    self._animepahe_process = None
+                self.animepahe_status_changed.emit(False)
+
+            threading.Thread(target=_monitor, daemon=True, name="animepahe-monitor").start()
+        return ok, msg
+
+    def stop_animepahe_scraper(self) -> tuple[bool, str]:
+        """Stop running AnimePahe background scraper process."""
+        if not self._animepahe_process or self._animepahe_process.poll() is not None:
+            self._animepahe_process = None
+            self.animepahe_status_changed.emit(False)
+            return True, "AnimePahe scraper is not running."
+
+        try:
+            self._animepahe_process.terminate()
+            self._animepahe_process = None
+            self.animepahe_status_changed.emit(False)
+            return True, "Stopped AnimePahe scraper."
+        except Exception as exc:
+            return False, f"Failed to stop AnimePahe scraper: {exc}"
+
+    def is_animepahe_running(self) -> bool:
+        return self._animepahe_process is not None and self._animepahe_process.poll() is None
 
     def set_tor_config(self, config: TorConfig):
         """Update Tor routing and SOCKS5 proxy configuration."""

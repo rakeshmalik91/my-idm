@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import logging
 import os
 import subprocess
 import sys
@@ -10,21 +11,25 @@ from pathlib import Path
 from typing import Any, Optional
 
 import humanize
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -33,6 +38,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+logger = logging.getLogger("my_idm.details_panel")
 
 from my_idm.database import DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
@@ -150,10 +157,99 @@ class FilesTreeWidget(QTreeWidget):
         return None
 
 
+class SideTabBar(QWidget):
+    """Vertical tab set on the left side of the panel for switching between Details & Console."""
+
+    currentChanged = Signal(int)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._current_index = 0
+        self._tabs: list[QPushButton] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(2)
+
+        self._btn_group = QButtonGroup(self)
+        self._btn_group.setExclusive(True)
+
+        self._btn_details = self._create_tab_button("📋 Details", 0)
+        self._btn_console = self._create_tab_button("📄 Console", 1)
+
+        layout.addWidget(self._btn_details)
+        layout.addWidget(self._btn_console)
+        layout.addStretch(1)
+
+        self.setFixedWidth(105)
+        self.setStyleSheet(f"""
+            SideTabBar {{
+                background-color: {Colors.BG_DARK};
+                border-right: 1px solid {Colors.BORDER};
+            }}
+        """)
+
+        self.setCurrentIndex(0)
+
+    def _create_tab_button(self, text: str, index: int) -> QPushButton:
+        btn = QPushButton(text, self)
+        btn.setCheckable(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_SECONDARY};
+                border: none;
+                border-left: 3px solid transparent;
+                padding: 10px 10px;
+                font-size: 12px;
+                font-weight: 500;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background: {Colors.BG_HOVER};
+                color: {Colors.TEXT};
+            }}
+            QPushButton:checked {{
+                background: {Colors.BG_MID};
+                color: {Colors.ACCENT};
+                border-left: 3px solid {Colors.ACCENT};
+                font-weight: bold;
+            }}
+        """)
+        btn.clicked.connect(lambda: self.setCurrentIndex(index))
+        self._btn_group.addButton(btn, index)
+        self._tabs.append(btn)
+        return btn
+
+    def count(self) -> int:
+        return len(self._tabs)
+
+    def currentIndex(self) -> int:
+        return self._current_index
+
+    def setCurrentIndex(self, index: int):
+        if 0 <= index < len(self._tabs):
+            self._tabs[index].setChecked(True)
+            if self._current_index != index:
+                self._current_index = index
+                self.currentChanged.emit(index)
+
+    def tabText(self, index: int) -> str:
+        if 0 <= index < len(self._tabs):
+            return self._tabs[index].text()
+        return ""
+
+    def setTabText(self, index: int, text: str):
+        if 0 <= index < len(self._tabs):
+            self._tabs[index].setText(text)
+
+
 class DetailsPanel(QWidget):
-    """Collapsible and tabbed bottom panel showing details for the selected download."""
+    """Collapsible and tabbed bottom panel showing details for the selected download and background consoles."""
 
     close_requested = Signal()
+    mode_changed = Signal(str)
 
     def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -165,7 +261,14 @@ class DetailsPanel(QWidget):
         self._file_item_map: dict[int, QTreeWidgetItem] = {}
         self._folder_items: list[QTreeWidgetItem] = []
 
+        self._raw_log_lines: list[str] = []
+        self._log_offset: int = 0
+        self._log_timer = QTimer(self)
+        self._log_timer.setInterval(250)
+        self._log_timer.timeout.connect(self._poll_console_log)
+
         self._setup_ui()
+        self._manager.animepahe_status_changed.connect(self.on_animepahe_status_changed)
 
     @property
     def current_download_id(self) -> Optional[str]:
@@ -174,12 +277,23 @@ class DetailsPanel(QWidget):
     # -- UI Setup -------------------------------------------------------------
 
     def _setup_ui(self):
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(8, 4, 8, 8)
-        main_layout.setSpacing(6)
+        outer_layout = QHBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # 1. Left side tab set for Details & Console
+        self._side_tabs = SideTabBar(self)
+        self._side_tabs.currentChanged.connect(self._on_mode_tab_changed)
+        outer_layout.addWidget(self._side_tabs)
+
+        # 2. Right container with header and stacked pages
+        right_container = QWidget(self)
+        right_layout = QVBoxLayout(right_container)
+        right_layout.setContentsMargins(8, 4, 8, 8)
+        right_layout.setSpacing(6)
 
         # Header Bar
-        header_widget = QWidget(self)
+        header_widget = QWidget(right_container)
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(4, 2, 4, 2)
         header_layout.setSpacing(8)
@@ -212,15 +326,18 @@ class DetailsPanel(QWidget):
 
         self._btn_close = QPushButton("✕", header_widget)
         self._btn_close.setObjectName("detailsCloseBtn")
-        self._btn_close.setToolTip("Hide details panel (F4)")
+        self._btn_close.setToolTip("Hide bottom panel (F4)")
         self._btn_close.setFixedSize(26, 26)
         self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_close.clicked.connect(self.close_requested.emit)
         header_layout.addWidget(self._btn_close)
 
-        main_layout.addWidget(header_widget)
+        right_layout.addWidget(header_widget)
 
-        # Tab Widget
+        # Mode Stack (Details vs Console)
+        self._mode_stack = QStackedWidget(right_container)
+
+        # Page 0: Details sub-tabs
         self._tabs = QTabWidget(self)
 
         # 1. Overview Tab
@@ -243,7 +360,16 @@ class DetailsPanel(QWidget):
         self._tab_segments = self._create_segments_tab()
         self._tabs.addTab(self._tab_segments, "🧩 Segments")
 
-        main_layout.addWidget(self._tabs, stretch=1)
+        self._tabs.currentChanged.connect(self._on_details_tab_changed)
+        self._mode_stack.addWidget(self._tabs)
+
+        # Page 1: Console View
+        self._console_widget = self._create_console_view()
+        self._tab_console = self._console_widget
+        self._mode_stack.addWidget(self._console_widget)
+
+        right_layout.addWidget(self._mode_stack, stretch=1)
+        outer_layout.addWidget(right_container, stretch=1)
 
     def _create_overview_tab(self) -> QWidget:
         scroll = QScrollArea(self)
@@ -474,7 +600,8 @@ class DetailsPanel(QWidget):
             if not is_torrent and self._tabs.currentIndex() == peers_tab_idx:
                 self._tabs.setCurrentIndex(0)
 
-        self._update_header(entry)
+        if self.current_mode() == "details":
+            self._update_header(entry)
         self._update_overview(entry)
         self._update_files(entry)
         self._update_peers(entry)
@@ -483,11 +610,19 @@ class DetailsPanel(QWidget):
 
     # -- Internal update methods ----------------------------------------------
 
-    def _clear_view(self):
+    def _clear_header(self):
+        if self.current_mode() == "console":
+            self._update_console_header()
+            return
         self._lbl_icon.setText("📊")
         self._lbl_title.setText("Select a download to view details")
         self._lbl_badge.setVisible(False)
+        self._btn_open_folder.setText("📁 Open Folder")
         self._btn_open_folder.setVisible(False)
+
+    def _clear_view(self):
+        if self.current_mode() == "details":
+            self._clear_header()
 
         # Clear overview
         self._ov_status.setText("—")
@@ -516,6 +651,9 @@ class DetailsPanel(QWidget):
         self._lbl_segments_status.setText("")
 
     def _update_header(self, entry: DownloadEntry):
+        if self.current_mode() == "console":
+            return
+
         icon = "📦" if entry.download_type == "torrent" else "🌐"
         self._lbl_icon.setText(icon)
 
@@ -525,7 +663,12 @@ class DetailsPanel(QWidget):
 
         badge_type = "BitTorrent" if entry.download_type == "torrent" else "HTTP / Direct"
         self._lbl_badge.setText(badge_type)
+        self._lbl_badge.setStyleSheet(
+            f"background-color: {Colors.BG_LIGHT}; color: {Colors.ACCENT}; "
+            f"padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px;"
+        )
         self._lbl_badge.setVisible(True)
+        self._btn_open_folder.setText("📁 Open Folder")
         self._btn_open_folder.setVisible(bool(entry.save_path or entry.file_path))
 
     def _update_overview(self, entry: DownloadEntry):
@@ -1480,6 +1623,15 @@ class DetailsPanel(QWidget):
     # -- Actions --------------------------------------------------------------
 
     def _on_open_folder_clicked(self):
+        if hasattr(self, "_tab_console") and self._tabs.currentWidget() == self._tab_console:
+            repo = self._manager.external_tools_config.get_effective_repo_path()
+            if repo and Path(repo).exists():
+                if sys.platform == "win32":
+                    subprocess.Popen(["explorer", str(repo).replace("/", "\\")])
+                else:
+                    os.startfile(repo)
+            return
+
         if not self._current_entry:
             return
         folder = self._current_entry.save_path
@@ -1492,11 +1644,308 @@ class DetailsPanel(QWidget):
         elif folder and Path(folder).exists():
             os.startfile(folder)
 
+    # -- AnimePahe Console Log View & Streaming -------------------------------
+
+    def _create_console_view(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(6)
+
+        # Control Bar
+        ctrl_bar = QHBoxLayout()
+        ctrl_bar.setSpacing(8)
+
+        is_running = self._manager.is_animepahe_running()
+        self._console_status_lbl = QLabel("● Active" if is_running else "○ Stopped", widget)
+        self._console_status_lbl.setStyleSheet(
+            "color: #50fa7b; font-weight: bold; font-size: 11px;"
+            if is_running else
+            "color: #ff5555; font-weight: bold; font-size: 11px;"
+        )
+        ctrl_bar.addWidget(self._console_status_lbl)
+
+        self._console_info_lbl = QLabel("", widget)
+        self._console_info_lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 11px;")
+        ctrl_bar.addWidget(self._console_info_lbl)
+
+        ctrl_bar.addStretch(1)
+
+        # Filter box
+        self._console_filter_edit = QLineEdit(widget)
+        self._console_filter_edit.setPlaceholderText("🔍 Filter logs...")
+        self._console_filter_edit.setClearButtonEnabled(True)
+        self._console_filter_edit.setFixedWidth(180)
+        self._console_filter_edit.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {Colors.BG_DARK};
+                color: {Colors.TEXT};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 11px;
+            }}
+            QLineEdit:focus {{
+                border-color: {Colors.ACCENT};
+            }}
+        """)
+        self._console_filter_edit.textChanged.connect(self._on_console_filter_changed)
+        ctrl_bar.addWidget(self._console_filter_edit)
+
+        # Auto-scroll checkbox
+        self._console_autoscroll_cb = QCheckBox("Auto-scroll", widget)
+        self._console_autoscroll_cb.setChecked(True)
+        self._console_autoscroll_cb.setStyleSheet(f"color: {Colors.TEXT}; font-size: 11px;")
+        ctrl_bar.addWidget(self._console_autoscroll_cb)
+
+        # Wrap lines checkbox
+        self._console_wrap_cb = QCheckBox("Wrap", widget)
+        self._console_wrap_cb.setChecked(False)
+        self._console_wrap_cb.setStyleSheet(f"color: {Colors.TEXT}; font-size: 11px;")
+        self._console_wrap_cb.toggled.connect(self._on_console_wrap_toggled)
+        ctrl_bar.addWidget(self._console_wrap_cb)
+
+        # Clear button
+        self._console_clear_btn = QPushButton("🗑️ Clear", widget)
+        self._console_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._console_clear_btn.setToolTip("Clear the displayed log output")
+        self._console_clear_btn.clicked.connect(self._on_clear_console_clicked)
+        ctrl_bar.addWidget(self._console_clear_btn)
+
+        # Open file button
+        self._console_open_btn = QPushButton("📄 Open File", widget)
+        self._console_open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._console_open_btn.setToolTip("Open console_log.txt in external text editor")
+        self._console_open_btn.clicked.connect(self._on_open_console_file_clicked)
+        ctrl_bar.addWidget(self._console_open_btn)
+
+        # Stop / Start Scraper button
+        self._console_action_btn = QPushButton("⏹️ Stop Scraper" if is_running else "▶️ Start Scraper", widget)
+        self._console_action_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._console_action_btn.clicked.connect(self._on_toggle_scraper_clicked)
+        ctrl_bar.addWidget(self._console_action_btn)
+
+        layout.addLayout(ctrl_bar)
+
+        # Log Text Viewer
+        self._console_text = QPlainTextEdit(widget)
+        self._console_text.setReadOnly(True)
+        self._console_text.setMaximumBlockCount(15000)
+        self._console_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        font = QFont("Consolas", 10)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self._console_text.setFont(font)
+        self._console_text.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #12151b;
+                color: #d1d5db;
+                border: 1px solid #28303e;
+                border-radius: 4px;
+                padding: 6px;
+                selection-background-color: #2b3d5b;
+                selection-color: #ffffff;
+            }
+        """)
+        layout.addWidget(self._console_text, stretch=1)
+
+        return widget
+
+    def _on_details_tab_changed(self, index: int):
+        if self._current_entry:
+            self._update_header(self._current_entry)
+        else:
+            self._clear_header()
+
+    def _on_mode_tab_changed(self, index: int):
+        self._mode_stack.setCurrentIndex(index)
+        mode = "console" if index == 1 else "details"
+        if mode == "console":
+            self._update_console_header()
+            if self.isVisible():
+                self._start_log_timer()
+        else:
+            self._stop_log_timer()
+            if self._current_entry:
+                self._update_header(self._current_entry)
+            else:
+                self._clear_header()
+        self.mode_changed.emit(mode)
+
+    def current_mode(self) -> str:
+        """Returns 'details' or 'console' based on active left-side tab."""
+        return "console" if self._side_tabs.currentIndex() == 1 else "details"
+
+    def set_mode(self, mode: str):
+        """Switch left-side tab mode ('details' or 'console')."""
+        idx = 1 if mode == "console" else 0
+        self._side_tabs.setCurrentIndex(idx)
+
+    def _start_log_timer(self):
+        if not self._log_timer.isActive():
+            self._log_timer.start(250)
+        self._poll_console_log()
+
+    def _stop_log_timer(self):
+        if self._log_timer.isActive():
+            self._log_timer.stop()
+
+    def _poll_console_log(self):
+        log_path = self._manager.external_tools_config.get_console_log_path()
+        if not log_path or not log_path.is_file():
+            return
+
+        try:
+            file_size = os.path.getsize(log_path)
+            if file_size < self._log_offset:
+                # File truncated or restarted
+                self._log_offset = 0
+                self._raw_log_lines.clear()
+                self._console_text.clear()
+
+            if file_size > self._log_offset:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(self._log_offset)
+                    new_data = f.read()
+                    self._log_offset = f.tell()
+
+                if new_data:
+                    self._append_log_text(new_data)
+        except Exception as exc:
+            logger.debug("Error reading console log: %s", exc)
+
+    def _append_log_text(self, text: str):
+        lines = text.splitlines(True)
+        self._raw_log_lines.extend(lines)
+        if len(self._raw_log_lines) > 10000:
+            self._raw_log_lines = self._raw_log_lines[-10000:]
+
+        filter_term = self._console_filter_edit.text().strip().lower()
+        if filter_term:
+            matching = [line for line in lines if filter_term in line.lower()]
+            to_append = "".join(matching)
+        else:
+            to_append = text
+
+        if to_append:
+            cursor = self._console_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(to_append)
+            if self._console_autoscroll_cb.isChecked():
+                self._scroll_to_bottom()
+
+    def _on_console_filter_changed(self, text: str):
+        filter_term = text.strip().lower()
+        self._console_text.clear()
+        if not filter_term:
+            content = "".join(self._raw_log_lines)
+        else:
+            matching = [line for line in self._raw_log_lines if filter_term in line.lower()]
+            content = "".join(matching)
+        if content:
+            cursor = self._console_text.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(content)
+            if self._console_autoscroll_cb.isChecked():
+                self._scroll_to_bottom()
+
+    def _on_console_wrap_toggled(self, checked: bool):
+        mode = QPlainTextEdit.LineWrapMode.WidgetWidth if checked else QPlainTextEdit.LineWrapMode.NoWrap
+        self._console_text.setLineWrapMode(mode)
+
+    def _on_clear_console_clicked(self):
+        self._console_text.clear()
+        self._raw_log_lines.clear()
+
+    def _on_open_console_file_clicked(self):
+        from my_idm.external_tools import open_file_in_default_app
+        log_path = self._manager.external_tools_config.get_console_log_path()
+        open_file_in_default_app(log_path, create_if_missing=True)
+
+    def _on_toggle_scraper_clicked(self):
+        if self._manager.is_animepahe_running():
+            self._manager.stop_animepahe_scraper()
+        else:
+            self._manager.start_animepahe_scraper()
+
+    def _scroll_to_bottom(self):
+        sb = self._console_text.verticalScrollBar()
+        if sb:
+            sb.setValue(sb.maximum())
+
+    def _update_console_header(self, is_running: Optional[bool] = None):
+        self._lbl_icon.setText("🎬")
+        self._lbl_title.setText("AnimePahe CLI Scraper Console")
+        if is_running is None:
+            is_running = self._manager.is_animepahe_running()
+        self._lbl_badge.setText("ACTIVE" if is_running else "STOPPED")
+        self._lbl_badge.setStyleSheet(
+            f"background-color: {'#193524' if is_running else '#351919'}; "
+            f"color: {'#50fa7b' if is_running else '#ff5555'}; "
+            f"padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px;"
+        )
+        self._lbl_badge.setVisible(True)
+
+        repo = self._manager.external_tools_config.get_effective_repo_path()
+        self._btn_open_folder.setText("📁 Open Repo Folder")
+        self._btn_open_folder.setVisible(bool(repo and Path(repo).exists()))
+
+    def show_animepahe_console(self):
+        """Switch to Console mode, update header, and start streaming."""
+        self.set_mode("console")
+        self._update_console_header()
+        self._start_log_timer()
+
+    def show_console(self):
+        """Alias for show_animepahe_console."""
+        self.show_animepahe_console()
+
+    def show_details(self):
+        """Switch to Details mode, update header, and stop log timer."""
+        self.set_mode("details")
+
+    def is_animepahe_console_active(self) -> bool:
+        """Returns True if the panel is currently in Console mode."""
+        return self.current_mode() == "console"
+
+    def on_animepahe_status_changed(self, is_running: bool):
+        """Slot called whenever the AnimePahe CLI scraper starts or stops."""
+        if hasattr(self, "_console_status_lbl"):
+            self._console_status_lbl.setText("● Active" if is_running else "○ Stopped")
+            self._console_status_lbl.setStyleSheet(
+                "color: #50fa7b; font-weight: bold; font-size: 11px;"
+                if is_running else
+                "color: #ff5555; font-weight: bold; font-size: 11px;"
+            )
+        if hasattr(self, "_console_action_btn"):
+            self._console_action_btn.setText("⏹️ Stop Scraper" if is_running else "▶️ Start Scraper")
+
+        proc = getattr(self._manager, "_animepahe_process", None)
+        if hasattr(self, "_console_info_lbl"):
+            if is_running and proc and hasattr(proc, "pid"):
+                self._console_info_lbl.setText(f"PID: {proc.pid}")
+            else:
+                self._console_info_lbl.setText("")
+
+        if self.current_mode() == "console":
+            self._update_console_header(is_running)
+            if is_running and self.isVisible():
+                self._start_log_timer()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._stop_log_timer()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.current_mode() == "console":
+            self._start_log_timer()
+
     # -- State Persistence ----------------------------------------------------
 
     def get_state(self) -> dict[str, Any]:
-        """Return serializable state of the details panel (active tab index, etc.)."""
+        """Return serializable state of the details panel (active mode, active tab index, etc.)."""
         return {
+            "current_mode": self.current_mode(),
             "current_tab": self._tabs.currentIndex(),
         }
 
@@ -1504,6 +1953,9 @@ class DetailsPanel(QWidget):
         """Restore serializable state of the details panel."""
         if not isinstance(state, dict):
             return
+        mode = state.get("current_mode")
+        if mode in ("details", "console"):
+            self.set_mode(mode)
         tab_idx = state.get("current_tab")
         if tab_idx is not None:
             try:

@@ -53,33 +53,49 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.assertNotIn(self.win._act_open_file, actions)
         self.assertNotIn(self.win._act_open_folder, actions)
 
-    def test_details_panel_button_on_top_right_of_toolbar(self):
-        """Details panel show/hide button should be present on the top right of the toolbar and toggle panel."""
+    def test_details_and_console_footer_buttons_and_toolbar_removal(self):
+        """Details panel button is removed from toolbar; footer has Details and Console toggle buttons."""
         self.win.show()
         toolbar = self.win.findChild(QToolBar)
         self.assertIsNotNone(toolbar)
 
+        # Details button is removed from top toolbar
         btn = getattr(self.win, "_details_toolbar_btn", None)
-        self.assertIsNotNone(btn, "_details_toolbar_btn should exist on MainWindow")
-        self.assertIsInstance(btn, QToolButton)
-        self.assertEqual(btn.defaultAction(), self.win._act_toggle_details)
-        self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.assertIsNone(btn, "_details_toolbar_btn should no longer exist on MainWindow")
 
-        # Initially checked and details panel is visible
-        self.assertTrue(btn.isChecked())
+        # Footer buttons exist and are visible
+        details_btn = getattr(self.win, "_details_status_btn", None)
+        console_btn = getattr(self.win, "_console_status_btn", None)
+        self.assertIsNotNone(details_btn)
+        self.assertIsNotNone(console_btn)
+        self.assertTrue(details_btn.isVisible())
+        self.assertTrue(console_btn.isVisible())
+
+        # Initially details panel is visible in Details mode
         self.assertTrue(self.win._details_panel.isVisible())
-        self.assertFalse(self.win._details_panel.isHidden())
+        self.assertEqual(self.win._details_panel.current_mode(), "details")
+        self.assertIn("ON", details_btn.text())
+        self.assertIn("OFF", console_btn.text())
 
-        # Click button to hide details panel
-        btn.click()
-        self.assertFalse(btn.isChecked())
-        self.assertTrue(self.win._details_panel.isHidden())
-
-        # Click button again to show details panel
-        btn.click()
-        self.assertTrue(btn.isChecked())
-        self.assertFalse(self.win._details_panel.isHidden())
+        # Click Console button on footer -> switches to Console mode
+        console_btn.click()
         self.assertTrue(self.win._details_panel.isVisible())
+        self.assertEqual(self.win._details_panel.current_mode(), "console")
+        self.assertIn("OFF", details_btn.text())
+        self.assertIn("ON", console_btn.text())
+
+        # Click Console button again while active -> hides bottom panel
+        console_btn.click()
+        self.assertFalse(self.win._details_panel.isVisible())
+        self.assertIn("OFF", details_btn.text())
+        self.assertIn("OFF", console_btn.text())
+
+        # Click Details button on footer -> opens panel in Details mode
+        details_btn.click()
+        self.assertTrue(self.win._details_panel.isVisible())
+        self.assertEqual(self.win._details_panel.current_mode(), "details")
+        self.assertIn("ON", details_btn.text())
+        self.assertIn("OFF", console_btn.text())
 
     def test_icon_only_buttons_on_toolbar(self):
         """Resume, Pause, Stop, Delete, Move, and Recheck must be icon-only on toolbar, while Preferences shows text."""
@@ -132,6 +148,62 @@ class TestMainWindowToolbar(unittest.TestCase):
         """Footer displays 'X Downloads, Y Active'."""
         self.assertIn("Downloads", self.win._count_label.text())
         self.assertIn("Active", self.win._count_label.text())
+
+    def test_animepahe_footer_badge_lifecycle(self):
+        """Footer badge for AnimePahe is hidden by default and becomes visible when scraper runs."""
+        self.win.show()
+        # Initially hidden when scraper is not running
+        self.assertTrue(self.win._animepahe_status_btn.isHidden())
+
+        # Scraper starts running
+        self.manager.animepahe_status_changed.emit(True)
+        self.assertFalse(self.win._animepahe_status_btn.isHidden())
+        self.assertEqual(self.win._animepahe_status_btn.text(), "🎬 AnimePahe: Active")
+
+        # Scraper stops running
+        self.manager.animepahe_status_changed.emit(False)
+        self.assertTrue(self.win._animepahe_status_btn.isHidden())
+
+    def test_animepahe_footer_console_log_button_and_panel_toggle(self):
+        """Clicking on console log button or menu from footer opens bottom panel and selects console tab."""
+        self.win.show()
+        # Console button is always visible on the footer
+        self.assertFalse(self.win._animepahe_console_btn.isHidden())
+        self.assertTrue(self.win._animepahe_console_btn.isVisible())
+
+        # Start scraper -> status badge becomes active, console button remains visible
+        self.manager.animepahe_status_changed.emit(True)
+        self.assertTrue(self.win._animepahe_status_btn.isVisible())
+        self.assertTrue(self.win._animepahe_console_btn.isVisible())
+
+        # Hide details panel first to test that clicking console log button opens it
+        self.win._act_toggle_details.setChecked(False)
+        self.assertFalse(self.win._details_panel.isVisible())
+        self.assertIn("OFF", self.win._animepahe_console_btn.text())
+
+        # Click footer console log button -> opens panel in Console mode
+        self.win._animepahe_console_btn.click()
+        self.assertTrue(self.win._details_panel.isVisible())
+        self.assertTrue(self.win._act_toggle_details.isChecked())
+        self.assertTrue(self.win._details_panel.is_animepahe_console_active())
+        self.assertIn("ON", self.win._animepahe_console_btn.text())
+
+        # Clicking again while console tab is active toggles panel closed
+        self.win._animepahe_console_btn.click()
+        self.assertFalse(self.win._details_panel.isVisible())
+        self.assertFalse(self.win._act_toggle_details.isChecked())
+        self.assertIn("OFF", self.win._animepahe_console_btn.text())
+
+        # Opening via menu action
+        self.win._on_view_animepahe_console_log()
+        self.assertTrue(self.win._details_panel.isVisible())
+        self.assertTrue(self.win._details_panel.is_animepahe_console_active())
+        self.assertIn("ON", self.win._animepahe_console_btn.text())
+
+        # Scraper stops -> status badge hides, but console button remains visible always
+        self.manager.animepahe_status_changed.emit(False)
+        self.assertTrue(self.win._animepahe_status_btn.isHidden())
+        self.assertTrue(self.win._animepahe_console_btn.isVisible())
 
 
 class TestMainWindowTableAndInteractions(unittest.TestCase):
@@ -817,6 +889,23 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.win._act_segregated_view.setChecked(False)
         self.assertFalse(self.win._model.is_segregated_view())
         self.assertEqual(self.win._model.rowCount(), 3)
+
+    def test_tools_menu_animepahe_actions(self):
+        """Tools menu contains actions to launch AnimePahe GUI and External Tools settings."""
+        self.assertIsNotNone(self.win._act_launch_animepahe_gui)
+        self.assertIsNotNone(self.win._act_external_tools_settings)
+
+        # Triggering when not configured prompts user
+        with patch.object(self.win._manager.external_tools_config, "get_effective_repo_path", return_value=""):
+            with patch("my_idm.main_window.QMessageBox.question") as mock_q:
+                self.win._act_launch_animepahe_gui.trigger()
+                mock_q.assert_called_once()
+
+        # Triggering when configured launches GUI
+        with patch.object(self.win._manager.external_tools_config, "get_effective_repo_path", return_value=tempfile.gettempdir()):
+            with patch("my_idm.main_window.launch_animepahe_gui", return_value=(True, "Success")):
+                self.win._act_launch_animepahe_gui.trigger()
+                self.assertEqual(self.win._status_label.text(), "Launched AnimePahe Downloader GUI")
 
 
 if __name__ == "__main__":

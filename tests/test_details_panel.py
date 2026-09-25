@@ -8,7 +8,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QMessageBox, QSplitter, QTableWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QMessageBox,
+    QPlainTextEdit,
+    QSplitter,
+    QTableWidget,
+)
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.details_panel import DetailsPanel
@@ -967,6 +975,94 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_download_id("test-seed-ov-1")
         seeded_text = panel._ov_seeded.text()
         self.assertIn("Ratio: 2.50", seeded_text)
+
+    def test_animepahe_console_tab_and_live_log_streaming(self):
+        """DetailsPanel AnimePahe console tab actively streams logs, handles filtering and clear."""
+        import tempfile
+        from my_idm.config import ExternalToolsConfig
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_file = Path(tmpdir) / "console_log.txt"
+            log_file.write_text("Line 1: Initializing animepahe scraper...\n", encoding="utf-8")
+
+            cfg = ExternalToolsConfig(animepahe_repo_path=tmpdir)
+            self.manager._external_tools_config = cfg
+
+            panel = self.win._details_panel
+
+            # Side tabs on left side for Details & Console
+            self.assertEqual(panel._side_tabs.count(), 2)
+            self.assertIn("Details", panel._side_tabs.tabText(0))
+            self.assertIn("Console", panel._side_tabs.tabText(1))
+
+            # Details tabs are strictly download tabs (Overview, Files, Peers, Trackers, Segments)
+            self.assertEqual(panel._tabs.count(), 5)
+            self.assertEqual(panel._tabs.indexOf(panel._tab_console), -1)
+
+            # Initially in details mode
+            self.assertEqual(panel.current_mode(), "details")
+            self.assertFalse(panel.is_animepahe_console_active())
+
+            # Show animepahe console
+            panel.show_animepahe_console()
+            self.assertEqual(panel.current_mode(), "console")
+            self.assertTrue(panel.is_animepahe_console_active())
+            self.assertEqual(panel._side_tabs.currentIndex(), 1)
+
+            # Check header
+            self.assertEqual(panel._lbl_icon.text(), "🎬")
+            self.assertEqual(panel._lbl_title.text(), "AnimePahe CLI Scraper Console")
+
+            # Check initial log loaded
+            panel._poll_console_log()
+            self.assertIn("Line 1: Initializing animepahe scraper...", panel._console_text.toPlainText())
+
+            # Append new lines to simulate real-time active output
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write("Line 2: Checking episode 5...\n")
+                f.write("Line 3: Found magnet link, forwarding to backlog.\n")
+
+            panel._poll_console_log()
+            text = panel._console_text.toPlainText()
+            self.assertIn("Line 2: Checking episode 5...", text)
+            self.assertIn("Line 3: Found magnet link", text)
+
+            # Test filter
+            panel._console_filter_edit.setText("magnet")
+            filtered = panel._console_text.toPlainText()
+            self.assertIn("Line 3: Found magnet link", filtered)
+            self.assertNotIn("Line 2: Checking episode 5...", filtered)
+
+            # Clear filter
+            panel._console_filter_edit.setText("")
+            self.assertIn("Line 2: Checking episode 5...", panel._console_text.toPlainText())
+
+            # Test clear button
+            panel._console_clear_btn.click()
+            self.assertEqual(panel._console_text.toPlainText(), "")
+
+            # Test wrap toggle
+            panel._console_wrap_cb.setChecked(True)
+            self.assertEqual(panel._console_text.lineWrapMode(), QPlainTextEdit.LineWrapMode.WidgetWidth)
+            panel._console_wrap_cb.setChecked(False)
+            self.assertEqual(panel._console_text.lineWrapMode(), QPlainTextEdit.LineWrapMode.NoWrap)
+
+    def test_animepahe_console_status_change_reflection(self):
+        """AnimePahe status change reflects on console tab badges and action button."""
+        panel = self.win._details_panel
+        panel.show_animepahe_console()
+
+        # Scraper starts
+        self.manager.animepahe_status_changed.emit(True)
+        self.assertIn("Active", panel._console_status_lbl.text())
+        self.assertIn("ACTIVE", panel._lbl_badge.text())
+        self.assertIn("Stop", panel._console_action_btn.text())
+
+        # Scraper stops
+        self.manager.animepahe_status_changed.emit(False)
+        self.assertIn("Stopped", panel._console_status_lbl.text())
+        self.assertIn("STOPPED", panel._lbl_badge.text())
+        self.assertIn("Start", panel._console_action_btn.text())
 
 
 if __name__ == "__main__":

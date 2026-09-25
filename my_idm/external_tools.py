@@ -1,0 +1,194 @@
+"""External tools integration layer (AnimePahe scraper, CLI execution, GUI launchers)."""
+
+from __future__ import annotations
+
+import logging
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple
+
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
+
+from my_idm.config import ExternalToolsConfig
+
+log = logging.getLogger(__name__)
+
+
+def find_pythonw_executable() -> str:
+    """Find pythonw.exe corresponding to current Python environment, or fallback to python."""
+    py_dir = Path(sys.executable).parent
+    pythonw = py_dir / "pythonw.exe"
+    if pythonw.is_file():
+        return str(pythonw)
+    return sys.executable
+
+
+def launch_animepahe_cli(
+    config: ExternalToolsConfig,
+    my_idm_dir: Optional[str] = None,
+) -> Tuple[bool, str, Optional[subprocess.Popen]]:
+    """
+    Launch AnimePahe scraper in background CLI mode.
+    Outputs stdout and stderr into console_log.txt and forwards items to My-IDM backlog.
+    """
+    repo = config.get_effective_repo_path()
+    if not repo or not os.path.isdir(repo):
+        msg = f"AnimePahe repository directory does not exist: '{config.animepahe_repo_path}'"
+        log.warning(msg)
+        return False, msg, None
+
+    script = Path(repo) / "animepahe_download.py"
+    if not script.is_file():
+        msg = f"animepahe_download.py not found in {repo}"
+        log.warning(msg)
+        return False, msg, None
+
+    cmd = [sys.executable, "-u", str(script), "--my-idm"]
+    if my_idm_dir:
+        cmd.extend(["--my-idm-dir", str(my_idm_dir)])
+
+    console_log = config.get_console_log_path()
+    console_log.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with open(console_log, "a", encoding="utf-8") as log_file:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_file.write(f"\n=======================================================\n")
+            log_file.write(f"  AnimePahe CLI Scraper Session Started: {timestamp}\n")
+            log_file.write(f"  Command: {' '.join(cmd)}\n")
+            log_file.write(f"=======================================================\n\n")
+            log_file.flush()
+
+            flags = 0
+            if sys.platform == "win32":
+                # CREATE_NO_WINDOW prevents command prompt window from appearing
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=repo,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=flags,
+                env=env,
+            )
+        msg = f"Started AnimePahe scraper in CLI mode (PID: {proc.pid})"
+        log.info(msg)
+        return True, msg, proc
+
+    except Exception as exc:
+        msg = f"Failed to launch AnimePahe scraper CLI: {exc}"
+        log.error(msg)
+        return False, msg, None
+
+
+def launch_animepahe_gui(config: ExternalToolsConfig) -> Tuple[bool, str]:
+    """
+    Launch AnimePahe desktop GUI detached from My-IDM process.
+    """
+    repo = config.get_effective_repo_path()
+    if not repo or not os.path.isdir(repo):
+        msg = f"AnimePahe repository directory does not exist: '{config.animepahe_repo_path}'"
+        log.warning(msg)
+        return False, msg
+
+    run_pyw = Path(repo) / "run.pyw"
+    gui_py = Path(repo) / "gui.py"
+    run_bat = Path(repo) / "run_gui.bat"
+
+    pythonw = find_pythonw_executable()
+
+    flags = 0
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
+    try:
+        if run_pyw.is_file():
+            cmd = [pythonw, str(run_pyw)]
+            subprocess.Popen(
+                cmd,
+                cwd=repo,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            msg = "Launched AnimePahe GUI via run.pyw"
+            log.info(msg)
+            return True, msg
+
+        elif gui_py.is_file():
+            cmd = [pythonw, str(gui_py)]
+            subprocess.Popen(
+                cmd,
+                cwd=repo,
+                creationflags=flags,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            msg = "Launched AnimePahe GUI via gui.py"
+            log.info(msg)
+            return True, msg
+
+        elif run_bat.is_file():
+            cmd = f'cmd.exe /c start "" /D "{repo}" "{run_bat}"'
+            subprocess.Popen(cmd, shell=True, cwd=repo)
+            msg = "Launched AnimePahe GUI via run_gui.bat"
+            log.info(msg)
+            return True, msg
+
+        else:
+            # Fallback to animepahe_download.py --gui
+            script = Path(repo) / "animepahe_download.py"
+            if script.is_file():
+                cmd = [pythonw, str(script), "--gui"]
+                subprocess.Popen(cmd, cwd=repo, creationflags=flags, stdin=subprocess.DEVNULL)
+                msg = "Launched AnimePahe GUI via animepahe_download.py --gui"
+                log.info(msg)
+                return True, msg
+
+            return False, f"No valid GUI entry point found in {repo} (expected run.pyw, gui.py, or run_gui.bat)"
+
+    except Exception as exc:
+        msg = f"Failed to launch AnimePahe GUI: {exc}"
+        log.error(msg)
+        return False, msg
+
+
+def open_file_in_default_app(file_path: Path | str, create_if_missing: bool = True) -> Tuple[bool, str]:
+    """
+    Open a file with the system's default text editor or viewer.
+    Creates an empty placeholder if it doesn't exist yet.
+    """
+    p = Path(file_path)
+    if not p.is_file():
+        if create_if_missing:
+            try:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(f"# Log file created on {datetime.now().isoformat()}\n", encoding="utf-8")
+            except Exception as exc:
+                return False, f"Could not create file '{p}': {exc}"
+        else:
+            return False, f"File does not exist: '{p}'"
+
+    try:
+        url = QUrl.fromLocalFile(str(p.resolve()))
+        success = QDesktopServices.openUrl(url)
+        if success:
+            return True, f"Opened '{p.name}'"
+        # Fallback for Windows if openUrl fails
+        if sys.platform == "win32":
+            os.startfile(str(p.resolve()))
+            return True, f"Opened '{p.name}'"
+        return False, f"Failed to open '{p.name}' with default application."
+    except Exception as exc:
+        return False, f"Failed to open '{p}': {exc}"
