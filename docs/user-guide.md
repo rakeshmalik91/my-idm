@@ -11,6 +11,7 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 - [Managing Downloads](#managing-downloads)
 - [Bottom Details Panel](#bottom-details-panel)
 - [Preferences & Settings](#preferences--settings)
+- [Browser Integration (Chrome / Brave / Edge)](#browser-integration-chrome--brave--edge)
 - [Dedicated Feature Guides](#dedicated-feature-guides)
 - [VPN & Network Settings](#vpn--network-settings)
 - [Antivirus & Malware Scanning](#antivirus--malware-scanning)
@@ -259,6 +260,44 @@ Manage integration with external scrapers and download tools (e.g. AnimePahe Aut
 - **View Debug Logs**: Open `debug_log.txt` located in the AnimePahe repository folder.
 - **Run CLI Now**: Start or stop the AnimePahe CLI scraper in background mode directly from Preferences settings.
 - **Launch GUI**: Launch the standalone AnimePahe desktop GUI detached from My-IDM.
+
+### 7. Browser Integration Tab
+Configure Chrome, Brave, and Edge browser integration:
+- **Enable Browser Integration**: Toggle the local HTTP loopback server (`127.0.0.1:19582`) on or off.
+- **Port**: Configure loopback port (default `19582`).
+- **Open Extension Folder**: Quick button opening the unpacked extension directory in File Explorer for easy drag-and-drop loading in `chrome://extensions`.
+- **Open Chrome Extensions Page**: Quick button to open Chrome's Extension Management page in Developer Mode.
+- **File Type Interception**: Choose file extensions to automatically capture or bypass.
+
+---
+
+## Browser Integration (Chrome / Brave / Edge)
+
+My-IDM includes an unpacked Manifest V3 browser extension that automatically intercepts downloads from Google Chrome, Brave, Microsoft Edge, and Chromium-based browsers, routing them into My-IDM for accelerated, multi-segment downloading.
+
+### 1. How It Works
+- The extension runs locally in your browser.
+- When you click a download link or start a download in Chrome:
+  1. The extension listens on `chrome.downloads.onDeterminingFilename`.
+  2. It pauses/cancels Chrome's native single-threaded download.
+  3. It extracts the full session cookies for the domain using `chrome.cookies.getAll()`.
+  4. It sends an HTTP POST request to My-IDM's local REST server at `http://127.0.0.1:19582/add`.
+  5. My-IDM starts downloading the file immediately with full multi-connection segmentation and authenticated cookies.
+
+### 2. Loading the Unpacked Extension (No Store Required)
+1. In My-IDM, navigate to **Tools → Preferences → Browser Integration** (or open `browser_extension/` directory in the repository).
+2. Click **Open Extension Folder** to locate the directory.
+3. Open Google Chrome (or Edge/Brave) and navigate to `chrome://extensions/`.
+4. Toggle **Developer mode** ON (top right switch).
+5. Click **Load unpacked** (top left).
+6. Select the `browser_extension/` directory inside your My-IDM installation.
+7. Done! The My-IDM extension icon will appear in your browser toolbar.
+
+### 3. Usage & Features
+- **Automatic Interception**: Any file download started in Chrome is seamlessly sent to My-IDM.
+- **Context Menu Download**: Right-click any link, video, or image and select **"Download with My-IDM"**.
+- **Instant Bypass**: Hold down the <kbd>Alt</kbd> key when clicking a download link to bypass My-IDM and let Chrome handle the download natively.
+- **Cookie Jar Forwarding**: Session cookies from private logins, premium file hosts, and trackers are preserved seamlessly.
 
 ---
 

@@ -21,10 +21,12 @@
 ## ✨ Features
 
 - 🚀 **Segmented HTTP & BitTorrent** — 1–32 parallel connections, magnet/torrent support, and crash auto-resume.
+- 🌐 **Browser Integration** — Local unpacked Chrome extension for 1-click downloads, automatic intercept, and cookie forwarding.
 - 🧅 **Tor & VPN Privacy** — 1-click Tor routing, network adapter binding, and instant kill switch protection.
 - 🛡️ **Antivirus & Safety** — Pre-download deceptive extension blocks and background Windows Defender scans.
 - 📋 **5-Tab Details Panel** — Collapsible inspector (<kbd>F4</kbd>) for live segments, torrent files, peers, and trackers.
 - 🎛️ **Queue & UI** — Priority queue order (`#`), multi-column sorting, resizable columns, and dark theme.
+- 🎬 **External Tools Integration** — Background AnimePahe scraper execution with real-time embedded console logs & browser sessions.
 
 ---
 
@@ -99,6 +101,7 @@ All settings and runtime data are persisted in the user profile:
 - [**VPN & Kill Switch**](docs/architecture/vpn.md) — Network interface binding, adapter watcher loop, and proxy configuration.
 - [**Antivirus & Security**](docs/architecture/antivirus.md) — Pre-download checks, Defender/custom scanning, and quarantine.
 - [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
+- [**Chrome & Browser Integration**](docs/architecture/chrome-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 - [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.

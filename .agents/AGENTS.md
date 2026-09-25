@@ -18,6 +18,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **State Machines & Lifecycle** | [`docs/architecture/state-machines.md`](file:///d:/Projects/my-idm/docs/architecture/state-machines.md) | Dedicated Mermaid state diagrams for HTTP and BitTorrent, transition triggers, slot allocation, and backoff/seeding flows. |
 | **Backlog Processing** | [`docs/architecture/backlog.md`](file:///d:/Projects/my-idm/docs/architecture/backlog.md) | Multi-location auto-discovery, custom download location delimiters & directives, auto-clearing queue lifecycle, and IPC ingestion. |
 | **Database & Persistence** | [`docs/architecture/database.md`](file:///d:/Projects/my-idm/docs/architecture/database.md) | SQLite schema specification, constraints, indexing, `metadata_json` contract, migrations, and self-healing. |
+| **Browser Integration** | [`docs/architecture/chrome-integration.md`](file:///d:/Projects/my-idm/docs/architecture/chrome-integration.md) | Google Chrome / Chromium Manifest V3 extension, loopback REST server (127.0.0.1:19582), automated download interception, and cookie preservation. |
 
 ---
 

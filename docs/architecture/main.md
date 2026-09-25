@@ -19,6 +19,8 @@ Technical documentation for developers working on the My-IDM codebase.
 - [Tor Privacy Subsystem](#tor-privacy-subsystem)
 - [Antivirus & Security Subsystem](#antivirus--security-subsystem)
 - [Backlog Processing Subsystem](#backlog-processing-subsystem)
+- [Browser Integration Subsystem](#browser-integration-subsystem)
+- [External Tools Subsystem](#external-tools-subsystem)
 - [Preferences & Configuration Architecture](#preferences--configuration-architecture)
 - [Dynamic Filename Resolution & Crash Resilience](#dynamic-filename-resolution--crash-resilience)
 - [GUI Architecture](#gui-architecture)
@@ -688,6 +690,48 @@ DownloadManager signals:
   threat_detected(str, str)
     → MainWindow._on_threat_detected → QMessageBox warning
 ```
+
+---
+
+## Browser Integration Subsystem
+
+My-IDM provides a zero-install-friction browser extension workflow using an unpacked Manifest V3 Chrome extension communicating with an embedded loopback REST server.
+
+### Architecture Overview
+
+```
+┌────────────────────────────────┐         REST HTTP (127.0.0.1:19582)        ┌────────────────────────────────┐
+│   Chrome Browser (MV3)         │ ─────────────────────────────────────────> │   My-IDM Core                  │
+│                                │                                            │                                │
+│ • downloads.onDeterminingFilename                                           │ • browser_server.py (aiohttp)  │
+│ • contextMenus ("Download")    │ <───────────────────────────────────────── │ • DownloadManager.add_url()    │
+│ • cookies.getAll()             │           {"status": "ok", "id": "..."}    │ • Cookie & Header propagation  │
+└────────────────────────────────┘                                            └────────────────────────────────┘
+```
+
+1. **Loopback Server (`browser_server.py`)**: Runs on `http://127.0.0.1:19582` within the asyncio thread.
+   - `GET /health` — Heartbeat verification and status reporting.
+   - `POST /add` — Ingests download URLs with target filename, cookies, referrer, and user-agent.
+   - `GET /config` — Queries user settings (e.g. bypass extensions or auto-download toggles).
+2. **Manifest V3 Extension (`browser_extension/`)**:
+   - Intercepts browser download initiations, cancels Chrome's built-in download, queries exact session cookies for the domain via `chrome.cookies.getAll()`, and posts to My-IDM.
+   - Bypassed if the user holds <kbd>Alt</kbd> during click or if file types match user bypass list.
+   - Provides right-click context menu: **"Download with My-IDM"** for links and media.
+3. For exhaustive details, see [**Chrome Integration Architecture**](chrome-integration.md).
+
+---
+
+## External Tools Subsystem
+
+My-IDM allows integration with companion scrapers and download tools (e.g., AnimePahe downloader).
+
+1. **Process Management**:
+   - `ExternalToolsManager` launches CLI scrapers as subprocesses, streaming logs directly into real-time buffers.
+2. **Embedded Console & Browser Subtabs**:
+   - The bottom panel features an embedded real-time Console tab to view live stdout/stderr.
+   - Web-based tools or automation views can be docked inside an embedded browser subtab.
+3. **Status Bar Indicators**:
+   - A dedicated footer badge indicates tool status, allows toggling background execution, and triggers quick log inspection.
 
 ---
 

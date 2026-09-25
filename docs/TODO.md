@@ -126,9 +126,17 @@ commit after each features or set of fixes/enhancements
 - [x] control when to scan, before download start, after completes etc
 - [x] control what kind of malware to delete/quarrantine
 
-----------------------
 ### Browser Integration
-- [ ] to check possibilities: chrome, mozilla
+- [x] Architecture design & sequence documentation ([docs/architecture/chrome-integration.md](docs/architecture/chrome-integration.md))
+- [ ] Local loopback REST server (`127.0.0.1:19582`) in `my_idm/browser_server.py`
+- [ ] Manifest V3 unpacked Chrome extension (`browser_extension/`)
+  - [ ] Intercept downloads (`chrome.downloads.onDeterminingFilename`)
+  - [ ] Session cookie extraction (`chrome.cookies.getAll()`)
+  - [ ] Context menu: "Download with My-IDM"
+  - [ ] Alt-key click bypass
+- [ ] Preferences GUI tab for browser integration (enable toggle, port, open extension folder)
+- [ ] Unit & integration tests for loopback server & payload handling
+- [ ] Mozilla Firefox WebExtension compatibility
 
 ----------------------
 ### Tools
