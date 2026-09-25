@@ -75,7 +75,7 @@ _STATUS_COLORS = {
 }
 
 ACTIVE_QUEUE_STATUSES = {
-    "queued", "downloading", "fetching_metadata", "stalled", "checking", "scanning"
+    "downloading"
 }
 
 

@@ -1048,6 +1048,7 @@ class DownloadManager(QObject):
 
         self._starting_downloads.discard(download_id)
         self._db.update_status(download_id, "paused")
+        self._db.update_queue_order(download_id, 0)
         self.status_changed.emit(download_id, "paused", "")
 
         if entry.download_type == "http":

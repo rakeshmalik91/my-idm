@@ -127,6 +127,10 @@ class TestDetailsPanel(unittest.TestCase):
         peers_tab_idx = panel._tabs.indexOf(panel._tab_peers)
         self.assertFalse(panel._tabs.isTabVisible(peers_tab_idx))
 
+        # Trackers tab should be hidden for HTTP downloads
+        trackers_tab_idx = panel._tabs.indexOf(panel._tab_trackers)
+        self.assertFalse(panel._tabs.isTabVisible(trackers_tab_idx))
+
     def test_details_panel_torrent_download_inspection(self):
         """Details panel displays torrent files, peers, trackers, and handles priority changes."""
         entry = DownloadEntry(
@@ -207,6 +211,10 @@ class TestDetailsPanel(unittest.TestCase):
         # Verify Peers Tab is visible for torrents
         peers_tab_idx = panel._tabs.indexOf(panel._tab_peers)
         self.assertTrue(panel._tabs.isTabVisible(peers_tab_idx))
+
+        # Verify Trackers Tab is visible for torrents
+        trackers_tab_idx = panel._tabs.indexOf(panel._tab_trackers)
+        self.assertTrue(panel._tabs.isTabVisible(trackers_tab_idx))
 
         # Verify Files Tab (Folder hierarchy in QTreeWidget)
         self.assertEqual(panel._tree_files.topLevelItemCount(), 1)

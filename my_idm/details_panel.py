@@ -771,12 +771,17 @@ class DetailsPanel(QWidget):
 
         self._current_entry = entry
 
-        # Peers tab is only relevant for BitTorrent
+        # Peers & Trackers tabs are only relevant for BitTorrent
         is_torrent = (entry.download_type == "torrent")
         peers_tab_idx = self._tabs.indexOf(self._tab_peers)
         if peers_tab_idx != -1:
             self._tabs.setTabVisible(peers_tab_idx, is_torrent)
             if not is_torrent and self._tabs.currentIndex() == peers_tab_idx:
+                self._tabs.setCurrentIndex(0)
+        trackers_tab_idx = self._tabs.indexOf(self._tab_trackers)
+        if trackers_tab_idx != -1:
+            self._tabs.setTabVisible(trackers_tab_idx, is_torrent)
+            if not is_torrent and self._tabs.currentIndex() == trackers_tab_idx:
                 self._tabs.setCurrentIndex(0)
 
         if self.current_mode() == "details":

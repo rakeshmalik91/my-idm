@@ -364,7 +364,11 @@ class Database:
         return [self._row_to_entry(r) for r in rows]
 
     def get_next_queue_order(self) -> int:
-        row = self._conn.execute("SELECT MAX(queue_order) AS max_order FROM downloads").fetchone()
+        row = self._conn.execute(
+            "SELECT MAX(queue_order) AS max_order FROM downloads "
+            "WHERE status IN ('queued', 'downloading', 'checking', 'fetching_metadata', 'stalled') "
+            "AND queue_order > 0"
+        ).fetchone()
         if row and row["max_order"] is not None:
             return int(row["max_order"]) + 1
         return 1
