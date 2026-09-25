@@ -126,21 +126,30 @@ commit after each features or set of fixes/enhancements
 - [x] control when to scan, before download start, after completes etc
 - [x] control what kind of malware to delete/quarrantine
 
+----------------------
 ### Browser Integration
+
+#### Chrome Integration
 - [x] Architecture design & sequence documentation ([docs/architecture/chrome-integration.md](docs/architecture/chrome-integration.md))
-- [ ] Local loopback REST server (`127.0.0.1:19582`) in `my_idm/browser_server.py`
-- [ ] Manifest V3 unpacked Chrome extension (`browser_extension/`)
-  - [ ] Intercept downloads (`chrome.downloads.onDeterminingFilename`)
-  - [ ] Session cookie extraction (`chrome.cookies.getAll()`)
-  - [ ] Context menu: "Download with My-IDM"
-  - [ ] Alt-key click bypass
-- [ ] Preferences GUI tab for browser integration (enable toggle, port, open extension folder)
-- [ ] Unit & integration tests for loopback server & payload handling
-- [ ] Mozilla Firefox WebExtension compatibility
+- [x] Local loopback REST server (`127.0.0.1:19582`) in `my_idm/browser_server.py`
+- [x] Manifest V3 unpacked Chrome extension (`browser_extension/`)
+  - [x] Intercept downloads (`chrome.downloads.onDeterminingFilename`)
+  - [x] Session cookie extraction (`chrome.cookies.getAll()`)
+  - [x] Context menu: "Download with My-IDM"
+  - [x] Bypassed file extensions & server fallback
+- [x] Preferences GUI tab for browser integration (enable toggle, port, open extension folder, test connection)
+- [x] Unit & integration tests for loopback server & payload handling (`tests/test_browser_integration.py`)
+- [ ] allow .torrent files to be caught from browser and add it as a torrent, have seperate config to control it
+- [ ] add config to control min fixe size to catch
+- [ ] add windows notification when a file is caught from browser extension
+
+#### Mozilla Integration
+- [ ] Mozilla Firefox WebExtension manifest compatibility
 
 ----------------------
 ### Tools
-- [x] Animepahe scraper
+
+#### Animepahe scraper
   - [x] add a new tab for external tools in preferences, add any related configs
     - [x] repo location
     - [x] toggle to launch animepahe scraper at launch, in cli mode, should send downloads to myidm in backlog file
@@ -148,5 +157,9 @@ commit after each features or set of fixes/enhancements
   - [x] add a button in tools menu to launch animepahe downloader gui
   - [x] show footer badge while background CLI scraper is active (status popup for logs, stop/start, GUI, settings)
   - [x] active console log bottom panel (stream logs in real-time when clicking console log from footer while animepahe cli is active)
-- [ ] Youtube scraper
-- [ ] Mangareader scraper
+
+#### Youtube scraper
+- [ ] TODO
+
+#### Mangareader scraper
+- [ ] TODO

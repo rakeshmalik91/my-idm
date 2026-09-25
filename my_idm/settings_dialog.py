@@ -38,6 +38,7 @@ from my_idm.config import (
     TorConfig,
     TorrentConfig,
     ExternalToolsConfig,
+    BrowserIntegrationConfig,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
 )
@@ -61,7 +62,7 @@ log = logging.getLogger(__name__)
 
 
 class SettingsDialog(QDialog):
-    """Preferences / Settings dialog for general downloads, torrent, network, Tor, and security."""
+    """Preferences / Settings dialog for general downloads, torrent, network, Tor, security, and browser."""
 
     def __init__(
         self,
@@ -71,6 +72,7 @@ class SettingsDialog(QDialog):
         security_config: Optional[SecurityConfig] = None,
         tor_config: Optional[TorConfig] = None,
         external_tools_config: Optional[ExternalToolsConfig] = None,
+        browser_config: Optional[BrowserIntegrationConfig] = None,
         db: Optional[Database] = None,
         parent=None,
         initial_tab: int = 0,
@@ -116,6 +118,11 @@ class SettingsDialog(QDialog):
             ExternalToolsConfig.from_dict(external_tools_config.to_dict())
             if external_tools_config
             else ExternalToolsConfig.load()
+        )
+        self._browser_cfg = (
+            BrowserIntegrationConfig.from_dict(browser_config.to_dict())
+            if browser_config
+            else BrowserIntegrationConfig.load()
         )
 
         self._interfaces: list[NetworkInterfaceInfo] = []
@@ -228,6 +235,7 @@ class SettingsDialog(QDialog):
         self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor Network")
         self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus && Security")
         self._tabs.addTab(self._wrap_scrollable(self._create_external_tools_tab()), "🛠️ External Tools")
+        self._tabs.addTab(self._wrap_scrollable(self._create_browser_tab()), "🌐 Browser Integration")
         root_layout.addWidget(self._tabs)
 
         # Dialog Buttons
@@ -958,6 +966,113 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return tab
 
+    def _create_browser_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        # 1. Server Configuration Group
+        server_group = QGroupBox("Local Extension Loopback Server")
+        server_layout = QVBoxLayout(server_group)
+        server_layout.setSpacing(10)
+
+        self._browser_enabled_cb = QCheckBox("Enable Browser Integration (starts HTTP loopback listener)")
+        self._browser_enabled_cb.setToolTip("Enables the local REST server that receives downloads from the Chrome extension.")
+        server_layout.addWidget(self._browser_enabled_cb)
+
+        port_row = QHBoxLayout()
+        port_lbl = QLabel("Server Port:")
+        port_row.addWidget(port_lbl)
+
+        self._browser_port_spin = QSpinBox()
+        self._browser_port_spin.setRange(1024, 65535)
+        self._browser_port_spin.setValue(self._browser_cfg.port or 19582)
+        port_row.addWidget(self._browser_port_spin)
+
+        self._browser_status_lbl = QLabel("Checking status...")
+        self._browser_status_lbl.setStyleSheet("color: #8fa0b5; margin-left: 12px;")
+        port_row.addWidget(self._browser_status_lbl, 1)
+        server_layout.addLayout(port_row)
+
+        self._browser_intercept_cb = QCheckBox("Automatically intercept downloads from Chrome")
+        self._browser_intercept_cb.setToolTip("When enabled, browser downloads are cancelled in Chrome and handed to My-IDM.")
+        server_layout.addWidget(self._browser_intercept_cb)
+
+        bypass_lbl = QLabel("Bypassed File Extensions (comma-separated):")
+        server_layout.addWidget(bypass_lbl)
+
+        self._browser_bypass_edit = QLineEdit()
+        self._browser_bypass_edit.setPlaceholderText(".torrent, .crx, .pdf")
+        self._browser_bypass_edit.setText(", ".join(self._browser_cfg.bypassed_extensions))
+        server_layout.addWidget(self._browser_bypass_edit)
+
+        layout.addWidget(server_group)
+
+        # 2. Chrome Extension Setup Group
+        setup_group = QGroupBox("Chrome / Brave / Edge Setup Instructions")
+        setup_layout = QVBoxLayout(setup_group)
+        setup_layout.setSpacing(10)
+
+        instructions = (
+            "<p style='line-height: 1.6; margin-bottom: 8px;'>"
+            "<b>How to install the local extension in Chrome / Brave / Edge:</b><br>"
+            "1. Open your browser and navigate to: <code style='color: #00d2ff;'>chrome://extensions/</code><br>"
+            "2. Turn <b>ON</b> the <b>Developer mode</b> toggle switch in the top-right corner.<br>"
+            "3. Click the <b>Load unpacked</b> button in the top-left corner.<br>"
+            "4. Select the <b>browser_extension</b> folder located inside your My-IDM directory."
+            "</p>"
+        )
+        instr_lbl = QLabel(instructions)
+        instr_lbl.setTextFormat(Qt.TextFormat.RichText)
+        instr_lbl.setWordWrap(True)
+        setup_layout.addWidget(instr_lbl)
+
+        btn_row = QHBoxLayout()
+
+        self._btn_open_ext_folder = QPushButton("📁 Open Extension Folder")
+        self._btn_open_ext_folder.setToolTip("Open the browser_extension folder in Windows File Explorer")
+        self._btn_open_ext_folder.clicked.connect(self._on_open_extension_folder)
+        btn_row.addWidget(self._btn_open_ext_folder)
+
+        self._btn_copy_ext_path = QPushButton("📋 Copy Folder Path")
+        self._btn_copy_ext_path.setToolTip("Copy absolute path of the extension directory to clipboard")
+        self._btn_copy_ext_path.clicked.connect(self._on_copy_extension_path)
+        btn_row.addWidget(self._btn_copy_ext_path)
+
+        self._btn_open_chrome_extensions = QPushButton("🌐 Open chrome://extensions")
+        self._btn_open_chrome_extensions.setToolTip("Open Chrome Extensions management page in your browser")
+        self._btn_open_chrome_extensions.clicked.connect(self._on_open_chrome_extensions)
+        btn_row.addWidget(self._btn_open_chrome_extensions)
+
+        setup_layout.addLayout(btn_row)
+        layout.addWidget(setup_group)
+
+        layout.addStretch()
+        return tab
+
+    def _get_extension_dir(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "browser_extension"
+
+    def _on_open_extension_folder(self):
+        ext_dir = self._get_extension_dir()
+        if ext_dir.is_dir():
+            open_file_in_default_app(ext_dir)
+        else:
+            QMessageBox.warning(self, "Folder Not Found", f"Extension folder does not exist:\n{ext_dir}")
+
+    def _on_copy_extension_path(self):
+        from PySide6.QtWidgets import QApplication
+        ext_dir = self._get_extension_dir()
+        QApplication.clipboard().setText(str(ext_dir))
+        QMessageBox.information(self, "Path Copied", f"Extension folder path copied to clipboard:\n{ext_dir}")
+
+    def _on_open_chrome_extensions(self):
+        try:
+            QDesktopServices.openUrl(QUrl("chrome://extensions/"))
+        except Exception:
+            pass
+
     # -----------------------------------------------------------------------
     # Population & Handlers
     # -----------------------------------------------------------------------
@@ -1068,6 +1183,21 @@ class SettingsDialog(QDialog):
         else:
             self._btn_run_cli_now.setText("▶️ Run CLI Now")
             self._btn_run_cli_now.setToolTip("Launch AnimePahe background scraper in CLI mode")
+
+        # Browser Integration tab
+        self._browser_enabled_cb.setChecked(self._browser_cfg.enabled)
+        self._browser_port_spin.setValue(self._browser_cfg.port or 19582)
+        self._browser_intercept_cb.setChecked(self._browser_cfg.intercept_all)
+        self._browser_bypass_edit.setText(", ".join(self._browser_cfg.bypassed_extensions))
+        if self._manager and getattr(self._manager, "browser_server", None) and self._manager.browser_server.is_running:
+            self._browser_status_lbl.setText(f"🟢 Active (Listening on http://127.0.0.1:{self._browser_cfg.port})")
+            self._browser_status_lbl.setStyleSheet("color: #50fa7b; font-weight: bold; margin-left: 12px;")
+        elif self._browser_cfg.enabled:
+            self._browser_status_lbl.setText("⚪ Server will start on apply")
+            self._browser_status_lbl.setStyleSheet("color: #f1fa8c; margin-left: 12px;")
+        else:
+            self._browser_status_lbl.setText("⚪ Disabled")
+            self._browser_status_lbl.setStyleSheet("color: #8fa0b5; margin-left: 12px;")
 
     def _on_test_tor(self):
         host = self._tor_host_edit.text().strip() or "127.0.0.1"
@@ -1497,6 +1627,18 @@ class SettingsDialog(QDialog):
         self._external_tools_cfg.animepahe_launch_on_startup = self._animepahe_startup_cb.isChecked()
         self._external_tools_cfg.save()
 
+        # 7. Collect Browser Integration settings
+        self._browser_cfg.enabled = self._browser_enabled_cb.isChecked()
+        self._browser_cfg.port = self._browser_port_spin.value()
+        self._browser_cfg.intercept_all = self._browser_intercept_cb.isChecked()
+        bypassed_text = self._browser_bypass_edit.text().strip()
+        self._browser_cfg.bypassed_extensions = [
+            ext.strip() for ext in bypassed_text.split(",") if ext.strip()
+        ] if bypassed_text else []
+        self._browser_cfg.save()
+        if self._manager and hasattr(self._manager, "set_browser_config"):
+            self._manager.set_browser_config(self._browser_cfg)
+
         self.accept()
 
     @property
@@ -1522,3 +1664,7 @@ class SettingsDialog(QDialog):
     @property
     def external_tools_config(self) -> ExternalToolsConfig:
         return self._external_tools_cfg
+
+    @property
+    def browser_config(self) -> BrowserIntegrationConfig:
+        return self._browser_cfg

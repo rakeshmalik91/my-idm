@@ -12,7 +12,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union, Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from PySide6.QtCore import QObject, Signal, QTimer
@@ -24,9 +24,11 @@ from my_idm.config import (
     TorConfig,
     TorrentConfig,
     ExternalToolsConfig,
+    BrowserIntegrationConfig,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
 )
+from my_idm.browser_server import BrowserServer
 from my_idm.external_tools import launch_animepahe_cli, launch_animepahe_gui
 from my_idm.tor_service import TorServiceManager, find_tor_executable
 from my_idm.network import NetworkConfig, is_interface_active
@@ -254,6 +256,7 @@ class DownloadManager(QObject):
     bandwidth_limits_changed = Signal(int, int)  # download_limit, upload_limit
     external_tools_config_changed = Signal(object)  # ExternalToolsConfig
     animepahe_status_changed = Signal(bool)  # is_running
+    browser_config_changed = Signal(object)  # BrowserIntegrationConfig
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -264,6 +267,8 @@ class DownloadManager(QObject):
         self._security_config = SecurityConfig.load()
         self._tor_config = TorConfig.load()
         self._external_tools_config = ExternalToolsConfig.load()
+        self._browser_config = BrowserIntegrationConfig.load()
+        self._browser_server = BrowserServer(self, self._browser_config)
         self._animepahe_process: Optional[subprocess.Popen] = None
         self._browser_container_hwnd: Optional[int] = None
         # Enforce that Tor is only enabled on startup if auto_start_at_startup is True
@@ -368,6 +373,16 @@ class DownloadManager(QObject):
         if self._external_tools_config.animepahe_launch_on_startup:
             self.start_animepahe_scraper()
 
+        # Start browser integration loopback server if enabled
+        if self._browser_config.enabled:
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._browser_server.start(), self._loop
+                )
+                future.result(timeout=5)
+            except Exception as exc:
+                log.warning("Failed to start browser integration server: %s", exc)
+
         log.info("DownloadManager started")
 
     def stop(self, status_cb=None):
@@ -381,6 +396,16 @@ class DownloadManager(QObject):
         self._torrent_timer.stop()
         self._retry_timer.stop()
         self._backlog_timer.stop()
+
+        # Stop browser integration server
+        if getattr(self, "_browser_server", None) and self._browser_server.is_running and self._loop and self._loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._browser_server.stop(), self._loop
+                )
+                future.result(timeout=3)
+            except Exception:
+                pass
 
         # Stop HTTP engine
         if status_cb:
@@ -505,6 +530,33 @@ class DownloadManager(QObject):
 
     def set_browser_container_hwnd(self, hwnd: Optional[int]):
         self._browser_container_hwnd = hwnd
+
+    @property
+    def browser_config(self) -> BrowserIntegrationConfig:
+        return self._browser_config
+
+    @property
+    def browser_server(self) -> BrowserServer:
+        return self._browser_server
+
+    def set_browser_config(self, config: BrowserIntegrationConfig):
+        """Update browser extension integration configuration."""
+        old_enabled = self._browser_config.enabled
+        old_port = self._browser_config.port
+        self._browser_config = config
+        self._browser_server.set_config(config)
+        config.save()
+        self.browser_config_changed.emit(config)
+
+        # Restart or stop/start browser server if loop is running
+        if self._loop and self._loop.is_running():
+            if not config.enabled and self._browser_server.is_running:
+                asyncio.run_coroutine_threadsafe(self._browser_server.stop(), self._loop)
+            elif config.enabled and (not self._browser_server.is_running or old_port != config.port):
+                async def _restart_server():
+                    await self._browser_server.stop()
+                    await self._browser_server.start()
+                asyncio.run_coroutine_threadsafe(_restart_server(), self._loop)
 
     def set_tor_config(self, config: TorConfig):
         """Update Tor routing and SOCKS5 proxy configuration."""
@@ -831,6 +883,47 @@ class DownloadManager(QObject):
             self.status_changed.emit(entry.id, "queued", "")
 
         return entry.id
+
+    def add_download_from_browser(
+        self,
+        url: str,
+        filename: str = "",
+        save_path: str = "",
+        headers: Optional[dict] = None,
+        cookies: Optional[Union[str, dict]] = None,
+        referrer: str = "",
+        user_agent: str = "",
+    ) -> Optional[str]:
+        """Add a download initiated from the browser extension."""
+        combined_headers = {}
+        if headers and isinstance(headers, dict):
+            combined_headers.update(headers)
+        if referrer:
+            combined_headers["Referer"] = referrer
+        if user_agent:
+            combined_headers["User-Agent"] = user_agent
+        if cookies:
+            if isinstance(cookies, dict):
+                combined_headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+            elif isinstance(cookies, str) and cookies.strip():
+                combined_headers["Cookie"] = cookies.strip()
+
+        meta: dict[str, Any] = {"source": "browser_extension"}
+        if referrer:
+            meta["referer"] = referrer
+        if cookies:
+            meta["cookies"] = cookies
+        if user_agent:
+            meta["user_agent"] = user_agent
+
+        return self.add_download(
+            url=url,
+            save_path=save_path or self._general_config.get_effective_save_path(),
+            num_segments=self._general_config.default_segments,
+            filename=filename,
+            headers=combined_headers,
+            metadata=meta,
+        )
 
     def _get_active_download_count(self) -> int:
         """Count downloads currently in active transferring states or starting."""

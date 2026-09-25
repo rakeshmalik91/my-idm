@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="styles.css">
+  <title>My-IDM Integration</title>
+</head>
+<body>
+  <div class="popup-container">
+    <div class="header">
+      <img src="icons/icon48.png" alt="My-IDM" class="logo-icon">
+      <div>
+        <div class="title">My-IDM Integration</div>
+        <div style="font-size: 11px; color: var(--text-muted);">High-Speed Downloader</div>
+      </div>
+    </div>
+
+    <div class="status-card">
+      <div class="status-indicator">
+        <div id="statusDot" class="dot"></div>
+        <span id="statusText">Checking status...</span>
+      </div>
+      <button id="refreshBtn" style="background:none; border:none; cursor:pointer; font-size:14px;" title="Refresh status">🔄</button>
+    </div>
+
+    <div class="toggle-row">
+      <span>Auto-Intercept Downloads</span>
+      <label class="switch">
+        <input type="checkbox" id="interceptToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="toggle-row">
+      <span>Enable Extension</span>
+      <label class="switch">
+        <input type="checkbox" id="enableToggle">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <button id="openOptionsBtn" class="btn-secondary">⚙️ Extension Settings</button>
+
+    <div class="footer">
+      Connected via <span id="portDisplay">127.0.0.1:19582</span>
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

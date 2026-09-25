@@ -701,6 +701,10 @@ class MainWindow(QMainWindow):
         self._act_external_tools_settings = QAction(_create_emoji_icon("🛠️"), "External Tools Settings…", self)
         self._act_external_tools_settings.triggered.connect(self._on_open_external_tools_settings)
         tools_menu.addAction(self._act_external_tools_settings)
+        tools_menu.addSeparator()
+        self._act_browser_settings = QAction(_create_emoji_icon("🌐"), "Browser Integration Settings…", self)
+        self._act_browser_settings.triggered.connect(self._on_open_browser_settings)
+        tools_menu.addAction(self._act_browser_settings)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -1438,6 +1442,7 @@ class MainWindow(QMainWindow):
             security_config=self._manager.security_config,
             tor_config=self._manager.tor_config,
             external_tools_config=self._manager.external_tools_config,
+            browser_config=self._manager.browser_config,
             db=self._manager._db,
             parent=self,
             initial_tab=initial_tab,
@@ -1448,6 +1453,7 @@ class MainWindow(QMainWindow):
             self._manager.set_network_config(dlg.network_config)
             self._manager.set_security_config(dlg.security_config)
             self._manager.set_external_tools_config(dlg.external_tools_config)
+            self._manager.set_browser_config(dlg.browser_config)
             old_tor_enabled = self._manager.tor_config.enabled
             self._manager.set_tor_config(dlg.tor_config)
             if dlg.tor_config.enabled != old_tor_enabled:
@@ -1467,6 +1473,9 @@ class MainWindow(QMainWindow):
 
     def _on_open_external_tools_settings(self):
         self._on_open_preferences(5)
+
+    def _on_open_browser_settings(self):
+        self._on_open_preferences(6)
 
     def _on_launch_animepahe_gui(self):
         cfg = self._manager.external_tools_config

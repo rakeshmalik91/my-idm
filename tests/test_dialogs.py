@@ -151,7 +151,7 @@ class TestDialogsScrollable(unittest.TestCase):
 
         dlg = SettingsDialog()
         try:
-            self.assertEqual(dlg._tabs.count(), 6)
+            self.assertEqual(dlg._tabs.count(), 7)
             for i in range(dlg._tabs.count()):
                 widget = dlg._tabs.widget(i)
                 self.assertIsInstance(widget, QScrollArea)

@@ -495,3 +495,67 @@ class ExternalToolsConfig:
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir / "animepahe_debug.log"
 
+
+@dataclass
+class BrowserIntegrationConfig:
+    """Stores configuration for browser extension integration."""
+
+    enabled: bool = True
+    port: int = 19582
+    host: str = "127.0.0.1"
+    intercept_all: bool = True
+    bypassed_extensions: list[str] = field(default_factory=lambda: [".torrent", ".crx"])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "port": self.port,
+            "host": self.host,
+            "intercept_all": self.intercept_all,
+            "bypassed_extensions": list(self.bypassed_extensions),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BrowserIntegrationConfig:
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            port=int(data.get("port", 19582)),
+            host=str(data.get("host", "127.0.0.1")),
+            intercept_all=bool(data.get("intercept_all", True)),
+            bypassed_extensions=list(data.get("bypassed_extensions", [".torrent", ".crx"])),
+        )
+
+    def save(self, settings: Optional[QSettings] = None):
+        """Persists browser integration preferences into QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("BrowserIntegration")
+        settings.setValue("enabled", self.enabled)
+        settings.setValue("port", self.port)
+        settings.setValue("host", self.host)
+        settings.setValue("intercept_all", self.intercept_all)
+        settings.setValue("bypassed_extensions", ",".join(self.bypassed_extensions))
+        settings.endGroup()
+
+    @classmethod
+    def load(cls, settings: Optional[QSettings] = None) -> BrowserIntegrationConfig:
+        """Loads browser integration preferences from QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("BrowserIntegration")
+        enabled = settings.value("enabled", True, type=bool)
+        port = settings.value("port", 19582, type=int)
+        host = settings.value("host", "127.0.0.1", type=str)
+        intercept_all = settings.value("intercept_all", True, type=bool)
+        bypassed_raw = settings.value("bypassed_extensions", ".torrent,.crx", type=str)
+        settings.endGroup()
+
+        bypassed = [ext.strip() for ext in bypassed_raw.split(",") if ext.strip()] if bypassed_raw else [".torrent", ".crx"]
+        return cls(
+            enabled=bool(enabled),
+            port=int(port) if port > 0 else 19582,
+            host=str(host or "127.0.0.1"),
+            intercept_all=bool(intercept_all),
+            bypassed_extensions=bypassed,
+        )
+
