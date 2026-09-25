@@ -907,6 +907,46 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
                 self.win._act_launch_animepahe_gui.trigger()
                 self.assertEqual(self.win._status_label.text(), "Launched AnimePahe Downloader GUI")
 
+    def test_window_geometry_persistence_does_not_shift_on_relaunch(self):
+        """Saving and restoring UI state across multiple launches preserves window position without shifting upwards."""
+        self.win.resize(800, 600)
+        self.win.move(300, 200)
+        self.win.show()
+        QApplication.processEvents()
+
+        initial_pos = self.win.pos()
+        initial_y = initial_pos.y()
+        initial_x = initial_pos.x()
+        self.win._save_ui_state_to_db()
+
+        for launch_idx in range(3):
+            next_win = MainWindow(self.manager)
+            next_win.show()
+            QApplication.processEvents()
+
+            current_pos = next_win.pos()
+            self.assertEqual(
+                current_pos.y(),
+                initial_y,
+                f"Window shifted vertically on launch {launch_idx + 1}: {current_pos.y()} vs {initial_y}",
+            )
+            self.assertEqual(current_pos.x(), initial_x)
+            next_win._save_ui_state_to_db()
+            next_win.close()
+
+    def test_legacy_window_geometry_restore_does_not_shift(self):
+        """Restoring legacy UI state dictionary (x, y, width, height) positions window accurately without shift."""
+        legacy_state = {"x": 350, "y": 250, "width": 820, "height": 610}
+        self.manager.save_ui_state(legacy_state)
+
+        next_win = MainWindow(self.manager)
+        next_win.show()
+        QApplication.processEvents()
+
+        self.assertEqual(next_win.pos().x(), 350)
+        self.assertEqual(next_win.pos().y(), 250)
+        next_win.close()
+
 
 if __name__ == "__main__":
     unittest.main()

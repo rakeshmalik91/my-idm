@@ -265,6 +265,7 @@ class DownloadManager(QObject):
         self._tor_config = TorConfig.load()
         self._external_tools_config = ExternalToolsConfig.load()
         self._animepahe_process: Optional[subprocess.Popen] = None
+        self._browser_container_hwnd: Optional[int] = None
         # Enforce that Tor is only enabled on startup if auto_start_at_startup is True
         if not self._tor_config.auto_start_at_startup:
             self._tor_config.enabled = False
@@ -458,6 +459,7 @@ class DownloadManager(QObject):
         ok, msg, proc = launch_animepahe_cli(
             self._external_tools_config,
             my_idm_dir=str(Path(__file__).resolve().parent.parent),
+            container_hwnd=self._browser_container_hwnd,
         )
         if ok and proc:
             self._animepahe_process = proc
@@ -492,6 +494,17 @@ class DownloadManager(QObject):
 
     def is_animepahe_running(self) -> bool:
         return self._animepahe_process is not None and self._animepahe_process.poll() is None
+
+    @property
+    def animepahe_process(self) -> Optional[subprocess.Popen]:
+        return self._animepahe_process
+
+    @property
+    def browser_container_hwnd(self) -> Optional[int]:
+        return self._browser_container_hwnd
+
+    def set_browser_container_hwnd(self, hwnd: Optional[int]):
+        self._browser_container_hwnd = hwnd
 
     def set_tor_config(self, config: TorConfig):
         """Update Tor routing and SOCKS5 proxy configuration."""

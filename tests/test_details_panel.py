@@ -1064,6 +1064,60 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertIn("STOPPED", panel._lbl_badge.text())
         self.assertIn("Start", panel._console_action_btn.text())
 
+    def test_animepahe_embedded_browser_subtab_lifecycle(self):
+        """DetailsPanel creates a Browser subtab inside the Console tab, docks browser, and handles lifecycle."""
+        panel = self.win._details_panel
+
+        # 1. Console view has subtabs with Log present by default
+        self.assertIsNotNone(panel._console_subtabs)
+        self.assertEqual(panel._console_subtabs.count(), 1)
+        self.assertIn("Log", panel._console_subtabs.tabText(0))
+        self.assertFalse(panel.is_browser_tab_active())
+        self.assertFalse(panel.is_browser_attached())
+
+        # 2. Browser container HWND is registered
+        container_hwnd = panel.browser_container_hwnd
+        self.assertIsNotNone(container_hwnd)
+        self.assertIsInstance(container_hwnd, int)
+        self.assertEqual(self.manager.browser_container_hwnd, container_hwnd)
+
+        # 3. Simulate AnimePahe browser opening (calling show_browser_tab with mock HWND)
+        req_signal_fired = False
+        panel.browser_tab_requested.connect(lambda: nonlocal_set())
+        def nonlocal_set():
+            nonlocal req_signal_fired
+            req_signal_fired = True
+
+        mock_hwnd = 123456
+        with unittest.mock.patch.object(panel._browser_container, "attach_window", return_value=True) as mock_attach:
+            panel.show_browser_tab(mock_hwnd)
+            mock_attach.assert_called_once_with(mock_hwnd)
+
+        # Subtab is created and active
+        self.assertEqual(panel._console_subtabs.count(), 2)
+        self.assertIn("Browser", panel._console_subtabs.tabText(1))
+        self.assertTrue(panel.is_browser_tab_active())
+        self.assertEqual(panel.current_mode(), "console")
+        self.assertTrue(req_signal_fired)
+        self.assertIn("Active", panel._browser_status_lbl.text())
+
+        # 4. Test float / detach toggle
+        panel._browser_container._chrome_hwnd = mock_hwnd
+        panel._on_toggle_float_browser()
+        self.assertTrue(panel._is_browser_floating)
+        self.assertIn("Embed", panel._btn_float_browser.text())
+
+        panel._on_toggle_float_browser()
+        self.assertFalse(panel._is_browser_floating)
+        self.assertIn("Detach", panel._btn_float_browser.text())
+
+        # 5. Hide browser tab on challenge completion
+        panel.hide_browser_tab()
+        self.assertEqual(panel._console_subtabs.count(), 1)
+        self.assertFalse(panel.is_browser_tab_active())
+        self.assertEqual(panel._console_subtabs.currentIndex(), 0)
+        self.assertIn("Idle", panel._browser_status_lbl.text())
+
 
 if __name__ == "__main__":
     unittest.main()

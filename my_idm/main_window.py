@@ -207,7 +207,6 @@ class MainWindow(QMainWindow):
         self._setup_statusbar()
         self._connect_signals()
 
-        self._saved_geometry = None
         # Restore window geometry, location, column lengths, and splitter from DB
         self._restore_ui_state_from_db()
 
@@ -323,6 +322,9 @@ class MainWindow(QMainWindow):
         self._splitter.addWidget(self._table)
         self._details_panel = DetailsPanel(self._manager, self)
         self._details_panel.setMinimumHeight(140)
+        if hasattr(self._details_panel, "browser_container_hwnd"):
+            self._manager.set_browser_container_hwnd(self._details_panel.browser_container_hwnd)
+        self._details_panel.browser_tab_requested.connect(self._on_browser_tab_requested)
         self._splitter.addWidget(self._details_panel)
         self._splitter.setChildrenCollapsible(False)
         self._details_height: int = 250
@@ -332,6 +334,18 @@ class MainWindow(QMainWindow):
         self._splitter.splitterMoved.connect(self._on_splitter_moved)
 
         self.setCentralWidget(self._splitter)
+
+    def _on_browser_tab_requested(self):
+        """Ensure bottom panel is visible and expanded when an external browser session opens."""
+        if hasattr(self, "_act_details") and not self._act_details.isChecked():
+            self._act_details.setChecked(True)
+            self._on_details_toggle(True)
+        sizes = self._splitter.sizes()
+        if len(sizes) == 2 and sizes[1] < 340:
+            total = sum(sizes)
+            top_h = max(100, total - 360)
+            bot_h = total - top_h
+            self._splitter.setSizes([top_h, bot_h])
 
     def _on_splitter_moved(self, pos: int, index: int):
         """Track user-adjusted details panel height in real time."""
@@ -2001,9 +2015,12 @@ class MainWindow(QMainWindow):
                 sort_sec = Col.ADDED
                 sort_ord = int(Qt.SortOrder.DescendingOrder.value)
 
+            window_geom_hex = bytes(self.saveGeometry().toHex()).decode()
+
             state = {
-                "x": geom.x(),
-                "y": geom.y(),
+                "window_geometry": window_geom_hex,
+                "x": geom.x() if is_max else self.x(),
+                "y": geom.y() if is_max else self.y(),
                 "width": geom.width(),
                 "height": geom.height(),
                 "is_maximized": is_max,
@@ -2091,24 +2108,25 @@ class MainWindow(QMainWindow):
                 return
 
             # Window size & location
-            w = state.get("width")
-            h = state.get("height")
-            x = state.get("x")
-            y = state.get("y")
-            has_valid_size = w and h and w >= 400 and h >= 300
-            has_valid_pos = x is not None and y is not None
-            if has_valid_size:
-                self.resize(int(w), int(h))
-            if has_valid_pos:
-                self.move(int(x), int(y))
-            if has_valid_size and has_valid_pos:
-                self._saved_geometry = (int(x), int(y), int(w), int(h))
+            window_geom = state.get("window_geometry")
+            if window_geom:
+                try:
+                    self.restoreGeometry(QByteArray.fromHex(window_geom.encode()))
+                except Exception:
+                    pass
             else:
-                self._saved_geometry = None
-
-            # Maximized or not
-            if state.get("is_maximized"):
-                self.showMaximized()
+                w = state.get("width")
+                h = state.get("height")
+                x = state.get("x")
+                y = state.get("y")
+                has_valid_size = w and h and w >= 400 and h >= 300
+                has_valid_pos = x is not None and y is not None
+                if has_valid_size:
+                    self.resize(int(w), int(h))
+                if has_valid_pos:
+                    self.move(int(x), int(y))
+                if state.get("is_maximized"):
+                    self.showMaximized()
 
             # Column lengths / widths
             col_widths = state.get("column_widths")
@@ -2209,13 +2227,6 @@ class MainWindow(QMainWindow):
             self._sync_panel_buttons()
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
-
-    def showEvent(self, event):
-        if self._saved_geometry:
-            x, y, w, h = self._saved_geometry
-            self.setGeometry(x, y, w, h)
-            self._saved_geometry = None
-        super().showEvent(event)
 
     def closeEvent(self, event):
         if getattr(self, "_is_closing", False):

@@ -27,9 +27,91 @@ def find_pythonw_executable() -> str:
     return sys.executable
 
 
+def get_child_pids(parent_pid: int) -> set[int]:
+    """Recursively retrieves all child process PIDs spawned by parent_pid on Windows."""
+    child_pids: set[int] = set()
+    if sys.platform != "win32":
+        return child_pids
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        hSnapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if hSnapshot == -1:
+            return child_pids
+        pe32 = PROCESSENTRY32W()
+        pe32.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if kernel32.Process32FirstW(hSnapshot, ctypes.byref(pe32)):
+            while True:
+                if pe32.th32ParentProcessID == parent_pid:
+                    child_pids.add(pe32.th32ProcessID)
+                    child_pids.update(get_child_pids(pe32.th32ProcessID))
+                if not kernel32.Process32NextW(hSnapshot, ctypes.byref(pe32)):
+                    break
+        kernel32.CloseHandle(hSnapshot)
+    except Exception as exc:
+        log.debug("Error enumerating child PIDs: %s", exc)
+    return child_pids
+
+
+def find_chrome_hwnd(parent_pid: Optional[int] = None) -> Optional[int]:
+    """Find newly created top-level Chrome_WidgetWin_1 browser window HWND belonging to parent_pid tree."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+
+        child_pids: set[int] = set()
+        if parent_pid is not None:
+            child_pids = get_child_pids(parent_pid)
+            child_pids.add(parent_pid)
+
+        found_hwnd = None
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def enum_cb(hwnd, lparam):
+            nonlocal found_hwnd
+            cbuf = ctypes.create_unicode_buffer(512)
+            user32.GetClassNameW(hwnd, cbuf, 512)
+            if cbuf.value == "Chrome_WidgetWin_1":
+                win_pid = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(win_pid))
+                if not child_pids or win_pid.value in child_pids:
+                    rect = (ctypes.c_long * 4)()
+                    user32.GetWindowRect(hwnd, rect)
+                    w = rect[2] - rect[0]
+                    h = rect[3] - rect[1]
+                    if w > 200 and h > 150:
+                        found_hwnd = hwnd
+                        return False
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+        return found_hwnd
+    except Exception as exc:
+        log.debug("Error finding Chrome HWND: %s", exc)
+        return None
+
+
 def launch_animepahe_cli(
     config: ExternalToolsConfig,
     my_idm_dir: Optional[str] = None,
+    container_hwnd: Optional[int] = None,
 ) -> Tuple[bool, str, Optional[subprocess.Popen]]:
     """
     Launch AnimePahe scraper in background CLI mode.
@@ -70,6 +152,8 @@ def launch_animepahe_cli(
 
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            if container_hwnd:
+                env["ANIMEPAHE_EMBED_CONTAINER_HWND"] = str(container_hwnd)
 
             proc = subprocess.Popen(
                 cmd,

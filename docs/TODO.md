@@ -41,6 +41,7 @@ commit after each features or set of fixes/enhancements
 - [x] dont show download order for Completed, Cancelled, Stopper, File not Found, Error etc. Visible numbers should be continuous.
 - [x] Add context menu item to just delete file, without removing the entry. Ask for confirmation. Should pause and set progress to 0.
 - [x] Recheck on completed file gets stuck at Checking
+- [x] Window moving up on every launch compared to last launch
 - [x] manage leftover segment files. seeing leftover files often, not sure when they are not cleaned up. Check app close, entry deletion etc.
 - [x] If unchecked file is checked after download complete, update download status & percentage.
 - [x] Add Tor button in add download popup

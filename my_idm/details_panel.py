@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import humanize
 from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QTextCursor
+from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QStyle,
+    QStyleOption,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -43,6 +45,7 @@ logger = logging.getLogger("my_idm.details_panel")
 
 from my_idm.database import DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
+from my_idm.external_tools import find_chrome_hwnd
 from my_idm.manager import DownloadManager
 from my_idm.styles import Colors
 from my_idm.utils import send_to_trash, to_int, unlock_path
@@ -164,12 +167,14 @@ class SideTabBar(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
         self._current_index = 0
         self._tabs: list[QPushButton] = []
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(2)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
 
         self._btn_group = QButtonGroup(self)
         self._btn_group.setExclusive(True)
@@ -181,7 +186,7 @@ class SideTabBar(QWidget):
         layout.addWidget(self._btn_console)
         layout.addStretch(1)
 
-        self.setFixedWidth(105)
+        self.setFixedWidth(112)
         self.setStyleSheet(f"""
             SideTabBar {{
                 background-color: {Colors.BG_DARK};
@@ -191,30 +196,50 @@ class SideTabBar(QWidget):
 
         self.setCurrentIndex(0)
 
+    def paintEvent(self, event):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        p = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+        super().paintEvent(event)
+
     def _create_tab_button(self, text: str, index: int) -> QPushButton:
         btn = QPushButton(text, self)
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFixedHeight(34)
         btn.setStyleSheet(f"""
             QPushButton {{
-                background: transparent;
+                background-color: {Colors.BG_DARK};
                 color: {Colors.TEXT_SECONDARY};
                 border: none;
                 border-left: 3px solid transparent;
-                padding: 10px 10px;
+                border-radius: 0px;
+                padding: 6px 12px;
                 font-size: 12px;
                 font-weight: 500;
                 text-align: left;
             }}
             QPushButton:hover {{
-                background: {Colors.BG_HOVER};
+                background-color: {Colors.BG_HOVER};
                 color: {Colors.TEXT};
+                border: none;
+                border-left: 3px solid transparent;
+                border-radius: 0px;
             }}
             QPushButton:checked {{
-                background: {Colors.BG_MID};
+                background-color: {Colors.BG_MID};
                 color: {Colors.ACCENT};
+                border: none;
                 border-left: 3px solid {Colors.ACCENT};
+                border-radius: 0px;
                 font-weight: bold;
+            }}
+            QPushButton:pressed {{
+                background-color: {Colors.BG_LIGHT};
+                border: none;
+                border-left: 3px solid {Colors.ACCENT};
+                border-radius: 0px;
             }}
         """)
         btn.clicked.connect(lambda: self.setCurrentIndex(index))
@@ -245,14 +270,146 @@ class SideTabBar(QWidget):
             self._tabs[index].setText(text)
 
 
+class EmbeddedBrowserContainer(QWidget):
+    """Container widget that embeds an external browser window via Win32 SetParent."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._chrome_hwnd: Optional[int] = None
+        self._original_style: Optional[int] = None
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setStyleSheet(
+            f"background-color: {Colors.BG_DARK}; border: 1px solid {Colors.BORDER}; border-radius: 4px;"
+        )
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(10, 10, 10, 10)
+        self._placeholder_lbl = QLabel(
+            "🌐 Waiting for AnimePahe browser session...\n\n"
+            "undetected-chromedriver will automatically dock here when Cloudflare resolution triggers.",
+            self,
+        )
+        self._placeholder_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder_lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 12px; font-weight: 500;")
+        self._layout.addWidget(self._placeholder_lbl)
+
+    def hwnd(self) -> int:
+        return int(self.winId())
+
+    @property
+    def chrome_hwnd(self) -> Optional[int]:
+        return self._chrome_hwnd
+
+    def is_attached(self) -> bool:
+        return self._chrome_hwnd is not None
+
+    def attach_window(self, hwnd: int) -> bool:
+        if not hwnd:
+            return False
+        self._chrome_hwnd = hwnd
+        self._placeholder_lbl.setVisible(False)
+
+        if sys.platform != "win32":
+            return True
+
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            if not user32.IsWindow(hwnd):
+                return False
+
+            GWL_STYLE = -16
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            self._original_style = style
+            # Strip WS_CAPTION, WS_THICKFRAME, WS_POPUP
+            style &= ~(0x00C00000 | 0x00040000 | 0x80000000)
+            style |= 0x40000000  # WS_CHILD
+
+            if hasattr(user32, "SetWindowLongPtrW"):
+                user32.SetWindowLongPtrW(ctypes.c_void_p(hwnd), GWL_STYLE, ctypes.c_ssize_t(style))
+            else:
+                user32.SetWindowLongW(ctypes.c_void_p(hwnd), GWL_STYLE, ctypes.c_long(style))
+
+            user32.SetParent(ctypes.c_void_p(hwnd), ctypes.c_void_p(self.hwnd()))
+            w = max(self.width(), 400)
+            h = max(self.height(), 300)
+            user32.MoveWindow(ctypes.c_void_p(hwnd), 0, 0, w, h, True)
+            user32.ShowWindow(ctypes.c_void_p(hwnd), 5)  # SW_SHOW
+            logger.info("Successfully attached browser HWND %s into container %s", hwnd, self.hwnd())
+            return True
+        except Exception as exc:
+            logger.warning("Failed to attach browser window %s: %s", hwnd, exc)
+            return False
+
+    def detach_window(self):
+        if sys.platform == "win32" and self._chrome_hwnd:
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                if user32.IsWindow(self._chrome_hwnd):
+                    user32.SetParent(ctypes.c_void_p(self._chrome_hwnd), None)
+                    if self._original_style is not None:
+                        if hasattr(user32, "SetWindowLongPtrW"):
+                            user32.SetWindowLongPtrW(
+                                ctypes.c_void_p(self._chrome_hwnd), -16, ctypes.c_ssize_t(self._original_style)
+                            )
+                        else:
+                            user32.SetWindowLongW(
+                                ctypes.c_void_p(self._chrome_hwnd), -16, ctypes.c_long(self._original_style)
+                            )
+                    user32.ShowWindow(ctypes.c_void_p(self._chrome_hwnd), 0)  # SW_HIDE
+            except Exception as exc:
+                logger.debug("Error detaching browser window: %s", exc)
+        self._chrome_hwnd = None
+        self._original_style = None
+        self._placeholder_lbl.setVisible(True)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if sys.platform == "win32" and self._chrome_hwnd:
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                if user32.IsWindow(self._chrome_hwnd):
+                    user32.MoveWindow(ctypes.c_void_p(self._chrome_hwnd), 0, 0, self.width(), self.height(), True)
+            except Exception:
+                pass
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if sys.platform == "win32" and self._chrome_hwnd:
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                if user32.IsWindow(self._chrome_hwnd):
+                    user32.ShowWindow(ctypes.c_void_p(self._chrome_hwnd), 5)  # SW_SHOW
+                    user32.MoveWindow(ctypes.c_void_p(self._chrome_hwnd), 0, 0, self.width(), self.height(), True)
+            except Exception:
+                pass
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if sys.platform == "win32" and self._chrome_hwnd:
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                if user32.IsWindow(self._chrome_hwnd):
+                    user32.ShowWindow(ctypes.c_void_p(self._chrome_hwnd), 0)  # SW_HIDE
+            except Exception:
+                pass
+
+
 class DetailsPanel(QWidget):
     """Collapsible and tabbed bottom panel showing details for the selected download and background consoles."""
 
     close_requested = Signal()
     mode_changed = Signal(str)
+    browser_tab_requested = Signal()
 
     def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
         self._manager = manager
         self._download_id: Optional[str] = None
         self._current_entry: Optional[DownloadEntry] = None
@@ -267,8 +424,22 @@ class DetailsPanel(QWidget):
         self._log_timer.setInterval(250)
         self._log_timer.timeout.connect(self._poll_console_log)
 
+        self._is_browser_floating: bool = False
+        self._browser_monitor_timer = QTimer(self)
+        self._browser_monitor_timer.setInterval(300)
+        self._browser_monitor_timer.timeout.connect(self._on_browser_monitor_tick)
+
         self._setup_ui()
         self._manager.animepahe_status_changed.connect(self.on_animepahe_status_changed)
+        if self._manager.is_animepahe_running():
+            self._browser_monitor_timer.start()
+
+    def paintEvent(self, event):
+        opt = QStyleOption()
+        opt.initFrom(self)
+        p = QPainter(self)
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+        super().paintEvent(event)
 
     @property
     def current_download_id(self) -> Optional[str]:
@@ -277,6 +448,12 @@ class DetailsPanel(QWidget):
     # -- UI Setup -------------------------------------------------------------
 
     def _setup_ui(self):
+        self.setStyleSheet(f"""
+            DetailsPanel {{
+                background-color: {Colors.BG_DARK};
+                border-top: 1px solid {Colors.BORDER};
+            }}
+        """)
         outer_layout = QHBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
@@ -288,6 +465,8 @@ class DetailsPanel(QWidget):
 
         # 2. Right container with header and stacked pages
         right_container = QWidget(self)
+        right_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        right_container.setAutoFillBackground(True)
         right_layout = QVBoxLayout(right_container)
         right_layout.setContentsMargins(8, 4, 8, 8)
         right_layout.setSpacing(6)
@@ -1649,7 +1828,24 @@ class DetailsPanel(QWidget):
     def _create_console_view(self) -> QWidget:
         widget = QWidget(self)
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Tab widget inside Console view: Log and Embedded Browser
+        self._console_subtabs = QTabWidget(widget)
+        self._console_log_tab = self._build_console_log_tab()
+        self._browser_tab = self._create_browser_tab()
+
+        self._console_subtabs.addTab(self._console_log_tab, "📄 Log")
+        # _browser_tab is initially hidden and will be added dynamically when the browser opens
+
+        layout.addWidget(self._console_subtabs)
+        return widget
+
+    def _build_console_log_tab(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
         # Control Bar
@@ -1750,6 +1946,77 @@ class DetailsPanel(QWidget):
 
         return widget
 
+    def _create_browser_tab(self) -> QWidget:
+        widget = QWidget(self._console_subtabs)
+        widget.hide()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # Header Info Bar
+        info_bar = QHBoxLayout()
+        info_bar.setContentsMargins(4, 2, 4, 2)
+        info_bar.setSpacing(8)
+
+        self._browser_status_lbl = QLabel("● Active", widget)
+        self._browser_status_lbl.setStyleSheet("color: #50fa7b; font-weight: bold; font-size: 11px;")
+        info_bar.addWidget(self._browser_status_lbl)
+
+        lbl_desc = QLabel("Real-time Cloudflare bypass & link extraction view (undetected-chromedriver)", widget)
+        lbl_desc.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 11px;")
+        info_bar.addWidget(lbl_desc)
+
+        info_bar.addStretch(1)
+
+        self._btn_float_browser = QPushButton("↗ Detach Window", widget)
+        self._btn_float_browser.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_float_browser.setToolTip("Detach the browser to float on desktop or re-embed")
+        self._btn_float_browser.clicked.connect(self._on_toggle_float_browser)
+        info_bar.addWidget(self._btn_float_browser)
+
+        layout.addLayout(info_bar)
+
+        # Embedded browser container
+        self._browser_container = EmbeddedBrowserContainer(widget)
+        self._browser_container.hide()
+        layout.addWidget(self._browser_container, stretch=1)
+
+        return widget
+
+    def _on_toggle_float_browser(self):
+        """Toggle floating the browser window outside the container or re-docking it."""
+        if not self.is_browser_attached():
+            return
+        if self._is_browser_floating:
+            # Re-dock
+            if self._browser_container.chrome_hwnd:
+                self._browser_container.attach_window(self._browser_container.chrome_hwnd)
+            self._is_browser_floating = False
+            self._btn_float_browser.setText("↗ Detach Window")
+            self._btn_float_browser.setToolTip("Detach the browser to float on desktop")
+        else:
+            # Float
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    user32 = ctypes.windll.user32
+                    hwnd = self._browser_container.chrome_hwnd
+                    if hwnd and user32.IsWindow(hwnd):
+                        user32.SetParent(ctypes.c_void_p(hwnd), None)
+                        style = user32.GetWindowLongW(hwnd, -16)
+                        style |= (0x00C00000 | 0x00040000 | 0x80000000)
+                        style &= ~0x40000000
+                        if hasattr(user32, "SetWindowLongPtrW"):
+                            user32.SetWindowLongPtrW(ctypes.c_void_p(hwnd), -16, ctypes.c_ssize_t(style))
+                        else:
+                            user32.SetWindowLongW(ctypes.c_void_p(hwnd), -16, ctypes.c_long(style))
+                        user32.ShowWindow(ctypes.c_void_p(hwnd), 5)
+                except Exception as exc:
+                    logger.debug("Error floating browser window: %s", exc)
+            self._is_browser_floating = True
+            self._btn_float_browser.setText("↙ Embed Window")
+            self._btn_float_browser.setToolTip("Dock the browser window back inside the panel")
+
     def _on_details_tab_changed(self, index: int):
         if self._current_entry:
             self._update_header(self._current_entry)
@@ -1833,6 +2100,9 @@ class DetailsPanel(QWidget):
             if self._console_autoscroll_cb.isChecked():
                 self._scroll_to_bottom()
 
+        if "[Browser Resolve]" in text or "Opening browser" in text:
+            self._on_browser_monitor_tick()
+
     def _on_console_filter_changed(self, text: str):
         filter_term = text.strip().lower()
         self._console_text.clear()
@@ -1907,6 +2177,93 @@ class DetailsPanel(QWidget):
         """Returns True if the panel is currently in Console mode."""
         return self.current_mode() == "console"
 
+    @property
+    def browser_container_hwnd(self) -> Optional[int]:
+        """HWND of the embedded browser container widget."""
+        if hasattr(self, "_browser_container"):
+            return self._browser_container.hwnd()
+        return None
+
+    def is_browser_tab_active(self) -> bool:
+        """Returns True if the Embedded Browser subtab is currently shown and selected."""
+        if not hasattr(self, "_console_subtabs") or not hasattr(self, "_browser_tab"):
+            return False
+        return (
+            self._console_subtabs.indexOf(self._browser_tab) >= 0
+            and self._console_subtabs.currentWidget() == self._browser_tab
+        )
+
+    def is_browser_attached(self) -> bool:
+        """Returns True if an external browser window is currently docked in the container."""
+        if not hasattr(self, "_browser_container"):
+            return False
+        return self._browser_container.is_attached()
+
+    def show_browser_tab(self, chrome_hwnd: Optional[int] = None):
+        """Unhides the Browser subtab, attaches the browser HWND if provided, and switches to it."""
+        if not hasattr(self, "_console_subtabs") or not hasattr(self, "_browser_tab"):
+            return
+
+        if self._console_subtabs.indexOf(self._browser_tab) == -1:
+            self._console_subtabs.addTab(self._browser_tab, "🌐 Embedded Browser")
+
+        self._browser_tab.show()
+        self._browser_container.show()
+
+        if chrome_hwnd:
+            self._browser_container.attach_window(chrome_hwnd)
+            self._browser_status_lbl.setText("● Active")
+            self._browser_status_lbl.setStyleSheet("color: #50fa7b; font-weight: bold; font-size: 11px;")
+
+        self._console_subtabs.setCurrentWidget(self._browser_tab)
+        self.set_mode("console")
+        self.browser_tab_requested.emit()
+
+    def hide_browser_tab(self):
+        """Detaches browser window, removes Browser subtab, and switches back to Log subtab."""
+        if not hasattr(self, "_console_subtabs") or not hasattr(self, "_browser_tab"):
+            return
+
+        self._browser_container.detach_window()
+        self._browser_tab.hide()
+        self._browser_container.hide()
+        self._is_browser_floating = False
+        if hasattr(self, "_btn_float_browser"):
+            self._btn_float_browser.setText("↗ Detach Window")
+
+        idx = self._console_subtabs.indexOf(self._browser_tab)
+        if idx >= 0:
+            self._console_subtabs.removeTab(idx)
+
+        self._console_subtabs.setCurrentWidget(self._console_log_tab)
+        self._browser_status_lbl.setText("○ Idle")
+        self._browser_status_lbl.setStyleSheet("color: #ff5555; font-weight: bold; font-size: 11px;")
+
+    def _on_browser_monitor_tick(self):
+        """Periodic check for newly opened AnimePahe Chrome windows or closed sessions."""
+        if not hasattr(self._manager, "is_animepahe_running") or not self._manager.is_animepahe_running():
+            if self.is_browser_attached():
+                self.hide_browser_tab()
+            return
+
+        proc = getattr(self._manager, "animepahe_process", None)
+        if not proc or not getattr(proc, "pid", None):
+            return
+
+        if not self.is_browser_attached():
+            chrome_hwnd = find_chrome_hwnd(proc.pid)
+            if chrome_hwnd:
+                self.show_browser_tab(chrome_hwnd)
+        else:
+            hwnd = self._browser_container.chrome_hwnd
+            if hwnd and sys.platform == "win32":
+                try:
+                    import ctypes
+                    if not ctypes.windll.user32.IsWindow(hwnd):
+                        self.hide_browser_tab()
+                except Exception:
+                    pass
+
     def on_animepahe_status_changed(self, is_running: bool):
         """Slot called whenever the AnimePahe CLI scraper starts or stops."""
         if hasattr(self, "_console_status_lbl"):
@@ -1925,6 +2282,13 @@ class DetailsPanel(QWidget):
                 self._console_info_lbl.setText(f"PID: {proc.pid}")
             else:
                 self._console_info_lbl.setText("")
+
+        if is_running:
+            self._browser_monitor_timer.start()
+        else:
+            self._browser_monitor_timer.stop()
+            if self.is_browser_attached():
+                self.hide_browser_tab()
 
         if self.current_mode() == "console":
             self._update_console_header(is_running)
