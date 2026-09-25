@@ -686,12 +686,22 @@ class DownloadManager(QObject):
                 d.filename for d in existing_downloads
                 if d.save_path == save_path and d.filename
             }
-            filename = get_unique_filename(save_path, filename, reserved_names=reserved)
+            if download_type == "torrent":
+                # For torrents, do not auto-number based on existing on-disk files;
+                # only avoid collision with another active/known download in DB.
+                # This ensures torrent files that already exist on disk can be rechecked
+                # and resumed rather than silently renamed to 'filename (1)'.
+                if filename.lower() in {r.lower() for r in reserved}:
+                    filename = get_unique_filename(save_path, filename, reserved_names=reserved)
+            else:
+                filename = get_unique_filename(save_path, filename, reserved_names=reserved)
 
         save_path = normalize_path(save_path)
         entry_metadata = metadata.copy() if metadata else {}
         if explicit_fn:
             entry_metadata["explicit_filename"] = True
+        if filename and not entry_metadata.get("original_name"):
+            entry_metadata["original_name"] = filename
         if risk_level != "clean":
             entry_metadata["security_warning"] = sec_details
         if headers:
@@ -922,6 +932,39 @@ class DownloadManager(QObject):
             return
         if self._torrent.start_seeding(download_id):
             self.status_changed.emit(download_id, "seeding", "")
+
+    def stop_all_seeding(self) -> int:
+        """Stop all torrents that are currently in the 'seeding' state.
+
+        Transitions each seeding torrent to 'completed' and pauses its engine handle.
+        Returns the number of stopped seeding torrents.
+        """
+        seeding_entries = [
+            e for e in self._db.get_all_downloads()
+            if e.download_type == "torrent" and e.status == "seeding"
+        ]
+        count = 0
+        for entry in seeding_entries:
+            self.stop_download(entry.id)
+            count += 1
+        return count
+
+    def pause_all_downloads(self) -> int:
+        """Pause all ongoing and queued downloads.
+
+        Targets transfers in 'downloading', 'queued', 'checking', 'fetching_metadata',
+        and 'stalled' states, transitioning each to 'paused'.
+        Returns the number of paused downloads.
+        """
+        pausable = [
+            e for e in self._db.get_all_downloads()
+            if e.status in ("downloading", "queued", "checking", "fetching_metadata", "stalled")
+        ]
+        count = 0
+        for entry in pausable:
+            self.pause_download(entry.id)
+            count += 1
+        return count
 
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
@@ -1201,7 +1244,38 @@ class DownloadManager(QObject):
         # Check collision with existing file/folder
         if Path(new_file_path).exists():
             if not old_file_path or normalize_path(old_file_path) != new_file_path:
-                return False, f"A file or folder named '{new_name}' already exists in the save folder."
+                other_downloads = [
+                    d for d in self._db.get_all_downloads()
+                    if d.id != download_id and (
+                        d.file_path == new_file_path or (
+                            d.save_path == save_path and d.filename == new_name
+                        )
+                    )
+                ]
+                if other_downloads:
+                    return False, f"A file or folder named '{new_name}' already exists in the save folder."
+
+                # If it's a torrent and new_file_path is a directory, check if it's a previous partial move
+                is_partial_torrent_move = False
+                if entry.download_type == "torrent" and Path(new_file_path).is_dir():
+                    torrent_files = []
+                    if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                        torrent_files = [Path(f.get("path", "")).name for f in entry.metadata["files"] if f.get("path")]
+                    if not torrent_files and old_file_path and Path(old_file_path).is_dir():
+                        torrent_files = [p.name for p in Path(old_file_path).iterdir() if p.is_file()]
+
+                    dst_files = [p.name for p in Path(new_file_path).iterdir() if p.is_file()]
+                    if dst_files and any(f in torrent_files for f in dst_files):
+                        is_partial_torrent_move = True
+
+                if not is_partial_torrent_move:
+                    return False, f"A file or folder named '{new_name}' already exists in the save folder."
+
+        if not entry.metadata:
+            entry.metadata = {}
+        if not entry.metadata.get("original_name"):
+            from my_idm.download_model import DownloadTableModel
+            entry.metadata["original_name"] = DownloadTableModel.get_original_name(entry)
 
         if entry.download_type == "torrent":
             success = self._torrent.rename_root(download_id, new_name)
@@ -1213,6 +1287,9 @@ class DownloadManager(QObject):
             if not entry.metadata:
                 entry.metadata = {}
             entry.metadata["explicit_filename"] = True
+            files = self._torrent.get_torrent_files(download_id)
+            if files:
+                entry.metadata["files"] = files
             self._db.update_download(entry)
         else:
             # HTTP download

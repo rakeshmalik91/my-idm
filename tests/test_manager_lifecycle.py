@@ -675,6 +675,7 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         from my_idm.utils import normalize_path
         self.assertEqual(updated.file_path, normalize_path(new_path))
         self.assertTrue(updated.metadata.get("explicit_filename"))
+        self.assertEqual(updated.metadata.get("original_name"), "old_file.txt")
 
         # Signal verification
         self.assertEqual(renamed_signals, [("d_rename_http", "new_file.txt")])
@@ -723,6 +724,7 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         updated = self.db.get_download("d_rename_tor")
         self.assertEqual(updated.filename, "NewTorrentRoot")
         self.assertTrue(updated.metadata.get("explicit_filename"))
+        self.assertEqual(updated.metadata.get("original_name"), "TorrentRoot")
 
     # -- Stop download -------------------------------------------------------
 
@@ -1092,6 +1094,53 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual((dst_dir / "file2.txt").read_text(), "Hello from file 2")
         # Source directory cleaned up
         self.assertFalse(src_dir.exists())
+
+    def test_stop_all_seeding(self):
+        """stop_all_seeding stops all active seeding torrents and returns the count."""
+        e1 = DownloadEntry(
+            id="seed_all_1",
+            url="magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+            download_type="torrent",
+            status="seeding",
+        )
+        e2 = DownloadEntry(
+            id="seed_all_2",
+            url="magnet:?xt=urn:btih:2222222222222222222222222222222222222222",
+            download_type="torrent",
+            status="seeding",
+        )
+        e3 = DownloadEntry(
+            id="http_dl",
+            url="http://example.com/test.zip",
+            download_type="http",
+            status="downloading",
+        )
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.db.add_download(e3)
+
+        with patch.object(self.manager._torrent, "pause") as mock_pause:
+            stopped_count = self.manager.stop_all_seeding()
+            self.assertEqual(stopped_count, 2)
+            self.assertEqual(self.db.get_download("seed_all_1").status, "completed")
+            self.assertEqual(self.db.get_download("seed_all_2").status, "completed")
+            self.assertEqual(self.db.get_download("http_dl").status, "downloading")
+            self.assertEqual(mock_pause.call_count, 2)
+
+    def test_pause_all_downloads(self):
+        """pause_all_downloads pauses downloading, queued, fetching, and stalled transfers."""
+        e1 = DownloadEntry(id="p_dl_1", url="http://example.com/1.zip", download_type="http", status="downloading")
+        e2 = DownloadEntry(id="p_dl_2", url="magnet:?xt=urn:btih:3333333333333333333333333333333333333333", download_type="torrent", status="queued")
+        e3 = DownloadEntry(id="p_comp", url="http://example.com/3.zip", download_type="http", status="completed")
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.db.add_download(e3)
+
+        count = self.manager.pause_all_downloads()
+        self.assertEqual(count, 2)
+        self.assertEqual(self.db.get_download("p_dl_1").status, "paused")
+        self.assertEqual(self.db.get_download("p_dl_2").status, "paused")
+        self.assertEqual(self.db.get_download("p_comp").status, "completed")
 
 
 if __name__ == "__main__":

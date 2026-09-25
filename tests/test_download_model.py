@@ -62,6 +62,32 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(Col.SIZE, 3)
         self.assertEqual(Col.PROGRESS, 4)
         self.assertEqual(Col.STATUS, 5)
+        self.assertEqual(Col.SAVE_PATH, 12)
+        self.assertEqual(Col.HEADERS[Col.SAVE_PATH], "Save Path")
+        self.assertEqual(Col.FILE_NAME, 13)
+        self.assertEqual(Col.HEADERS[Col.FILE_NAME], "File / Folder Name")
+
+    def test_file_folder_name_column(self):
+        """File / Folder Name column displays actual target file or folder name, while Name column retains original title."""
+        e = DownloadEntry(
+            id="t_fn",
+            url="magnet:?xt=urn:btih:123&dn=SomeTorrentTitle",
+            filename="CustomRenamedFolder",
+            file_path="D:/Downloads/CustomRenamedFolder",
+            status="completed",
+            download_type="torrent",
+        )
+        self.model.load_entries([e])
+        idx_fn = self.model.index(0, Col.FILE_NAME)
+        idx_name = self.model.index(0, Col.NAME)
+        self.assertEqual(self.model.data(idx_fn, Qt.ItemDataRole.DisplayRole), "CustomRenamedFolder")
+        self.assertEqual(self.model.data(idx_fn, Qt.ItemDataRole.ToolTipRole), "D:/Downloads/CustomRenamedFolder")
+        self.assertEqual(self.model.data(idx_name, Qt.ItemDataRole.DisplayRole), "SomeTorrentTitle")
+
+        # After model rename, Name remains original while File / Folder Name updates
+        self.model.rename_entry("t_fn", "NewFolderOnDisk")
+        self.assertEqual(self.model.data(idx_fn, Qt.ItemDataRole.DisplayRole), "NewFolderOnDisk")
+        self.assertEqual(self.model.data(idx_name, Qt.ItemDataRole.DisplayRole), "SomeTorrentTitle")
 
     def test_queue_column_display_and_alignment(self):
         """Queue column displays 1-based order for active downloads and empty for completed."""

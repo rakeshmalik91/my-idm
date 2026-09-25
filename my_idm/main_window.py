@@ -258,6 +258,11 @@ class MainWindow(QMainWindow):
             Col.SAVE_PATH, self._save_path_delegate
         )
 
+        self._file_name_delegate = DownloadNameDelegate(self._table)
+        self._table.setItemDelegateForColumn(
+            Col.FILE_NAME, self._file_name_delegate
+        )
+
         # Filterable and movable column header with sort indicators
         self._header_view = FilterHeaderView(self._table)
         self._table.setHorizontalHeader(self._header_view)
@@ -274,6 +279,10 @@ class MainWindow(QMainWindow):
         self._model.set_tor_config(self._manager.tor_config)
         self._table.doubleClicked.connect(self._on_table_double_clicked)
 
+        # Move Col.SOURCE_DOMAIN and Col.FILE_NAME to the end of the table by default
+        header.moveSection(header.visualIndex(Col.SOURCE_DOMAIN), Col.COUNT - 2)
+        header.moveSection(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
+
         # Set specific default column widths
         self._table.setColumnWidth(Col.QUEUE, 45)
         self._table.setColumnWidth(Col.NAME, 270)
@@ -288,6 +297,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.LAST_TRIED, 130)
         self._table.setColumnWidth(Col.COMPLETED, 130)
         self._table.setColumnWidth(Col.SAVE_PATH, 220)
+        self._table.setColumnWidth(Col.FILE_NAME, 220)
 
         # Row height
         self._table.verticalHeader().setDefaultSectionSize(36)
@@ -353,6 +363,14 @@ class MainWindow(QMainWindow):
         self._act_start_seeding = QAction(_create_emoji_icon("🌱"), "Start Seeding", self)
         self._act_start_seeding.setToolTip("Start or resume seeding for completed torrents")
         self._act_start_seeding.triggered.connect(self._on_start_seeding)
+
+        self._act_pause_all = QAction(_create_emoji_icon("⏸️"), "Pause All", self)
+        self._act_pause_all.setToolTip("Pause all active and queued downloads")
+        self._act_pause_all.triggered.connect(self._on_pause_all_downloads)
+
+        self._act_stop_all_seeding = QAction(_create_emoji_icon("🛑"), "Stop All Seeding", self)
+        self._act_stop_all_seeding.setToolTip("Stop all active seeding torrents (move to Completed)")
+        self._act_stop_all_seeding.triggered.connect(self._on_stop_all_seeding)
 
         self._act_copy_url = QAction(_create_emoji_icon("📋"), "Copy URL / Magnet", self)
         self._act_copy_url.setShortcut(QKeySequence("Ctrl+C"))
@@ -464,6 +482,7 @@ class MainWindow(QMainWindow):
 
     def _setup_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
+        self._toolbar = toolbar
         toolbar.setMovable(False)
         toolbar.setIconSize(QSize(18, 18))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -472,7 +491,11 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self._act_resume)
         toolbar.addAction(self._act_pause)
-        stop_action = toolbar.addAction(self._act_stop)
+        toolbar.addAction(self._act_stop)
+        toolbar.addAction(self._act_start_seeding)
+        toolbar.addSeparator()
+        toolbar.addAction(self._act_pause_all)
+        toolbar.addAction(self._act_stop_all_seeding)
         toolbar.addSeparator()
         toolbar.addAction(self._act_delete)
         toolbar.addAction(self._act_move)
@@ -515,11 +538,14 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self._act_preferences)
 
-        # Show only icons without text for playback and action buttons (resume, pause, stop, delete, move, recheck)
+        # Show only icons without text for playback and action buttons
         for act in (
             self._act_resume,
             self._act_pause,
             self._act_stop,
+            self._act_start_seeding,
+            self._act_pause_all,
+            self._act_stop_all_seeding,
             self._act_delete,
             self._act_move,
             self._act_recheck,
@@ -591,8 +617,10 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_resume)
         edit_menu.addAction(self._act_force_start)
         edit_menu.addAction(self._act_pause)
+        edit_menu.addAction(self._act_pause_all)
         edit_menu.addAction(self._act_stop)
         edit_menu.addAction(self._act_start_seeding)
+        edit_menu.addAction(self._act_stop_all_seeding)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_move_up)
         edit_menu.addAction(self._act_move_down)
@@ -859,6 +887,13 @@ class MainWindow(QMainWindow):
         for did in self._selected_ids():
             self._manager.pause_download(did)
 
+    def _on_pause_all_downloads(self):
+        count = self._manager.pause_all_downloads()
+        if count > 0:
+            self._status_label.setText(f"Paused {count} download{'s' if count > 1 else ''}")
+        else:
+            self._status_label.setText("No active downloads to pause")
+
     def _on_stop(self):
         for did in self._selected_ids():
             self._manager.stop_download(did)
@@ -866,6 +901,13 @@ class MainWindow(QMainWindow):
     def _on_start_seeding(self):
         for did in self._selected_ids():
             self._manager.start_seeding(did)
+
+    def _on_stop_all_seeding(self):
+        count = self._manager.stop_all_seeding()
+        if count > 0:
+            self._status_label.setText(f"Stopped {count} seeding torrent{'s' if count > 1 else ''}")
+        else:
+            self._status_label.setText("No torrents are currently seeding")
 
     def _on_resume(self):
         for did in self._selected_ids():
@@ -1006,7 +1048,7 @@ class MainWindow(QMainWindow):
         entry = self._first_selected_entry()
         if not entry:
             return
-        current_name = entry.filename or ""
+        current_name = entry.filename or (os.path.basename(entry.file_path) if entry.file_path else "")
         dlg = RenameDialog(current_name, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_name = dlg.new_name.strip()
@@ -1024,6 +1066,15 @@ class MainWindow(QMainWindow):
     # -- context menu --------------------------------------------------------
 
     def _show_context_menu(self, pos):
+        idx = self._table.indexAt(pos)
+        if idx.isValid():
+            sm = self._table.selectionModel()
+            selected_rows = {i.row() for i in sm.selectedRows()}
+            if idx.row() not in selected_rows:
+                self._table.selectRow(idx.row())
+        else:
+            return
+
         menu = QMenu(self)
         menu.addAction(self._act_resume)
         menu.addAction(self._act_force_start)
@@ -1115,8 +1166,12 @@ class MainWindow(QMainWindow):
 
     def _on_download_renamed(self, download_id: str, new_filename: str):
         entry = self._manager.get_entry(download_id)
-        fp = entry.file_path if entry else ""
-        self._model.rename_entry(download_id, new_filename, fp)
+        if entry:
+            entry.filename = new_filename
+            self._model.refresh_entry(download_id, entry)
+        else:
+            self._model.rename_entry(download_id, new_filename)
+        self._table.viewport().update()
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 
@@ -1560,20 +1615,20 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.LAST_TRIED, 130)
         self._table.setColumnWidth(Col.COMPLETED, 130)
         self._table.setColumnWidth(Col.SAVE_PATH, 220)
+        self._table.setColumnWidth(Col.FILE_NAME, 220)
 
         # 2. Show all columns (reset column visibility)
         header = self._header_view
         for col in range(Col.COUNT):
             header.setSectionHidden(col, False)
 
-        # 3. Reset column order to default (0, 1, 2, ...)
-        header_state = header.saveState()
-        header.restoreState(header_state)  # This doesn't change order, but we need to reset visual order
-        # Actually reset visual order by moving sections back to logical positions
+        # 3. Reset column order to default with Source Domain and File / Folder Name at the end
         for visual in range(Col.COUNT - 1, -1, -1):
             logical = header.logicalIndex(visual)
             if logical != visual:
                 header.moveSection(visual, logical)
+        header.moveSection(header.visualIndex(Col.SOURCE_DOMAIN), Col.COUNT - 2)
+        header.moveSection(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
 
         # 4. Clear all filters (status and type filters)
         self._model.clear_filters()
@@ -1768,10 +1823,16 @@ class MainWindow(QMainWindow):
                     pass
 
             # Ensure sections remain movable and flags are not overwritten by saved state
-            self._table.horizontalHeader().setSectionsMovable(True)
-            self._table.horizontalHeader().setFirstSectionMovable(True)
-            self._table.horizontalHeader().setStretchLastSection(False)
-            self._table.horizontalHeader().setCascadingSectionResizes(False)
+            header = self._table.horizontalHeader()
+            header.setSectionsMovable(True)
+            header.setFirstSectionMovable(True)
+            header.setStretchLastSection(False)
+            header.setCascadingSectionResizes(False)
+
+            # Ensure Col.FILE_NAME is visible and properly sized if restored from an older state
+            header.setSectionHidden(Col.FILE_NAME, False)
+            if self._table.columnWidth(Col.FILE_NAME) < 50:
+                self._table.setColumnWidth(Col.FILE_NAME, 220)
 
             # Restore sort column & order: default to Col.ADDED, DescendingOrder
             sort_col = state.get("sort_column")

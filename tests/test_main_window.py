@@ -90,6 +90,9 @@ class TestMainWindowToolbar(unittest.TestCase):
             self.win._act_resume,
             self.win._act_pause,
             self.win._act_stop,
+            self.win._act_start_seeding,
+            self.win._act_pause_all,
+            self.win._act_stop_all_seeding,
             self.win._act_delete,
             self.win._act_move,
             self.win._act_recheck,
@@ -500,6 +503,29 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         self.assertEqual(self.win._model.get_entry(0).filename, "new_name.iso")
         self.assertEqual(self.win._model.data(self.win._model.index(0, Col.NAME)), "new_name.iso")
 
+    def test_context_menu_selects_unselected_row(self):
+        """Right-clicking an unselected row in table selects it for the context menu."""
+        e1 = DownloadEntry(id="d_cm_1", url="https://example.com/1", filename="1.zip", save_path="D:/Downloads", added_at="2026-09-25T10:00:00Z")
+        e2 = DownloadEntry(id="d_cm_2", url="https://example.com/2", filename="2.zip", save_path="D:/Downloads", added_at="2026-09-25T09:00:00Z")
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.win._load_history()
+
+        # Select row 0 initially
+        self.win._table.selectRow(0)
+        self.assertEqual(self.win._selected_ids(), ["d_cm_1"])
+
+        # Context menu at row 1's rect
+        rect = self.win._table.visualRect(self.win._model.index(1, 0))
+        pos = rect.center()
+        with patch("my_idm.main_window.QMenu") as mock_menu_cls:
+            mock_menu = MagicMock()
+            mock_menu_cls.return_value = mock_menu
+            mock_menu.exec.return_value = None
+            self.win._show_context_menu(pos)
+
+        self.assertEqual(self.win._selected_ids(), ["d_cm_2"])
+
     def test_on_add_multiple_urls_queues_all(self):
         """MainWindow._on_add adds each URL from dlg.urls."""
         mock_dlg = MagicMock()
@@ -649,6 +675,52 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.win._update_count_label()
         self.assertNotIn("Filtered", self.win._count_label.text())
         self.assertEqual(self.win._count_label.text(), "2 Downloads, 1 Active")
+
+    def test_toolbar_stop_all_seeding_button(self):
+        """Toolbar contains Stop All Seeding action and triggers manager.stop_all_seeding."""
+        self.assertIn(self.win._act_stop_all_seeding, self.win._toolbar.actions())
+        with unittest.mock.patch.object(self.manager, "stop_all_seeding", return_value=3) as mock_stop:
+            self.win._act_stop_all_seeding.trigger()
+            mock_stop.assert_called_once()
+            self.assertIn("Stopped 3 seeding torrents", self.win._status_label.text())
+
+    def test_toolbar_pause_all_downloads_button(self):
+        """Toolbar contains Pause All action and triggers manager.pause_all_downloads."""
+        self.assertIn(self.win._act_pause_all, self.win._toolbar.actions())
+        with unittest.mock.patch.object(self.manager, "pause_all_downloads", return_value=2) as mock_pause_all:
+            self.win._act_pause_all.trigger()
+            mock_pause_all.assert_called_once()
+            self.assertIn("Paused 2 downloads", self.win._status_label.text())
+
+    def test_toolbar_start_seeding_button(self):
+        """Toolbar contains Start Seeding action and triggers manager.start_seeding on selected downloads."""
+        self.assertIn(self.win._act_start_seeding, self.win._toolbar.actions())
+        with unittest.mock.patch.object(self.win, "_selected_ids", return_value=["dl-seed-1"]):
+            with unittest.mock.patch.object(self.manager, "start_seeding") as mock_seed:
+                self.win._act_start_seeding.trigger()
+                mock_seed.assert_called_once_with("dl-seed-1")
+
+    def test_default_column_order_places_source_domain_and_file_name_at_end(self):
+        """Source Domain and File / Folder Name default to the end of the table."""
+        header = self.win._table.horizontalHeader()
+        v_source = header.visualIndex(Col.SOURCE_DOMAIN)
+        v_file = header.visualIndex(Col.FILE_NAME)
+        self.assertGreaterEqual(v_source, Col.COUNT - 2)
+        self.assertGreaterEqual(v_file, Col.COUNT - 2)
+
+    def test_ui_state_restore_preserves_user_column_order(self):
+        """Restoring UI state does not forcefully push File / Folder Name or Source Domain to the front."""
+        header = self.win._table.horizontalHeader()
+        # Move Col.FILE_NAME to the very last position
+        header.moveSection(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
+
+        # Save UI state and restore it
+        self.win._save_ui_state_to_db()
+        self.win._restore_ui_state_from_db()
+
+        # Must still be at the end, not forced back to index 2
+        self.assertEqual(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
 
 
 if __name__ == "__main__":

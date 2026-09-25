@@ -183,14 +183,13 @@ stateDiagram-v2
     [*] --> queued: Add Torrent / Magnet Link / Startup
 
     queued --> fetching_metadata: Magnet Link (Slot Available)
-    queued --> checking: .torrent File (Fastresume / Disk Validation)
-    queued --> downloading: Slot Available & Metadata Present
+    queued --> checking: .torrent File / Disk Validation (No Fastresume)
+    queued --> downloading: Slot Available & Fastresume Valid
     
     fetching_metadata --> suspended: Metadata Timeout (> Configured Days)
     suspended --> queued: User Resumes (Resets Metadata Timer)
     
-    fetching_metadata --> downloading: Metadata Resolved via DHT/PEX
-    fetching_metadata --> checking: Metadata Resolved with Existing Payload
+    fetching_metadata --> checking: Metadata Resolved (Triggers Disk Recheck)
     
     checking --> downloading: Piece Check Incomplete (< 100%)
     checking --> completed: Piece Check 100% & Seeding Disabled
@@ -260,7 +259,7 @@ stateDiagram-v2
 | `queued` | `downloading` | Slot available & `.torrent` has metadata | Consumes slot | Resumes handle (`handle.resume()`), unchokes peers. |
 | `fetching_metadata` | `suspended` | `now - fetching_metadata_since > timeout` | Releases slot | Pauses handle, unsets `auto_managed`, sets `queue_order=0`. |
 | `suspended` | `queued` | User clicks Resume | None | Resets `fetching_metadata_since`, queues entry. |
-| `fetching_metadata` | `downloading` | `metadata_received_alert` received | Slot maintained | Renames task from metadata, parses file hierarchy. |
+| `fetching_metadata` | `checking` | Metadata received via DHT/PEX | Slot maintained | Resolves name/file tree, invokes `handle.force_recheck()` to inspect on-disk files. |
 | `downloading` | `stalled` | Speed = 0 & Seeds = 0 for > 45 seconds | Slot maintained | Emits status `'stalled'`; keeps searching DHT/trackers. |
 | `stalled` | `downloading` | Speed > 0 or seeds connect | Slot maintained | Emits status `'downloading'`. |
 | `downloading` | `checking` | User triggers Force Recheck | Slot maintained | Calls `handle.force_recheck()`, begins piece hashing. |
@@ -296,7 +295,10 @@ User adds magnet:?xt=urn:btih:<hash>
   │     ├── Dynamic filename resolved from torrent name
   │     ├── File hierarchy parsed & saved to database
   │     ├── fetching_metadata_since cleared
-  │     └── Transitions to "downloading" (or "checking")
+  │     ├── handle.force_recheck() invoked to verify existing files on disk
+  │     └── Transitions to "checking"
+  │           ├── 100% verified on disk ──> "seeding" (or "completed")
+  │           └── < 100% verified ────────> "downloading"
   │
   └── No peers provide metadata for > metadata_fetch_timeout_days (default: 1 day):
         ├── Transitions to "suspended"

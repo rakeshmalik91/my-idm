@@ -13,7 +13,7 @@ from typing import Optional, Callable, Any
 from my_idm.config import TorConfig, TorrentConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.network import NetworkConfig, is_interface_active
-from my_idm.utils import normalize_path
+from my_idm.utils import normalize_path, robust_move_download_files, unlock_path
 
 log = logging.getLogger(__name__)
 
@@ -500,6 +500,11 @@ class TorrentEngine:
                 parsed_hash = _get_info_hash_from_params(params)
                 if parsed_hash:
                     expected_hash = parsed_hash
+                if getattr(params, "name", None):
+                    if not entry.metadata:
+                        entry.metadata = {}
+                    if not entry.metadata.get("original_name"):
+                        entry.metadata["original_name"] = params.name
             except Exception as exc:
                 log.error("Failed to parse magnet URI %s: %s", url, exc)
                 return False
@@ -527,6 +532,11 @@ class TorrentEngine:
                 parsed_hash = str(ti.info_hash()).lower()
                 if parsed_hash:
                     expected_hash = parsed_hash
+                if ti and hasattr(ti, "name") and ti.name():
+                    if not entry.metadata:
+                        entry.metadata = {}
+                    if not entry.metadata.get("original_name"):
+                        entry.metadata["original_name"] = ti.name()
             except Exception as exc:
                 log.error("Failed to parse torrent file %s: %s", url, exc)
                 return False
@@ -579,6 +589,11 @@ class TorrentEngine:
                 parsed_hash = str(ti.info_hash()).lower()
                 if parsed_hash:
                     expected_hash = parsed_hash
+                if ti and hasattr(ti, "name") and ti.name():
+                    if not entry.metadata:
+                        entry.metadata = {}
+                    if not entry.metadata.get("original_name"):
+                        entry.metadata["original_name"] = ti.name()
             except Exception as exc:
                 log.error("Failed to download or parse torrent file from %s: %s", url, exc)
                 return False
@@ -654,7 +669,20 @@ class TorrentEngine:
                     has_meta = getattr(handle.status(), "has_metadata", False)
             except Exception:
                 pass
-            initial_status = "downloading" if has_meta else "fetching_metadata"
+            if has_meta:
+                # Torrent already has metadata (e.g. .torrent file).
+                # If no fastresume exists, do a recheck first just in case the torrent file already exists on disk.
+                has_resume = (FASTRESUME_DIR / f"{entry.id}.fastresume").exists()
+                if not has_resume:
+                    try:
+                        handle.force_recheck()
+                    except Exception:
+                        pass
+                    initial_status = "checking"
+                else:
+                    initial_status = "downloading"
+            else:
+                initial_status = "fetching_metadata"
             self._db.update_status(entry.id, initial_status)
             if initial_status == "fetching_metadata":
                 if not entry.fetching_metadata_since:
@@ -700,6 +728,10 @@ class TorrentEngine:
             except Exception:
                 pass
             target_status = "completed" if is_seeding else "paused"
+            if is_seeding and entry:
+                entry.metadata.pop("manual_seeding", None)
+                entry.metadata.pop("seeding_baseline_upload", None)
+                self._db.update_download(entry)
             self._db.update_status(download_id, target_status)
             if self._status_cb:
                 self._status_cb(download_id, target_status, "")
@@ -724,8 +756,11 @@ class TorrentEngine:
                 log.debug("Could not set auto_managed flag on start_seeding: %s", e)
             handle.resume()
             self._apply_seeding_limit_to_handle(handle)
-            if not entry.metadata.get("seeding_since"):
-                entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+            # Reset seeding session timestamp so duration timer starts fresh from now
+            entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+            entry.metadata["manual_seeding"] = True
+            cur_status = self.get_status(download_id) or {}
+            entry.metadata["seeding_baseline_upload"] = cur_status.get("total_upload", 0) or getattr(entry, "uploaded_size", 0) or 0
             entry.status = "seeding"
             self._db.update_download(entry)
             self._db.update_status(download_id, "seeding")
@@ -768,6 +803,10 @@ class TorrentEngine:
                 new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
                 if new_status == "seeding":
                     self._apply_seeding_limit_to_handle(handle)
+                    if entry:
+                        entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+                        entry.status = "seeding"
+                        self._db.update_download(entry)
             else:
                 new_status = "downloading" if has_meta else "fetching_metadata"
             self._db.update_status(download_id, new_status)
@@ -870,6 +909,39 @@ class TorrentEngine:
         new_disk_path = Path(entry.save_path) / new_name
 
         handle = self._handles.get(download_id)
+        was_active = False
+        was_seeding = bool(entry.status == "seeding")
+        if handle:
+            try:
+                s = handle.status()
+                raw_paused = getattr(s, "paused", None)
+                if raw_paused is not None and not type(raw_paused).__name__.startswith("MagicMock"):
+                    was_active = not bool(raw_paused)
+                else:
+                    was_active = not bool(getattr(s, "is_paused", False))
+            except Exception:
+                pass
+            try:
+                handle.pause()
+                handle.flush_cache()
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+        # Move file or folder on disk robustly (handles locks, partial moves, and merges)
+        if old_disk_path and (old_disk_path.exists() or new_disk_path.exists()) and old_disk_path != new_disk_path:
+            success, err = robust_move_download_files(old_disk_path, new_disk_path)
+            if not success:
+                log.error("Failed to move torrent path on disk from %s to %s: %s", old_disk_path, new_disk_path, err)
+                if was_active and handle:
+                    try:
+                        handle.resume()
+                        if was_seeding:
+                            self._apply_seeding_limit_to_handle(handle)
+                    except Exception:
+                        pass
+                return False
+
         if handle:
             try:
                 if not hasattr(handle, "is_valid") or handle.is_valid():
@@ -909,9 +981,18 @@ class TorrentEngine:
             except Exception as exc:
                 log.warning("Error checking handle validity for %s rename: %s", download_id, exc)
 
+            if was_active:
+                try:
+                    handle.resume()
+                    if was_seeding:
+                        self._apply_seeding_limit_to_handle(handle)
+                except Exception:
+                    pass
+
         # Update metadata files list if present
         if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
-            for f in entry.metadata["files"]:
+            files_list = entry.metadata["files"]
+            for f in files_list:
                 f_path = f.get("path", "")
                 if f_path:
                     parts = [p for p in f_path.replace("\\", "/").split("/") if p]
@@ -922,15 +1003,8 @@ class TorrentEngine:
                         else:
                             f["path"] = new_name
                             f["name"] = new_name
-
-        # If file or folder exists on disk, rename it
-        if old_disk_path and old_disk_path.exists() and old_disk_path != new_disk_path:
-            try:
-                new_disk_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(old_disk_path), str(new_disk_path))
-            except Exception as exc:
-                log.error("Failed to move torrent path on disk from %s to %s: %s", old_disk_path, new_disk_path, exc)
-                return False
+            entry.metadata["files"] = files_list
+            self._db.update_download(entry)
 
         return True
 
@@ -1064,6 +1138,8 @@ class TorrentEngine:
                 entry.metadata["total_peers"] = total_peers
 
             resolved_name = status.get("name")
+            if resolved_name and entry.metadata is not None and not entry.metadata.get("original_name"):
+                entry.metadata["original_name"] = resolved_name
             has_explicit = bool(entry.metadata.get("explicit_filename")) if entry.metadata else False
             if not has_explicit and resolved_name and resolved_name != entry.filename:
                 entry.filename = resolved_name
@@ -1157,7 +1233,7 @@ class TorrentEngine:
                     entry.status = target_status
                     if target_status == "seeding":
                         if not entry.metadata.get("seeding_since"):
-                            entry.metadata["seeding_since"] = entry.completed_at or datetime.now(timezone.utc).isoformat()
+                            entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
                     self._db.update_download(entry)
                     self._db.update_status(download_id, target_status)
                     if target_status == "seeding":
@@ -1180,7 +1256,7 @@ class TorrentEngine:
                 # Check seeding limits for currently seeding torrents
                 if entry.status == "seeding":
                     if not entry.metadata.get("seeding_since"):
-                        entry.metadata["seeding_since"] = entry.completed_at or datetime.now(timezone.utc).isoformat()
+                        entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
                         self._db.update_download(entry)
 
                     should_stop_seeding = False
@@ -1204,9 +1280,11 @@ class TorrentEngine:
                     ratio_limit = getattr(self._torrent_config, "seeding_ratio_limit", 0.0) if self._torrent_config else 0.0
                     if not should_stop_seeding and ratio_limit > 0.0:
                         tot_up = status.get("total_upload", 0)
+                        baseline = entry.metadata.get("seeding_baseline_upload", 0)
+                        session_up = max(0, tot_up - baseline) if (entry.metadata.get("manual_seeding") and baseline > 0) else tot_up
                         base_dl = status.get("downloaded", 0) or entry.total_size or entry.downloaded_size or 1
                         if base_dl > 0:
-                            cur_ratio = tot_up / base_dl
+                            cur_ratio = session_up / base_dl
                             if cur_ratio >= ratio_limit:
                                 should_stop_seeding = True
                                 stop_reason = f"Seeding ratio limit reached ({cur_ratio:.2f} >= {ratio_limit:.2f})"
@@ -1214,6 +1292,8 @@ class TorrentEngine:
                     if should_stop_seeding:
                         log.info("Stopping seeding for %s: %s", download_id, stop_reason)
                         entry.status = "completed"
+                        entry.metadata.pop("manual_seeding", None)
+                        entry.metadata.pop("seeding_baseline_upload", None)
                         self._db.update_download(entry)
                         self._db.update_status(download_id, "completed")
                         try:
@@ -1238,14 +1318,14 @@ class TorrentEngine:
                     entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
                     self._db.update_download(entry)
             elif entry.status == "fetching_metadata" and (state in ("downloading", "finished", "seeding") or status.get("name") or status["downloaded"] > 0):
-                if state in ("finished", "seeding"):
-                    new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
-                    if new_status == "seeding":
-                        self._apply_seeding_limit_to_handle(handle)
-                else:
-                    new_status = "downloading"
-                entry.status = new_status
                 entry.fetching_metadata_since = ""
+                # Do a recheck first just in case the torrent file/payload already exists on disk
+                try:
+                    handle.force_recheck()
+                except Exception as exc:
+                    log.warning("Could not force recheck on metadata receipt for %s: %s", download_id, exc)
+                new_status = "checking"
+                entry.status = new_status
                 self._db.update_download(entry)
                 self._db.update_status(download_id, new_status)
                 if self._status_cb:
@@ -1318,6 +1398,20 @@ class TorrentEngine:
         entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
         is_completed = bool(entry and entry.status in ("completed", "seeding"))
         handle = self._handles.get(download_id)
+        def _adjust_paths(file_list: list[dict]) -> list[dict]:
+            if not entry or not entry.filename:
+                return file_list
+            for f in file_list:
+                orig = f.get("path", "")
+                parts = [p for p in orig.replace("\\", "/").split("/") if p]
+                if len(parts) > 1 and parts[0] != entry.filename:
+                    parts[0] = entry.filename
+                    f["path"] = "/".join(parts)
+                elif len(parts) == 1 and entry.metadata and entry.metadata.get("explicit_filename") and parts[0] != entry.filename:
+                    f["path"] = entry.filename
+                    f["name"] = entry.filename
+            return file_list
+
         if not handle or not _HAS_LIBTORRENT:
             if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
                 cached = entry.metadata["files"]
@@ -1329,13 +1423,13 @@ class TorrentEngine:
                             f["status"] = "completed"
                         else:
                             f["status"] = "skipped"
-                return cached
+                return _adjust_paths(cached)
             return []
 
         try:
             if not handle.is_valid():
                 if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
-                    return entry.metadata["files"]
+                    return _adjust_paths(entry.metadata["files"])
                 return []
             ti = None
             try:
@@ -1344,7 +1438,7 @@ class TorrentEngine:
                 pass
             if not ti:
                 if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
-                    return entry.metadata["files"]
+                    return _adjust_paths(entry.metadata["files"])
                 return []
 
             num_files = ti.num_files()
@@ -1356,6 +1450,14 @@ class TorrentEngine:
             for i in range(num_files):
                 f_size = files_info.file_size(i)
                 f_path = files_info.file_path(i)
+                if entry and entry.filename:
+                    parts = [p for p in f_path.replace("\\", "/").split("/") if p]
+                    if len(parts) > 1 and parts[0] != entry.filename:
+                        parts[0] = entry.filename
+                        f_path = "/".join(parts)
+                    elif len(parts) == 1 and entry.metadata and entry.metadata.get("explicit_filename") and parts[0] != entry.filename:
+                        f_path = entry.filename
+
                 f_prio = priorities[i] if i < len(priorities) else 4
                 if is_completed and f_prio > 0:
                     f_prog = f_size
@@ -1390,7 +1492,7 @@ class TorrentEngine:
         except Exception as exc:
             log.debug("Failed to get torrent files for %s: %s", download_id, exc)
             if entry and entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
-                return entry.metadata["files"]
+                return _adjust_paths(entry.metadata["files"])
             return []
 
     def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:

@@ -13,7 +13,7 @@ With advanced multi-peer piece verification, DHT, Peer Exchange (PEX), selective
 ### 1. Universal Magnet & Torrent File Support
 - **Magnet URIs**: Full support for `magnet:?xt=urn:btih:...` links with embedded trackers and display names.
 - **`.torrent` Files**: Add torrent descriptor files via the Add Download dialog, file picker, clipboard monitor, or direct drag-and-drop.
-- **Asynchronous Metadata Resolution**: While fetching metadata (`downloading_metadata` state), My-IDM connects to DHT nodes and swarm peers, automatically renaming the task and populating the file tree once metadata is decoded.
+- **Asynchronous Metadata Resolution & Auto-Recheck**: While fetching metadata (`downloading_metadata` state), My-IDM connects to DHT nodes and swarm peers. Once decoded, it automatically renames the task, populates the file tree, and immediately triggers an on-disk piece recheck (`checking` state) to verify if the torrent payload or files already exist on disk before downloading.
 - **Metadata Timeout & Suspended State**: Magnet links remaining in the `fetching_metadata` state longer than the configured timeout (`metadata_fetch_timeout_days`, default: `1` day) automatically transition to `'suspended'`.
   - The libtorrent handle is paused with `auto_managed` unset so it consumes 0 network bandwidth.
   - Its `queue_order` is reset to `0`, freeing up a concurrent download slot for queued downloads.

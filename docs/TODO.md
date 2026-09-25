@@ -96,6 +96,7 @@ commit after each features or set of fixes/enhancements
 - [x] add start seeding button in context menu
 - [x] move failed while seeding. but it moved partially, handle it properly. unlock the file before move/delete if required.
 - [x] pause/stop at seeding state should move to completed. pause/stop at completed shouldnt do anything. update state diagrams as well
+- [x] when a new torrent is added, after metadata fetch do a recheck first just in case the torrent file already exists. (update state digrams)
 
 ----------------------
 ### Tor Support

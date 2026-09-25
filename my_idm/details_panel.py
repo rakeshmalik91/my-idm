@@ -279,6 +279,7 @@ class DetailsPanel(QWidget):
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
 
+        self._ov_filename = self._create_info_row(right_col, "File / Folder Name:")
         self._ov_type = self._create_info_row(right_col, "Transfer Type:")
         self._ov_swarm = self._create_info_row(right_col, "Swarm / Parts:")
         self._ov_save_path = self._create_info_row(right_col, "Save Directory:")
@@ -497,6 +498,7 @@ class DetailsPanel(QWidget):
         self._ov_completed.setText("—")
         self._ov_type.setText("—")
         self._ov_swarm.setText("—")
+        self._ov_filename.setText("—")
         self._ov_save_path.setText("—")
         self._ov_hash.setText("—")
         self._ov_security.setText("—")
@@ -515,7 +517,8 @@ class DetailsPanel(QWidget):
         icon = "📦" if entry.download_type == "torrent" else "🌐"
         self._lbl_icon.setText(icon)
 
-        name = entry.filename or os.path.basename(entry.file_path) if entry.file_path else "Download"
+        from my_idm.download_model import DownloadTableModel
+        name = DownloadTableModel.get_original_name(entry)
         self._lbl_title.setText(name)
 
         badge_type = "BitTorrent" if entry.download_type == "torrent" else "HTTP / Direct"
@@ -580,6 +583,9 @@ class DetailsPanel(QWidget):
         self._ov_completed.setText(_format_time(entry.completed_at))
 
         self._ov_type.setText("BitTorrent Swarm" if entry.download_type == "torrent" else "HTTP / Multi-Segment")
+        from my_idm.download_model import DownloadTableModel
+        fn = DownloadTableModel.get_actual_name(entry)
+        self._ov_filename.setText(fn)
         self._ov_save_path.setText(entry.save_path or "—")
 
         # Hash / Infohash

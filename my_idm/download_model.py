@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import humanize
+from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 from PySide6.QtCore import (
     QAbstractTableModel,
     QModelIndex,
@@ -43,11 +45,12 @@ class Col:
     LAST_TRIED = 10
     COMPLETED = 11
     SAVE_PATH = 12
+    FILE_NAME = 13
 
     HEADERS = [
         "#", "Name", "Source Domain", "Size", "Progress", "Status", "Speed", "ETA",
         "Seeds / Peers", "Added", "Last Tried", "Completed",
-        "Save Path",
+        "Save Path", "File / Folder Name",
     ]
     COUNT = len(HEADERS)
 
@@ -381,7 +384,7 @@ class DownloadTableModel(QAbstractTableModel):
                 return (1, val) if is_active else (0, val)
 
         if col == Col.NAME:
-            return (entry.filename or entry.url or "").lower()
+            return self.get_original_name(entry).lower()
 
         if col == Col.SOURCE_DOMAIN:
             return extract_source_domain(entry.url).lower()
@@ -440,6 +443,9 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.SAVE_PATH:
             return (entry.save_path or "").lower()
+
+        if col == Col.FILE_NAME:
+            return self.get_actual_name(entry).lower()
 
         return ""
 
@@ -630,7 +636,7 @@ class DownloadTableModel(QAbstractTableModel):
             entry.file_path = str(Path(entry.save_path) / filename)
 
         left = self.index(row, Col.NAME)
-        right = self.index(row, Col.SAVE_PATH)
+        right = self.index(row, Col.COUNT - 1)
         self.dataChanged.emit(
             left, right,
             [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
@@ -640,29 +646,38 @@ class DownloadTableModel(QAbstractTableModel):
         """Update entry filename and file_path after user rename."""
         for e in self._all_entries:
             if e.id == download_id:
+                if not e.metadata:
+                    e.metadata = {}
+                if not e.metadata.get("original_name"):
+                    e.metadata["original_name"] = self.get_original_name(e)
                 e.filename = filename
                 if file_path:
                     e.file_path = file_path
                 elif e.save_path:
                     e.file_path = str(Path(e.save_path) / filename)
+                elif e.file_path:
+                    e.file_path = str(Path(e.file_path).parent / filename)
                 break
 
         row = self._id_to_row.get(download_id)
         if row is None:
             return
         entry = self._entries[row]
+        if not entry.metadata:
+            entry.metadata = {}
+        if not entry.metadata.get("original_name"):
+            entry.metadata["original_name"] = self.get_original_name(entry)
         entry.filename = filename
         if file_path:
             entry.file_path = file_path
         elif entry.save_path:
             entry.file_path = str(Path(entry.save_path) / filename)
+        elif entry.file_path:
+            entry.file_path = str(Path(entry.file_path).parent / filename)
 
         left = self.index(row, 0)
         right = self.index(row, Col.COUNT - 1)
-        self.dataChanged.emit(
-            left, right,
-            [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
-        )
+        self.dataChanged.emit(left, right)
 
     def refresh_entry(self, download_id: str, entry: DownloadEntry):
         """Full refresh of an entry (e.g. after move or recheck)."""
@@ -747,7 +762,11 @@ class DownloadTableModel(QAbstractTableModel):
                     return _get_icon("🧅")
                 if entry.download_type == "torrent":
                     return _get_icon("🧲")
-                ext = Path(entry.filename or entry.url).suffix.lower()
+            if col in (Col.NAME, Col.FILE_NAME):
+                if col == Col.FILE_NAME and entry.file_path and os.path.isdir(entry.file_path):
+                    return _get_icon("📁")
+                name_for_icon = self.get_actual_name(entry) if col == Col.FILE_NAME else self.get_original_name(entry)
+                ext = Path(name_for_icon).suffix.lower()
                 if ext in (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".7zip"):
                     return _get_icon("📦")
                 if ext in (".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".wmv"):
@@ -762,6 +781,8 @@ class DownloadTableModel(QAbstractTableModel):
                     return _get_icon("📄")
                 if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"):
                     return _get_icon("🖼️")
+                if col == Col.FILE_NAME:
+                    return _get_icon("📄")
                 return _get_icon("🌐")
 
         if role == Qt.ItemDataRole.DisplayRole:
@@ -783,8 +804,10 @@ class DownloadTableModel(QAbstractTableModel):
 
             if col == Col.NAME:
                 type_tag = f"[{entry.download_type.upper()}] " if entry.download_type else ""
-                base = f"{type_tag}{normalize_path(entry.file_path) or entry.url}"
+                base = f"{type_tag}{self.get_original_name(entry)}"
                 return f"{tor_note}\n{base}".strip() if tor_note else base
+            if col == Col.FILE_NAME:
+                return normalize_path(entry.file_path) if entry.file_path else self.get_actual_name(entry)
             if col == Col.STATUS:
                 if entry.error_message:
                     return f"{tor_note}\n{entry.error_message}".strip() if tor_note else entry.error_message
@@ -819,7 +842,7 @@ class DownloadTableModel(QAbstractTableModel):
             return str(count)
 
         if col == Col.NAME:
-            raw_name = entry.filename or entry.url[:60]
+            raw_name = self.get_original_name(entry)
             if self.is_tor_active_for(entry):
                 return f"🧅 {raw_name}"
             return raw_name
@@ -903,7 +926,74 @@ class DownloadTableModel(QAbstractTableModel):
         if col == Col.SAVE_PATH:
             return normalize_path(entry.save_path) or "—"
 
+        if col == Col.FILE_NAME:
+            return self.get_actual_name(entry)
+
         return None
+
+    @staticmethod
+    def get_original_name(entry: DownloadEntry) -> str:
+        """Resolve the original task / download title (before any rename)."""
+        if entry.metadata:
+            orig = entry.metadata.get("original_name")
+            if orig and str(orig).strip():
+                return str(orig).strip()
+            tor_name = entry.metadata.get("torrent_name")
+            if tor_name and str(tor_name).strip():
+                return str(tor_name).strip()
+
+        # Check magnet URI dn parameter
+        if entry.url and "magnet:" in entry.url:
+            try:
+                query_str = entry.url.split("?", 1)[1] if "?" in entry.url else ""
+                if query_str:
+                    qs = parse_qs(query_str)
+                    dns = qs.get("dn")
+                    if dns and dns[0] and dns[0].strip():
+                        return unquote_plus(dns[0]).strip()
+            except Exception:
+                pass
+
+        # If entry was explicitly renamed and original_name is not stored, try extracting original from URL
+        if entry.url and entry.url.startswith(("http://", "https://", "ftp://")):
+            if entry.metadata and entry.metadata.get("explicit_filename"):
+                try:
+                    parsed = urlparse(entry.url)
+                    if parsed.path:
+                        base = os.path.basename(unquote(parsed.path))
+                        if base and "." in base:
+                            return base
+                except Exception:
+                    pass
+
+        if entry.filename:
+            return entry.filename
+
+        return entry.url[:60] if entry.url else "—"
+
+    @staticmethod
+    def get_actual_name(entry: DownloadEntry) -> str:
+        """Resolve the actual target file or root folder name on disk."""
+        if entry.file_path:
+            norm = normalize_path(entry.file_path)
+            base = os.path.basename(norm)
+            if base:
+                return base
+        if entry.filename:
+            return entry.filename
+        if entry.metadata and "files" in entry.metadata:
+            files = entry.metadata["files"]
+            if isinstance(files, list) and files:
+                f0 = files[0]
+                p = f0.get("path") if isinstance(f0, dict) else str(f0)
+                if p:
+                    norm_p = normalize_path(p)
+                    parts = norm_p.split("/")
+                    if len(parts) > 1 and parts[0]:
+                        return parts[0]
+                    elif parts[0]:
+                        return parts[0]
+        return "—"
 
     # -- index management ----------------------------------------------------
 

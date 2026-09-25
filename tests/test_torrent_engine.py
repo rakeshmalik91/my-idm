@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
+from datetime import datetime, timezone, timedelta
 from unittest.mock import MagicMock, patch
 
 from my_idm.database import Database, DownloadEntry
@@ -655,7 +656,7 @@ class TestTorrentEngine(unittest.TestCase):
         self.assertEqual(updated.status, "queued")
 
     def test_successful_progress_clears_fetching_metadata_timer(self):
-        """When torrent receives metadata or progresses, fetching_metadata_since is cleared."""
+        """When torrent receives metadata, force_recheck is called, state becomes checking, and fetching_metadata_since is cleared."""
         from datetime import datetime, timezone, timedelta
         te = TorrentEngine(self.db)
         te._running = True
@@ -681,11 +682,89 @@ class TestTorrentEngine(unittest.TestCase):
             "state": "downloading", "speed": 50000.0, "upload_speed": 0.0,
             "seeds": 5, "peers": 10, "eta": 18, "name": "ResolvedTorrent",
         }):
+            # First poll: receives metadata -> triggers force_recheck -> moves to checking
             te.poll_all()
 
+        mock_handle.force_recheck.assert_called_once()
         updated = self.db.get_download("t_prog_clear")
-        self.assertEqual(updated.status, "downloading")
+        self.assertEqual(updated.status, "checking")
         self.assertEqual(updated.fetching_metadata_since, "")
+
+        # Second poll: checking finishes (state not in checking_files) -> transitions to downloading
+        with patch.object(te, "get_status", return_value={
+            "total_size": 1000, "downloaded": 100, "progress": 10.0,
+            "state": "downloading", "speed": 50000.0, "upload_speed": 0.0,
+            "seeds": 5, "peers": 10, "eta": 18, "name": "ResolvedTorrent",
+        }):
+            te.poll_all()
+
+        updated_after_check = self.db.get_download("t_prog_clear")
+        self.assertEqual(updated_after_check.status, "downloading")
+
+    def test_metadata_resolution_with_existing_completed_payload_transitions_to_seeding(self):
+        """When metadata is received and recheck discovers 100% completed payload, transitions to seeding."""
+        from my_idm.config import TorrentConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        te.set_torrent_config(TorrentConfig(seeding_after_complete=True, max_seeding_speed=200))
+
+        entry = DownloadEntry(
+            id="t_meta_existing",
+            url="magnet:?xt=urn:btih:aabbccddeeff0011&dn=ExistingMovie",
+            filename="ExistingMovie",
+            status="fetching_metadata",
+            download_type="torrent",
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.status.return_value = MagicMock(paused=False, is_paused=False)
+        mock_handle.is_valid.return_value = True
+        te._handles["t_meta_existing"] = mock_handle
+
+        # First poll: receives metadata -> triggers force_recheck -> status becomes checking
+        with patch.object(te, "get_status", return_value={
+            "total_size": 50000, "downloaded": 50000, "progress": 100.0,
+            "state": "downloading", "speed": 0.0, "upload_speed": 0.0,
+            "seeds": 1, "peers": 1, "eta": 0, "name": "ExistingMovie",
+        }):
+            te.poll_all()
+
+        mock_handle.force_recheck.assert_called_once()
+        self.assertEqual(self.db.get_download("t_meta_existing").status, "checking")
+
+        # Second poll: checking finishes with 100% verified on disk -> transitions to seeding
+        with patch.object(te, "get_status", return_value={
+            "total_size": 50000, "downloaded": 50000, "progress": 100.0,
+            "state": "seeding", "speed": 0.0, "upload_speed": 0.0,
+            "seeds": 1, "peers": 1, "eta": 0, "name": "ExistingMovie",
+        }):
+            te.poll_all()
+
+        self.assertEqual(self.db.get_download("t_meta_existing").status, "seeding")
+
+    def test_new_torrent_file_without_fastresume_starts_in_checking(self):
+        """Adding a new .torrent file without existing fastresume triggers force_recheck and checking status."""
+        te = TorrentEngine(self.db)
+        te._running = True
+        mock_session = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.status.return_value = MagicMock(has_metadata=True, paused=False, is_paused=False)
+        mock_session.add_torrent.return_value = mock_handle
+        te._session = mock_session
+
+        entry = DownloadEntry(
+            id="t_new_file",
+            url="magnet:?xt=urn:btih:1122334455667788990011223344556677889900",
+            download_type="torrent",
+            status="queued",
+        )
+        self.db.add_download(entry)
+
+        te.add_torrent(entry)
+        mock_handle.force_recheck.assert_called_once()
+        self.assertEqual(self.db.get_download("t_new_file").status, "checking")
 
     def test_torrent_transitions_to_seeding_on_completion(self):
         """When seeding_after_complete is True, completed torrent transitions to seeding."""
@@ -870,6 +949,82 @@ class TestTorrentEngine(unittest.TestCase):
         self.assertEqual(updated.status, "completed")
         mock_handle.pause.assert_called()
         self.assertIn(("t_seeding_ratio_limit", "completed"), status_updates)
+
+    def test_get_torrent_files_reflects_renamed_root(self):
+        """get_torrent_files updates the root folder in file paths to match renamed entry.filename."""
+        te = TorrentEngine(self.db)
+        entry = DownloadEntry(
+            id="t_renamed_files",
+            url="magnet:?xt=urn:btih:1122334455667788&dn=OldRoot",
+            filename="NewRoot",
+            save_path="D:/Downloads",
+            status="completed",
+            download_type="torrent",
+        )
+        entry.metadata = {
+            "explicit_filename": True,
+            "files": [
+                {"index": 0, "path": "OldRoot/sub/movie.mp4", "name": "movie.mp4", "size": 1000},
+                {"index": 1, "path": "OldRoot/readme.txt", "name": "readme.txt", "size": 50},
+            ]
+        }
+        self.db.add_download(entry)
+
+        files = te.get_torrent_files("t_renamed_files")
+        self.assertEqual(files[0]["path"], "NewRoot/sub/movie.mp4")
+        self.assertEqual(files[1]["path"], "NewRoot/readme.txt")
+
+    def test_start_seeding_resets_timer_and_does_not_stop_immediately(self):
+        """Manually starting seeding resets seeding_since to current time so seeding does not immediately stop."""
+        from my_idm.config import TorrentConfig
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+        # 4-hour limit
+        te.set_torrent_config(TorrentConfig(seeding_time_limit_minutes=240))
+
+        # A torrent that completed hours ago and had a stale seeding_since from 5 hours ago
+        past_time = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        entry = DownloadEntry(
+            id="t_manual_seed",
+            url="magnet:?xt=urn:btih:1111222233334444555566667777888899990003",
+            filename="ManualSeedTest",
+            status="completed",
+            download_type="torrent",
+            total_size=10000,
+            downloaded_size=10000,
+            completed_at=past_time,
+            metadata_json=f'{{"seeding_since": "{past_time}"}}',
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.is_valid.return_value = True
+        te._handles["t_manual_seed"] = mock_handle
+
+        # Manually start seeding
+        res = te.start_seeding("t_manual_seed")
+        self.assertTrue(res)
+
+        # seeding_since must be updated to recent time (within last few seconds), not 5 hours ago
+        updated = self.db.get_download("t_manual_seed")
+        self.assertEqual(updated.status, "seeding")
+        since_dt = datetime.fromisoformat(updated.metadata["seeding_since"])
+        elapsed_sec = (datetime.now(timezone.utc) - since_dt).total_seconds()
+        self.assertLess(elapsed_sec, 10.0)
+
+        # When polling torrents, it must NOT stop immediately
+        with patch.object(te, "get_status", return_value={
+            "total_size": 10000, "downloaded": 10000, "progress": 100.0,
+            "state": "seeding", "speed": 0.0, "upload_speed": 1024.0,
+            "seeds": 5, "peers": 10, "eta": 0, "name": "ManualSeedTest",
+            "total_upload": 100, "total_download": 10000,
+        }):
+            te.poll_all()
+
+        polled = self.db.get_download("t_manual_seed")
+        self.assertEqual(polled.status, "seeding")
+        mock_handle.pause.assert_not_called()
 
 
 if __name__ == "__main__":

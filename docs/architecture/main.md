@@ -236,15 +236,16 @@ stateDiagram-v2
     queued --> downloading: Slot Available (Active < Max Concurrent)
     queued --> fetching_metadata: Magnet Link (Slot Available)
     
-    fetching_metadata --> downloading: Metadata Resolved
+    fetching_metadata --> checking: Metadata Resolved (Rechecks Disk)
     fetching_metadata --> suspended: Metadata Timeout (> Configured Days)
     
     downloading --> stalled: Speed=0 & Seeds=0 (> 45s)
     stalled --> downloading: Speed > 0 or Peers Connected
     
     downloading --> checking: Force Recheck / Hash Verification
-    checking --> downloading: Incomplete Data
-    checking --> completed: 100% Data Verified
+    checking --> downloading: Incomplete Data (< 100%)
+    checking --> completed: 100% Data Verified (Seeding Disabled)
+    checking --> seeding: 100% Data Verified (BitTorrent Seeding)
     
     downloading --> scanning: Download Complete (Antivirus Active)
     downloading --> completed: Download Complete (HTTP)

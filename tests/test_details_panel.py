@@ -933,6 +933,21 @@ class TestDetailsPanel(unittest.TestCase):
             self.assertEqual(mock_trash.call_count, 2)
             self.assertEqual(mock_set_prio.call_count, 2)
 
+    def test_details_panel_overview_displays_filename(self):
+        """DetailsPanel Overview tab displays filename in _ov_filename."""
+        entry = DownloadEntry(
+            id="test-fn-ov-1",
+            url="https://example.com/myfile.zip",
+            filename="my_custom_name.zip",
+            status="completed",
+        )
+        self.db.add_download(entry)
+        self.win._model.add_entry(entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-fn-ov-1")
+        self.assertEqual(panel._ov_filename.text(), "my_custom_name.zip")
+
 
 if __name__ == "__main__":
     unittest.main()
