@@ -126,9 +126,27 @@ Rechecking verifies existing files:
 - **📄 Open File** (Enter) — Opens the downloaded file with the default application
 - **📁 Open Folder** (Ctrl+O) — Opens the containing folder in Explorer with the file selected
 
+### Export Selected as CSV
+
+1. Select one or more downloads in the table.
+2. Select **Tools → 📄 Export Selected as CSV…** or choose **Export Selected as CSV…** from the right-click context menu.
+3. Choose a destination file. The CSV file is generated with two columns:
+   - `Name`: Resolved/original download name.
+   - `URL/Magnet`: Source direct URL or magnet URI.
+
+### Segregated View & Collapsible Sections
+
+1. Toggle **View → 🗂️ Segregated View** from the menu bar.
+2. When enabled, downloads are segregated into 3 collapsible sections:
+   - **Active**: Items in `fetching metadata`, `queued`, `downloading`, `paused`, `stalled`, or `error` states.
+   - **Seeding**: Items actively seeding in the BitTorrent swarm.
+   - **Inactive**: Items in `completed`, `stopped`, `file_not_found`, or `suspended` states.
+3. Click or double-click any section header to collapse or expand it (`▼` / `▶`).
+4. Section collapse states and the segregated view toggle are saved and restored automatically from the database.
+
 ### Context Menu
 
-Right-click any download to access all actions (Pause, Resume, Recheck, Move, Open File, Open Folder, Delete).
+Right-click any download to access all actions (Pause, Resume, Recheck, Move, Rename, Export Selected as CSV, Open File, Open Folder, Delete).
 
 ---
 
@@ -150,6 +168,7 @@ When any download is selected in the main table, the panel updates dynamically a
 1. **📋 Overview**:
    - **Status & Progress**: Color-coded download state with error details and completion percentage.
    - **Size Metrics**: Exact downloaded bytes vs. total size formatted with human-readable binary units (KiB, MiB, GiB).
+   - **Total Seeded / Uploaded**: Cumulative uploaded bytes and upload/download ratio for torrent transfers.
    - **Live Speeds**: Real-time download speed and upload speed indicators.
    - **ETA & Time Elapsed**: Precise remaining time calculation.
    - **Swarm & Transfer Breakdown**: Number of connected seeds and swarm peers (for torrents) or active parallel segments (for HTTP).

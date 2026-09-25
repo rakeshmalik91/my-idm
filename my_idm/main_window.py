@@ -277,7 +277,18 @@ class MainWindow(QMainWindow):
         header.filter_requested.connect(self._on_header_filter_requested)
 
         self._model.set_tor_config(self._manager.tor_config)
+        self._table.clicked.connect(self._on_table_clicked)
         self._table.doubleClicked.connect(self._on_table_double_clicked)
+        self._model.modelReset.connect(self._apply_table_spans)
+        self._model.layoutChanged.connect(self._apply_table_spans)
+
+        # Segregated view: disabled by default, state persisted in db
+        self._segregated_view_enabled = bool(self._manager.db.get_ui_state("segregated_view_enabled", False))
+        for sec_id in ("active", "seeding", "inactive"):
+            if self._manager.db.get_ui_state(f"segregated_{sec_id}_collapsed", False):
+                self._model.set_section_collapsed(sec_id, True)
+        self._model.set_segregated_view(self._segregated_view_enabled)
+        self._apply_table_spans()
 
         # Move Col.SOURCE_DOMAIN and Col.FILE_NAME to the end of the table by default
         header.moveSection(header.visualIndex(Col.SOURCE_DOMAIN), Col.COUNT - 2)
@@ -634,6 +645,12 @@ class MainWindow(QMainWindow):
 
         # View menu
         view_menu = menubar.addMenu("&View")
+        self._act_segregated_view = QAction(_create_emoji_icon("🗂️"), "Segregated View", self)
+        self._act_segregated_view.setCheckable(True)
+        self._act_segregated_view.setChecked(self._segregated_view_enabled)
+        self._act_segregated_view.toggled.connect(self._on_toggle_segregated_view)
+        view_menu.addAction(self._act_segregated_view)
+
         view_menu.addAction(self._act_toggle_details)
         view_menu.addSeparator()
         select_all_act = QAction(_create_emoji_icon("☑️"), "Select All", self)
@@ -681,6 +698,9 @@ class MainWindow(QMainWindow):
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
         tools_menu.addAction(self._act_preferences)
+        self._act_export_csv = QAction(_create_emoji_icon("📄"), "Export Selected as CSV…", self)
+        self._act_export_csv.triggered.connect(self._on_export_selected_csv)
+        tools_menu.addAction(self._act_export_csv)
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_torrent_settings)
         tools_menu.addSeparator()
@@ -977,8 +997,78 @@ class MainWindow(QMainWindow):
             else:
                 self._manager.mark_file_not_found(entry.id)
 
+    def _apply_table_spans(self):
+        self._table.clearSpans()
+        if not self._model.is_segregated_view():
+            return
+        for row in self._model.get_section_header_row_indices():
+            self._table.setSpan(row, 0, 1, Col.COUNT)
+
+    def _on_table_clicked(self, index):
+        row = index.row()
+        if self._model.is_section_header_row(row):
+            res = self._model.toggle_section_collapsed(row)
+            if res:
+                sec_id, is_col = res
+                self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
+            self._apply_table_spans()
+
     def _on_table_double_clicked(self, index):
+        if self._model.is_section_header_row(index.row()):
+            res = self._model.toggle_section_collapsed(index.row())
+            if res:
+                sec_id, is_col = res
+                self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
+            self._apply_table_spans()
+            return
         self._on_open_file()
+
+    def _on_toggle_segregated_view(self, checked: bool):
+        self._segregated_view_enabled = checked
+        self._manager.db.set_ui_state("segregated_view_enabled", checked)
+        self._model.set_segregated_view(checked)
+        self._apply_table_spans()
+        state_str = "enabled" if checked else "disabled"
+        self._status_label.setText(f"Segregated view {state_str}")
+
+    def _on_export_selected_csv(self):
+        selected_ids = self._selected_ids()
+        selected = [self._manager.get_entry(did) for did in selected_ids]
+        selected = [e for e in selected if e]
+        if not selected:
+            QMessageBox.information(
+                self,
+                "Export Selected to CSV",
+                "Please select one or more downloads to export.",
+            )
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Selected Downloads as CSV",
+            "downloads_export.csv",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        import csv
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Name", "URL/Magnet"])
+                for entry in selected:
+                    name = DownloadTableModel.get_original_name(entry)
+                    writer.writerow([name, entry.url or ""])
+            self._status_label.setText(
+                f"Exported {len(selected)} download(s) to '{Path(file_path).name}'"
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                f"Could not export downloads to CSV:\n\n{exc}",
+            )
 
     def _on_open_folder(self):
         entry = self._first_selected_entry()
@@ -1068,6 +1158,39 @@ class MainWindow(QMainWindow):
     def _show_context_menu(self, pos):
         idx = self._table.indexAt(pos)
         if idx.isValid():
+            if self._model.is_section_header_row(idx.row()):
+                sec_menu = QMenu(self)
+                entry = self._model._entries[idx.row()]
+                action_word = "Expand" if entry.section_collapsed else "Collapse"
+                act_this = QAction(f"{action_word} '{entry.section_title}' Section", self)
+                def _toggle_this():
+                    res = self._model.toggle_section_collapsed(idx.row())
+                    if res:
+                        sec_id, is_col = res
+                        self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
+                    self._apply_table_spans()
+                act_this.triggered.connect(_toggle_this)
+                sec_menu.addAction(act_this)
+                sec_menu.addSeparator()
+                act_expand_all = QAction("Expand All Sections", self)
+                def _expand_all():
+                    for sid in ("active", "seeding", "inactive"):
+                        self._model.set_section_collapsed(sid, False)
+                        self._manager.db.set_ui_state(f"segregated_{sid}_collapsed", False)
+                    self._apply_table_spans()
+                act_expand_all.triggered.connect(_expand_all)
+                sec_menu.addAction(act_expand_all)
+                act_collapse_all = QAction("Collapse All Sections", self)
+                def _collapse_all():
+                    for sid in ("active", "seeding", "inactive"):
+                        self._model.set_section_collapsed(sid, True)
+                        self._manager.db.set_ui_state(f"segregated_{sid}_collapsed", True)
+                    self._apply_table_spans()
+                act_collapse_all.triggered.connect(_collapse_all)
+                sec_menu.addAction(act_collapse_all)
+                sec_menu.exec(self._table.viewport().mapToGlobal(pos))
+                return
+
             sm = self._table.selectionModel()
             selected_rows = {i.row() for i in sm.selectedRows()}
             if idx.row() not in selected_rows:
@@ -1087,6 +1210,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(self._act_copy_url)
         menu.addAction(self._act_rename)
+        menu.addAction(self._act_export_csv)
         menu.addSeparator()
         menu.addAction(self._act_scan_antivirus)
         menu.addAction(self._act_recheck)
@@ -1179,7 +1303,7 @@ class MainWindow(QMainWindow):
 
     def _update_count_label(self):
         total_all = self._model.total_unfiltered_count()
-        visible = self._model.rowCount()
+        visible = self._model.visible_download_count()
         active = sum(
             1 for e in self._model.all_entries
             if e.status in ("downloading", "checking", "fetching_metadata")

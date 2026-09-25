@@ -722,6 +722,102 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         # Must still be at the end, not forced back to index 2
         self.assertEqual(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
 
+    def test_export_selected_as_csv(self):
+        """Exporting selected downloads creates a valid CSV file with Name and URL/Magnet columns."""
+        e1 = DownloadEntry(
+            id="csv-1",
+            url="https://example.com/file1.zip",
+            filename="file1.zip",
+            status="completed",
+        )
+        e2 = DownloadEntry(
+            id="csv-2",
+            url="magnet:?xt=urn:btih:csvmagnet123",
+            filename="my_torrent.mkv",
+            status="seeding",
+        )
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.win._load_history()
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tf:
+            csv_path = tf.name
+
+        try:
+            with unittest.mock.patch.object(self.win, "_selected_ids", return_value=["csv-1", "csv-2"]):
+                with unittest.mock.patch("my_idm.main_window.QFileDialog.getSaveFileName", return_value=(csv_path, "CSV Files (*.csv)")):
+                    self.win._act_export_csv.trigger()
+
+            with open(csv_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            self.assertEqual(lines[0], "Name,URL/Magnet")
+            self.assertIn("file1.zip,https://example.com/file1.zip", lines)
+            self.assertIn("my_torrent.mkv,magnet:?xt=urn:btih:csvmagnet123", lines)
+        finally:
+            if Path(csv_path).exists():
+                Path(csv_path).unlink()
+
+    def test_segregated_view_toggle_and_collapsible_sections(self):
+        """Segregated view partitions items into Active, Seeding, Inactive sections and persists collapse state."""
+        e_active = DownloadEntry(
+            id="sec-active-1",
+            url="https://example.com/active.zip",
+            filename="active.zip",
+            status="downloading",
+        )
+        e_seed = DownloadEntry(
+            id="sec-seed-1",
+            url="magnet:?xt=urn:btih:seed123",
+            filename="seed.iso",
+            status="seeding",
+        )
+        e_inact = DownloadEntry(
+            id="sec-inact-1",
+            url="https://example.com/done.zip",
+            filename="done.zip",
+            status="completed",
+        )
+        self.db.add_download(e_active)
+        self.db.add_download(e_seed)
+        self.db.add_download(e_inact)
+        self.win._load_history()
+
+        # Turn on segregated view
+        self.win._act_segregated_view.setChecked(True)
+        self.assertTrue(self.win._model.is_segregated_view())
+        self.assertTrue(self.db.get_ui_state("segregated_view_enabled"))
+
+        # In segregated view, we have 3 headers + 3 items = 6 rows
+        self.assertEqual(self.win._model.rowCount(), 6)
+        hdr_indices = self.win._model.get_section_header_row_indices()
+        self.assertEqual(len(hdr_indices), 3)
+
+        # First header should be Active
+        self.assertTrue(self.win._model.is_section_header_row(0))
+        entry_h0 = self.win._model._entries[0]
+        self.assertEqual(entry_h0.section_id, "active")
+
+        # Collapse the Active section by clicking on header row 0
+        self.win._on_table_clicked(self.win._model.index(0, 0))
+        self.assertTrue(self.win._model._collapsed_sections)
+        self.assertIn("active", self.win._model._collapsed_sections)
+        self.assertTrue(self.db.get_ui_state("segregated_active_collapsed"))
+        # With active collapsed, row count drops by 1
+        self.assertEqual(self.win._model.rowCount(), 5)
+
+        # Un-collapse Active section
+        self.win._on_table_clicked(self.win._model.index(0, 0))
+        self.assertNotIn("active", self.win._model._collapsed_sections)
+        self.assertFalse(self.db.get_ui_state("segregated_active_collapsed"))
+        self.assertEqual(self.win._model.rowCount(), 6)
+
+        # Turn off segregated view -> back to flat list of 3 items
+        self.win._act_segregated_view.setChecked(False)
+        self.assertFalse(self.win._model.is_segregated_view())
+        self.assertEqual(self.win._model.rowCount(), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

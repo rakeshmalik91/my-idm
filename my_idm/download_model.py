@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont
 
 from my_idm.config import TorConfig
 from my_idm.database import DownloadEntry
@@ -135,6 +135,17 @@ TYPE_FILTER_LABELS: dict[str, str] = {
     "torrent": "BitTorrent Swarm",
 }
 
+SECTION_ACTIVE = "active"
+SECTION_SEEDING = "seeding"
+SECTION_INACTIVE = "inactive"
+
+ACTIVE_SECTION_STATUSES = {
+    "fetching_metadata", "queued", "downloading", "paused", "stalled", "error",
+    "checking", "scanning", "threat_detected"
+}
+SEEDING_SECTION_STATUSES = {"seeding"}
+INACTIVE_SECTION_STATUSES = {"completed", "stopped", "file_not_found", "suspended"}
+
 
 class DownloadTableModel(QAbstractTableModel):
     """Table model backed by a list of DownloadEntry objects with filtering support."""
@@ -149,6 +160,8 @@ class DownloadTableModel(QAbstractTableModel):
         self._tor_config: Optional[TorConfig] = None
         self._status_filter: Optional[set[str]] = None
         self._type_filter: Optional[set[str]] = None
+        self._segregated_view: bool = False
+        self._collapsed_sections: set[str] = set()
 
     @property
     def tor_config(self) -> Optional[TorConfig]:
@@ -209,11 +222,50 @@ class DownloadTableModel(QAbstractTableModel):
 
     def _reapply_filter(self):
         self.beginResetModel()
-        self._entries = [e for e in self._all_entries if self._matches_filter(e)]
-        if self._sort_column is not None:
-            self._apply_sort()
+        self._apply_sort()
         self._rebuild_index()
         self.endResetModel()
+
+    def set_segregated_view(self, enabled: bool):
+        if self._segregated_view == enabled:
+            return
+        self._segregated_view = enabled
+        self._reapply_filter()
+
+    def is_segregated_view(self) -> bool:
+        return self._segregated_view
+
+    def set_section_collapsed(self, section_id: str, collapsed: bool):
+        if collapsed:
+            self._collapsed_sections.add(section_id)
+        else:
+            self._collapsed_sections.discard(section_id)
+        self._reapply_filter()
+
+    def is_section_collapsed(self, section_id: str) -> bool:
+        return section_id in self._collapsed_sections
+
+    def is_section_header_row(self, row: int) -> bool:
+        if 0 <= row < len(self._entries):
+            return bool(getattr(self._entries[row], "is_section_header", False))
+        return False
+
+    def get_section_header_row_indices(self) -> list[int]:
+        return [i for i, e in enumerate(self._entries) if getattr(e, "is_section_header", False)]
+
+    def toggle_section_collapsed(self, row: int) -> Optional[tuple[str, bool]]:
+        if 0 <= row < len(self._entries):
+            e = self._entries[row]
+            if getattr(e, "is_section_header", False):
+                sec_id = e.section_id
+                now_collapsed = sec_id not in self._collapsed_sections
+                if now_collapsed:
+                    self._collapsed_sections.add(sec_id)
+                else:
+                    self._collapsed_sections.discard(sec_id)
+                self._reapply_filter()
+                return (sec_id, now_collapsed)
+        return None
 
     def status_filter(self) -> Optional[set[str]]:
         return self._status_filter
@@ -255,6 +307,9 @@ class DownloadTableModel(QAbstractTableModel):
 
     def total_unfiltered_count(self) -> int:
         return len(self._all_entries)
+
+    def visible_download_count(self) -> int:
+        return sum(1 for e in self._entries if not getattr(e, "is_section_header", False))
 
     def get_status_counts(self) -> dict[str, int]:
         counts = {k: 0 for k in STATUS_FILTER_GROUPS}
@@ -299,9 +354,7 @@ class DownloadTableModel(QAbstractTableModel):
             if e.status in ("completed", "seeding") and e.total_size > 0:
                 if e.downloaded_size < e.total_size:
                     e.downloaded_size = e.total_size
-        self._entries = [e for e in self._all_entries if self._matches_filter(e)]
-        if self._sort_column is not None:
-            self._apply_sort()
+        self._apply_sort()
         self._rebuild_index()
         self.endResetModel()
 
@@ -316,6 +369,9 @@ class DownloadTableModel(QAbstractTableModel):
             if not getattr(entry, "total_peers", 0) and "total_peers" in entry.metadata:
                 entry.total_peers = self._to_int(entry.metadata.get("total_peers", 0))
         self._all_entries.append(entry)
+        if self._segregated_view:
+            self._reapply_filter()
+            return
         if self._matches_filter(entry):
             row = self._find_insert_row(entry)
             self.beginInsertRows(QModelIndex(), row, row)
@@ -325,6 +381,9 @@ class DownloadTableModel(QAbstractTableModel):
 
     def remove_entry(self, download_id: str):
         self._all_entries = [e for e in self._all_entries if e.id != download_id]
+        if self._segregated_view:
+            self._reapply_filter()
+            return
         row = self._id_to_row.get(download_id)
         if row is None:
             return
@@ -362,17 +421,82 @@ class DownloadTableModel(QAbstractTableModel):
         self.layoutChanged.emit()
 
     def _apply_sort(self):
-        if self._sort_column is None:
-            return
+        filtered = [e for e in self._all_entries if self._matches_filter(e)]
         ascending = (
             self._sort_order == Qt.SortOrder.AscendingOrder
             or self._sort_order == 0
         )
         reverse = not ascending
-        self._entries.sort(
-            key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
-            reverse=reverse,
+
+        if not self._segregated_view:
+            if self._sort_column is not None:
+                filtered.sort(
+                    key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                    reverse=reverse,
+                )
+            self._entries = filtered
+            return
+
+        # Segregated view: group by Active, Seeding, Inactive
+        active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
+        seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
+        inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
+
+        if self._sort_column is not None:
+            active_entries.sort(
+                key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                reverse=reverse,
+            )
+            seeding_entries.sort(
+                key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                reverse=reverse,
+            )
+            inactive_entries.sort(
+                key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                reverse=reverse,
+            )
+
+        entries: list[DownloadEntry] = []
+        # 1. Active Section
+        active_hdr = DownloadEntry(
+            id="__section_active__",
+            is_section_header=True,
+            section_id=SECTION_ACTIVE,
+            section_title="Active",
+            section_count=len(active_entries),
+            section_collapsed=(SECTION_ACTIVE in self._collapsed_sections),
         )
+        entries.append(active_hdr)
+        if SECTION_ACTIVE not in self._collapsed_sections:
+            entries.extend(active_entries)
+
+        # 2. Seeding Section
+        seeding_hdr = DownloadEntry(
+            id="__section_seeding__",
+            is_section_header=True,
+            section_id=SECTION_SEEDING,
+            section_title="Seeding",
+            section_count=len(seeding_entries),
+            section_collapsed=(SECTION_SEEDING in self._collapsed_sections),
+        )
+        entries.append(seeding_hdr)
+        if SECTION_SEEDING not in self._collapsed_sections:
+            entries.extend(seeding_entries)
+
+        # 3. Inactive Section
+        inactive_hdr = DownloadEntry(
+            id="__section_inactive__",
+            is_section_header=True,
+            section_id=SECTION_INACTIVE,
+            section_title="Inactive",
+            section_count=len(inactive_entries),
+            section_collapsed=(SECTION_INACTIVE in self._collapsed_sections),
+        )
+        entries.append(inactive_hdr)
+        if SECTION_INACTIVE not in self._collapsed_sections:
+            entries.extend(inactive_entries)
+
+        self._entries = entries
 
     def _entry_sort_key(self, entry: DownloadEntry, col: int, ascending: bool) -> Any:
         if col == Col.QUEUE:
@@ -470,7 +594,8 @@ class DownloadTableModel(QAbstractTableModel):
 
     def get_entry(self, row: int) -> Optional[DownloadEntry]:
         if 0 <= row < len(self._entries):
-            return self._entries[row]
+            e = self._entries[row]
+            return None if getattr(e, "is_section_header", False) else e
         return None
 
     def get_entry_by_id(self, download_id: str) -> Optional[DownloadEntry]:
@@ -486,7 +611,7 @@ class DownloadTableModel(QAbstractTableModel):
         rows = sorted(set(idx.row() for idx in indexes))
         return [
             self._entries[r].id for r in rows
-            if 0 <= r < len(self._entries)
+            if 0 <= r < len(self._entries) and not getattr(self._entries[r], "is_section_header", False)
         ]
 
     @property
@@ -567,6 +692,10 @@ class DownloadTableModel(QAbstractTableModel):
                     e.eta_seconds = 0
                 entry_all = e
                 break
+
+        if self._segregated_view:
+            self._reapply_filter()
+            return
 
         row = self._id_to_row.get(download_id)
         matches = entry_all is not None and self._matches_filter(entry_all)
@@ -702,6 +831,10 @@ class DownloadTableModel(QAbstractTableModel):
         else:
             self._all_entries.append(entry)
 
+        if self._segregated_view:
+            self._reapply_filter()
+            return
+
         row = self._id_to_row.get(download_id)
         matches = self._matches_filter(entry)
 
@@ -751,6 +884,30 @@ class DownloadTableModel(QAbstractTableModel):
             return None
 
         entry = self._entries[row]
+
+        if getattr(entry, "is_section_header", False):
+            if role == Qt.ItemDataRole.DisplayRole:
+                if col == Col.QUEUE:
+                    arrow = "▶" if entry.section_collapsed else "▼"
+                    return f"  {arrow}   {entry.section_title.upper()} ({entry.section_count})"
+                return ""
+            if role == Qt.ItemDataRole.BackgroundRole:
+                return QColor("#1e2330")
+            if role == Qt.ItemDataRole.ForegroundRole:
+                if entry.section_id == SECTION_ACTIVE:
+                    return QColor(Colors.ACCENT)
+                elif entry.section_id == SECTION_SEEDING:
+                    return QColor(Colors.PURPLE)
+                else:
+                    return QColor("#8fa0b5")
+            if role == Qt.ItemDataRole.FontRole:
+                return QFont("Segoe UI", 10, QFont.Weight.Bold)
+            if role == Qt.ItemDataRole.TextAlignmentRole:
+                return int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            if role == Qt.ItemDataRole.ToolTipRole:
+                action = "expand" if entry.section_collapsed else "collapse"
+                return f"Click to {action} {entry.section_title} section"
+            return None
 
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if col == Col.QUEUE:
@@ -821,6 +978,10 @@ class DownloadTableModel(QAbstractTableModel):
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        if 0 <= index.row() < len(self._entries) and getattr(self._entries[index.row()], "is_section_header", False):
+            return Qt.ItemFlag.ItemIsEnabled
         return (
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -1000,4 +1161,5 @@ class DownloadTableModel(QAbstractTableModel):
     def _rebuild_index(self):
         self._id_to_row = {
             e.id: i for i, e in enumerate(self._entries)
+            if not getattr(e, "is_section_header", False)
         }

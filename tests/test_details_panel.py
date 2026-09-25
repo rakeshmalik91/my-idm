@@ -948,6 +948,26 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_download_id("test-fn-ov-1")
         self.assertEqual(panel._ov_filename.text(), "my_custom_name.zip")
 
+    def test_details_panel_overview_displays_seeded_bytes_and_ratio(self):
+        """DetailsPanel Overview tab displays total seeded bytes and upload/download ratio."""
+        entry = DownloadEntry(
+            id="test-seed-ov-1",
+            url="magnet:?xt=urn:btih:seeded123",
+            filename="seeded_movie.iso",
+            total_size=1000000,
+            downloaded_size=1000000,
+            uploaded_size=2500000,
+            download_type="torrent",
+            status="seeding",
+        )
+        self.db.add_download(entry)
+        self.win._model.add_entry(entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-seed-ov-1")
+        seeded_text = panel._ov_seeded.text()
+        self.assertIn("Ratio: 2.50", seeded_text)
+
 
 if __name__ == "__main__":
     unittest.main()

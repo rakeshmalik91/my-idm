@@ -80,6 +80,8 @@ commit after each features or set of fixes/enhancements
 - [x] add a reset view button under Manu > View, to reset columns/filters/sorting/width etc
 - [x] in delete download popup, preselct the delete file checkbox
 - [x] remove the emoji for Stopped status
+- [x] in tools menu > add a feature to export selected downloads as csv. 2 columns - name, url/magnet
+- [x] add a segregated view toggle in view menu. when on downloads are segregated into 3 collapsible sections based on Active (fetching metadata, Queued, Downloading, Paused, Stalled, Error), Seeding, Inactive (Completed, Stopped, File not Found, Suspended). store the state of which section is collapsed in db. turn it on by default.
 
 ----------------------
 ### Torrent
@@ -97,6 +99,7 @@ commit after each features or set of fixes/enhancements
 - [x] move failed while seeding. but it moved partially, handle it properly. unlock the file before move/delete if required.
 - [x] pause/stop at seeding state should move to completed. pause/stop at completed shouldnt do anything. update state diagrams as well
 - [x] when a new torrent is added, after metadata fetch do a recheck first just in case the torrent file already exists. (update state digrams)
+- [x] store total seeded bytes and show in details tab
 
 ----------------------
 ### Tor Support
@@ -128,6 +131,11 @@ commit after each features or set of fixes/enhancements
 
 ----------------------
 ### Tools
+- [ ] Animepahe scraper
+  - [ ] add a new tab for external tools in preferences, add any related configs
+    - [ ] repo location
+    - [ ] toggle to launch animepahe scraper at launch, in cli mode, should send downloads to myidm in backlog file
+    - [ ] buttons to view console logs (redirect them in a file, open that file) & debug logs (should be there alreaady, open the file)
+  - [ ] add a button in tools menu to launch animepahe downloader gui
 - [ ] Youtube scraper
-- [ ] inbuilt Animepahe scraper
 - [ ] Mangareader scraper

@@ -405,6 +405,10 @@ class DownloadManager(QObject):
         log.info("DownloadManager stopped")
 
     @property
+    def db(self) -> Database:
+        return self._db
+
+    @property
     def tor_config(self) -> TorConfig:
         return self._tor_config
 

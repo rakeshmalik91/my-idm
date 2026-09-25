@@ -57,6 +57,14 @@ class DownloadEntry:
     metadata_json: str = "{}"
     queue_order: int = 0
     fetching_metadata_since: str = ""  # ISO timestamp when fetching_metadata started
+    uploaded_size: int = 0             # Total cumulative seeded/uploaded bytes
+
+    # --- UI section header attributes (transient) ---
+    is_section_header: bool = False
+    section_id: str = ""               # active | seeding | inactive
+    section_title: str = ""
+    section_count: int = 0
+    section_collapsed: bool = False
 
     # --- transient (not stored in DB) ---
     speed: float = 0.0
@@ -148,7 +156,7 @@ _DOWNLOAD_DB_COLUMNS = [
     "num_segments", "error_message", "retry_count", "max_retries",
     "added_at", "last_tried_at", "completed_at",
     "etag", "content_hash", "torrent_info_hash", "metadata_json",
-    "queue_order", "fetching_metadata_since",
+    "queue_order", "fetching_metadata_since", "uploaded_size",
 ]
 
 _SEGMENT_DB_COLUMNS = [
@@ -207,7 +215,8 @@ class Database:
                 torrent_info_hash TEXT NOT NULL DEFAULT '',
                 metadata_json   TEXT NOT NULL DEFAULT '{}',
                 queue_order     INTEGER NOT NULL DEFAULT 0,
-                fetching_metadata_since TEXT NOT NULL DEFAULT ''
+                fetching_metadata_since TEXT NOT NULL DEFAULT '',
+                uploaded_size   INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS segments (
@@ -241,6 +250,8 @@ class Database:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
         if "fetching_metadata_since" not in cols:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN fetching_metadata_since TEXT NOT NULL DEFAULT ''")
+        if "uploaded_size" not in cols:
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN uploaded_size INTEGER NOT NULL DEFAULT 0")
 
         # Create indexes after ensuring columns exist
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")
@@ -513,6 +524,11 @@ class Database:
                 entry.total_seeds = to_int(meta["total_seeds"])
             if "total_peers" in meta:
                 entry.total_peers = to_int(meta["total_peers"])
+            if not entry.uploaded_size and "total_seeded_bytes" in meta:
+                try:
+                    entry.uploaded_size = int(meta["total_seeded_bytes"])
+                except (ValueError, TypeError):
+                    pass
         if entry.status in ("completed", "seeding"):
             if entry.total_size > 0 and entry.downloaded_size < entry.total_size:
                 entry.downloaded_size = entry.total_size

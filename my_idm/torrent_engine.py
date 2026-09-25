@@ -1131,11 +1131,16 @@ class TorrentEngine:
             entry.peers = peers
             entry.total_seeds = total_seeds
             entry.total_peers = total_peers
+            new_upload = status.get("total_upload", 0)
+            if new_upload > 0:
+                entry.uploaded_size = max(getattr(entry, "uploaded_size", 0), int(new_upload))
             if entry.metadata is not None:
                 entry.metadata["seeds"] = seeds
                 entry.metadata["peers"] = peers
                 entry.metadata["total_seeds"] = total_seeds
                 entry.metadata["total_peers"] = total_peers
+                if entry.uploaded_size > 0:
+                    entry.metadata["total_seeded_bytes"] = entry.uploaded_size
 
             resolved_name = status.get("name")
             if resolved_name and entry.metadata is not None and not entry.metadata.get("original_name"):

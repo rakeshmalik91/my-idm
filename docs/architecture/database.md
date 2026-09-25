@@ -36,6 +36,7 @@ erDiagram
         TEXT file_path "Full absolute path to file"
         INTEGER total_size "File size in bytes (0 if unknown)"
         INTEGER downloaded_size "Downloaded bytes on disk"
+        INTEGER uploaded_size "Total cumulative uploaded/seeded bytes"
         TEXT status "Current lifecycle state"
         TEXT download_type "http | torrent"
         INTEGER num_segments "Configured HTTP segment count"
@@ -86,6 +87,7 @@ The primary entity table storing download tasks, progress state, connection para
 | `file_path`               | `TEXT`    | **NO**   | `''`       | Full normalized path to the downloaded file or root folder on disk.                          |
 | `total_size`              | `INTEGER` | **NO**   | `0`        | Expected file/payload size in bytes (`0` for chunked streams or unresolved magnets).         |
 | `downloaded_size`         | `INTEGER` | **NO**   | `0`        | Bytes written and verified on disk.                                                          |
+| `uploaded_size`           | `INTEGER` | **NO**   | `0`        | Total cumulative uploaded/seeded bytes to peers in the swarm.                                |
 | `status`                  | `TEXT`    | **NO**   | `'queued'` | Lifecycle status (see [Status Values](#status-values)).                                      |
 | `download_type`           | `TEXT`    | **NO**   | `'http'`   | Protocol type: `'http'` (direct/multi-segment) or `'torrent'` (BitTorrent).                  |
 | `num_segments`            | `INTEGER` | **NO**   | `8`        | Number of parallel HTTP segment connections configured for this download.                    |

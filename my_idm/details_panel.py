@@ -268,6 +268,7 @@ class DetailsPanel(QWidget):
         self._ov_status = self._create_info_row(left_col, "Status:")
         self._ov_size = self._create_info_row(left_col, "Size:")
         self._ov_downloaded = self._create_info_row(left_col, "Downloaded:")
+        self._ov_seeded = self._create_info_row(left_col, "Total Seeded / Uploaded:")
         self._ov_speed = self._create_info_row(left_col, "Speed:")
         self._ov_eta = self._create_info_row(left_col, "ETA:")
         self._ov_added = self._create_info_row(left_col, "Added:")
@@ -492,6 +493,7 @@ class DetailsPanel(QWidget):
         self._ov_status.setText("—")
         self._ov_size.setText("—")
         self._ov_downloaded.setText("—")
+        self._ov_seeded.setText("—")
         self._ov_speed.setText("—")
         self._ov_eta.setText("—")
         self._ov_added.setText("—")
@@ -559,6 +561,17 @@ class DetailsPanel(QWidget):
         dl_str = humanize.naturalsize(downloaded_size, binary=True)
         self._ov_size.setText(f"{total_str} ({pct:.1f}%)")
         self._ov_downloaded.setText(f"{dl_str} / {total_str}")
+
+        # Total Seeded / Uploaded
+        seeded_bytes = getattr(entry, "uploaded_size", 0) or (entry.metadata.get("total_seeded_bytes", 0) if entry.metadata else 0)
+        if entry.download_type == "torrent":
+            ratio_str = ""
+            if downloaded_size > 0 and seeded_bytes > 0:
+                ratio = seeded_bytes / downloaded_size
+                ratio_str = f"  (Ratio: {ratio:.2f})"
+            self._ov_seeded.setText(f"{humanize.naturalsize(seeded_bytes, binary=True)}{ratio_str}" if seeded_bytes > 0 else "0 B")
+        else:
+            self._ov_seeded.setText("—")
 
         # Speeds
         down_speed = _format_speed(entry.speed)
