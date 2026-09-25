@@ -996,6 +996,103 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
             self.manager.start()
             mock_add2.assert_not_called()
 
+    def test_pause_and_stop_at_completed_are_no_ops(self):
+        """Pause and stop on a completed download are no-ops and preserve completed state."""
+        e_comp = DownloadEntry(
+            id="d_comp_noop",
+            url="http://example.com/file.zip",
+            download_type="http",
+            status="completed",
+        )
+        self.db.add_download(e_comp)
+
+        emitted = []
+        self.manager.status_changed.connect(lambda did, st, err: emitted.append((did, st)))
+
+        self.manager.pause_download("d_comp_noop")
+        self.assertEqual(self.db.get_download("d_comp_noop").status, "completed")
+        self.assertEqual(emitted, [])
+
+        self.manager.stop_download("d_comp_noop")
+        self.assertEqual(self.db.get_download("d_comp_noop").status, "completed")
+        self.assertEqual(emitted, [])
+
+    def test_pause_and_stop_at_seeding_move_to_completed(self):
+        """Pause or stop on a seeding download transitions state to completed."""
+        e_seed1 = DownloadEntry(
+            id="d_seed_pause",
+            url="magnet:?xt=urn:btih:3333444455556666777788889999000011112222",
+            download_type="torrent",
+            status="seeding",
+        )
+        e_seed2 = DownloadEntry(
+            id="d_seed_stop",
+            url="magnet:?xt=urn:btih:4444555566667777888899990000111122223333",
+            download_type="torrent",
+            status="seeding",
+        )
+        self.db.add_download(e_seed1)
+        self.db.add_download(e_seed2)
+
+        emitted = []
+        self.manager.status_changed.connect(lambda did, st, err: emitted.append((did, st)))
+
+        with patch.object(self.manager._torrent, "pause") as mock_pause:
+            # 1. Pause seeding -> completed
+            self.manager.pause_download("d_seed_pause")
+            mock_pause.assert_called_with("d_seed_pause")
+            self.assertEqual(self.db.get_download("d_seed_pause").status, "completed")
+            self.assertIn(("d_seed_pause", "completed"), emitted)
+
+            # 2. Stop seeding -> completed
+            self.manager.stop_download("d_seed_stop")
+            mock_pause.assert_called_with("d_seed_stop")
+            self.assertEqual(self.db.get_download("d_seed_stop").status, "completed")
+            self.assertIn(("d_seed_stop", "completed"), emitted)
+
+    def test_start_seeding(self):
+        """start_seeding starts seeding engine and emits seeding status."""
+        e_comp_tor = DownloadEntry(
+            id="d_start_seed",
+            url="magnet:?xt=urn:btih:5555666677778888999900001111222233334444",
+            download_type="torrent",
+            status="completed",
+        )
+        self.db.add_download(e_comp_tor)
+
+        emitted = []
+        self.manager.status_changed.connect(lambda did, st, err: emitted.append((did, st)))
+
+        with patch.object(self.manager._torrent, "start_seeding", return_value=True) as mock_ss:
+            self.manager.start_seeding("d_start_seed")
+            mock_ss.assert_called_with("d_start_seed")
+            self.assertIn(("d_start_seed", "seeding"), emitted)
+
+    def test_robust_move_download_files_partial_move_recovery(self):
+        """robust_move_download_files merges partially moved directories cleanly."""
+        from my_idm.utils import robust_move_download_files
+
+        src_dir = Path(self.tmp_dir.name) / "src_torrent"
+        dst_dir = Path(self.tmp_dir.name) / "dst_torrent"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+        # File 1 was already moved to dst in a previous partial attempt
+        (dst_dir / "file1.txt").write_text("Hello from file 1")
+        (src_dir / "file1.txt").write_text("Hello from file 1")
+
+        # File 2 was not yet moved and only exists in src
+        (src_dir / "file2.txt").write_text("Hello from file 2")
+
+        success, err = robust_move_download_files(src_dir, dst_dir)
+        self.assertTrue(success, f"Move failed: {err}")
+        self.assertTrue((dst_dir / "file1.txt").exists())
+        self.assertTrue((dst_dir / "file2.txt").exists())
+        self.assertEqual((dst_dir / "file1.txt").read_text(), "Hello from file 1")
+        self.assertEqual((dst_dir / "file2.txt").read_text(), "Hello from file 2")
+        # Source directory cleaned up
+        self.assertFalse(src_dir.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

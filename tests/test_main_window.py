@@ -298,15 +298,12 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         self.db.add_download(entry)
         self.win._load_history()
 
-        try:
+        mock_cb = unittest.mock.MagicMock()
+        with unittest.mock.patch("my_idm.main_window.QGuiApplication.clipboard", return_value=mock_cb):
             self.win._table.selectRow(0)
             self.win._on_copy_url()
-            clipboard = QGuiApplication.clipboard()
-            self.assertEqual(clipboard.text(), entry.url)
+            mock_cb.setText.assert_called_with(entry.url)
             self.assertIn("Copied Magnet link", self.win._status_label.text())
-        finally:
-            if cb:
-                cb.setText(orig)
 
     def test_main_window_receives_filename_resolved(self):
         """MainWindow updates model when manager emits filename_resolved."""

@@ -146,6 +146,158 @@ def extract_source_domain(url: str) -> str:
     return ""
 
 
+def unlock_path(file_path: str | Path) -> None:
+    """Attempt to unlock a file or directory on disk by clearing read-only/system flags and running GC."""
+    if not file_path:
+        return
+    import gc
+    import os
+    import stat
+    gc.collect()
+    try:
+        p = Path(file_path)
+        if not p.exists():
+            return
+        try:
+            os.chmod(str(p), stat.S_IWRITE | stat.S_IREAD)
+        except Exception:
+            pass
+        if p.is_dir():
+            for root, dirs, files in os.walk(str(p)):
+                for d in dirs:
+                    try:
+                        os.chmod(os.path.join(root, d), stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                    except Exception:
+                        pass
+                for f in files:
+                    try:
+                        os.chmod(os.path.join(root, f), stat.S_IWRITE | stat.S_IREAD)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def robust_move_download_files(src: str | Path, dst: str | Path) -> tuple[bool, str]:
+    """Robustly moves a file or directory tree from src to dst.
+
+    Handles:
+      - File permission unlocking before and during move.
+      - Partial moves from previous failed attempts (merges files into dst without duplicate errors).
+      - Directory tree moves across drives or within the same filesystem.
+      - Retries on transient Windows file lock errors (ERROR_SHARING_VIOLATION).
+    Returns (success: bool, error_message: str).
+    """
+    import os
+    import shutil
+    import time
+    if not src or not dst:
+        return False, "Invalid source or destination path."
+    sp = Path(src)
+    dp = Path(dst)
+
+    if not sp.exists():
+        if dp.exists():
+            # Already moved to destination
+            return True, ""
+        return False, f"Source path does not exist: {sp}"
+
+    if sp.resolve() == dp.resolve():
+        return True, ""
+
+    unlock_path(sp)
+    if dp.exists():
+        unlock_path(dp)
+
+    dp.parent.mkdir(parents=True, exist_ok=True)
+
+    if sp.is_file():
+        # Single file move
+        last_exc = None
+        for attempt in range(5):
+            try:
+                unlock_path(sp)
+                if dp.exists():
+                    unlock_path(dp)
+                    dp.unlink()
+                shutil.move(str(sp), str(dp))
+                return True, ""
+            except (OSError, PermissionError) as exc:
+                last_exc = exc
+                time.sleep(0.1 * (attempt + 1))
+        # Fallback to copy + unlink
+        try:
+            shutil.copy2(str(sp), str(dp))
+            unlock_path(sp)
+            sp.unlink()
+            return True, ""
+        except Exception as exc:
+            return False, f"Failed to move file from {sp} to {dp}: {last_exc or exc}"
+
+    # Directory move (multi-file torrent or folder)
+    dp.mkdir(parents=True, exist_ok=True)
+    failed_files = []
+
+    # Walk all files in source
+    for root, _, files in os.walk(str(sp)):
+        for f in files:
+            src_f = Path(root) / f
+            rel_f = src_f.relative_to(sp)
+            dst_f = dp / rel_f
+            dst_f.parent.mkdir(parents=True, exist_ok=True)
+
+            # Check if destination file already exists and has identical size (e.g. from prior partial move)
+            if dst_f.exists() and dst_f.is_file():
+                try:
+                    if dst_f.stat().st_size == src_f.stat().st_size:
+                        unlock_path(src_f)
+                        src_f.unlink()
+                        continue
+                except Exception:
+                    pass
+
+            moved = False
+            for attempt in range(5):
+                try:
+                    unlock_path(src_f)
+                    if dst_f.exists():
+                        unlock_path(dst_f)
+                        dst_f.unlink()
+                    shutil.move(str(src_f), str(dst_f))
+                    moved = True
+                    break
+                except (OSError, PermissionError):
+                    time.sleep(0.1 * (attempt + 1))
+
+            if not moved:
+                # Fallback to copy + unlink
+                try:
+                    shutil.copy2(str(src_f), str(dst_f))
+                    unlock_path(src_f)
+                    src_f.unlink()
+                    moved = True
+                except Exception as exc:
+                    failed_files.append((str(rel_f), str(exc)))
+
+    # Clean up empty directories in source
+    for root, dirs, _ in os.walk(str(sp), topdown=False):
+        for d in dirs:
+            try:
+                (Path(root) / d).rmdir()
+            except Exception:
+                pass
+    try:
+        sp.rmdir()
+    except Exception:
+        pass
+
+    if failed_files:
+        err_details = "; ".join(f"{f}: {err}" for f, err in failed_files[:3])
+        return False, f"{len(failed_files)} file(s) failed to move: {err_details}"
+
+    return True, ""
+
+
 def send_to_trash(file_path: str | Path) -> bool:
     """Move a file or directory to the system trash / recycle bin.
 
@@ -161,6 +313,8 @@ def send_to_trash(file_path: str | Path) -> bool:
     fp = Path(file_path)
     if not fp.exists():
         return True
+
+    unlock_path(fp)
 
     # 1. Try PySide6 / Qt native QFile.moveToTrash
     try:
@@ -187,6 +341,7 @@ def send_to_trash(file_path: str | Path) -> bool:
     import time
     for attempt in range(5):
         try:
+            unlock_path(fp)
             if fp.is_dir():
                 shutil.rmtree(fp)
             else:
@@ -196,4 +351,5 @@ def send_to_trash(file_path: str | Path) -> bool:
             time.sleep(0.1)
 
     return not fp.exists()
+
 

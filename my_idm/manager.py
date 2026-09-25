@@ -29,7 +29,7 @@ from my_idm.security import (
     quarantine_or_delete_file,
 )
 from my_idm.torrent_engine import TorrentEngine
-from my_idm.utils import get_unique_filename, normalize_path, send_to_trash, to_int
+from my_idm.utils import get_unique_filename, normalize_path, robust_move_download_files, send_to_trash, to_int, unlock_path
 
 log = logging.getLogger(__name__)
 
@@ -830,13 +830,28 @@ class DownloadManager(QObject):
     # -- pause / resume / delete ---------------------------------------------
 
     def pause_download(self, download_id: str):
-        self._starting_downloads.discard(download_id)
-        self._db.update_status(download_id, "paused")
-        self.status_changed.emit(download_id, "paused", "")
-
         entry = self._db.get_download(download_id)
         if not entry:
             return
+
+        if entry.status == "completed":
+            return
+
+        if entry.status == "seeding":
+            self._starting_downloads.discard(download_id)
+            if entry.download_type == "torrent":
+                self._torrent.pause(download_id)
+            self._db.update_status(download_id, "completed")
+            self.status_changed.emit(download_id, "completed", "")
+            self.progress_updated.emit(
+                download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+            )
+            self._process_queue()
+            return
+
+        self._starting_downloads.discard(download_id)
+        self._db.update_status(download_id, "paused")
+        self.status_changed.emit(download_id, "paused", "")
 
         if entry.download_type == "http":
             if self._loop:
@@ -857,11 +872,28 @@ class DownloadManager(QObject):
         Only an explicit resume_download() or force_start_download() will restart it.
         The download is removed from the active queue (queue_order set to 0).
         """
-        self._starting_downloads.discard(download_id)
-
         entry = self._db.get_download(download_id)
         if not entry:
             return
+
+        if entry.status == "completed":
+            return
+
+        if entry.status == "seeding":
+            self._starting_downloads.discard(download_id)
+            if entry.download_type == "torrent":
+                self._torrent.pause(download_id)
+            entry.status = "completed"
+            entry.queue_order = 0
+            self._db.update_download(entry)
+            self.status_changed.emit(download_id, "completed", "")
+            self.progress_updated.emit(
+                download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+            )
+            self._process_queue()
+            return
+
+        self._starting_downloads.discard(download_id)
 
         # Halt the transfer in the engine
         if entry.download_type == "http":
@@ -882,6 +914,14 @@ class DownloadManager(QObject):
             download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
         self._process_queue()
+
+    def start_seeding(self, download_id: str):
+        """Start or resume seeding for a completed or stopped torrent."""
+        entry = self._db.get_download(download_id)
+        if not entry or entry.download_type != "torrent":
+            return
+        if self._torrent.start_seeding(download_id):
+            self.status_changed.emit(download_id, "seeding", "")
 
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
@@ -1045,15 +1085,54 @@ class DownloadManager(QObject):
             return
 
         new_save_path = normalize_path(new_save_path)
-        old_file_path = Path(entry.file_path)
+        old_file_path = (
+            Path(entry.file_path)
+            if entry.file_path
+            else (Path(entry.save_path) / (entry.filename or ""))
+        )
         new_file_path = normalize_path(Path(new_save_path) / old_file_path.name)
 
         if entry.download_type == "torrent":
-            # libtorrent handles this natively
+            handle = self._torrent._handles.get(download_id)
+            was_seeding = (entry.status == "seeding")
+            was_active = False
+            if handle:
+                try:
+                    s = handle.status()
+                    was_active = not s.is_paused
+                except Exception:
+                    pass
+                try:
+                    handle.pause()
+                    handle.flush_cache()
+                except Exception:
+                    pass
+                time.sleep(0.1)
+
+            # Move files robustly (handles partial moves, unlocking permissions, sharing violations)
+            if old_file_path.exists() or Path(new_file_path).exists():
+                success, err = robust_move_download_files(old_file_path, new_file_path)
+                if not success:
+                    log.error("Failed to move torrent files for %s: %s", download_id, err)
+                    if was_active and handle:
+                        try:
+                            handle.resume()
+                        except Exception:
+                            pass
+                    return
+
             self._torrent.move_storage(download_id, new_save_path)
             self._db.move_download(
                 download_id, new_save_path, new_file_path
             )
+
+            if was_active and handle:
+                try:
+                    handle.resume()
+                    if was_seeding:
+                        self._torrent._apply_seeding_limit_to_handle(handle)
+                except Exception:
+                    pass
         else:
             # For HTTP: pause → move → update → resume
             was_active = self._http.is_active(download_id)
@@ -1067,10 +1146,12 @@ class DownloadManager(QObject):
                     except Exception:
                         pass
 
-            # Move the file
-            if old_file_path.exists():
-                Path(new_save_path).mkdir(parents=True, exist_ok=True)
-                shutil.move(str(old_file_path), str(new_file_path))
+            # Move the file robustly
+            if old_file_path.exists() or Path(new_file_path).exists():
+                success, err = robust_move_download_files(old_file_path, new_file_path)
+                if not success:
+                    log.error("Failed to move HTTP file for %s: %s", download_id, err)
+                    return
 
             self._db.move_download(
                 download_id, new_save_path, new_file_path
@@ -1079,11 +1160,10 @@ class DownloadManager(QObject):
             # Resume if it was active
             if was_active:
                 entry = self._db.get_download(download_id)
-                if entry:
-                    if self._loop:
-                        asyncio.run_coroutine_threadsafe(
-                            self._http.add(entry), self._loop
-                        )
+                if entry and self._loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self._http.add(entry), self._loop
+                    )
 
         self.download_moved.emit(download_id)
 

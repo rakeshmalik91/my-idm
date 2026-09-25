@@ -90,9 +90,12 @@ commit after each features or set of fixes/enhancements
 - [x] after successful download torrent should go to seeding state. make max seeding speed and download to seeedin g speed ration configurable in preferences
 - [x] seperate torrent specific preferences to seperate tab in preferences window
 - [x] store seeders, trackers, file hierarchy details with progress details in db & handle them in details panel
-- [x] setting a downloaded file to "Do not download" or unchecking it should ask for confirmation and move it to trash.
+- [x] setting a downloaded file to "Do not download" or unchecking it should ask for confirmation and move it to trash. deleting a folder or multiple files shouldnt trigger multiple confirmations. unlock the file before delete if required.
 - [x] make how long to seed configurable
 - [x] resume seeding downloads in seeding status on startup. (make it configurable)
+- [x] add start seeding button in context menu
+- [x] move failed while seeding. but it moved partially, handle it properly. unlock the file before move/delete if required.
+- [x] pause/stop at seeding state should move to completed. pause/stop at completed shouldnt do anything. update state diagrams as well
 
 ----------------------
 ### Tor Support

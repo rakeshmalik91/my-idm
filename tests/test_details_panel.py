@@ -884,6 +884,55 @@ class TestDetailsPanel(unittest.TestCase):
             mock_set_prio.assert_called_with("test-trash-combo-1", 0, 0)
             self.assertEqual(item.text(4), "Skipped")
 
+    def test_multi_selection_dont_download_single_confirmation(self):
+        """Setting multiple files to Don't Download via selection triggers exactly ONE prompt."""
+        tor_entry = DownloadEntry(
+            id="test-trash-multi-1",
+            url="magnet:?xt=urn:btih:6666777788889999000011112222333344445555",
+            filename="TestTrashMulti",
+            download_type="torrent",
+            status="downloading",
+            save_path="C:/Downloads/TestTrashMulti",
+            metadata_json='''{
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "TestTrashMulti/file1.bin",
+                        "size": 1000,
+                        "downloaded": 1000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "status": "completed"
+                    },
+                    {
+                        "index": 1,
+                        "path": "TestTrashMulti/file2.bin",
+                        "size": 2000,
+                        "downloaded": 2000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "status": "completed"
+                    }
+                ]
+            }'''
+        )
+        self.db.add_download(tor_entry)
+        self.win._model.add_entry(tor_entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-trash-multi-1")
+        item0 = panel._file_item_map[0]
+        item1 = panel._file_item_map[1]
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as mock_q, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash, \
+             unittest.mock.patch("pathlib.Path.exists", return_value=True), \
+             unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
+            panel._set_items_priority([item0, item1], 0)
+            mock_q.assert_called_once()
+            self.assertEqual(mock_trash.call_count, 2)
+            self.assertEqual(mock_set_prio.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

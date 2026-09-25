@@ -350,6 +350,10 @@ class MainWindow(QMainWindow):
         self._act_stop.setToolTip("Stop selected downloads permanently until manually resumed")
         self._act_stop.triggered.connect(self._on_stop)
 
+        self._act_start_seeding = QAction(_create_emoji_icon("🌱"), "Start Seeding", self)
+        self._act_start_seeding.setToolTip("Start or resume seeding for completed torrents")
+        self._act_start_seeding.triggered.connect(self._on_start_seeding)
+
         self._act_copy_url = QAction(_create_emoji_icon("📋"), "Copy URL / Magnet", self)
         self._act_copy_url.setShortcut(QKeySequence("Ctrl+C"))
         self._act_copy_url.setToolTip("Copy download URL or Magnet link to clipboard (Ctrl+C)")
@@ -587,6 +591,8 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_resume)
         edit_menu.addAction(self._act_force_start)
         edit_menu.addAction(self._act_pause)
+        edit_menu.addAction(self._act_stop)
+        edit_menu.addAction(self._act_start_seeding)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_move_up)
         edit_menu.addAction(self._act_move_down)
@@ -857,6 +863,10 @@ class MainWindow(QMainWindow):
         for did in self._selected_ids():
             self._manager.stop_download(did)
 
+    def _on_start_seeding(self):
+        for did in self._selected_ids():
+            self._manager.start_seeding(did)
+
     def _on_resume(self):
         for did in self._selected_ids():
             self._manager.resume_download(did)
@@ -1019,6 +1029,7 @@ class MainWindow(QMainWindow):
         menu.addAction(self._act_force_start)
         menu.addAction(self._act_pause)
         menu.addAction(self._act_stop)
+        menu.addAction(self._act_start_seeding)
         menu.addSeparator()
         menu.addAction(self._act_move_up)
         menu.addAction(self._act_move_down)

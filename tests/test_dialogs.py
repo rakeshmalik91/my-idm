@@ -201,19 +201,20 @@ class TestAddDownloadDialogMultiline(unittest.TestCase):
 
     def test_multiline_prefill_from_clipboard(self):
         """Clipboard with multiple valid URLs prefills all lines."""
-        clipboard = QGuiApplication.clipboard()
         multiline_urls = (
             "https://mirror1.example.com/iso.img\n"
             "https://mirror2.example.com/iso.img\n"
             "https://mirror3.example.com/iso.img"
         )
-        clipboard.setText(multiline_urls)
-        dlg = AddDownloadDialog()
-        try:
-            self.assertEqual(dlg._url_edit.toPlainText().strip(), multiline_urls)
-            self.assertEqual(len(dlg.urls or [dlg.url]), 3)
-        finally:
-            dlg.close()
+        mock_cb = unittest.mock.MagicMock()
+        mock_cb.text.return_value = multiline_urls
+        with unittest.mock.patch("my_idm.dialogs.QGuiApplication.clipboard", return_value=mock_cb):
+            dlg = AddDownloadDialog()
+            try:
+                self.assertEqual(dlg._url_edit.toPlainText().strip(), multiline_urls)
+                self.assertEqual(len(dlg.urls or [dlg.url]), 3)
+            finally:
+                dlg.close()
 
 
 class TestRenameDialog(unittest.TestCase):

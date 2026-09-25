@@ -207,19 +207,18 @@ stateDiagram-v2
     scanning --> completed: Scan Clean (Seeding Disabled)
     scanning --> threat_detected: Malware Detected
     
-    seeding --> completed: Seeding Ratio / Time Limit Reached or User Stops
+    seeding --> completed: Seeding Ratio / Time Limit Reached or User Pauses/Stops
+    completed --> seeding: User Clicks Start Seeding
     
     downloading --> paused: User Pauses (Handle Paused, Flags Cleared)
     fetching_metadata --> paused: User Pauses
     stalled --> paused: User Pauses
-    seeding --> paused: User Pauses
     queued --> paused: User Pauses
     paused --> queued: User Resumes
     
     downloading --> stopped: User Stops (Clears Queue Order)
     fetching_metadata --> stopped: User Stops
     stalled --> stopped: User Stops
-    seeding --> stopped: User Stops
     queued --> stopped: User Stops
     stopped --> queued: User Resumes
     
@@ -245,8 +244,8 @@ stateDiagram-v2
 - **`stalled`**: Download has 0 B/s transfer speed and 0 connected seeds for over 45 consecutive seconds. Consumes **1** concurrency slot (remains active to discover new peers).
 - **`scanning`**: Payload download finished 100%; post-download antivirus scan running asynchronously. Consumes **0** concurrency slots.
 - **`seeding`**: 100% of torrent payload downloaded and verified; serving upload pieces to swarm peers. **Does NOT consume a downloading concurrency slot.**
-- **`paused`**: User requested pause. Handle paused via `handle.pause(flags=graceful_pause)`, auto-managed flag cleared, lingering progress callbacks discarded. Consumes **0** concurrency slots.
-- **`stopped`**: User requested stop. Handle stopped, queue order cleared. Consumes **0** concurrency slots.
+- **`paused`**: User requested pause on downloading/queued torrent. Handle paused via `handle.pause(flags=graceful_pause)`, auto-managed flag cleared, lingering progress callbacks discarded. Consumes **0** concurrency slots.
+- **`stopped`**: User requested stop on downloading/queued torrent. Handle stopped, queue order cleared. Consumes **0** concurrency slots.
 - **`threat_detected`**: Security scanner detected infected files within torrent payload. Consumes **0** concurrency slots.
 - **`completed`**: Download finished, verified, and seeding terminated or disabled. Consumes **0** concurrency slots.
 - **`file_not_found`**: Verified payload files missing from download path. Consumes **0** concurrency slots.
@@ -269,10 +268,15 @@ stateDiagram-v2
 | `downloading` | `scanning` | 100% pieces verified & AV enabled | Releases slot | Triggers async antivirus scanner thread. |
 | `downloading` | `seeding` | 100% pieces verified & seeding enabled | Releases slot | Updates status to `'seeding'`, applies upload rate limits. |
 | `downloading` | `completed` | 100% pieces verified & seeding disabled | Releases slot | Unsets handle or pauses, marks `'completed'`. |
-| `seeding` | `completed` | Seeding ratio/timer reached or stopped | None | Halts handle seeding, marks `'completed'`. |
-| Any Active | `paused` | User clicks Pause | Releases slot | Calls `handle.pause()`, clears auto-managed flag. |
+| `seeding` | `completed` | Seeding ratio/timer reached, or user clicks Pause / Stop | None | Halts handle seeding, marks `'completed'`. |
+| `completed` | `seeding` | User clicks Start Seeding in context menu | None | Resumes handle, applies upload limits, marks `'seeding'`. |
+| Any Downloading | `paused` | User clicks Pause | Releases slot | Calls `handle.pause()`, clears auto-managed flag. |
 | `paused` | `queued` | User clicks Resume | None | Sets status `'queued'`, awaits queue processor. |
-| Any Active | `stopped` | User clicks Stop | Releases slot | Pauses handle, sets `queue_order = 0`. |
+| Any Downloading | `stopped` | User clicks Stop | Releases slot | Pauses handle, sets `queue_order = 0`. |
+| `completed` | `completed` | User clicks Pause or Stop | None | No-op (terminal completed state is preserved). |
+
+> [!NOTE]
+> **Completed State Idempotence**: Invoking Pause or Stop on a transfer that is already in the `completed` state is a no-op (the transfer remains safely completed). Invoking Pause or Stop on an actively `seeding` transfer halts upload activity and transitions it cleanly to `completed`.
 
 ### BitTorrent Metadata Lifecycle & Suspended State
 

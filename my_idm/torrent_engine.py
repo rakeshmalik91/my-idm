@@ -670,6 +670,10 @@ class TorrentEngine:
         handle = self._handles.get(download_id)
         if handle:
             entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+            if entry and entry.status == "completed":
+                return
+            is_seeding = (entry and entry.status == "seeding")
+
             if entry:
                 try:
                     files = self.get_torrent_files(download_id)
@@ -695,9 +699,41 @@ class TorrentEngine:
                     handle.save_resume_data()
             except Exception:
                 pass
-            self._db.update_status(download_id, "paused")
+            target_status = "completed" if is_seeding else "paused"
+            self._db.update_status(download_id, target_status)
             if self._status_cb:
-                self._status_cb(download_id, "paused", "")
+                self._status_cb(download_id, target_status, "")
+
+    def start_seeding(self, download_id: str) -> bool:
+        """Start or resume seeding for a completed or stopped torrent."""
+        entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
+        if not entry or entry.download_type != "torrent":
+            return False
+
+        handle = self._handles.get(download_id)
+        if not handle:
+            if not self.add_torrent(entry):
+                return False
+            handle = self._handles.get(download_id)
+
+        if handle:
+            try:
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.set_flags(lt.torrent_flags.auto_managed)
+            except Exception as e:
+                log.debug("Could not set auto_managed flag on start_seeding: %s", e)
+            handle.resume()
+            self._apply_seeding_limit_to_handle(handle)
+            if not entry.metadata.get("seeding_since"):
+                entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+            entry.status = "seeding"
+            self._db.update_download(entry)
+            self._db.update_status(download_id, "seeding")
+            if self._status_cb:
+                self._status_cb(download_id, "seeding", "")
+            log.info("Started seeding torrent %s (%s)", download_id, entry.filename)
+            return True
+        return False
 
     def resume(self, download_id: str):
         handle = self._handles.get(download_id)
@@ -814,8 +850,11 @@ class TorrentEngine:
     def move_storage(self, download_id: str, new_path: str):
         handle = self._handles.get(download_id)
         if handle:
-            handle.move_storage(new_path)
-            log.info("Moving torrent %s storage to %s", download_id, new_path)
+            try:
+                handle.move_storage(new_path)
+                log.info("Moving torrent %s storage to %s", download_id, new_path)
+            except Exception as exc:
+                log.warning("Could not move storage in libtorrent for %s: %s", download_id, exc)
 
     def rename_root(self, download_id: str, new_name: str) -> bool:
         """Rename the root file or folder of a torrent in libtorrent and on disk."""
@@ -1605,6 +1644,10 @@ class TorrentEngine:
                 self._handle_save_resume_data_alert(alert)
             elif _is_save_resume_data_failed_alert(alert):
                 log.debug("Save resume data failed: %s", getattr(alert, "message", lambda: "")())
+            elif hasattr(lt, "storage_moved_alert") and isinstance(alert, lt.storage_moved_alert):
+                log.debug("Libtorrent storage moved: %s", getattr(alert, "message", lambda: "")())
+            elif hasattr(lt, "storage_moved_failed_alert") and isinstance(alert, lt.storage_moved_failed_alert):
+                log.warning("Libtorrent storage move failed: %s", getattr(alert, "message", lambda: "")())
             elif hasattr(lt, "file_error_alert") and isinstance(alert, lt.file_error_alert):
                 alert_handle = getattr(alert, "handle", None)
                 if alert_handle:
