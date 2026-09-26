@@ -199,6 +199,26 @@ When any download is selected in the main table, the panel updates dynamically a
 
 ---
 
+## System Tray & Background Execution
+
+My-IDM integrates natively with the **Windows System Tray** (notification area) so your downloads and BitTorrent seeding can continue uninterrupted in the background.
+
+### Tray Icon & Quick Controls
+- **Left-click or Double-click**: Toggles the main window between hidden and restored.
+- **Right-click Context Menu**:
+  - **🪟 Show My-IDM / Hide My-IDM**: Toggle window visibility.
+  - **⏸️ Pause All Downloads**: Instantly pause all ongoing, queued, and stalled transfers.
+  - **▶️ Resume All Downloads**: Resume all paused and stopped transfers.
+  - **⚙️ Preferences…**: Quick shortcut directly to Settings.
+  - **🚪 Exit My-IDM**: Completely terminate My-IDM and stop all background services.
+
+### Window Minimize & Close Behavior
+1. **Minimize to Tray**: When enabled under Preferences, clicking the window minimize button hides My-IDM to the system tray instead of cluttering your taskbar.
+2. **Close to Tray**: When enabled, clicking the window close (`X`) button keeps the application active in the tray with ongoing transfers and browser integration active. A one-time notification bubble confirms background execution.
+3. **Completely Quitting**: To fully exit when close-to-tray is enabled, choose **File → Exit** (or right-click the tray icon and select **🚪 Exit My-IDM**).
+
+---
+
 ## Preferences & Settings
 
 Open the comprehensive preferences dialog anytime via:
@@ -206,7 +226,7 @@ Open the comprehensive preferences dialog anytime via:
 - Menu: **Tools → ⚙️ Preferences…**
 - Shortcut: **Ctrl+,**
 
-The settings popup is organized into three tabs:
+The settings popup is organized into six tabs:
 
 ### 1. General & Downloads Tab
 
@@ -225,44 +245,20 @@ The settings popup is organized into three tabs:
   - **Maximum delay cap (s)**: Upper ceiling for exponential backoff wait times (1–3600s, default 60s).
 - **Application Behavior**:
   - **Automatically resume incomplete downloads when application starts**: Interrupted or actively downloading items resume immediately on launch.
-  - **Show desktop / status notification when a download completes**: Notifies you when files finish.
+  - **Show desktop / status notification when a download completes**: Native Windows toast notification when transfers complete.
+- **System Tray & Window Behavior**:
+  - **Enable Windows system tray icon**: Displays the My-IDM icon in the Windows notification area with quick controls.
+  - **Minimize window to system tray instead of taskbar**: Hides the window completely to the system tray on minimize.
+  - **Close window to system tray**: Hides window on close (`X`), keeping downloads, seeding, and browser interception running uninterrupted in the background.
+  - **Start My-IDM minimized to system tray**: Silently launches directly into the background on startup.
+- **Backlog Files Auto-Processing**:
+  - Auto-discover backlog files on startup and optionally clear processed URLs.
 
 ### 2. BitTorrent Tab
 Configure seeding behavior after download completion, seeding time and ratio limits, maximum seeding speed, and startup seeding resumption.
 
-### 3. Network & VPN Tab
-Access adapter binding, kill switch, and HTTP/SOCKS5 proxy settings directly from the unified preferences window.
-
-### 4. Tor Network Tab
-Configure Tor SOCKS5 proxy routing, executable auto-discovery, and startup gating.
-
-### 5. Antivirus & Security Tab
-Configure pre-download safety checks, executable warnings, double-extension blocking, VirusTotal API key, and post-download antivirus scanning engines.
-
-### 6. External Tools Tab
-Manage integration with external scrapers and download tools (e.g. AnimePahe Auto-Downloader):
-- **Repository Location**: Specify or auto-detect the path to the AnimePahe repository folder.
-- **Launch on Startup (CLI mode)**: When enabled, My-IDM executes `animepahe_download.py --my-idm` in the background on startup. Discovered anime episodes are forwarded to the My-IDM backlog file and downloaded automatically.
-- **Footer Status Badge & Quick Console Button**: While the AnimePahe scraper is actively running in the background, a green badge (`🎬 AnimePahe: Active`) and a quick button (`📄 Console Log`) are displayed in the main window status bar (footer):
-  - **Clicking `📄 Console Log`**: Toggles the bottom details panel directly to the **🎬 AnimePahe Console** tab to actively stream live CLI scraper output in real time.
-  - **Clicking `🎬 AnimePahe: Active`**: Displays a quick popup menu allowing you to:
-    - View Console Logs in the bottom panel
-    - Open Console Log in default external text editor (`console_log.txt`)
-    - View Debug Logs (`debug_log.txt`)
-    - Launch AnimePahe GUI
-    - Stop or Start the background scraper process
-    - Open External Tools Settings
-- **Bottom Panel AnimePahe Console**: Provides a built-in terminal-like console viewer at the bottom of the window:
-  - **Live Output Streaming**: Actively polls and appends stdout/stderr in real time as the CLI runs.
-  - **Auto-Scroll & Text Wrap**: Keep pinned to the latest output or pause auto-scrolling to inspect earlier lines.
-  - **Real-Time Log Filtering**: Filter output lines dynamically by typing into the search filter input.
-  - **Controls**: Includes instant Clear, Open Log File, and Start/Stop Scraper buttons.
-- **View Debug Logs**: Open `debug_log.txt` located in the AnimePahe repository folder.
-- **Run CLI Now**: Start or stop the AnimePahe CLI scraper in background mode directly from Preferences settings.
-- **Launch GUI**: Launch the standalone AnimePahe desktop GUI detached from My-IDM.
-
-### 7. Browser Integration Tab
-Configure Chrome, Brave, Edge, and Mozilla Firefox browser integration:
+### 3. Browser Integration Tab
+Configure Chrome, Brave, Edge, Opera, and Mozilla Firefox browser integration:
 - **Enable Browser Integration**: Toggle the local HTTP loopback server (`127.0.0.1:19582`) on or off.
 - **Port**: Configure loopback port (default `19582`).
 - **Chromium Browsers Group (Chrome / Brave / Edge / Opera)**:
@@ -279,6 +275,24 @@ Configure Chrome, Brave, Edge, and Mozilla Firefox browser integration:
   - **Intercept magnet links from browser**.
   - **Minimum file size to intercept (KB)** (0 = no limit; smaller files download directly via browser).
   - **Bypassed File Extensions**: Comma-separated list of extensions to ignore (e.g. `.crx, .pdf`).
+
+### 4. Network & Privacy (VPN & Tor) Tab
+Unified privacy and network routing tab combining VPN and Tor controls:
+- **VPN Adapter Binding**: Bind downloads exclusively to a selected network interface (e.g., WireGuard, OpenVPN, TAP-Windows).
+- **Kill Switch**: Automatically freezes and pauses all active downloads if the bound VPN adapter disconnects or drops, preventing IP leakage.
+- **Proxy Server Configuration**: Configure standard HTTP or SOCKS5 proxies with optional authentication.
+- **🧅 Tor Onion Routing & Privacy**:
+  - **Enable Tor network routing (SOCKS5 proxy)**: Instantly routes download traffic through local Tor SOCKS5.
+  - **Activate Tor automatically on startup**.
+  - **Traffic Routing**: Choose to route HTTP/HTTPS web downloads, BitTorrent swarms/trackers, or both.
+  - **Tor Port Presets**: Quick switch between Tor Service (`9050`) and Tor Browser (`9150`).
+  - **Tor Executable (Optional)**: Specify or auto-discover `tor.exe` for silent background daemon launching.
+
+### 5. Antivirus & Security Tab
+Configure pre-download safety checks, executable warnings, double-extension blocking, and post-download antivirus scanning engines (Windows Defender or custom scanner).
+
+### 6. External Tools Tab
+Manage integration with external scrapers and download tools (e.g. AnimePahe Auto-Downloader).
 
 ---
 

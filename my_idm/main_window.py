@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF
+from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF, QEvent, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QSystemTrayIcon,
     QTableView,
     QToolBar,
     QToolButton,
@@ -182,6 +183,8 @@ def _create_details_panel_icon(size: int = 32) -> QIcon:
 class MainWindow(QMainWindow):
     """The main My-IDM window."""
 
+    _sig_show_tray_notification = Signal(str, str, int)
+
     def __init__(
         self,
         manager: DownloadManager,
@@ -191,6 +194,10 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._manager = manager
         self._show_exit_splash = show_exit_splash
+        self._tray_icon: Optional[QSystemTrayIcon] = None
+        self._force_exit: bool = False
+        self._close_to_tray_notified: bool = False
+        self._completed_notified: set[str] = set()
 
         self.setWindowTitle("My-IDM — Download Manager")
         self.setMinimumSize(1100, 600)
@@ -205,6 +212,7 @@ class MainWindow(QMainWindow):
         self._setup_toolbar()
         self._setup_menubar()
         self._setup_statusbar()
+        self._setup_system_tray()
         self._connect_signals()
 
         # Restore window geometry, location, column lengths, and splitter from DB
@@ -599,7 +607,7 @@ class MainWindow(QMainWindow):
 
         exit_act = QAction(_create_emoji_icon("🚪"), "Exit", self)
         exit_act.setShortcut(QKeySequence("Ctrl+Q"))
-        exit_act.triggered.connect(self.close)
+        exit_act.triggered.connect(self._exit_app)
         file_menu.addAction(exit_act)
 
         # Edit menu
@@ -825,6 +833,121 @@ class MainWindow(QMainWindow):
         self._update_speed_label()
         self._update_count_label()
 
+    def _setup_system_tray(self):
+        """Initializes the Windows system tray icon and context menu."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_icon = None
+            return
+
+        icon = get_app_icon()
+        self._tray_icon = QSystemTrayIcon(icon, self)
+        self._tray_icon.setToolTip("My-IDM — Download Manager")
+
+        # Tray Context Menu
+        tray_menu = QMenu(self)
+        self._tray_act_toggle = QAction("🪟 Show My-IDM", self)
+        self._tray_act_toggle.triggered.connect(self._toggle_show_window)
+        tray_menu.addAction(self._tray_act_toggle)
+        tray_menu.addSeparator()
+
+        act_pause_all = QAction("⏸️ Pause All Downloads", self)
+        act_pause_all.triggered.connect(self._on_pause_all_downloads)
+        tray_menu.addAction(act_pause_all)
+
+        act_resume_all = QAction("▶️ Resume All Downloads", self)
+        act_resume_all.triggered.connect(self._on_resume_all_downloads)
+        tray_menu.addAction(act_resume_all)
+        tray_menu.addSeparator()
+
+        act_prefs = QAction("⚙️ Preferences…", self)
+        act_prefs.triggered.connect(lambda: self._on_open_preferences(0))
+        tray_menu.addAction(act_prefs)
+        tray_menu.addSeparator()
+
+        act_exit = QAction("🚪 Exit My-IDM", self)
+        act_exit.triggered.connect(self._exit_app)
+        tray_menu.addAction(act_exit)
+
+        self._tray_icon.setContextMenu(tray_menu)
+        self._tray_icon.activated.connect(self._on_tray_activated)
+        self._tray_icon.messageClicked.connect(self._on_tray_message_clicked)
+
+        # Thread-safe notification dispatcher
+        self._sig_show_tray_notification.connect(self._do_show_tray_notification)
+        from my_idm.notifications import register_notification_handler
+        register_notification_handler(self.show_tray_notification)
+
+        if self._manager.general_config.enable_system_tray:
+            self._tray_icon.show()
+        self._update_tray_menu_text()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason):
+        """Handles user clicking or double-clicking the system tray icon."""
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self._toggle_show_window()
+
+    def _on_tray_message_clicked(self):
+        """Handles notification click to open and focus My-IDM window."""
+        self._restore_and_focus()
+
+    def _restore_and_focus(self):
+        """Restores the window from tray/minimized state and brings it into active foreground focus."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        from my_idm.single_instance import activate_window
+        activate_window(self)
+        self._update_tray_menu_text()
+
+    def _toggle_show_window(self):
+        """Toggles main window visibility between foreground and hidden."""
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self._restore_and_focus()
+        self._update_tray_menu_text()
+
+    def _update_tray_menu_text(self):
+        """Updates the text of the tray context menu Show/Hide action dynamically."""
+        if hasattr(self, "_tray_act_toggle") and self._tray_act_toggle:
+            if self.isVisible() and not self.isMinimized():
+                self._tray_act_toggle.setText("🪟 Hide My-IDM")
+            else:
+                self._tray_act_toggle.setText("🪟 Show My-IDM")
+
+    def show_tray_notification(self, title: str, message: str, duration: int = 5, icon_path: Optional[str] = None) -> bool:
+        """Handler registered with my_idm.notifications to route toasts via QSystemTrayIcon."""
+        if not self._tray_icon or not self._tray_icon.isVisible():
+            return False
+        self._sig_show_tray_notification.emit(title, message, duration * 1000)
+        return True
+
+    def _do_show_tray_notification(self, title: str, message: str, msecs: int):
+        """Displays toast on main GUI thread via QSystemTrayIcon."""
+        if self._tray_icon and self._tray_icon.isVisible():
+            try:
+                self._tray_icon.showMessage(
+                    title,
+                    message,
+                    QSystemTrayIcon.MessageIcon.Information,
+                    msecs,
+                )
+            except Exception as exc:
+                log.warning("Failed to show tray notification: %s", exc)
+
+    def _exit_app(self):
+        """Forces full application exit, bypassing close-to-tray intercept."""
+        from my_idm.notifications import unregister_notification_handler
+        unregister_notification_handler(self.show_tray_notification)
+        self._force_exit = True
+        self.close()
+
     def _connect_signals(self):
         self._manager.progress_updated.connect(self._on_progress_updated)
         self._manager.status_changed.connect(self._on_status_changed)
@@ -954,6 +1077,13 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"Paused {count} download{'s' if count > 1 else ''}")
         else:
             self._status_label.setText("No active downloads to pause")
+
+    def _on_resume_all_downloads(self):
+        count = self._manager.resume_all_downloads()
+        if count > 0:
+            self._status_label.setText(f"Resumed {count} download{'s' if count > 1 else ''}")
+        else:
+            self._status_label.setText("No paused downloads to resume")
 
     def _on_stop(self):
         for did in self._selected_ids():
@@ -1309,6 +1439,17 @@ class MainWindow(QMainWindow):
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 
+        if status == "completed":
+            if self._manager.general_config.notify_on_completion:
+                if download_id not in self._completed_notified:
+                    self._completed_notified.add(download_id)
+                    entry = self._manager.get_entry(download_id)
+                    fname = entry.filename if entry and entry.filename else download_id
+                    from my_idm.notifications import notify_download_complete
+                    notify_download_complete(fname)
+        elif status in ("downloading", "queued", "paused"):
+            self._completed_notified.discard(download_id)
+
     def _on_filename_resolved(self, download_id: str, filename: str):
         self._model.update_filename(download_id, filename)
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
@@ -1463,12 +1604,20 @@ class MainWindow(QMainWindow):
             self._manager.set_tor_config(dlg.tor_config)
             if dlg.tor_config.enabled != old_tor_enabled:
                 self._on_toggle_tor(dlg.tor_config.enabled)
+            if self._tray_icon:
+                if dlg.general_config.enable_system_tray:
+                    self._tray_icon.show()
+                else:
+                    self._tray_icon.hide()
 
     def _on_open_torrent_settings(self):
         self._on_open_preferences(1)
 
-    def _on_open_network_settings(self):
+    def _on_open_browser_settings(self):
         self._on_open_preferences(2)
+
+    def _on_open_network_settings(self):
+        self._on_open_preferences(3)
 
     def _on_open_tor_settings(self):
         self._on_open_preferences(3)
@@ -1478,9 +1627,6 @@ class MainWindow(QMainWindow):
 
     def _on_open_external_tools_settings(self):
         self._on_open_preferences(5)
-
-    def _on_open_browser_settings(self):
-        self._on_open_preferences(6)
 
     def _on_launch_animepahe_gui(self):
         cfg = self._manager.external_tools_config
@@ -2260,11 +2406,50 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
 
+    def changeEvent(self, event: QEvent):
+        if event.type() == QEvent.Type.WindowStateChange:
+            cfg = self._manager.general_config
+            if self.isMinimized() and cfg.enable_system_tray and cfg.minimize_to_tray:
+                QTimer.singleShot(0, self.hide)
+        super().changeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_tray_menu_text()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._update_tray_menu_text()
+
     def closeEvent(self, event):
+        cfg = self._manager.general_config
+        if not getattr(self, "_force_exit", False) and cfg.enable_system_tray and cfg.close_to_tray:
+            event.ignore()
+            self.hide()
+            if self._tray_icon and self._tray_icon.isVisible() and not getattr(self, "_close_to_tray_notified", False):
+                self._close_to_tray_notified = True
+                try:
+                    self._tray_icon.showMessage(
+                        "Running in Background",
+                        "My-IDM is running in the system tray and continuing downloads in the background.",
+                        QSystemTrayIcon.MessageIcon.Information,
+                        3000,
+                    )
+                except Exception:
+                    pass
+            self._update_tray_menu_text()
+            return
+
         if getattr(self, "_is_closing", False):
             event.accept()
             return
         self._is_closing = True
+
+        try:
+            from my_idm.notifications import unregister_notification_handler
+            unregister_notification_handler(self.show_tray_notification)
+        except Exception:
+            pass
 
         # Stop UI timer immediately so no further GUI updates fire
         if hasattr(self, "_details_timer"):

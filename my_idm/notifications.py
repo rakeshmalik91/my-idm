@@ -1,9 +1,26 @@
 """Windows toast notification utilities."""
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
+
+# Delegate handler type: (title, message, duration_secs, icon_path) -> bool
+_notification_handler: Optional[Callable[[str, str, int, Optional[str]], bool]] = None
+
+
+def register_notification_handler(handler: Callable[[str, str, int, Optional[str]], bool]) -> None:
+    """Register a custom notification handler (e.g. QSystemTrayIcon from GUI)."""
+    global _notification_handler
+    _notification_handler = handler
+
+
+def unregister_notification_handler(handler: Optional[Callable] = None) -> None:
+    """Unregister the active notification handler."""
+    global _notification_handler
+    if handler is None or _notification_handler == handler:
+        _notification_handler = None
+
 
 try:
     from win10toast import ToastNotifier
@@ -37,6 +54,14 @@ def show_notification(title: str, message: str, duration: int = 5, icon_path: Op
     Returns:
         True if notification was sent, False otherwise
     """
+    global _notification_handler
+    if _notification_handler is not None:
+        try:
+            if _notification_handler(title, message, duration, icon_path):
+                return True
+        except Exception as exc:
+            log.warning("Custom notification handler failed: %s", exc)
+
     if not _HAS_WIN10TOAST or _toaster is None:
         log.debug("win10toast not available, skipping notification")
         return False
@@ -57,7 +82,7 @@ def show_notification(title: str, message: str, duration: int = 5, icon_path: Op
 
 def notify_browser_download_caught(filename: str, url: str = "") -> bool:
     """Show notification when a download is caught from browser extension."""
-    title = "My-IDM: Download Captured"
+    title = "Download Captured"
     if filename:
         message = f"Added: {filename}"
     else:
@@ -69,13 +94,13 @@ def notify_browser_download_caught(filename: str, url: str = "") -> bool:
 
 def notify_download_complete(filename: str) -> bool:
     """Show notification when a download completes."""
-    title = "My-IDM: Download Complete"
+    title = "Download Complete"
     message = f"Finished: {filename}"
     return show_notification(title, message, duration=8)
 
 
 def notify_download_error(filename: str, error: str) -> bool:
     """Show notification when a download fails."""
-    title = "My-IDM: Download Failed"
+    title = "Download Failed"
     message = f"Failed: {filename}\n{error[:100]}"
     return show_notification(title, message, duration=10)

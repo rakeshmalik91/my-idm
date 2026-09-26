@@ -1234,6 +1234,23 @@ class DownloadManager(QObject):
             count += 1
         return count
 
+    def resume_all_downloads(self) -> int:
+        """Resume all paused or stopped downloads.
+
+        Targets transfers in 'paused' or 'stopped' states, transitioning each to 'queued'
+        and processing queue.
+        Returns the number of resumed downloads.
+        """
+        resumable = [
+            e for e in self._db.get_all_downloads()
+            if e.status in ("paused", "stopped")
+        ]
+        count = 0
+        for entry in resumable:
+            self.resume_download(entry.id)
+            count += 1
+        return count
+
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
         if not entry:

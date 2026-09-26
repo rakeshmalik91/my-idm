@@ -21,6 +21,7 @@ Technical documentation for developers working on the My-IDM codebase.
 - [Backlog Processing Subsystem](#backlog-processing-subsystem)
 - [Browser Integration Subsystem](#browser-integration-subsystem)
 - [External Tools Subsystem](#external-tools-subsystem)
+- [Window Lifecycle & System Tray Subsystem](#window-lifecycle--system-tray-subsystem)
 - [Preferences & Configuration Architecture](#preferences--configuration-architecture)
 - [Dynamic Filename Resolution & Crash Resilience](#dynamic-filename-resolution--crash-resilience)
 - [GUI Architecture](#gui-architecture)
@@ -732,6 +733,21 @@ My-IDM allows integration with companion scrapers and download tools (e.g., Anim
    - Web-based tools or automation views can be docked inside an embedded browser subtab.
 3. **Status Bar Indicators**:
    - A dedicated footer badge indicates tool status, allows toggling background execution, and triggers quick log inspection.
+
+---
+
+## Window Lifecycle & System Tray Subsystem
+
+My-IDM supports persistent background operations through Windows system tray integration, window minimize/close event interception, desktop completion notifications, and one-click global queue controls.
+
+1. **System Tray Integration (`QSystemTrayIcon`)**:
+   - Resides in the Windows notification area with dynamic Show/Hide window toggling, Pause All Downloads, Resume All Downloads, Preferences, and Exit controls.
+2. **Minimize & Close Interceptions**:
+   - `changeEvent` intercepts window minimization and routes it to the tray without taskbar clutter.
+   - `closeEvent` intercepts window close (`X` button), ignoring termination and keeping downloads and swarm seeding running in the background.
+3. **Clean Teardown**:
+   - `MainWindow._exit_app()` bypasses close-to-tray, gracefully flushes SQLite states, halts background threads (`HTTPEngine`, `TorrentEngine`, `TorServiceManager`), and closes cleanly.
+4. For exhaustive details, see [**Window Lifecycle & System Tray Architecture**](window-system-tray.md).
 
 ---
 

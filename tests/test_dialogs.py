@@ -29,8 +29,15 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
 
     def test_prefill_http_url_from_clipboard(self):
         """HTTP URL in clipboard is automatically prefilled."""
+        import time
         clipboard = QGuiApplication.clipboard()
-        clipboard.setText("https://downloads.example.com/test-file.tar.gz")
+        url = "https://downloads.example.com/test-file.tar.gz"
+        for _ in range(10):
+            clipboard.setText(url)
+            QApplication.processEvents()
+            if clipboard.text() == url:
+                break
+            time.sleep(0.02)
 
         dlg = AddDownloadDialog()
         try:
@@ -45,9 +52,15 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
 
     def test_prefill_magnet_link_from_clipboard(self):
         """Magnet link in clipboard is automatically prefilled."""
+        import time
         clipboard = QGuiApplication.clipboard()
         magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=sample_download_dialog_test"
-        clipboard.setText(magnet)
+        for _ in range(10):
+            clipboard.setText(magnet)
+            QApplication.processEvents()
+            if clipboard.text() == magnet:
+                break
+            time.sleep(0.02)
 
         dlg = AddDownloadDialog()
         try:
@@ -151,7 +164,7 @@ class TestDialogsScrollable(unittest.TestCase):
 
         dlg = SettingsDialog()
         try:
-            self.assertEqual(dlg._tabs.count(), 7)
+            self.assertEqual(dlg._tabs.count(), 6)
             for i in range(dlg._tabs.count()):
                 widget = dlg._tabs.widget(i)
                 self.assertIsInstance(widget, QScrollArea)

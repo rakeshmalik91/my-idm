@@ -86,13 +86,14 @@ def main():
     if sys.platform == "win32":
         import ctypes
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("myidm.downloadmanager.app.1")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("My-IDM")
         except Exception:
             pass
 
     # Qt Application
     app = QApplication(sys.argv)
     app.setApplicationName("My-IDM")
+    app.setApplicationDisplayName("My-IDM")
     app.setApplicationVersion("1.0.0")
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_STYLESHEET)
@@ -148,13 +149,18 @@ def main():
         splash.set_message("Loading user interface...", 80)
     window = MainWindow(manager, show_exit_splash=not args.no_splash)
 
+    start_in_tray = manager.general_config.enable_system_tray and manager.general_config.start_minimized
     if splash:
         splash.set_message("Ready!", 100)
-        window.show()
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(400, lambda: splash.finish(window))
+        if start_in_tray:
+            splash.close()
+        else:
+            window.show()
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(400, lambda: splash.finish(window))
     else:
-        window.show()
+        if not start_in_tray:
+            window.show()
 
     # Connect single instance IPC message receiver
     def _on_instance_message(msg: dict):

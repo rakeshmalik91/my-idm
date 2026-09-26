@@ -239,11 +239,10 @@ class SettingsDialog(QDialog):
         # Tabs
         self._tabs.addTab(self._wrap_scrollable(self._create_general_tab()), "📁 General && Downloads")
         self._tabs.addTab(self._wrap_scrollable(self._create_torrent_tab()), "🧲 BitTorrent")
-        self._tabs.addTab(self._wrap_scrollable(self._create_network_tab()), "🌐 Network && VPN")
-        self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor Network")
+        self._tabs.addTab(self._wrap_scrollable(self._create_browser_tab()), "🌐 Browser Integration")
+        self._tabs.addTab(self._wrap_scrollable(self._create_network_privacy_tab()), "🛡️ Network && Privacy (VPN && Tor)")
         self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus && Security")
         self._tabs.addTab(self._wrap_scrollable(self._create_external_tools_tab()), "🛠️ External Tools")
-        self._tabs.addTab(self._wrap_scrollable(self._create_browser_tab()), "🌐 Browser Integration")
         root_layout.addWidget(self._tabs)
 
         # Dialog Buttons
@@ -394,6 +393,41 @@ class SettingsDialog(QDialog):
         app_layout.addWidget(self._notify_cb)
 
         layout.addWidget(app_group)
+
+        # 5. System Tray & Window Behavior
+        tray_group = QGroupBox("System Tray && Window Behavior")
+        tray_layout = QVBoxLayout(tray_group)
+        tray_layout.setSpacing(10)
+
+        self._enable_system_tray_cb = QCheckBox("Enable Windows system tray icon")
+        self._enable_system_tray_cb.setToolTip(
+            "Show an icon in the Windows notification area (system tray) with quick controls and status."
+        )
+        tray_layout.addWidget(self._enable_system_tray_cb)
+
+        self._minimize_to_tray_cb = QCheckBox("Minimize window to system tray instead of taskbar")
+        self._minimize_to_tray_cb.setToolTip(
+            "When the window minimize button is clicked, hide the window to the system tray."
+        )
+        tray_layout.addWidget(self._minimize_to_tray_cb)
+
+        self._close_to_tray_cb = QCheckBox(
+            "Close window to system tray (keep downloads and seeding running in background)"
+        )
+        self._close_to_tray_cb.setToolTip(
+            "When the window close (X) button is clicked, hide to system tray instead of terminating the app.\n"
+            "Use File -> Exit or Tray Menu -> Exit to completely quit My-IDM."
+        )
+        tray_layout.addWidget(self._close_to_tray_cb)
+
+        self._start_minimized_cb = QCheckBox("Start My-IDM minimized to system tray")
+        self._start_minimized_cb.setToolTip(
+            "Launch My-IDM directly in the background/system tray without opening the main window."
+        )
+        tray_layout.addWidget(self._start_minimized_cb)
+
+        self._enable_system_tray_cb.toggled.connect(self._on_system_tray_toggled)
+        layout.addWidget(tray_group)
 
         # 4. Backlog Auto-Processing Locations
         backlog_group = QGroupBox("Backlog Files Auto-Processing")
@@ -581,13 +615,13 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return tab
 
-    def _create_network_tab(self) -> QWidget:
+    def _create_network_privacy_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setSpacing(14)
         layout.setContentsMargins(14, 16, 14, 14)
 
-        # VPN Adapter Binding
+        # 1. VPN / Adapter Binding
         iface_group = QGroupBox("Network Adapter / VPN Binding")
         iface_inner = QVBoxLayout(iface_group)
         iface_inner.setSpacing(10)
@@ -613,10 +647,9 @@ class SettingsDialog(QDialog):
             "Prevent all downloads and traffic leaks if the VPN or bound adapter disconnects."
         )
         iface_inner.addWidget(self._kill_switch_cb)
-
         layout.addWidget(iface_group)
 
-        # Proxy
+        # 2. Proxy Server Configuration
         proxy_group = QGroupBox("Proxy Server Configuration")
         proxy_inner = QVBoxLayout(proxy_group)
         proxy_inner.setSpacing(10)
@@ -656,69 +689,50 @@ class SettingsDialog(QDialog):
         auth_row.addWidget(self._proxy_pass_edit, 1)
         proxy_inner.addLayout(auth_row)
 
-        layout.addWidget(proxy_group)
-
-        # Test Connection button
+        test_net_row = QHBoxLayout()
         test_btn = QPushButton("🧪 Test Network Connection")
         test_btn.clicked.connect(self._on_test_network)
-        layout.addWidget(test_btn)
+        test_net_row.addWidget(test_btn)
+        test_net_row.addStretch()
+        proxy_inner.addLayout(test_net_row)
 
-        layout.addStretch()
-        return tab
+        layout.addWidget(proxy_group)
 
-    def _create_tor_tab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setSpacing(14)
-        layout.setContentsMargins(14, 16, 14, 14)
-
-        # 1. Startup & Activation
-        startup_group = QGroupBox("Tor Activation && Startup")
-        startup_inner = QVBoxLayout(startup_group)
-        startup_inner.setSpacing(8)
+        # 3. Tor Onion Routing & Privacy
+        tor_group = QGroupBox("🧅 Tor Network Privacy && Onion Routing")
+        tor_inner = QVBoxLayout(tor_group)
+        tor_inner.setSpacing(10)
 
         self._tor_enable_cb = QCheckBox("🧅 Enable Tor network routing (SOCKS5 proxy)")
         self._tor_enable_cb.setToolTip("Activate Tor proxy routing immediately")
-        startup_inner.addWidget(self._tor_enable_cb)
+        tor_inner.addWidget(self._tor_enable_cb)
 
         self._tor_autostart_cb = QCheckBox("🧅 Activate Tor automatically when My-IDM starts")
-        startup_inner.addWidget(self._tor_autostart_cb)
-        layout.addWidget(startup_group)
-
-        # 2. Traffic Routing
-        routing_group = QGroupBox("Traffic Routing Through Tor")
-        routing_inner = QVBoxLayout(routing_group)
-        routing_inner.setSpacing(8)
+        tor_inner.addWidget(self._tor_autostart_cb)
 
         self._tor_route_http_cb = QCheckBox("🌐 Route standard downloads (HTTP / HTTPS) through Tor")
         self._tor_route_http_cb.setToolTip("Route direct HTTP/HTTPS web downloads through Tor SOCKS5 proxy")
-        routing_inner.addWidget(self._tor_route_http_cb)
+        tor_inner.addWidget(self._tor_route_http_cb)
 
         self._tor_route_torrent_cb = QCheckBox("📦 Route BitTorrent swarms and trackers through Tor")
         self._tor_route_torrent_cb.setToolTip("Route BitTorrent peer and tracker connections through Tor SOCKS5 proxy")
-        routing_inner.addWidget(self._tor_route_torrent_cb)
-        layout.addWidget(routing_group)
+        tor_inner.addWidget(self._tor_route_torrent_cb)
 
-        # 3. SOCKS5 Proxy Configuration
-        proxy_group = QGroupBox("Tor SOCKS5 Proxy Settings")
-        proxy_inner = QVBoxLayout(proxy_group)
-        proxy_inner.setSpacing(10)
-
-        host_row = QHBoxLayout()
-        host_row.addWidget(QLabel("Host:"))
+        tor_host_row = QHBoxLayout()
+        tor_host_row.addWidget(QLabel("Tor SOCKS5 Host:"))
         self._tor_host_edit = QLineEdit("127.0.0.1")
         self._tor_host_edit.setPlaceholderText("127.0.0.1")
-        host_row.addWidget(self._tor_host_edit, 1)
+        tor_host_row.addWidget(self._tor_host_edit, 1)
 
-        host_row.addWidget(QLabel("Port:"))
+        tor_host_row.addWidget(QLabel("Port:"))
         self._tor_port_spin = QSpinBox()
         self._tor_port_spin.setRange(1, 65535)
         self._tor_port_spin.setValue(9050)
-        host_row.addWidget(self._tor_port_spin)
-        proxy_inner.addLayout(host_row)
+        tor_host_row.addWidget(self._tor_port_spin)
+        tor_inner.addLayout(tor_host_row)
 
         presets_row = QHBoxLayout()
-        presets_row.addWidget(QLabel("Presets:"))
+        presets_row.addWidget(QLabel("Port Presets:"))
         preset_service_btn = QPushButton("Tor Service (Port 9050)")
         preset_service_btn.clicked.connect(lambda: self._tor_port_spin.setValue(9050))
         preset_browser_btn = QPushButton("Tor Browser (Port 9150)")
@@ -726,23 +740,20 @@ class SettingsDialog(QDialog):
         presets_row.addWidget(preset_service_btn)
         presets_row.addWidget(preset_browser_btn)
         presets_row.addStretch()
-        proxy_inner.addLayout(presets_row)
+        tor_inner.addLayout(presets_row)
 
-        test_row = QHBoxLayout()
+        test_tor_row = QHBoxLayout()
         self._tor_test_btn = QPushButton("🧪 Test Tor Connection")
         self._tor_test_btn.clicked.connect(self._on_test_tor)
-        test_row.addWidget(self._tor_test_btn)
+        test_tor_row.addWidget(self._tor_test_btn)
 
         self._tor_test_status_lbl = QLabel("")
-        test_row.addWidget(self._tor_test_status_lbl, 1)
-        proxy_inner.addLayout(test_row)
+        test_tor_row.addWidget(self._tor_test_status_lbl, 1)
+        tor_inner.addLayout(test_tor_row)
 
-        layout.addWidget(proxy_group)
-
-        # 4. Optional Executable Path
-        exec_group = QGroupBox("Tor Executable (Optional)")
-        exec_inner = QVBoxLayout(exec_group)
+        # Tor Executable (Optional)
         path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Tor Executable (opt):"))
         self._tor_path_edit = QLineEdit()
         self._tor_path_edit.setPlaceholderText("C:\\Path\\To\\tor.exe (optional)")
         path_row.addWidget(self._tor_path_edit, 1)
@@ -750,11 +761,18 @@ class SettingsDialog(QDialog):
         browse_tor_btn = QPushButton("Browse…")
         browse_tor_btn.clicked.connect(self._on_browse_tor_path)
         path_row.addWidget(browse_tor_btn)
-        exec_inner.addLayout(path_row)
-        layout.addWidget(exec_group)
+        tor_inner.addLayout(path_row)
+
+        layout.addWidget(tor_group)
 
         layout.addStretch()
         return tab
+
+    def _create_network_tab(self) -> QWidget:
+        return self._create_network_privacy_tab()
+
+    def _create_tor_tab(self) -> QWidget:
+        return self._create_network_privacy_tab()
 
     def _create_security_tab(self) -> QWidget:
         tab = QWidget()
@@ -1233,10 +1251,18 @@ class SettingsDialog(QDialog):
             QDesktopServices.openUrl(QUrl(text))
             return
 
-        QApplication.clipboard().setText(text)
+        cb = QApplication.clipboard()
+        if cb:
+            for _ in range(5):
+                cb.setText(text)
+                if cb.text() == text:
+                    break
+                import time
+                time.sleep(0.015)
         QApplication.processEvents()
         try:
-            QToolTip.showText(QCursor.pos(), f"✓ Copied: {text}", self, 2500)
+            from PySide6.QtCore import QRect
+            QToolTip.showText(QCursor.pos(), f"✓ Copied: {text}", self, QRect(), 2500)
         except Exception:
             pass
 
@@ -1311,6 +1337,13 @@ class SettingsDialog(QDialog):
         self._on_retry_exp_toggled(self._general_cfg.retry_exponential_backoff)
         self._auto_resume_cb.setChecked(self._general_cfg.auto_resume_startup)
         self._notify_cb.setChecked(self._general_cfg.notify_on_completion)
+        self._enable_system_tray_cb.setChecked(self._general_cfg.enable_system_tray)
+        self._minimize_to_tray_cb.setChecked(self._general_cfg.minimize_to_tray)
+        self._close_to_tray_cb.setChecked(self._general_cfg.close_to_tray)
+        self._start_minimized_cb.setChecked(self._general_cfg.start_minimized)
+        self._minimize_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
+        self._close_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
+        self._start_minimized_cb.setEnabled(self._general_cfg.enable_system_tray)
 
         # BitTorrent tab
         self._seeding_after_complete_cb.setChecked(self._torrent_cfg.seeding_after_complete)
@@ -1741,6 +1774,11 @@ class SettingsDialog(QDialog):
         self._iface_combo.blockSignals(False)
         self._on_iface_changed(selected_idx)
 
+    def _on_system_tray_toggled(self, checked: bool):
+        self._minimize_to_tray_cb.setEnabled(checked)
+        self._close_to_tray_cb.setEnabled(checked)
+        self._start_minimized_cb.setEnabled(checked)
+
     def _on_retry_exp_toggled(self, checked: bool):
         self._retry_factor_lbl.setEnabled(checked)
         self._retry_factor_spin.setEnabled(checked)
@@ -1926,6 +1964,10 @@ class SettingsDialog(QDialog):
         self._general_cfg.retry_max_delay = float(self._retry_max_delay_spin.value())
         self._general_cfg.auto_resume_startup = self._auto_resume_cb.isChecked()
         self._general_cfg.notify_on_completion = self._notify_cb.isChecked()
+        self._general_cfg.enable_system_tray = self._enable_system_tray_cb.isChecked()
+        self._general_cfg.minimize_to_tray = self._minimize_to_tray_cb.isChecked()
+        self._general_cfg.close_to_tray = self._close_to_tray_cb.isChecked()
+        self._general_cfg.start_minimized = self._start_minimized_cb.isChecked()
         self._general_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
         locs = [self._backlog_list.item(i).text().strip() for i in range(self._backlog_list.count())]
         self._general_cfg.backlog_locations = [l for l in locs if l]
@@ -2175,12 +2217,20 @@ class FirefoxInstallGuideDialog(QDialog):
 
     def _copy_text(self, text: str, msg: str = ""):
         from PySide6.QtWidgets import QApplication, QToolTip
-        from PySide6.QtGui import QClipboard, QCursor
-        from PySide6.QtCore import QTimer
-        QApplication.clipboard().setText(text)
+        from PySide6.QtGui import QCursor
+        from PySide6.QtCore import QTimer, QRect
+        import time
+        cb = QApplication.clipboard()
+        if cb:
+            for _ in range(10):
+                cb.setText(text)
+                QApplication.processEvents()
+                if cb.text() == text:
+                    break
+                time.sleep(0.015)
         QApplication.processEvents()
         try:
-            QToolTip.showText(QCursor.pos(), f"✓ Copied: {text}", self, 2500)
+            QToolTip.showText(QCursor.pos(), f"✓ Copied: {text}", self, QRect(), 2500)
         except Exception:
             pass
         if hasattr(self, "_copy_status_lbl"):

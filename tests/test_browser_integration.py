@@ -260,7 +260,7 @@ class TestSettingsDialogBrowserTab:
             intercept_all=True,
             bypassed_extensions=[".torrent", ".crx"],
         )
-        dialog = SettingsDialog(browser_config=cfg, initial_tab=6)
+        dialog = SettingsDialog(browser_config=cfg, initial_tab=2)
 
         assert dialog._browser_enabled_cb.isChecked() is True
         assert dialog._browser_port_spin.value() == 19582
@@ -287,38 +287,47 @@ class TestSettingsDialogBrowserTab:
         monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
 
         cfg = BrowserIntegrationConfig(enabled=True)
-        dialog = SettingsDialog(browser_config=cfg, initial_tab=6)
+        dialog = SettingsDialog(browser_config=cfg, initial_tab=2)
 
         # 1. Verify instructions label text interaction flags
         flags = dialog._instr_lbl.textInteractionFlags()
         assert bool(flags & Qt.TextInteractionFlag.TextSelectableByMouse)
         assert bool(flags & Qt.TextInteractionFlag.LinksAccessibleByMouse)
 
+        import time
+        def get_clip():
+            for _ in range(10):
+                t = QApplication.clipboard().text()
+                if t:
+                    return t
+                time.sleep(0.02)
+            return QApplication.clipboard().text()
+
         # 2. Test copy Chrome URL button
         dialog._on_copy_chrome_url()
-        assert QApplication.clipboard().text() == "chrome://extensions/"
+        assert get_clip() == "chrome://extensions/"
 
         # 3. Test copy Edge URL button
         dialog._on_copy_edge_url()
-        assert QApplication.clipboard().text() == "edge://extensions/"
+        assert get_clip() == "edge://extensions/"
 
         # 4. Test copy Firefox URL button
         dialog._on_copy_firefox_url()
-        assert QApplication.clipboard().text() == "about:debugging#/runtime/this-firefox"
+        assert get_clip() == "about:debugging#/runtime/this-firefox"
 
         # 4b. Test copy Firefox Add-ons URL button
         dialog._on_copy_firefox_addons_url()
-        assert QApplication.clipboard().text() == "about:addons"
+        assert get_clip() == "about:addons"
 
         # 5. Test link click handler
         dialog._on_browser_url_clicked("chrome://extensions/")
-        assert QApplication.clipboard().text() == "chrome://extensions/"
+        assert get_clip() == "chrome://extensions/"
 
         dialog._on_browser_url_clicked("copy:extension_path")
-        assert "browser_extension" in QApplication.clipboard().text()
+        assert "browser_extension" in get_clip()
 
         dialog._on_browser_url_clicked("copy:manifest_path")
-        assert "manifest.json" in QApplication.clipboard().text()
+        assert "manifest.json" in get_clip()
 
         # 6. Test Firefox packaging button
         dialog._on_package_firefox_extension()
@@ -427,31 +436,65 @@ class TestFirefoxExtensionPackaging:
 
         dialog = FirefoxInstallGuideDialog()
 
-        # Test copying about:config and about:addons
-        dialog._copy_text("about:config", "test")
-        QApplication.processEvents()
-        assert QApplication.clipboard().text() == "about:config"
+        import time
+        def get_clip():
+            for _ in range(20):
+                QApplication.processEvents()
+                t = QApplication.clipboard().text()
+                if t:
+                    return t
+                time.sleep(0.02)
+            return QApplication.clipboard().text()
 
-        dialog._copy_text("about:addons", "test")
-        QApplication.processEvents()
-        assert QApplication.clipboard().text() == "about:addons"
+        # Test copying about:config and about:addons
+        clip = ""
+        for _ in range(5):
+            dialog._copy_text("about:config", "test")
+            QApplication.processEvents()
+            clip = get_clip()
+            if clip == "about:config":
+                break
+            time.sleep(0.02)
+        assert clip == "about:config"
+
+        clip = ""
+        for _ in range(5):
+            dialog._copy_text("about:addons", "test")
+            QApplication.processEvents()
+            clip = get_clip()
+            if clip == "about:addons":
+                break
+            time.sleep(0.02)
+        assert clip == "about:addons"
 
         # Test link click handler for non-http
-        dialog._on_link_clicked("about:config")
-        QApplication.processEvents()
-        assert QApplication.clipboard().text() == "about:config"
+        clip = ""
+        for _ in range(5):
+            dialog._on_link_clicked("about:config")
+            QApplication.processEvents()
+            clip = get_clip()
+            if clip == "about:config":
+                break
+            time.sleep(0.02)
+        assert clip == "about:config"
 
-        dialog._on_link_clicked("xpinstall.signatures.required")
-        QApplication.processEvents()
-        assert QApplication.clipboard().text() == "xpinstall.signatures.required"
+        clip = ""
+        for _ in range(5):
+            dialog._on_link_clicked("xpinstall.signatures.required")
+            QApplication.processEvents()
+            clip = get_clip()
+            if clip == "xpinstall.signatures.required":
+                break
+            time.sleep(0.02)
+        assert clip == "xpinstall.signatures.required"
 
         dialog._on_link_clicked("false")
         QApplication.processEvents()
-        assert QApplication.clipboard().text() == "false"
+        assert get_clip() == "false"
 
         dialog._on_link_clicked("copy:xpi_path")
         QApplication.processEvents()
-        assert "my-idm-firefox.xpi" in QApplication.clipboard().text()
+        assert "my-idm-firefox.xpi" in get_clip()
 
         # Test external link routing to QDesktopServices
         dialog._on_link_clicked("https://addons.mozilla.org/developers/addon/submit/distribution")
@@ -499,15 +542,24 @@ class TestEdgeBrowserIntegration:
 
     def test_edge_url_copying_and_links(self):
         cfg = BrowserIntegrationConfig(enabled=True)
-        dialog = SettingsDialog(browser_config=cfg, initial_tab=6)
+        dialog = SettingsDialog(browser_config=cfg, initial_tab=2)
+
+        import time
+        def get_clip():
+            for _ in range(10):
+                t = QApplication.clipboard().text()
+                if t:
+                    return t
+                time.sleep(0.02)
+            return QApplication.clipboard().text()
 
         # 1. Direct Edge copy method
         dialog._on_copy_edge_url()
-        assert QApplication.clipboard().text() == "edge://extensions/"
+        assert get_clip() == "edge://extensions/"
 
         # 2. Clicking edge://extensions/ URL link
         dialog._on_browser_url_clicked("edge://extensions/")
-        assert QApplication.clipboard().text() == "edge://extensions/"
+        assert get_clip() == "edge://extensions/"
 
         # 3. Label text and group title contain Edge references
         raw_html = dialog._chrome_instr_lbl.text()

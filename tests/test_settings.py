@@ -44,6 +44,10 @@ class TestGeneralConfig(unittest.TestCase):
         self.assertTrue(cfg.retry_exponential_backoff)
         self.assertTrue(cfg.auto_resume_startup)
         self.assertTrue(cfg.notify_on_completion)
+        self.assertTrue(cfg.enable_system_tray)
+        self.assertTrue(cfg.minimize_to_tray)
+        self.assertTrue(cfg.close_to_tray)
+        self.assertFalse(cfg.start_minimized)
 
     def test_get_retry_delay_exponential(self):
         cfg = GeneralConfig(
@@ -80,6 +84,10 @@ class TestGeneralConfig(unittest.TestCase):
             retry_exponential_backoff=False,
             auto_resume_startup=False,
             notify_on_completion=False,
+            enable_system_tray=False,
+            minimize_to_tray=False,
+            close_to_tray=False,
+            start_minimized=True,
         )
         cfg.save(self.test_settings)
 
@@ -96,6 +104,10 @@ class TestGeneralConfig(unittest.TestCase):
         self.assertFalse(loaded.retry_exponential_backoff)
         self.assertFalse(loaded.auto_resume_startup)
         self.assertFalse(loaded.notify_on_completion)
+        self.assertFalse(loaded.enable_system_tray)
+        self.assertFalse(loaded.minimize_to_tray)
+        self.assertFalse(loaded.close_to_tray)
+        self.assertTrue(loaded.start_minimized)
 
     def test_get_effective_save_path(self):
         with tempfile.TemporaryDirectory() as default_dir, tempfile.TemporaryDirectory() as last_dir:
@@ -262,6 +274,41 @@ class TestSettingsDialog(unittest.TestCase):
                 persisted = GeneralConfig.load()
                 self.assertEqual(persisted.default_save_path, new_dir)
                 self.assertEqual(persisted.default_segments, 16)
+
+    def test_system_tray_settings_ui(self):
+        cfg = GeneralConfig(
+            enable_system_tray=True,
+            minimize_to_tray=True,
+            close_to_tray=True,
+            start_minimized=False,
+        )
+        dlg = SettingsDialog(general_config=cfg)
+        self.assertTrue(dlg._enable_system_tray_cb.isChecked())
+        self.assertTrue(dlg._minimize_to_tray_cb.isChecked())
+        self.assertTrue(dlg._close_to_tray_cb.isChecked())
+        self.assertFalse(dlg._start_minimized_cb.isChecked())
+
+        # Modify values and test toggling enable checkbox
+        dlg._enable_system_tray_cb.setChecked(False)
+        dlg._on_system_tray_toggled(False)
+        self.assertFalse(dlg._minimize_to_tray_cb.isEnabled())
+        self.assertFalse(dlg._close_to_tray_cb.isEnabled())
+        self.assertFalse(dlg._start_minimized_cb.isEnabled())
+
+        dlg._enable_system_tray_cb.setChecked(True)
+        dlg._on_system_tray_toggled(True)
+        self.assertTrue(dlg._minimize_to_tray_cb.isEnabled())
+
+        dlg._minimize_to_tray_cb.setChecked(False)
+        dlg._start_minimized_cb.setChecked(True)
+        dlg._on_save()
+
+        saved = dlg.general_config
+        self.assertTrue(saved.enable_system_tray)
+        self.assertFalse(saved.minimize_to_tray)
+        self.assertTrue(saved.close_to_tray)
+        self.assertTrue(saved.start_minimized)
+        dlg.close()
 
     def test_initial_tab(self):
         dlg_gen = SettingsDialog(initial_tab=0)

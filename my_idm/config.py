@@ -36,6 +36,10 @@ class GeneralConfig:
     backlog_poll_interval: int = 60
     backlog_poll_enabled: bool = True
     metadata_fetch_timeout_days: int = 1
+    enable_system_tray: bool = True
+    minimize_to_tray: bool = True
+    close_to_tray: bool = True
+    start_minimized: bool = False
 
     def get_retry_delay(self, attempt: int) -> float:
         """Calculate retry delay in seconds for a given attempt index (0-indexed)."""
@@ -102,6 +106,10 @@ class GeneralConfig:
             "backlog_poll_interval": self.backlog_poll_interval,
             "backlog_poll_enabled": self.backlog_poll_enabled,
             "metadata_fetch_timeout_days": self.metadata_fetch_timeout_days,
+            "enable_system_tray": self.enable_system_tray,
+            "minimize_to_tray": self.minimize_to_tray,
+            "close_to_tray": self.close_to_tray,
+            "start_minimized": self.start_minimized,
         }
 
     @classmethod
@@ -132,6 +140,10 @@ class GeneralConfig:
             backlog_poll_interval=int(data.get("backlog_poll_interval", 60)),
             backlog_poll_enabled=bool(data.get("backlog_poll_enabled", True)),
             metadata_fetch_timeout_days=int(data.get("metadata_fetch_timeout_days", 1)),
+            enable_system_tray=bool(data.get("enable_system_tray", True)),
+            minimize_to_tray=bool(data.get("minimize_to_tray", True)),
+            close_to_tray=bool(data.get("close_to_tray", True)),
+            start_minimized=bool(data.get("start_minimized", False)),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -156,6 +168,10 @@ class GeneralConfig:
         settings.setValue("backlog_poll_interval", self.backlog_poll_interval)
         settings.setValue("backlog_poll_enabled", self.backlog_poll_enabled)
         settings.setValue("metadata_fetch_timeout_days", self.metadata_fetch_timeout_days)
+        settings.setValue("enable_system_tray", self.enable_system_tray)
+        settings.setValue("minimize_to_tray", self.minimize_to_tray)
+        settings.setValue("close_to_tray", self.close_to_tray)
+        settings.setValue("start_minimized", self.start_minimized)
         settings.endGroup()
 
     @classmethod
@@ -187,6 +203,10 @@ class GeneralConfig:
         backlog_poll_interval = settings.value("backlog_poll_interval", 60, type=int)
         backlog_poll_enabled = settings.value("backlog_poll_enabled", True, type=bool)
         metadata_fetch_timeout_days = settings.value("metadata_fetch_timeout_days", 1, type=int)
+        enable_system_tray = settings.value("enable_system_tray", True, type=bool)
+        minimize_to_tray = settings.value("minimize_to_tray", True, type=bool)
+        close_to_tray = settings.value("close_to_tray", True, type=bool)
+        start_minimized = settings.value("start_minimized", False, type=bool)
         settings.endGroup()
 
         return cls(
@@ -207,6 +227,10 @@ class GeneralConfig:
             backlog_poll_interval=int(backlog_poll_interval),
             backlog_poll_enabled=bool(backlog_poll_enabled),
             metadata_fetch_timeout_days=int(metadata_fetch_timeout_days),
+            enable_system_tray=bool(enable_system_tray),
+            minimize_to_tray=bool(minimize_to_tray),
+            close_to_tray=bool(close_to_tray),
+            start_minimized=bool(start_minimized),
         )
 
 

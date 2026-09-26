@@ -28,6 +28,8 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.win = MainWindow(self.manager)
 
     def tearDown(self):
+        from my_idm.notifications import unregister_notification_handler
+        unregister_notification_handler()
         self.win.close()
         self.manager.stop()
         self.db.close()
@@ -969,6 +971,99 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             dlg = captured_dialogs[0]
             self.assertIn("© Rakesh Malik, 2026", dlg.informativeText())
             self.assertIn("My-IDM", dlg.text())
+
+    def test_system_tray_setup_and_actions(self):
+        """System tray icon and context menu actions are properly initialized."""
+        if self.win._tray_icon is not None:
+            self.assertEqual(self.win._tray_icon.toolTip(), "My-IDM — Download Manager")
+            menu = self.win._tray_icon.contextMenu()
+            self.assertIsNotNone(menu)
+            action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+            self.assertTrue(any("Show" in t or "Hide" in t for t in action_texts))
+            self.assertTrue(any("Pause All" in t for t in action_texts))
+            self.assertTrue(any("Resume All" in t for t in action_texts))
+            self.assertTrue(any("Preferences" in t for t in action_texts))
+            self.assertTrue(any("Exit" in t for t in action_texts))
+
+    def test_system_tray_toggle_show_window(self):
+        """_toggle_show_window toggles between visible and hidden."""
+        self.win.show()
+        self.assertTrue(self.win.isVisible())
+        self.win._toggle_show_window()
+        self.assertFalse(self.win.isVisible())
+        self.win._toggle_show_window()
+        self.assertTrue(self.win.isVisible())
+
+    def test_minimize_to_tray(self):
+        """When minimize_to_tray is enabled, minimizing window hides it."""
+        from PySide6.QtGui import QWindowStateChangeEvent
+        self.win._manager._general_config.enable_system_tray = True
+        self.win._manager._general_config.minimize_to_tray = True
+        self.win.show()
+        self.win.setWindowState(Qt.WindowState.WindowMinimized)
+        ev = QWindowStateChangeEvent(Qt.WindowState.WindowNoState)
+        self.win.changeEvent(ev)
+        QApplication.processEvents()
+        self.assertTrue(self.win.isHidden())
+
+    def test_close_to_tray_and_exit_app(self):
+        """Closing window when close_to_tray is enabled hides window; _exit_app completely closes."""
+        from PySide6.QtGui import QCloseEvent
+        self.win._manager._general_config.enable_system_tray = True
+        self.win._manager._general_config.close_to_tray = True
+        self.win._force_exit = False
+        self.win.show()
+
+        # Regular closeEvent should be ignored and window hidden
+        close_ev = QCloseEvent()
+        self.win.closeEvent(close_ev)
+        self.assertFalse(close_ev.isAccepted())
+        self.assertTrue(self.win.isHidden())
+        self.assertTrue(self.win._close_to_tray_notified)
+
+        # _exit_app should set _force_exit and accept closeEvent
+        self.win._exit_app()
+        self.assertTrue(self.win._force_exit)
+
+    def test_tray_resume_all_downloads(self):
+        """_on_resume_all_downloads triggers manager.resume_all_downloads and updates status label."""
+        with unittest.mock.patch.object(self.manager, "resume_all_downloads", return_value=3) as mock_resume:
+            self.win._on_resume_all_downloads()
+            mock_resume.assert_called_once()
+            self.assertIn("Resumed 3 downloads", self.win._status_label.text())
+
+    def test_tray_notification_click_restores_and_focuses(self):
+        """Clicking on tray notification restores and focuses main window."""
+        self.win.hide()
+        self.assertTrue(self.win.isHidden())
+        with unittest.mock.patch("my_idm.single_instance.activate_window") as mock_activate:
+            self.win._on_tray_message_clicked()
+            self.assertFalse(self.win.isHidden())
+            mock_activate.assert_called_once_with(self.win)
+
+    def test_notification_handler_delegation_to_tray(self):
+        """my_idm.notifications.show_notification routes through registered MainWindow tray icon."""
+        from my_idm.notifications import show_notification
+        received = []
+        self.win._sig_show_tray_notification.connect(lambda t, m, d: received.append((t, m, d)))
+        res = show_notification("Test Title", "Test Message", duration=4)
+        self.assertTrue(res)
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0], ("Test Title", "Test Message", 4000))
+
+    def test_status_completed_triggers_notification(self):
+        """When download status becomes completed, notify_download_complete is called if enabled."""
+        entry = DownloadEntry(id="done-1", url="http://example.com/done.mp4", filename="done.mp4", status="downloading")
+        self.db.add_download(entry)
+        self.win._manager._general_config.notify_on_completion = True
+        with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
+            self.win._on_status_changed("done-1", "completed", "")
+            mock_notify.assert_called_once_with("done.mp4")
+
+            # Duplicate call should not re-notify
+            mock_notify.reset_mock()
+            self.win._on_status_changed("done-1", "completed", "")
+            mock_notify.assert_not_called()
 
 
 if __name__ == "__main__":
