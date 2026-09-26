@@ -312,6 +312,11 @@ class DownloadManager(QObject):
         self._backlog_timer.timeout.connect(self._on_backlog_timer_tick)
         self._apply_backlog_timer_config()
 
+        # AnimePahe periodic scraper timer
+        self._animepahe_timer = QTimer(self)
+        self._animepahe_timer.timeout.connect(self._on_animepahe_timer_tick)
+        self._apply_animepahe_timer_config()
+
         # Wire engine callbacks
         self._http.set_callbacks(
             self._on_http_progress,
@@ -377,6 +382,9 @@ class DownloadManager(QObject):
         if self._external_tools_config.animepahe_launch_on_startup:
             self.start_animepahe_scraper()
 
+        # Start periodic AnimePahe scraper if enabled
+        self._apply_animepahe_timer_config()
+
         # Start browser integration loopback server if enabled
         if self._browser_config.enabled:
             try:
@@ -400,6 +408,7 @@ class DownloadManager(QObject):
         self._torrent_timer.stop()
         self._retry_timer.stop()
         self._backlog_timer.stop()
+        self._animepahe_timer.stop()
 
         # Stop browser integration server
         if getattr(self, "_browser_server", None) and self._browser_server.is_running and self._loop and self._loop.is_running():
@@ -480,7 +489,33 @@ class DownloadManager(QObject):
         """Update external tools configuration."""
         self._external_tools_config = config
         config.save()
+        self._apply_animepahe_timer_config()
         self.external_tools_config_changed.emit(config)
+
+    def _apply_animepahe_timer_config(self):
+        """Configures or starts/stops the periodic AnimePahe scraper timer."""
+        cfg = self._external_tools_config
+        if cfg.animepahe_periodic_run and cfg.animepahe_interval_hours > 0:
+            interval_ms = int(cfg.animepahe_interval_hours * 3600 * 1000)
+            self._animepahe_timer.setInterval(interval_ms)
+            if not getattr(self, "_stopped", False) and not self._animepahe_timer.isActive():
+                self._animepahe_timer.start()
+        else:
+            self._animepahe_timer.stop()
+
+    def _on_animepahe_timer_tick(self):
+        """Periodically triggers AnimePahe scraper in background CLI mode."""
+        if getattr(self, "_stopped", False):
+            return
+        cfg = self._external_tools_config
+        if not cfg.animepahe_periodic_run:
+            self._animepahe_timer.stop()
+            return
+        log.info(
+            "Triggering scheduled AnimePahe scraper run (interval: every %s hours)",
+            cfg.animepahe_interval_hours,
+        )
+        self.start_animepahe_scraper()
 
     def start_animepahe_scraper(
         self,

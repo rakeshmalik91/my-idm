@@ -940,7 +940,7 @@ class SettingsDialog(QDialog):
 
         ap_layout.addLayout(repo_row)
 
-        # 2. Startup Option
+        # 2. Startup & Periodic Scheduling Options
         self._animepahe_startup_cb = QCheckBox(
             "Launch AnimePahe scraper on startup (CLI mode, forwards downloads to My-IDM backlog)"
         )
@@ -949,6 +949,33 @@ class SettingsDialog(QDialog):
             "Discovered episodes are sent directly to the My-IDM backlog file for automatic downloading."
         )
         ap_layout.addWidget(self._animepahe_startup_cb)
+
+        periodic_row = QHBoxLayout()
+        self._animepahe_periodic_cb = QCheckBox(
+            "Run AnimePahe scraper periodically in background"
+        )
+        self._animepahe_periodic_cb.setToolTip(
+            "When enabled, My-IDM automatically runs animepahe_download.py on a recurring schedule in the background,\n"
+            "checking for newly aired episodes and queuing them into the My-IDM backlog."
+        )
+        periodic_row.addWidget(self._animepahe_periodic_cb)
+
+        self._animepahe_interval_lbl = QLabel("Every:")
+        self._animepahe_interval_lbl.setStyleSheet("color: #8fa0b5; margin-left: 10px;")
+        periodic_row.addWidget(self._animepahe_interval_lbl)
+
+        self._animepahe_interval_spin = QSpinBox()
+        self._animepahe_interval_spin.setRange(1, 168)
+        self._animepahe_interval_spin.setValue(6)
+        self._animepahe_interval_spin.setSuffix(" hours")
+        self._animepahe_interval_spin.setToolTip("Periodic interval between automated scraper runs (default: 6 hours)")
+        periodic_row.addWidget(self._animepahe_interval_spin)
+        periodic_row.addStretch()
+
+        self._animepahe_periodic_cb.toggled.connect(self._animepahe_interval_spin.setEnabled)
+        self._animepahe_periodic_cb.toggled.connect(self._animepahe_interval_lbl.setEnabled)
+
+        ap_layout.addLayout(periodic_row)
 
         desc_lbl = QLabel(
             "ℹ️ In CLI mode, the scraper performs an automated library check in the background. "
@@ -1430,6 +1457,10 @@ class SettingsDialog(QDialog):
         # External Tools tab
         self._animepahe_repo_edit.setText(self._external_tools_cfg.animepahe_repo_path)
         self._animepahe_startup_cb.setChecked(self._external_tools_cfg.animepahe_launch_on_startup)
+        self._animepahe_periodic_cb.setChecked(self._external_tools_cfg.animepahe_periodic_run)
+        self._animepahe_interval_spin.setValue(self._external_tools_cfg.animepahe_interval_hours)
+        self._animepahe_interval_spin.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
+        self._animepahe_interval_lbl.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_url_edit.setText(self._external_tools_cfg.animepahe_last_url)
         self._animepahe_episodes_edit.setText(self._external_tools_cfg.animepahe_last_episodes)
         q_idx = self._animepahe_quality_combo.findText(self._external_tools_cfg.animepahe_last_quality)
@@ -2040,6 +2071,8 @@ class SettingsDialog(QDialog):
         # 6. Collect External Tools settings
         self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
         self._external_tools_cfg.animepahe_launch_on_startup = self._animepahe_startup_cb.isChecked()
+        self._external_tools_cfg.animepahe_periodic_run = self._animepahe_periodic_cb.isChecked()
+        self._external_tools_cfg.animepahe_interval_hours = self._animepahe_interval_spin.value()
         self._external_tools_cfg.animepahe_last_url = self._animepahe_url_edit.text().strip()
         self._external_tools_cfg.animepahe_last_episodes = self._animepahe_episodes_edit.text().strip()
         self._external_tools_cfg.animepahe_last_quality = self._animepahe_quality_combo.currentText()

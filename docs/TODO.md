@@ -150,6 +150,7 @@ commit after each features or set of fixes/enhancements
   - [x] add a new tab for external tools in preferences, add any related configs
     - [x] repo location
     - [x] toggle to launch animepahe scraper at launch, in cli mode, should send downloads to myidm in backlog file
+    - [x] periodic background scraper schedule (configurable toggle, default: every 6 hours)
     - [x] buttons to view console logs (redirect them in a file, open that file) & debug logs (should be there alreaady, open the file)
   - [x] add a button in tools menu to launch animepahe downloader gui
   - [x] show footer badge while background CLI scraper is active (status popup for logs, stop/start, GUI, settings)

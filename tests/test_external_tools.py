@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from my_idm.config import ExternalToolsConfig
@@ -218,6 +219,37 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             # Re-run start check
             if self.manager._external_tools_config.animepahe_launch_on_startup:
                 self.manager.start_animepahe_scraper()
+            mock_start.assert_called_once()
+
+    def test_manager_periodic_timer_configuration(self):
+        """DownloadManager starts or stops the periodic AnimePahe timer based on config."""
+        cfg_off = ExternalToolsConfig(animepahe_periodic_run=False, animepahe_interval_hours=6)
+        self.manager.set_external_tools_config(cfg_off)
+        self.assertFalse(self.manager._animepahe_timer.isActive())
+
+        # When enabled, timer starts with configured interval (6 hours = 21,600,000 ms)
+        cfg_on = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6)
+        self.manager.set_external_tools_config(cfg_on)
+        self.assertTrue(self.manager._animepahe_timer.isActive())
+        self.assertEqual(self.manager._animepahe_timer.interval(), 6 * 3600 * 1000)
+
+        # Updating interval adjusts timer
+        cfg_12 = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=12)
+        self.manager.set_external_tools_config(cfg_12)
+        self.assertTrue(self.manager._animepahe_timer.isActive())
+        self.assertEqual(self.manager._animepahe_timer.interval(), 12 * 3600 * 1000)
+
+        # Disabling stops timer
+        self.manager.set_external_tools_config(cfg_off)
+        self.assertFalse(self.manager._animepahe_timer.isActive())
+
+    def test_manager_periodic_timer_tick_triggers_scraper(self):
+        """_on_animepahe_timer_tick invokes start_animepahe_scraper when periodic run is enabled."""
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6)
+        self.manager.set_external_tools_config(cfg)
+
+        with patch.object(self.manager, "start_animepahe_scraper") as mock_start:
+            self.manager._on_animepahe_timer_tick()
             mock_start.assert_called_once()
 
     def test_stop_terminates_running_process(self):
@@ -483,6 +515,54 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
             mock_info.assert_called_once()
             self.assertEqual(mock_info.call_args[0][1], "AnimePahe Download Queued")
 
+        dialog.close()
+
+    def test_external_tools_config_periodic_settings(self):
+        """ExternalToolsConfig supports periodic scraper run toggle and interval."""
+        cfg = ExternalToolsConfig()
+        self.assertFalse(cfg.animepahe_periodic_run)
+        self.assertEqual(cfg.animepahe_interval_hours, 6)
+
+        d = cfg.to_dict()
+        self.assertIn("animepahe_periodic_run", d)
+        self.assertIn("animepahe_interval_hours", d)
+
+        d["animepahe_periodic_run"] = True
+        d["animepahe_interval_hours"] = 12
+        loaded = ExternalToolsConfig.from_dict(d)
+        self.assertTrue(loaded.animepahe_periodic_run)
+        self.assertEqual(loaded.animepahe_interval_hours, 12)
+
+        # Isolated QSettings save/load
+        ini_file = str(Path(self.tmp_dir.name) / "test_settings.ini")
+        settings = QSettings(ini_file, QSettings.Format.IniFormat)
+        loaded.save(settings)
+
+        restored = ExternalToolsConfig.load(settings)
+        self.assertTrue(restored.animepahe_periodic_run)
+        self.assertEqual(restored.animepahe_interval_hours, 12)
+
+    def test_settings_dialog_periodic_scraper_controls(self):
+        """SettingsDialog loads and persists periodic scraper checkbox and interval spinbox."""
+        from my_idm.settings_dialog import SettingsDialog
+        cfg = ExternalToolsConfig(
+            animepahe_repo_path=str(self.repo_dir),
+            animepahe_periodic_run=True,
+            animepahe_interval_hours=8,
+        )
+        dialog = SettingsDialog(external_tools_config=cfg, initial_tab=5)
+        self.assertTrue(dialog._animepahe_periodic_cb.isChecked())
+        self.assertEqual(dialog._animepahe_interval_spin.value(), 8)
+        self.assertTrue(dialog._animepahe_interval_spin.isEnabled())
+
+        # Modify values and save
+        dialog._animepahe_periodic_cb.setChecked(False)
+        dialog._animepahe_interval_spin.setValue(10)
+        dialog._on_save()
+
+        saved_cfg = dialog.external_tools_config
+        self.assertFalse(saved_cfg.animepahe_periodic_run)
+        self.assertEqual(saved_cfg.animepahe_interval_hours, 10)
         dialog.close()
 
 
