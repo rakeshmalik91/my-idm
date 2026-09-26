@@ -943,10 +943,19 @@ class MainWindow(QMainWindow):
 
     def _exit_app(self):
         """Forces full application exit, bypassing close-to-tray intercept."""
+        self._force_exit = True
+        if self._tray_icon:
+            self._tray_icon.hide()
         from my_idm.notifications import unregister_notification_handler
         unregister_notification_handler(self.show_tray_notification)
-        self._force_exit = True
-        self.close()
+
+        from PySide6.QtGui import QCloseEvent
+        close_ev = QCloseEvent()
+        self.closeEvent(close_ev)
+
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     def _connect_signals(self):
         self._manager.progress_updated.connect(self._on_progress_updated)

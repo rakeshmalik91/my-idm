@@ -1021,9 +1021,10 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertTrue(self.win.isHidden())
         self.assertTrue(self.win._close_to_tray_notified)
 
-        # _exit_app should set _force_exit and accept closeEvent
+        # _exit_app should set _force_exit and execute closeEvent even while hidden
         self.win._exit_app()
         self.assertTrue(self.win._force_exit)
+        self.assertTrue(getattr(self.win, "_is_closing", False))
 
     def test_tray_resume_all_downloads(self):
         """_on_resume_all_downloads triggers manager.resume_all_downloads and updates status label."""
