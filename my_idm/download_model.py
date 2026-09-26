@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -141,12 +141,76 @@ SECTION_ACTIVE = "active"
 SECTION_SEEDING = "seeding"
 SECTION_INACTIVE = "inactive"
 
+SECTION_DATE_TODAY = "date_today"
+SECTION_DATE_YESTERDAY = "date_yesterday"
+SECTION_DATE_LAST_7_DAYS = "date_last_7_days"
+SECTION_DATE_LAST_30_DAYS = "date_last_30_days"
+SECTION_DATE_OLDER = "date_older"
+
+# Backward-compatibility aliases
+SECTION_DATE_THIS_WEEK = SECTION_DATE_LAST_7_DAYS
+SECTION_DATE_THIS_MONTH = SECTION_DATE_LAST_30_DAYS
+
 ACTIVE_SECTION_STATUSES = {
     "fetching_metadata", "queued", "downloading", "paused", "stalled", "error",
     "checking", "scanning", "threat_detected"
 }
 SEEDING_SECTION_STATUSES = {"seeding"}
 INACTIVE_SECTION_STATUSES = {"completed", "stopped", "file_not_found", "suspended"}
+
+DATE_SECTION_DEFS = [
+    (SECTION_DATE_TODAY, "Today", "__section_date_today__"),
+    (SECTION_DATE_YESTERDAY, "Yesterday", "__section_date_yesterday__"),
+    (SECTION_DATE_LAST_7_DAYS, "Last 7 Days", "__section_date_last_7_days__"),
+    (SECTION_DATE_LAST_30_DAYS, "Last 30 Days", "__section_date_last_30_days__"),
+    (SECTION_DATE_OLDER, "Older", "__section_date_older__"),
+]
+
+
+def get_entry_latest_timestamp(entry: DownloadEntry) -> Optional[datetime]:
+    """Return the latest datetime among added_at, completed_at, and last_tried_at."""
+    candidates: list[datetime] = []
+    for raw in (entry.added_at, entry.completed_at, entry.last_tried_at):
+        if not raw or not isinstance(raw, str):
+            continue
+        raw_s = raw.strip()
+        if not raw_s:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_s)
+            if dt.tzinfo is None:
+                dt = dt.astimezone()
+            else:
+                dt = dt.astimezone()
+            candidates.append(dt)
+        except (ValueError, TypeError):
+            continue
+    return max(candidates) if candidates else None
+
+
+def get_entry_date_category(entry: DownloadEntry, now_dt: Optional[datetime] = None) -> str:
+    """Classify download entry into Today, Yesterday, Last 7 Days, Last 30 Days, or Older."""
+    latest_dt = get_entry_latest_timestamp(entry)
+    if latest_dt is None:
+        return SECTION_DATE_OLDER
+
+    if now_dt is None:
+        now_dt = datetime.now().astimezone()
+
+    today = now_dt.date()
+    entry_date = latest_dt.date()
+    diff_days = (today - entry_date).days
+
+    if diff_days <= 0:
+        return SECTION_DATE_TODAY
+    elif diff_days == 1:
+        return SECTION_DATE_YESTERDAY
+    elif diff_days <= 7:
+        return SECTION_DATE_LAST_7_DAYS
+    elif diff_days <= 30:
+        return SECTION_DATE_LAST_30_DAYS
+    else:
+        return SECTION_DATE_OLDER
 
 
 class DownloadTableModel(QAbstractTableModel):
@@ -163,6 +227,7 @@ class DownloadTableModel(QAbstractTableModel):
         self._status_filter: Optional[set[str]] = None
         self._type_filter: Optional[set[str]] = None
         self._segregated_view: bool = False
+        self._segregated_mode: str = "status"
         self._collapsed_sections: set[str] = set()
 
     @property
@@ -228,14 +293,27 @@ class DownloadTableModel(QAbstractTableModel):
         self._rebuild_index()
         self.endResetModel()
 
-    def set_segregated_view(self, enabled: bool):
-        if self._segregated_view == enabled:
+    def set_segregated_view(self, enabled: bool, mode: Optional[str] = None):
+        if mode is not None and mode in ("status", "date"):
+            self._segregated_mode = mode
+        if self._segregated_view == enabled and mode is None:
             return
         self._segregated_view = enabled
         self._reapply_filter()
 
     def is_segregated_view(self) -> bool:
         return self._segregated_view
+
+    def set_segregated_mode(self, mode: str):
+        if mode not in ("status", "date"):
+            mode = "status"
+        if self._segregated_mode != mode:
+            self._segregated_mode = mode
+            if self._segregated_view:
+                self._reapply_filter()
+
+    def segregated_mode(self) -> str:
+        return self._segregated_mode
 
     def set_section_collapsed(self, section_id: str, collapsed: bool):
         if collapsed:
@@ -439,64 +517,67 @@ class DownloadTableModel(QAbstractTableModel):
             self._entries = filtered
             return
 
-        # Segregated view: group by Active, Seeding, Inactive
-        active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
-        seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
-        inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
+        if self._segregated_mode == "date":
+            # Segregated view: group by Today, Yesterday, Last 7 Days, Last 30 Days, Older
+            today_entries: list[DownloadEntry] = []
+            yesterday_entries: list[DownloadEntry] = []
+            last_7_days_entries: list[DownloadEntry] = []
+            last_30_days_entries: list[DownloadEntry] = []
+            older_entries: list[DownloadEntry] = []
+
+            now_dt = datetime.now().astimezone()
+            for e in filtered:
+                cat = get_entry_date_category(e, now_dt)
+                if cat == SECTION_DATE_TODAY:
+                    today_entries.append(e)
+                elif cat == SECTION_DATE_YESTERDAY:
+                    yesterday_entries.append(e)
+                elif cat in (SECTION_DATE_LAST_7_DAYS, "date_this_week"):
+                    last_7_days_entries.append(e)
+                elif cat in (SECTION_DATE_LAST_30_DAYS, "date_this_month"):
+                    last_30_days_entries.append(e)
+                else:
+                    older_entries.append(e)
+
+            groups = [
+                (SECTION_DATE_TODAY, "Today", today_entries, "__section_date_today__"),
+                (SECTION_DATE_YESTERDAY, "Yesterday", yesterday_entries, "__section_date_yesterday__"),
+                (SECTION_DATE_LAST_7_DAYS, "Last 7 Days", last_7_days_entries, "__section_date_last_7_days__"),
+                (SECTION_DATE_LAST_30_DAYS, "Last 30 Days", last_30_days_entries, "__section_date_last_30_days__"),
+                (SECTION_DATE_OLDER, "Older", older_entries, "__section_date_older__"),
+            ]
+        else:
+            # Segregated view: group by Active, Seeding, Inactive
+            active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
+            seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
+            inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
+
+            groups = [
+                (SECTION_ACTIVE, "Active", active_entries, "__section_active__"),
+                (SECTION_SEEDING, "Seeding", seeding_entries, "__section_seeding__"),
+                (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
+            ]
 
         if self._sort_column is not None:
-            active_entries.sort(
-                key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
-                reverse=reverse,
-            )
-            seeding_entries.sort(
-                key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
-                reverse=reverse,
-            )
-            inactive_entries.sort(
-                key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
-                reverse=reverse,
-            )
+            for _, _, group_entries, _ in groups:
+                group_entries.sort(
+                    key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                    reverse=reverse,
+                )
 
         entries: list[DownloadEntry] = []
-        # 1. Active Section
-        active_hdr = DownloadEntry(
-            id="__section_active__",
-            is_section_header=True,
-            section_id=SECTION_ACTIVE,
-            section_title="Active",
-            section_count=len(active_entries),
-            section_collapsed=(SECTION_ACTIVE in self._collapsed_sections),
-        )
-        entries.append(active_hdr)
-        if SECTION_ACTIVE not in self._collapsed_sections:
-            entries.extend(active_entries)
-
-        # 2. Seeding Section
-        seeding_hdr = DownloadEntry(
-            id="__section_seeding__",
-            is_section_header=True,
-            section_id=SECTION_SEEDING,
-            section_title="Seeding",
-            section_count=len(seeding_entries),
-            section_collapsed=(SECTION_SEEDING in self._collapsed_sections),
-        )
-        entries.append(seeding_hdr)
-        if SECTION_SEEDING not in self._collapsed_sections:
-            entries.extend(seeding_entries)
-
-        # 3. Inactive Section
-        inactive_hdr = DownloadEntry(
-            id="__section_inactive__",
-            is_section_header=True,
-            section_id=SECTION_INACTIVE,
-            section_title="Inactive",
-            section_count=len(inactive_entries),
-            section_collapsed=(SECTION_INACTIVE in self._collapsed_sections),
-        )
-        entries.append(inactive_hdr)
-        if SECTION_INACTIVE not in self._collapsed_sections:
-            entries.extend(inactive_entries)
+        for sec_id, title, group_entries, hdr_id in groups:
+            hdr = DownloadEntry(
+                id=hdr_id,
+                is_section_header=True,
+                section_id=sec_id,
+                section_title=title,
+                section_count=len(group_entries),
+                section_collapsed=(sec_id in self._collapsed_sections),
+            )
+            entries.append(hdr)
+            if sec_id not in self._collapsed_sections:
+                entries.extend(group_entries)
 
         self._entries = entries
 
@@ -896,10 +977,14 @@ class DownloadTableModel(QAbstractTableModel):
             if role == Qt.ItemDataRole.BackgroundRole:
                 return QColor("#1e2330")
             if role == Qt.ItemDataRole.ForegroundRole:
-                if entry.section_id == SECTION_ACTIVE:
+                if entry.section_id in (SECTION_ACTIVE, SECTION_DATE_TODAY):
                     return QColor(Colors.ACCENT)
-                elif entry.section_id == SECTION_SEEDING:
+                elif entry.section_id in (SECTION_SEEDING, SECTION_DATE_YESTERDAY):
                     return QColor(Colors.PURPLE)
+                elif entry.section_id in (SECTION_DATE_LAST_7_DAYS, "date_this_week"):
+                    return QColor("#ffb74d")
+                elif entry.section_id in (SECTION_DATE_LAST_30_DAYS, "date_this_month"):
+                    return QColor("#64b5f6")
                 else:
                     return QColor("#8fa0b5")
             if role == Qt.ItemDataRole.FontRole:

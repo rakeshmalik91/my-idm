@@ -82,7 +82,7 @@ commit after each features or set of fixes/enhancements
 - [x] in delete download popup, preselct the delete file checkbox
 - [x] remove the emoji for Stopped status
 - [x] in tools menu > add a feature to export selected downloads as csv. 2 columns - name, url/magnet
-- [x] add a segregated view toggle in view menu. when on downloads are segregated into 3 collapsible sections based on Active (fetching metadata, Queued, Downloading, Paused, Stalled, Error), Seeding, Inactive (Completed, Stopped, File not Found, Suspended). store the state of which section is collapsed in db. turn it on by default.
+- [x] add a segregated view toggle in view menu with 2 segregation modes: Status-based (Active, Seeding, Inactive) and Date-based (Today, Yesterday, Last 7 Days, Last 30 Days, Older based on latest of added, completed, last tried timestamps). Store active view mode and individual section collapse states in DB across app launches.
 
 ----------------------
 ### Torrent

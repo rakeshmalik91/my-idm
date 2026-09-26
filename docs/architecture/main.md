@@ -25,6 +25,7 @@ Technical documentation for developers working on the My-IDM codebase.
 - [Preferences & Configuration Architecture](#preferences--configuration-architecture)
 - [Dynamic Filename Resolution & Crash Resilience](#dynamic-filename-resolution--crash-resilience)
 - [GUI Architecture](#gui-architecture)
+- [Table Views & Segregation Subsystem](#table-views--segregation-subsystem)
 - [Key Design Decisions](#key-design-decisions)
 - [Adding New Features](#adding-new-features)
 
@@ -691,6 +692,22 @@ DownloadManager signals:
   threat_detected(str, str)
     → MainWindow._on_threat_detected → QMessageBox warning
 ```
+
+---
+
+## Table Views & Segregation Subsystem
+
+> **Canonical Architecture Document:** For detailed information on delegates, column rendering, section spanning, status/date algorithms, and auxiliary telemetry tables, see [`docs/architecture/table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md).
+
+My-IDM implements a modular, high-performance table view subsystem for displaying downloads:
+
+1. **Dual Grouping Modes (`DownloadTableModel`)**:
+   - **Status-Based**: Partitions downloads into `Active`, `Seeding`, and `Inactive` sections.
+   - **Date-Based**: Partitions downloads into `Today`, `Yesterday`, `Last 7 Days`, `Last 30 Days`, and `Older` based on the latest of `added_at`, `completed_at`, and `last_tried_at`.
+2. **Collapsible Section Spans**: Section header rows span across all 13 columns via `MainWindow._apply_table_spans()` and support single-click or double-click expand/collapse toggling (`▼` / `▶`).
+3. **Contextual Section Controls**: Header right-click context menu provides options to expand/collapse the selected section, expand/collapse all sections, and quickly switch grouping modes.
+4. **State Persistence**: The active segregation mode (`status` vs `date`), enabled flag (`segregated_view_enabled`), and each section's collapsed state (`segregated_{sec_id}_collapsed`) are persisted in SQLite and restored automatically on next launch.
+5. **Details Panel Auxiliary Views**: Four dedicated tables in the bottom details panel render multi-file torrent priorities, swarm peer diagnostics, tracker statuses, and HTTP multi-segment chunks.
 
 ---
 

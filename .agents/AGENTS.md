@@ -20,6 +20,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Database & Persistence** | [`docs/architecture/database.md`](file:///d:/Projects/my-idm/docs/architecture/database.md) | SQLite schema specification, constraints, indexing, `metadata_json` contract, migrations, and self-healing. |
 | **Browser Integration** | [`docs/architecture/browser-integration.md`](file:///d:/Projects/my-idm/docs/architecture/browser-integration.md) | Chromium & Mozilla Firefox Manifest V3 extension, loopback REST server (127.0.0.1:19582), automated download interception, and cookie preservation. |
 | **Window & System Tray** | [`docs/architecture/window-system-tray.md`](file:///d:/Projects/my-idm/docs/architecture/window-system-tray.md) | Windows system tray icon lifecycle, minimize-to-tray, close-to-tray, desktop completion toast notifications, and preferences reorganization. |
+| **Table Views & Segregation** | [`docs/architecture/table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md) | Table model architecture, custom delegates, status/date segregation algorithms, section header spans, context menus, and telemetry tables. |
 
 ---
 

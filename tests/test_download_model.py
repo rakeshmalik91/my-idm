@@ -736,8 +736,119 @@ class TestModelFiltering(unittest.TestCase):
         data_after = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
         self.assertEqual(data_after["progress"], 100.0)
 
+    def test_get_entry_latest_timestamp_and_date_categorization(self):
+        """Latest timestamp resolves correctly across added, completed, and last tried timestamps."""
+        from datetime import datetime, timezone, timedelta
+        from my_idm.download_model import (
+            get_entry_latest_timestamp,
+            get_entry_date_category,
+            SECTION_DATE_TODAY,
+            SECTION_DATE_YESTERDAY,
+            SECTION_DATE_LAST_7_DAYS,
+            SECTION_DATE_LAST_30_DAYS,
+            SECTION_DATE_THIS_WEEK,
+            SECTION_DATE_THIS_MONTH,
+            SECTION_DATE_OLDER,
+        )
+
+        now = datetime.now().astimezone()
+        now_iso = now.isoformat()
+        yesterday_iso = (now - timedelta(days=1)).isoformat()
+        four_days_ago_iso = (now - timedelta(days=4)).isoformat()
+        twenty_days_ago_iso = (now - timedelta(days=20)).isoformat()
+        sixty_days_ago_iso = (now - timedelta(days=60)).isoformat()
+
+        # Added 60 days ago, but last tried today -> Today
+        e_today = DownloadEntry(
+            id="t1",
+            url="https://example.com/1",
+            added_at=sixty_days_ago_iso,
+            last_tried_at=now_iso,
+        )
+        self.assertEqual(get_entry_date_category(e_today, now_dt=now), SECTION_DATE_TODAY)
+
+        # Added 60 days ago, completed yesterday -> Yesterday
+        e_yest = DownloadEntry(
+            id="t2",
+            url="https://example.com/2",
+            added_at=sixty_days_ago_iso,
+            completed_at=yesterday_iso,
+        )
+        self.assertEqual(get_entry_date_category(e_yest, now_dt=now), SECTION_DATE_YESTERDAY)
+
+        # 4 days ago -> Last 7 Days
+        e_week = DownloadEntry(id="t3", url="https://example.com/3", added_at=four_days_ago_iso)
+        self.assertEqual(get_entry_date_category(e_week, now_dt=now), SECTION_DATE_LAST_7_DAYS)
+
+        # 20 days ago -> Last 30 Days
+        e_month = DownloadEntry(id="t4", url="https://example.com/4", added_at=twenty_days_ago_iso)
+        self.assertEqual(get_entry_date_category(e_month, now_dt=now), SECTION_DATE_LAST_30_DAYS)
+
+        # 60 days ago -> Older
+        e_older = DownloadEntry(id="t5", url="https://example.com/5", added_at=sixty_days_ago_iso)
+        self.assertEqual(get_entry_date_category(e_older, now_dt=now), SECTION_DATE_OLDER)
+
+        # No timestamps -> Older
+        e_empty = DownloadEntry(id="t6", url="https://example.com/6")
+        self.assertEqual(get_entry_date_category(e_empty, now_dt=now), SECTION_DATE_OLDER)
+
+    def test_segregated_view_date_mode_and_collapsing(self):
+        """Date-based segregated view groups entries into Today, Yesterday, Last 7 Days, Last 30 Days, Older."""
+        from datetime import datetime, timedelta
+        from my_idm.download_model import (
+            SECTION_DATE_TODAY,
+            SECTION_DATE_YESTERDAY,
+            SECTION_DATE_LAST_7_DAYS,
+            SECTION_DATE_LAST_30_DAYS,
+            SECTION_DATE_OLDER,
+        )
+
+        now = datetime.now().astimezone()
+        e_today = DownloadEntry(id="d-today", url="http://a", filename="a", added_at=now.isoformat())
+        e_yesterday = DownloadEntry(id="d-yest", url="http://b", filename="b", added_at=(now - timedelta(days=1)).isoformat())
+        e_week = DownloadEntry(id="d-week", url="http://c", filename="c", added_at=(now - timedelta(days=3)).isoformat())
+        e_month = DownloadEntry(id="d-month", url="http://d", filename="d", added_at=(now - timedelta(days=15)).isoformat())
+        e_older = DownloadEntry(id="d-older", url="http://e", filename="e", added_at=(now - timedelta(days=50)).isoformat())
+
+        self.model.load_entries([e_today, e_yesterday, e_week, e_month, e_older])
+
+        # Enable segregated view in date mode
+        self.model.set_segregated_view(True, mode="date")
+        self.assertTrue(self.model.is_segregated_view())
+        self.assertEqual(self.model.segregated_mode(), "date")
+
+        # 5 section headers + 5 items = 10 rows
+        self.assertEqual(self.model.rowCount(), 10)
+        hdrs = self.model.get_section_header_row_indices()
+        self.assertEqual(len(hdrs), 5)
+
+        # Check section header titles
+        titles = [self.model._entries[i].section_title for i in hdrs]
+        self.assertEqual(titles, ["Today", "Yesterday", "Last 7 Days", "Last 30 Days", "Older"])
+
+        # Collapse "Older" section
+        self.model.set_section_collapsed(SECTION_DATE_OLDER, True)
+        self.assertTrue(self.model.is_section_collapsed(SECTION_DATE_OLDER))
+        self.assertEqual(self.model.rowCount(), 9)
+
+        # Collapse "Today" section
+        self.model.set_section_collapsed(SECTION_DATE_TODAY, True)
+        self.assertEqual(self.model.rowCount(), 8)
+
+        # Uncollapse both
+        self.model.set_section_collapsed(SECTION_DATE_OLDER, False)
+        self.model.set_section_collapsed(SECTION_DATE_TODAY, False)
+        self.assertEqual(self.model.rowCount(), 10)
+
+        # Switch back to status mode
+        self.model.set_segregated_mode("status")
+        self.assertEqual(self.model.segregated_mode(), "status")
+        # 3 status headers (Active, Seeding, Inactive) + 5 items = 8 rows
+        self.assertEqual(self.model.rowCount(), 8)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

@@ -12,6 +12,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF, QEvent, Signal
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QFont,
     QGuiApplication,
@@ -288,12 +289,28 @@ class MainWindow(QMainWindow):
         self._model.modelReset.connect(self._apply_table_spans)
         self._model.layoutChanged.connect(self._apply_table_spans)
 
-        # Segregated view: disabled by default, state persisted in db
+        # Segregated view: disabled by default, state and mode persisted in db
         self._segregated_view_enabled = bool(self._manager.db.get_ui_state("segregated_view_enabled", False))
-        for sec_id in ("active", "seeding", "inactive"):
+        self._segregated_view_mode = str(self._manager.db.get_ui_state("segregated_view_mode", "status"))
+        if self._segregated_view_mode not in ("status", "date"):
+            self._segregated_view_mode = "status"
+
+        all_sec_ids = (
+            "active", "seeding", "inactive",
+            "date_today", "date_yesterday",
+            "date_last_7_days", "date_this_week",
+            "date_last_30_days", "date_this_month",
+            "date_older",
+        )
+        for sec_id in all_sec_ids:
             if self._manager.db.get_ui_state(f"segregated_{sec_id}_collapsed", False):
-                self._model.set_section_collapsed(sec_id, True)
-        self._model.set_segregated_view(self._segregated_view_enabled)
+                canonical_sec_id = sec_id
+                if sec_id == "date_this_week":
+                    canonical_sec_id = "date_last_7_days"
+                elif sec_id == "date_this_month":
+                    canonical_sec_id = "date_last_30_days"
+                self._model.set_section_collapsed(canonical_sec_id, True)
+        self._model.set_segregated_view(self._segregated_view_enabled, mode=self._segregated_view_mode)
         self._apply_table_spans()
 
         # Move Col.SOURCE_DOMAIN and Col.FILE_NAME to the end of the table by default
@@ -632,11 +649,32 @@ class MainWindow(QMainWindow):
 
         # View menu
         view_menu = menubar.addMenu("&View")
-        self._act_segregated_view = QAction(_create_emoji_icon("🗂️"), "Segregated View", self)
+        self._menu_segregated_view = view_menu.addMenu(_create_emoji_icon("🗂️"), "Segregated View")
+
+        self._act_segregated_view = QAction("On", self)
         self._act_segregated_view.setCheckable(True)
         self._act_segregated_view.setChecked(self._segregated_view_enabled)
         self._act_segregated_view.toggled.connect(self._on_toggle_segregated_view)
-        view_menu.addAction(self._act_segregated_view)
+        self._menu_segregated_view.addAction(self._act_segregated_view)
+
+        self._menu_segregated_view.addSeparator()
+
+        self._seg_mode_group = QActionGroup(self)
+        self._seg_mode_group.setExclusive(True)
+
+        self._act_seg_by_status = QAction("Status (Active / Seeding / Inactive)", self)
+        self._act_seg_by_status.setCheckable(True)
+        self._act_seg_by_status.setChecked(self._segregated_view_mode == "status")
+        self._act_seg_by_status.triggered.connect(lambda: self._set_segregation_mode("status"))
+        self._seg_mode_group.addAction(self._act_seg_by_status)
+        self._menu_segregated_view.addAction(self._act_seg_by_status)
+
+        self._act_seg_by_date = QAction("Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)", self)
+        self._act_seg_by_date.setCheckable(True)
+        self._act_seg_by_date.setChecked(self._segregated_view_mode == "date")
+        self._act_seg_by_date.triggered.connect(lambda: self._set_segregation_mode("date"))
+        self._seg_mode_group.addAction(self._act_seg_by_date)
+        self._menu_segregated_view.addAction(self._act_seg_by_date)
 
         view_menu.addAction(self._act_toggle_details)
         view_menu.addSeparator()
@@ -1203,13 +1241,34 @@ class MainWindow(QMainWindow):
             return
         self._on_open_file()
 
+    def _set_segregation_mode(self, mode: str):
+        if mode not in ("status", "date"):
+            mode = "status"
+        self._segregated_view_mode = mode
+        self._manager.db.set_ui_state("segregated_view_mode", mode)
+        if hasattr(self, "_act_seg_by_status"):
+            self._act_seg_by_status.setChecked(mode == "status")
+        if hasattr(self, "_act_seg_by_date"):
+            self._act_seg_by_date.setChecked(mode == "date")
+
+        if not self._segregated_view_enabled:
+            self._act_segregated_view.setChecked(True)
+        else:
+            self._model.set_segregated_mode(mode)
+            self._apply_table_spans()
+            mode_str = "Status" if mode == "status" else "Date"
+            self._status_label.setText(f"Segregated view grouped by {mode_str}")
+
     def _on_toggle_segregated_view(self, checked: bool):
         self._segregated_view_enabled = checked
         self._manager.db.set_ui_state("segregated_view_enabled", checked)
-        self._model.set_segregated_view(checked)
+        self._model.set_segregated_view(checked, mode=self._segregated_view_mode)
         self._apply_table_spans()
-        state_str = "enabled" if checked else "disabled"
-        self._status_label.setText(f"Segregated view {state_str}")
+        mode_str = "Status" if self._segregated_view_mode == "status" else "Date"
+        if checked:
+            self._status_label.setText(f"Segregated view enabled ({mode_str})")
+        else:
+            self._status_label.setText("Segregated view disabled")
 
     def _on_export_selected_csv(self):
         selected_ids = self._selected_ids()
@@ -1353,22 +1412,41 @@ class MainWindow(QMainWindow):
                 act_this.triggered.connect(_toggle_this)
                 sec_menu.addAction(act_this)
                 sec_menu.addSeparator()
+                current_mode = self._model.segregated_mode()
+                if current_mode == "status":
+                    active_sec_ids = ("active", "seeding", "inactive")
+                else:
+                    active_sec_ids = (
+                        "date_today", "date_yesterday", "date_last_7_days", "date_last_30_days", "date_older"
+                    )
+
                 act_expand_all = QAction("Expand All Sections", self)
                 def _expand_all():
-                    for sid in ("active", "seeding", "inactive"):
+                    for sid in active_sec_ids:
                         self._model.set_section_collapsed(sid, False)
                         self._manager.db.set_ui_state(f"segregated_{sid}_collapsed", False)
                     self._apply_table_spans()
                 act_expand_all.triggered.connect(_expand_all)
                 sec_menu.addAction(act_expand_all)
+
                 act_collapse_all = QAction("Collapse All Sections", self)
                 def _collapse_all():
-                    for sid in ("active", "seeding", "inactive"):
+                    for sid in active_sec_ids:
                         self._model.set_section_collapsed(sid, True)
                         self._manager.db.set_ui_state(f"segregated_{sid}_collapsed", True)
                     self._apply_table_spans()
                 act_collapse_all.triggered.connect(_collapse_all)
                 sec_menu.addAction(act_collapse_all)
+
+                sec_menu.addSeparator()
+                if current_mode == "status":
+                    act_switch = QAction("Switch to Date Grouping", self)
+                    act_switch.triggered.connect(lambda: self._set_segregation_mode("date"))
+                else:
+                    act_switch = QAction("Switch to Status Grouping", self)
+                    act_switch.triggered.connect(lambda: self._set_segregation_mode("status"))
+                sec_menu.addAction(act_switch)
+
                 sec_menu.exec(self._table.viewport().mapToGlobal(pos))
                 return
 

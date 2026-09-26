@@ -137,13 +137,21 @@ Rechecking verifies existing files:
 
 ### Segregated View & Collapsible Sections
 
-1. Toggle **View → 🗂️ Segregated View** from the menu bar.
-2. When enabled, downloads are segregated into 3 collapsible sections:
-   - **Active**: Items in `fetching metadata`, `queued`, `downloading`, `paused`, `stalled`, or `error` states.
-   - **Seeding**: Items actively seeding in the BitTorrent swarm.
-   - **Inactive**: Items in `completed`, `stopped`, `file_not_found`, or `suspended` states.
-3. Click or double-click any section header to collapse or expand it (`▼` / `▶`).
-4. Section collapse states and the segregated view toggle are saved and restored automatically from the database.
+1. Toggle **View → 🗂️ Segregated View → On** from the menu bar to enable or disable sectioned partitioning.
+2. Select the grouping strategy directly under **View → 🗂️ Segregated View**:
+   - **Status Grouping**: Segregates downloads into 3 collapsible sections:
+     - **Active**: Items in `fetching metadata`, `queued`, `downloading`, `paused`, `stalled`, or `error` states.
+     - **Seeding**: Items actively seeding in the BitTorrent swarm.
+     - **Inactive**: Items in `completed`, `stopped`, `file_not_found`, or `suspended` states.
+   - **Date Grouping**: Segregates downloads based on the latest of their `added_at`, `completed_at`, and `last_tried_at` timestamps into 5 collapsible sections:
+     - **Today**: Active or completed today.
+     - **Yesterday**: Active or completed yesterday.
+     - **Last 7 Days**: Active or completed within the last 7 days.
+     - **Last 30 Days**: Active or completed within the last 30 days.
+     - **Older**: Older downloads or downloads without timestamps.
+3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
+4. Right-click any section header to expand/collapse all sections or quickly switch between Status and Date grouping.
+5. The active segregation mode (`status` or `date`), enabled state, and individual collapsed section states are persisted in SQLite and restored automatically on next launch.
 
 ### Context Menu
 
@@ -461,14 +469,20 @@ The download list supports full column sorting:
   - Completed downloads sort above uncompleted downloads when sorting by Completed date.
   - New downloads automatically insert into their proper sorted position without resetting the view.
 
-### Resizing Columns
+### Resizing Columns & Leaf-Node Path Shortening
 
 All table columns are interactively resizable:
 - Hover your mouse over the vertical divider line between any two column headers.
 - Click and drag to adjust column widths to your preference.
 - Your customized column widths are automatically saved and restored on subsequent application launches.
+- **Smart Path Shortening**: In the **Save Path** column, when resized to narrower widths, paths automatically shorten while prioritizing leaf folders (e.g. `D:/.../TargetFolder` instead of cutting off the folder name).
 
----
+### Resetting the View
+
+If you ever wish to restore the default layout:
+- Select **View → 🔄 Reset View** from the menu bar.
+- This immediately resets all column widths to defaults, unhides any hidden columns, clears all status/type filters, and returns sorting to Date Added descending.
+
 
 ## Backlog Files
 

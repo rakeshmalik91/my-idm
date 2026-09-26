@@ -341,18 +341,42 @@ Table model backed by a list of `DownloadEntry` objects. The `SOURCE_DOMAIN` col
 | `load_entries` | `(entries: list[DownloadEntry]) → None` | Full model reset with automatic sort application |
 | `add_entry` | `(entry: DownloadEntry) → None` | Inserts row in correct sorted position |
 | `remove_entry` | `(download_id: str) → None` | Remove row by ID |
-| `get_entry` | `(row: int) → DownloadEntry | None` | Get entry by row index |
+| `get_entry` | `(row: int) → DownloadEntry | None` | Get entry by row index (returns None for section headers) |
 | `get_entry_by_id` | `(download_id: str) → DownloadEntry | None` | Get entry by ID |
-| `get_selected_ids` | `(indexes: list[QModelIndex]) → list[str]` | Extract unique IDs from selection |
+| `get_selected_ids` | `(indexes: list[QModelIndex]) → list[str]` | Extract unique non-header download IDs from selection |
 | `update_filename` | `(download_id: str, filename: str) → None` | Update entry filename and file_path dynamically |
 | `update_progress` | `(download_id, downloaded, total, speed, eta, seeds, peers, upload_speed) → None` | Efficient partial update |
 | `update_status` | `(download_id, status, error_msg) → None` | Status and color update |
 | `refresh_entry` | `(download_id, entry) → None` | Full row refresh |
+| `set_segregated_view` | `(enabled: bool, mode: str | None = None) → None` | Toggle segregated view and optionally switch grouping mode |
+| `is_segregated_view` | `() → bool` | Returns True if segregated view is enabled |
+| `set_segregated_mode` | `(mode: str) → None` | Set active segregation grouping mode (`"status"` or `"date"`) |
+| `segregated_mode` | `() → str` | Returns currently active grouping mode (`"status"` or `"date"`) |
+| `set_section_collapsed` | `(section_id: str, collapsed: bool) → None` | Set collapsed state for a section ID |
+| `is_section_collapsed` | `(section_id: str) → bool` | Returns True if specified section ID is collapsed |
+| `is_section_header_row` | `(row: int) → bool` | Returns True if the specified row is a section header |
+| `get_section_header_row_indices` | `() → list[int]` | Returns visual row indices of all active section headers |
+| `toggle_section_collapsed` | `(row: int) → tuple[str, bool] | None` | Toggles collapsed state for header at row index |
+
+### Section Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `SECTION_ACTIVE` | `"active"` | Status mode: Active transfers header |
+| `SECTION_SEEDING` | `"seeding"` | Status mode: Seeding transfers header |
+| `SECTION_INACTIVE` | `"inactive"` | Status mode: Inactive/completed transfers header |
+| `SECTION_DATE_TODAY` | `"date_today"` | Date mode: Today header |
+| `SECTION_DATE_YESTERDAY` | `"date_yesterday"` | Date mode: Yesterday header |
+| `SECTION_DATE_LAST_7_DAYS` | `"date_last_7_days"` | Date mode: Last 7 Days header (alias: `SECTION_DATE_THIS_WEEK`) |
+| `SECTION_DATE_LAST_30_DAYS` | `"date_last_30_days"` | Date mode: Last 30 Days header (alias: `SECTION_DATE_THIS_MONTH`) |
+| `SECTION_DATE_OLDER` | `"date_older"` | Date mode: Older / dateless header |
 
 ### Helper Functions
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
+| `get_entry_latest_timestamp` | `(entry: DownloadEntry) → datetime | None` | Returns the latest datetime among added_at, completed_at, and last_tried_at |
+| `get_entry_date_category` | `(entry: DownloadEntry, now_dt: datetime | None = None) → str` | Classifies entry into Today, Yesterday, Last 7 Days, Last 30 Days, or Older |
 | `_format_speed` | `(bps: float) → str` | e.g. `"1.5 MiB/s"` or `"—"` |
 | `_format_eta` | `(seconds: float) → str` | e.g. `"5m 30s"` or `"2h 15m"` |
 | `_format_time` | `(iso_str: str) → str` | ISO 8601 → `"YYYY-MM-DD HH:MM"` (local time) |

@@ -862,6 +862,13 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.db.add_download(e_inact)
         self.win._load_history()
 
+        # Menu structure verification
+        self.assertEqual(self.win._act_segregated_view.text(), "On")
+        menu_actions = self.win._menu_segregated_view.actions()
+        self.assertIn(self.win._act_segregated_view, menu_actions)
+        self.assertIn(self.win._act_seg_by_status, menu_actions)
+        self.assertIn(self.win._act_seg_by_date, menu_actions)
+
         # Turn on segregated view
         self.win._act_segregated_view.setChecked(True)
         self.assertTrue(self.win._model.is_segregated_view())
@@ -895,6 +902,66 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.win._act_segregated_view.setChecked(False)
         self.assertFalse(self.win._model.is_segregated_view())
         self.assertEqual(self.win._model.rowCount(), 3)
+
+    def test_segregated_view_date_mode_and_persistence(self):
+        """Date-based segregated view groups by Today, Yesterday, Last 7 Days, Last 30 Days, Older and persists settings."""
+        from datetime import datetime, timedelta
+
+        now = datetime.now().astimezone()
+        e_today = DownloadEntry(
+            id="d-today-1",
+            url="https://example.com/1",
+            filename="today.zip",
+            status="completed",
+            added_at=now.isoformat(),
+        )
+        e_yest = DownloadEntry(
+            id="d-yest-1",
+            url="https://example.com/2",
+            filename="yest.zip",
+            status="completed",
+            added_at=(now - timedelta(days=1)).isoformat(),
+        )
+        e_older = DownloadEntry(
+            id="d-older-1",
+            url="https://example.com/3",
+            filename="older.zip",
+            status="completed",
+            added_at=(now - timedelta(days=60)).isoformat(),
+        )
+        self.db.add_download(e_today)
+        self.db.add_download(e_yest)
+        self.db.add_download(e_older)
+        self.win._load_history()
+
+        # Switch to Date segregation via menu action
+        self.win._act_seg_by_date.trigger()
+        self.assertTrue(self.win._model.is_segregated_view())
+        self.assertEqual(self.win._model.segregated_mode(), "date")
+        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "date")
+        self.assertTrue(self.db.get_ui_state("segregated_view_enabled"))
+
+        # 5 headers + 3 items = 8 rows
+        self.assertEqual(self.win._model.rowCount(), 8)
+
+        # Collapse "Last 7 Days" and "Older" sections
+        self.win._model.set_section_collapsed("date_last_7_days", True)
+        self.db.set_ui_state("segregated_date_last_7_days_collapsed", True)
+        self.win._model.set_section_collapsed("date_older", True)
+        self.db.set_ui_state("segregated_date_older_collapsed", True)
+        self.assertEqual(self.win._model.rowCount(), 7)
+
+        # Create a new MainWindow with same db to verify next launch persistence
+        win2 = MainWindow(self.win._manager)
+        try:
+            self.assertTrue(win2._segregated_view_enabled)
+            self.assertEqual(win2._segregated_view_mode, "date")
+            self.assertTrue(win2._model.is_segregated_view())
+            self.assertEqual(win2._model.segregated_mode(), "date")
+            self.assertTrue(win2._model.is_section_collapsed("date_last_7_days"))
+            self.assertTrue(win2._model.is_section_collapsed("date_older"))
+        finally:
+            win2.close()
 
     def test_tools_menu_animepahe_actions(self):
         """Tools menu contains actions to launch AnimePahe GUI and External Tools settings."""
