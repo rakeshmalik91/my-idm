@@ -86,7 +86,7 @@ commit after each features or set of fixes/enhancements
 
 ----------------------
 ### Torrent
-- [x] UNVERIFIED - Torrent in "fetching metadata" state for more than 1 (configurable) day should go to Suspended state. Suspended state shouldnt be considered active, shouldnt have an order. timer calculation should be regardless of app restart. Manual resume or successful progress should reset the timer.
+- [x] Torrent in "fetching metadata" state for more than 1 (configurable) day should go to Suspended state. Suspended state shouldnt be considered active, shouldnt have an order. timer calculation should be regardless of app restart. Manual resume or successful progress should reset the timer.
 - [x] for completed torrents, in details panel, files are showing Pending status
 - [x] double clicking a file in details panel should open it
 - [x] max parallel download limit not working, ones that are limited should be in queued state and not downloading. queued ones should automatically move to downloading when another one finishes/paused/stopped/deleted etc or limit is increased. verify ordering, last added download should be processed last. order 1 is for high priority, higher number for lower priority. downloads sometimes progressing even in paused state.
@@ -129,22 +129,19 @@ commit after each features or set of fixes/enhancements
 ----------------------
 ### Browser Integration
 
-#### Chrome Integration
-- [x] Architecture design & sequence documentation ([docs/architecture/chrome-integration.md](docs/architecture/chrome-integration.md))
-- [x] Local loopback REST server (`127.0.0.1:19582`) in `my_idm/browser_server.py`
-- [x] Manifest V3 unpacked Chrome extension (`browser_extension/`)
-  - [x] Intercept downloads (`chrome.downloads.onDeterminingFilename`)
-  - [x] Session cookie extraction (`chrome.cookies.getAll()`)
-  - [x] Context menu: "Download with My-IDM"
-  - [x] Bypassed file extensions & server fallback
-- [x] Preferences GUI tab for browser integration (enable toggle, port, open extension folder, test connection)
-- [x] Unit & integration tests for loopback server & payload handling (`tests/test_browser_integration.py`)
-- [ ] allow .torrent files to be caught from browser and add it as a torrent, have seperate config to control it
-- [ ] add config to control min fixe size to catch
-- [ ] add windows notification when a file is caught from browser extension
+#### Chrome
+- [x] chrome integration
+- [x] allow .torrent files to be caught from browser and add it as a torrent, have seperate config to control it
+- [x] add config to control min fixed size to catch
+- [x] add windows notification when a file is caught from browser extension
+- [x] config values should be shared between extension & my-idm ui
+- [x] capture clicking on magnet URL from browser, have this as a config on both extension and my-idm ui
 
-#### Mozilla Integration
-- [ ] Mozilla Firefox WebExtension manifest compatibility
+#### Mozilla
+- [ ] UNVERIFIED - mozilla integration
+
+#### Edge
+- [ ] UNVERIFIED - edge integration
 
 ----------------------
 ### Tools
@@ -157,6 +154,7 @@ commit after each features or set of fixes/enhancements
   - [x] add a button in tools menu to launch animepahe downloader gui
   - [x] show footer badge while background CLI scraper is active (status popup for logs, stop/start, GUI, settings)
   - [x] active console log bottom panel (stream logs in real-time when clicking console log from footer while animepahe cli is active)
+  - [x] download new anime from preferences window > animepahe, using url & optional episode range
 
 #### Youtube scraper
 - [ ] TODO

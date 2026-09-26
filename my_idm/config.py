@@ -415,11 +415,19 @@ class ExternalToolsConfig:
 
     animepahe_repo_path: str = ""
     animepahe_launch_on_startup: bool = False
+    animepahe_last_url: str = ""
+    animepahe_last_episodes: str = ""
+    animepahe_last_quality: str = "Auto"
+    animepahe_last_lang: str = "Auto"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "animepahe_repo_path": self.animepahe_repo_path,
             "animepahe_launch_on_startup": self.animepahe_launch_on_startup,
+            "animepahe_last_url": self.animepahe_last_url,
+            "animepahe_last_episodes": self.animepahe_last_episodes,
+            "animepahe_last_quality": self.animepahe_last_quality,
+            "animepahe_last_lang": self.animepahe_last_lang,
         }
 
     @classmethod
@@ -427,6 +435,10 @@ class ExternalToolsConfig:
         return cls(
             animepahe_repo_path=str(data.get("animepahe_repo_path", "")),
             animepahe_launch_on_startup=bool(data.get("animepahe_launch_on_startup", False)),
+            animepahe_last_url=str(data.get("animepahe_last_url", "")),
+            animepahe_last_episodes=str(data.get("animepahe_last_episodes", "")),
+            animepahe_last_quality=str(data.get("animepahe_last_quality", "Auto")),
+            animepahe_last_lang=str(data.get("animepahe_last_lang", "Auto")),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -436,6 +448,10 @@ class ExternalToolsConfig:
         settings.beginGroup("ExternalTools")
         settings.setValue("animepahe_repo_path", self.animepahe_repo_path)
         settings.setValue("animepahe_launch_on_startup", self.animepahe_launch_on_startup)
+        settings.setValue("animepahe_last_url", self.animepahe_last_url)
+        settings.setValue("animepahe_last_episodes", self.animepahe_last_episodes)
+        settings.setValue("animepahe_last_quality", self.animepahe_last_quality)
+        settings.setValue("animepahe_last_lang", self.animepahe_last_lang)
         settings.endGroup()
 
     @classmethod
@@ -446,6 +462,10 @@ class ExternalToolsConfig:
         settings.beginGroup("ExternalTools")
         animepahe_repo_path = settings.value("animepahe_repo_path", "", type=str)
         animepahe_launch_on_startup = settings.value("animepahe_launch_on_startup", False, type=bool)
+        animepahe_last_url = settings.value("animepahe_last_url", "", type=str)
+        animepahe_last_episodes = settings.value("animepahe_last_episodes", "", type=str)
+        animepahe_last_quality = settings.value("animepahe_last_quality", "Auto", type=str)
+        animepahe_last_lang = settings.value("animepahe_last_lang", "Auto", type=str)
         settings.endGroup()
 
         # Auto-detect default if not explicitly configured
@@ -462,6 +482,10 @@ class ExternalToolsConfig:
         return cls(
             animepahe_repo_path=str(animepahe_repo_path or ""),
             animepahe_launch_on_startup=bool(animepahe_launch_on_startup),
+            animepahe_last_url=str(animepahe_last_url or ""),
+            animepahe_last_episodes=str(animepahe_last_episodes or ""),
+            animepahe_last_quality=str(animepahe_last_quality or "Auto"),
+            animepahe_last_lang=str(animepahe_last_lang or "Auto"),
         )
 
     def get_effective_repo_path(self) -> str:
@@ -504,7 +528,10 @@ class BrowserIntegrationConfig:
     port: int = 19582
     host: str = "127.0.0.1"
     intercept_all: bool = True
-    bypassed_extensions: list[str] = field(default_factory=lambda: [".torrent", ".crx"])
+    intercept_torrent_files: bool = True
+    intercept_magnet_links: bool = True
+    min_file_size_kb: int = 0  # Minimum file size in KB to intercept (0 = no minimum)
+    bypassed_extensions: list[str] = field(default_factory=lambda: [".crx"])
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -512,6 +539,9 @@ class BrowserIntegrationConfig:
             "port": self.port,
             "host": self.host,
             "intercept_all": self.intercept_all,
+            "intercept_torrent_files": self.intercept_torrent_files,
+            "intercept_magnet_links": self.intercept_magnet_links,
+            "min_file_size_kb": self.min_file_size_kb,
             "bypassed_extensions": list(self.bypassed_extensions),
         }
 
@@ -522,7 +552,10 @@ class BrowserIntegrationConfig:
             port=int(data.get("port", 19582)),
             host=str(data.get("host", "127.0.0.1")),
             intercept_all=bool(data.get("intercept_all", True)),
-            bypassed_extensions=list(data.get("bypassed_extensions", [".torrent", ".crx"])),
+            intercept_torrent_files=bool(data.get("intercept_torrent_files", True)),
+            intercept_magnet_links=bool(data.get("intercept_magnet_links", True)),
+            min_file_size_kb=int(data.get("min_file_size_kb", 0)),
+            bypassed_extensions=list(data.get("bypassed_extensions", [".crx"])),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -534,6 +567,9 @@ class BrowserIntegrationConfig:
         settings.setValue("port", self.port)
         settings.setValue("host", self.host)
         settings.setValue("intercept_all", self.intercept_all)
+        settings.setValue("intercept_torrent_files", self.intercept_torrent_files)
+        settings.setValue("intercept_magnet_links", self.intercept_magnet_links)
+        settings.setValue("min_file_size_kb", self.min_file_size_kb)
         settings.setValue("bypassed_extensions", ",".join(self.bypassed_extensions))
         settings.endGroup()
 
@@ -547,15 +583,21 @@ class BrowserIntegrationConfig:
         port = settings.value("port", 19582, type=int)
         host = settings.value("host", "127.0.0.1", type=str)
         intercept_all = settings.value("intercept_all", True, type=bool)
-        bypassed_raw = settings.value("bypassed_extensions", ".torrent,.crx", type=str)
+        intercept_torrent_files = settings.value("intercept_torrent_files", True, type=bool)
+        intercept_magnet_links = settings.value("intercept_magnet_links", True, type=bool)
+        min_file_size_kb = settings.value("min_file_size_kb", 0, type=int)
+        bypassed_raw = settings.value("bypassed_extensions", ".crx", type=str)
         settings.endGroup()
 
-        bypassed = [ext.strip() for ext in bypassed_raw.split(",") if ext.strip()] if bypassed_raw else [".torrent", ".crx"]
+        bypassed = [ext.strip() for ext in bypassed_raw.split(",") if ext.strip()] if bypassed_raw else [".crx"]
         return cls(
             enabled=bool(enabled),
             port=int(port) if port > 0 else 19582,
             host=str(host or "127.0.0.1"),
             intercept_all=bool(intercept_all),
+            intercept_torrent_files=bool(intercept_torrent_files),
+            intercept_magnet_links=bool(intercept_magnet_links),
+            min_file_size_kb=int(min_file_size_kb) if min_file_size_kb >= 0 else 0,
             bypassed_extensions=bypassed,
         )
 

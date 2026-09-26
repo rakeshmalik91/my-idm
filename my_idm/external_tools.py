@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -112,10 +113,16 @@ def launch_animepahe_cli(
     config: ExternalToolsConfig,
     my_idm_dir: Optional[str] = None,
     container_hwnd: Optional[int] = None,
+    url: Optional[str] = None,
+    episodes: Optional[str] = None,
+    quality: Optional[str] = None,
+    lang: Optional[str] = None,
+    extra_args: Optional[list[str]] = None,
 ) -> Tuple[bool, str, Optional[subprocess.Popen]]:
     """
     Launch AnimePahe scraper in background CLI mode.
     Outputs stdout and stderr into console_log.txt and forwards items to My-IDM backlog.
+    Optionally targets a specific anime URL and episode range.
     """
     repo = config.get_effective_repo_path()
     if not repo or not os.path.isdir(repo):
@@ -132,6 +139,19 @@ def launch_animepahe_cli(
     cmd = [sys.executable, "-u", str(script), "--my-idm"]
     if my_idm_dir:
         cmd.extend(["--my-idm-dir", str(my_idm_dir)])
+    if url:
+        cmd.extend(["--url", url.strip()])
+    if episodes:
+        clean_ep = re.sub(r"\s+", "", episodes.strip())
+        cmd.extend(["-ep", clean_ep])
+    if quality and quality.lower() != "auto":
+        cmd.extend(["-q", quality.strip()])
+    if lang and lang.lower() != "auto":
+        l_flag = "en" if "dub" in lang.lower() or lang.lower() == "en" else "jap"
+        cmd.extend(["-l", l_flag])
+    cmd.append("-y")  # Skip interactive prompts in background CLI
+    if extra_args:
+        cmd.extend(extra_args)
 
     console_log = config.get_console_log_path()
     console_log.parent.mkdir(parents=True, exist_ok=True)
@@ -250,10 +270,25 @@ def launch_animepahe_gui(config: ExternalToolsConfig) -> Tuple[bool, str]:
 
 def open_file_in_default_app(file_path: Path | str, create_if_missing: bool = True) -> Tuple[bool, str]:
     """
-    Open a file with the system's default text editor or viewer.
-    Creates an empty placeholder if it doesn't exist yet.
+    Open a file or directory with the system's default application or File Explorer.
+    Creates an empty placeholder if it's a non-existent file and create_if_missing is True.
     """
-    p = Path(file_path)
+    p = Path(file_path).resolve()
+
+    # 1. Directory handling
+    if p.is_dir():
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(p))
+                return True, f"Opened folder '{p.name}'"
+            url = QUrl.fromLocalFile(str(p))
+            if QDesktopServices.openUrl(url):
+                return True, f"Opened folder '{p.name}'"
+            return False, f"Failed to open folder '{p.name}'"
+        except Exception as exc:
+            return False, f"Failed to open folder '{p}': {exc}"
+
+    # 2. Non-existent file handling
     if not p.is_file():
         if create_if_missing:
             try:
@@ -264,15 +299,46 @@ def open_file_in_default_app(file_path: Path | str, create_if_missing: bool = Tr
         else:
             return False, f"File does not exist: '{p}'"
 
+    # 3. Existing file handling
     try:
-        url = QUrl.fromLocalFile(str(p.resolve()))
+        url = QUrl.fromLocalFile(str(p))
         success = QDesktopServices.openUrl(url)
         if success:
             return True, f"Opened '{p.name}'"
         # Fallback for Windows if openUrl fails
         if sys.platform == "win32":
-            os.startfile(str(p.resolve()))
+            os.startfile(str(p))
             return True, f"Opened '{p.name}'"
         return False, f"Failed to open '{p.name}' with default application."
     except Exception as exc:
         return False, f"Failed to open '{p}': {exc}"
+
+
+def show_in_folder(path: Path | str) -> Tuple[bool, str]:
+    """
+    Open File Explorer. If path is a file, highlights/selects the file.
+    If path is a folder, opens the folder.
+    """
+    p = Path(path).resolve()
+    if not p.exists():
+        if p.parent.is_dir():
+            p = p.parent
+        else:
+            return False, f"Path does not exist: '{p}'"
+
+    try:
+        if sys.platform == "win32":
+            if p.is_file():
+                subprocess.Popen(["explorer", f"/select,{p}"])
+            else:
+                os.startfile(str(p))
+            return True, f"Opened '{p.name}' in File Explorer"
+
+        target = p.parent if p.is_file() else p
+        url = QUrl.fromLocalFile(str(target))
+        if QDesktopServices.openUrl(url):
+            return True, f"Opened '{p.name}'"
+        return False, f"Failed to open '{p.name}'"
+    except Exception as exc:
+        return False, f"Failed to open '{p}': {exc}"
+

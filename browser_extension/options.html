@@ -31,12 +31,36 @@
         </label>
       </div>
       <div class="hint">When turned off, downloads will proceed normally in Chrome. You can still use the right-click menu.</div>
-    </div>
 
-    <div class="form-group">
-      <label for="bypassExts">Bypassed File Extensions</label>
-      <input type="text" id="bypassExts" placeholder=".torrent, .crx, .pdf">
-      <div class="hint">Comma-separated list of extensions that should NOT be intercepted by My-IDM.</div>
+      <div class="toggle-row">
+        <span>Intercept .torrent files</span>
+        <label class="switch">
+          <input type="checkbox" id="interceptTorrentFiles">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="hint">When enabled, .torrent file downloads are intercepted and added as torrents in My-IDM.</div>
+
+      <div class="toggle-row">
+        <span>Intercept magnet links</span>
+        <label class="switch">
+          <input type="checkbox" id="interceptMagnetLinks">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="hint">When enabled, magnet link clicks are intercepted and added as torrents in My-IDM.</div>
+
+      <div class="form-row">
+        <label for="minFileSizeKb" style="flex: 1;">Minimum file size to intercept (KB)</label>
+        <input type="number" id="minFileSizeKb" min="0" max="1000000" value="0" style="width: 120px;">
+      </div>
+      <div class="hint">Downloads smaller than this size (in KB) will not be intercepted. Set to 0 for no limit.</div>
+
+      <div class="form-group">
+        <label for="bypassExts">Bypassed File Extensions</label>
+        <input type="text" id="bypassExts" placeholder=".torrent, .crx, .pdf">
+        <div class="hint">Comma-separated list of extensions that should NOT be intercepted by My-IDM.</div>
+      </div>
     </div>
 
     <div class="form-group">

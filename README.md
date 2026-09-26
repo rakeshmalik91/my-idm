@@ -101,7 +101,7 @@ All settings and runtime data are persisted in the user profile:
 - [**VPN & Kill Switch**](docs/architecture/vpn.md) — Network interface binding, adapter watcher loop, and proxy configuration.
 - [**Antivirus & Security**](docs/architecture/antivirus.md) — Pre-download checks, Defender/custom scanning, and quarantine.
 - [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
-- [**Chrome & Browser Integration**](docs/architecture/chrome-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
+- [**Browser Integration (Chrome & Firefox)**](docs/architecture/browser-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 - [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.

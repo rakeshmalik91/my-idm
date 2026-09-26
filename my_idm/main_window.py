@@ -844,6 +844,10 @@ class MainWindow(QMainWindow):
         self._manager.animepahe_status_changed.connect(
             self._on_animepahe_status_changed
         )
+        if hasattr(self._manager, "animepahe_queue_changed"):
+            self._manager.animepahe_queue_changed.connect(
+                self._on_animepahe_queue_changed
+            )
         self._details_panel.mode_changed.connect(lambda _: self._sync_panel_buttons())
 
         # Connect table selection to bottom details panel
@@ -1148,6 +1152,7 @@ class MainWindow(QMainWindow):
             "downloading, full BitTorrent swarm engine, VPN Kill Switch privacy protection, "
             "and automated virus & malware inspection.</p>"
             "<p>Built with Python, PySide6, asyncio/aiohttp, and libtorrent.</p>"
+            "<p style='color: #8fa0b5; margin-top: 8px;'>© Rakesh Malik, 2026</p>"
         )
         dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
         dlg.exec()
@@ -1599,7 +1604,18 @@ class MainWindow(QMainWindow):
     def _on_animepahe_status_changed(self, is_running: bool):
         self._animepahe_status_btn.setVisible(is_running)
         if is_running:
-            self._animepahe_status_btn.setText("🎬 AnimePahe: Active")
+            q_len = getattr(self._manager, "get_animepahe_queue_length", lambda: 0)()
+            if q_len > 0:
+                self._animepahe_status_btn.setText(f"🎬 AnimePahe: Active (+{q_len} queued)")
+            else:
+                self._animepahe_status_btn.setText("🎬 AnimePahe: Active")
+
+    def _on_animepahe_queue_changed(self, queue_len: int):
+        if self._animepahe_status_btn.isVisible():
+            if queue_len > 0:
+                self._animepahe_status_btn.setText(f"🎬 AnimePahe: Active (+{queue_len} queued)")
+            else:
+                self._animepahe_status_btn.setText("🎬 AnimePahe: Active")
 
     def _show_animepahe_status_menu(self):
         menu = QMenu(self)
@@ -1623,7 +1639,14 @@ class MainWindow(QMainWindow):
         menu.addAction(act_gui)
 
         if self._manager.is_animepahe_running():
-            act_stop = QAction(_create_emoji_icon("⏹️"), "Stop Background Scraper", self)
+            q_len = getattr(self._manager, "get_animepahe_queue_length", lambda: 0)()
+            if q_len > 0:
+                act_info = QAction(f"📋 Pending in Queue: {q_len} task(s)", self)
+                act_info.setEnabled(False)
+                menu.addAction(act_info)
+
+            stop_label = f"Stop Scraper & Clear Queue ({q_len})" if q_len > 0 else "Stop Background Scraper"
+            act_stop = QAction(_create_emoji_icon("⏹️"), stop_label, self)
             def _stop():
                 ok, msg = self._manager.stop_animepahe_scraper()
                 self._status_label.setText(msg)

@@ -11,7 +11,7 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 - [Managing Downloads](#managing-downloads)
 - [Bottom Details Panel](#bottom-details-panel)
 - [Preferences & Settings](#preferences--settings)
-- [Browser Integration (Chrome / Brave / Edge)](#browser-integration-chrome--brave--edge)
+- [Browser Integration (Chrome / Brave / Edge / Firefox)](#browser-integration-chrome--brave--edge--firefox)
 - [Dedicated Feature Guides](#dedicated-feature-guides)
 - [VPN & Network Settings](#vpn--network-settings)
 - [Antivirus & Malware Scanning](#antivirus--malware-scanning)
@@ -262,41 +262,66 @@ Manage integration with external scrapers and download tools (e.g. AnimePahe Aut
 - **Launch GUI**: Launch the standalone AnimePahe desktop GUI detached from My-IDM.
 
 ### 7. Browser Integration Tab
-Configure Chrome, Brave, and Edge browser integration:
+Configure Chrome, Brave, Edge, and Mozilla Firefox browser integration:
 - **Enable Browser Integration**: Toggle the local HTTP loopback server (`127.0.0.1:19582`) on or off.
 - **Port**: Configure loopback port (default `19582`).
-- **Open Extension Folder**: Quick button opening the unpacked extension directory in File Explorer for easy drag-and-drop loading in `chrome://extensions`.
-- **Open Chrome Extensions Page**: Quick button to open Chrome's Extension Management page in Developer Mode.
-- **File Type Interception**: Choose file extensions to automatically capture or bypass.
+- **Chromium Browsers Group (Chrome / Brave / Edge / Opera)**:
+  - Copy-on-click inline links for `chrome://extensions/`, `edge://extensions/`, and the `browser_extension` folder path.
+  - **📁 Open Extension Folder**: Opens Windows Explorer directly to the unpacked extension directory.
+- **Mozilla Firefox Group**:
+  - Copy-on-click inline links for `about:debugging#/runtime/this-firefox` and `manifest.json` (temporary mode).
+  - Copy-on-click inline links for `about:config`, `xpinstall.signatures.required`, `false`, and `about:addons` (permanent mode).
+  - **📦 Package Firefox Add-on (.xpi)**: Generates `my-idm-firefox.xpi` packaged specifically for Firefox.
+  - **🦊 Permanent Firefox Guide**: Opens an interactive modal guide with full setup instructions for developer editions, privacy forks, and standard release AMO signing.
+- **Interception Filters**:
+  - **Automatically intercept downloads from Chrome/Edge/Firefox**.
+  - **Intercept .torrent files from browser**.
+  - **Intercept magnet links from browser**.
+  - **Minimum file size to intercept (KB)** (0 = no limit; smaller files download directly via browser).
+  - **Bypassed File Extensions**: Comma-separated list of extensions to ignore (e.g. `.crx, .pdf`).
 
 ---
 
-## Browser Integration (Chrome / Brave / Edge)
+## Browser Integration (Chrome / Brave / Edge / Firefox)
 
-My-IDM includes an unpacked Manifest V3 browser extension that automatically intercepts downloads from Google Chrome, Brave, Microsoft Edge, and Chromium-based browsers, routing them into My-IDM for accelerated, multi-segment downloading.
+My-IDM includes an unpacked Manifest V3 browser extension that automatically intercepts downloads from Google Chrome, Brave, Microsoft Edge, and Mozilla Firefox (Gecko), routing them into My-IDM for accelerated, multi-segment downloading.
 
 ### 1. How It Works
 - The extension runs locally in your browser.
-- When you click a download link or start a download in Chrome:
-  1. The extension listens on `chrome.downloads.onDeterminingFilename`.
-  2. It pauses/cancels Chrome's native single-threaded download.
-  3. It extracts the full session cookies for the domain using `chrome.cookies.getAll()`.
+- When you click a download link or start a download:
+  1. **Chromium (Chrome/Edge/Brave/Opera)**: The extension listens on `chrome.downloads.onDeterminingFilename` to cancel the browser's download before writing to disk.
+  2. **Mozilla Firefox**: The extension intercepts `downloads.onCreated`, cancels the native download job, and purges the browser history entry.
+  3. It extracts the full session cookies for the domain using `chrome.cookies.getAll()` to preserve authenticated sessions.
   4. It sends an HTTP POST request to My-IDM's local REST server at `http://127.0.0.1:19582/add`.
   5. My-IDM starts downloading the file immediately with full multi-connection segmentation and authenticated cookies.
 
 ### 2. Loading the Unpacked Extension (No Store Required)
-1. In My-IDM, navigate to **Tools → Preferences → Browser Integration** (or open `browser_extension/` directory in the repository).
+
+#### For Google Chrome / Brave / Edge / Opera:
+1. In My-IDM, navigate to **Tools → Preferences → Browser Integration** (or locate the `browser_extension/` directory in the repository).
 2. Click **Open Extension Folder** to locate the directory.
-3. Open Google Chrome (or Edge/Brave) and navigate to `chrome://extensions/`.
+3. Open your browser and navigate to `chrome://extensions/` (or `edge://extensions/`).
 4. Toggle **Developer mode** ON (top right switch).
 5. Click **Load unpacked** (top left).
 6. Select the `browser_extension/` directory inside your My-IDM installation.
 7. Done! The My-IDM extension icon will appear in your browser toolbar.
 
+#### For Mozilla Firefox:
+- **Temporary Session (Quick Testing)**:
+  1. Open Firefox and navigate to `about:debugging#/runtime/this-firefox` (or click **"🦊 Copy about:debugging"** in My-IDM Preferences).
+  2. Click **Load Temporary Add-on...** and select `manifest.json` inside the `browser_extension/` directory.
+  3. *Note: Mozilla Firefox purges temporary add-ons on browser restart by design.*
+- **Permanent Installation (Retained Across Restarts)**:
+  1. In My-IDM Preferences ➔ Browser Integration, click **"📦 Package Firefox Add-on (.xpi)"** to generate `my-idm-firefox.xpi`.
+  2. Click **"🦊 Permanent Setup Guide"** to view instructions:
+     - **Firefox Developer Edition / ESR / Floorp / LibreWolf**: In `about:config`, toggle `xpinstall.signatures.required` to `false`. Then in `about:addons`, click ⚙️ ➔ **Install Add-on From File...** and choose `my-idm-firefox.xpi`. It stays permanently across restarts!
+     - **Standard Firefox Release**: Upload `my-idm-firefox.xpi` to [AMO Developer Hub](https://addons.mozilla.org/developers/addon/submit/distribution) (or view your builds at [AMO Version 6515778](https://addons.mozilla.org/en-US/developers/addon/84510108e17d4c599bce/versions/6515778)) for free automated unlisted signing (takes 1–2 minutes), then install the signed `.xpi`.
+
 ### 3. Usage & Features
-- **Automatic Interception**: Any file download started in Chrome is seamlessly sent to My-IDM.
-- **Context Menu Download**: Right-click any link, video, or image and select **"Download with My-IDM"**.
-- **Instant Bypass**: Hold down the <kbd>Alt</kbd> key when clicking a download link to bypass My-IDM and let Chrome handle the download natively.
+- **Automatic Interception**: File downloads started in your browser are seamlessly sent to My-IDM.
+- **Magnet Link Interception**: Clicking magnet links on any web page automatically forwards them directly to My-IDM without opening external browser prompt dialogs.
+- **Context Menu Download**: Right-click any link, video, audio, or image and select **"Download with My-IDM"**.
+- **Instant Bypass**: Hold down the <kbd>Alt</kbd> key when clicking a download link to bypass My-IDM and let your browser handle the download natively.
 - **Cookie Jar Forwarding**: Session cookies from private logins, premium file hosts, and trackers are preserved seamlessly.
 
 ---

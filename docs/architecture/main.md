@@ -717,7 +717,7 @@ My-IDM provides a zero-install-friction browser extension workflow using an unpa
    - Intercepts browser download initiations, cancels Chrome's built-in download, queries exact session cookies for the domain via `chrome.cookies.getAll()`, and posts to My-IDM.
    - Bypassed if the user holds <kbd>Alt</kbd> during click or if file types match user bypass list.
    - Provides right-click context menu: **"Download with My-IDM"** for links and media.
-3. For exhaustive details, see [**Chrome Integration Architecture**](chrome-integration.md).
+3. For exhaustive details, see [**Browser Integration Architecture**](browser-integration.md).
 
 ---
 

@@ -16,7 +16,6 @@
     "http://localhost:19582/*"
   ],
   "background": {
-    "service_worker": "background.js",
     "scripts": [
       "background.js"
     ]

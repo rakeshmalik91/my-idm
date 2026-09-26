@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -43,7 +44,12 @@ from my_idm.config import (
     DEFAULT_DOWNLOADS_DIR,
 )
 from my_idm.database import Database, APP_DIR
-from my_idm.external_tools import launch_animepahe_cli, launch_animepahe_gui, open_file_in_default_app
+from my_idm.external_tools import (
+    launch_animepahe_cli,
+    launch_animepahe_gui,
+    open_file_in_default_app,
+    show_in_folder,
+)
 from my_idm.utils import normalize_path
 from my_idm.tor_service import find_tor_executable
 from my_idm.network import (
@@ -131,6 +137,8 @@ class SettingsDialog(QDialog):
         self._setup_ui()
         if self._manager and hasattr(self._manager, "animepahe_status_changed"):
             self._manager.animepahe_status_changed.connect(self._on_animepahe_status_changed)
+        if self._manager and hasattr(self._manager, "animepahe_queue_changed"):
+            self._manager.animepahe_queue_changed.connect(self._on_animepahe_queue_changed)
         self._populate_fields()
         self._restore_size_from_db()
 
@@ -932,7 +940,75 @@ class SettingsDialog(QDialog):
         desc_lbl.setWordWrap(True)
         ap_layout.addWidget(desc_lbl)
 
-        # 3. Logs & Actions Group
+        # 3. Download Anime by URL & Episode Range Group
+        dl_group = QGroupBox("Download Anime by URL")
+        dl_layout = QVBoxLayout(dl_group)
+        dl_layout.setSpacing(10)
+
+        url_row = QHBoxLayout()
+        url_lbl = QLabel("AnimePahe URL:")
+        url_lbl.setMinimumWidth(110)
+        url_row.addWidget(url_lbl)
+
+        self._animepahe_url_edit = QLineEdit()
+        self._animepahe_url_edit.setPlaceholderText(
+            "e.g. https://animepahe.ru/anime/4380 or https://animepahe.si/anime/ef667bb4-3a9b-449e-1a22-26156a642e47"
+        )
+        self._animepahe_url_edit.setClearButtonEnabled(True)
+        self._animepahe_url_edit.returnPressed.connect(self._on_download_animepahe_url)
+        url_row.addWidget(self._animepahe_url_edit, 1)
+        dl_layout.addLayout(url_row)
+
+        options_row = QHBoxLayout()
+
+        ep_lbl = QLabel("Episode Range:")
+        ep_lbl.setMinimumWidth(110)
+        options_row.addWidget(ep_lbl)
+
+        self._animepahe_episodes_edit = QLineEdit()
+        self._animepahe_episodes_edit.setPlaceholderText("e.g. 1-12, 15, 20-25 (optional, leave blank for all)")
+        self._animepahe_episodes_edit.setClearButtonEnabled(True)
+        self._animepahe_episodes_edit.returnPressed.connect(self._on_download_animepahe_url)
+        options_row.addWidget(self._animepahe_episodes_edit, 1)
+
+        q_lbl = QLabel("Quality:")
+        options_row.addWidget(q_lbl)
+        self._animepahe_quality_combo = QComboBox()
+        self._animepahe_quality_combo.addItems(["Auto", "1080p", "720p", "360p"])
+        options_row.addWidget(self._animepahe_quality_combo)
+
+        l_lbl = QLabel("Audio:")
+        options_row.addWidget(l_lbl)
+        self._animepahe_lang_combo = QComboBox()
+        self._animepahe_lang_combo.addItems(["Auto", "Sub (jap)", "Dub (en)"])
+        options_row.addWidget(self._animepahe_lang_combo)
+
+        self._btn_download_animepahe_url = QPushButton("⬇️ Download via AnimePahe")
+        self._btn_download_animepahe_url.setObjectName("primaryButton")
+        self._btn_download_animepahe_url.setToolTip(
+            "Launch AnimePahe scraper to resolve streams and forward download jobs to My-IDM"
+        )
+        self._btn_download_animepahe_url.clicked.connect(self._on_download_animepahe_url)
+        options_row.addWidget(self._btn_download_animepahe_url)
+
+        self._animepahe_queue_lbl = QLabel("")
+        self._animepahe_queue_lbl.setStyleSheet("color: #00d2ff; font-weight: bold; font-size: 11px; margin-left: 8px;")
+        self._animepahe_queue_lbl.setVisible(False)
+        options_row.addWidget(self._animepahe_queue_lbl)
+
+        dl_layout.addLayout(options_row)
+
+        dl_desc = QLabel(
+            "ℹ️ AnimePahe will resolve the stream links, bypass Cloudflare/Kwik, and automatically push the episodes "
+            "into My-IDM's backlog queue for accelerated multi-segmented download."
+        )
+        dl_desc.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+        dl_desc.setWordWrap(True)
+        dl_layout.addWidget(dl_desc)
+
+        ap_layout.addWidget(dl_group)
+
+        # 4. Logs & Actions Group
         logs_group = QGroupBox("Diagnostics && Logs")
         logs_layout = QVBoxLayout(logs_group)
         logs_layout.setSpacing(8)
@@ -999,6 +1075,28 @@ class SettingsDialog(QDialog):
         self._browser_intercept_cb.setToolTip("When enabled, browser downloads are cancelled in Chrome and handed to My-IDM.")
         server_layout.addWidget(self._browser_intercept_cb)
 
+        self._browser_intercept_torrent_cb = QCheckBox("Intercept .torrent files from browser")
+        self._browser_intercept_torrent_cb.setToolTip("When enabled, .torrent file downloads are intercepted and added as torrents in My-IDM.")
+        self._browser_intercept_torrent_cb.setChecked(self._browser_cfg.intercept_torrent_files)
+        server_layout.addWidget(self._browser_intercept_torrent_cb)
+
+        self._browser_intercept_magnet_cb = QCheckBox("Intercept magnet links from browser")
+        self._browser_intercept_magnet_cb.setToolTip("When enabled, magnet link clicks are intercepted and added as torrents in My-IDM.")
+        self._browser_intercept_magnet_cb.setChecked(self._browser_cfg.intercept_magnet_links)
+        server_layout.addWidget(self._browser_intercept_magnet_cb)
+
+        min_size_row = QHBoxLayout()
+        min_size_lbl = QLabel("Minimum file size to intercept (KB, 0 = no limit):")
+        min_size_row.addWidget(min_size_lbl)
+
+        self._browser_min_size_spin = QSpinBox()
+        self._browser_min_size_spin.setRange(0, 1000000)
+        self._browser_min_size_spin.setValue(self._browser_cfg.min_file_size_kb)
+        self._browser_min_size_spin.setToolTip("Downloads smaller than this size (in KB) will not be intercepted by My-IDM. Set to 0 to disable.")
+        min_size_row.addWidget(self._browser_min_size_spin)
+        min_size_row.addStretch()
+        server_layout.addLayout(min_size_row)
+
         bypass_lbl = QLabel("Bypassed File Extensions (comma-separated):")
         server_layout.addWidget(bypass_lbl)
 
@@ -1009,44 +1107,92 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(server_group)
 
-        # 2. Chrome Extension Setup Group
-        setup_group = QGroupBox("Chrome / Brave / Edge Setup Instructions")
-        setup_layout = QVBoxLayout(setup_group)
-        setup_layout.setSpacing(10)
+        # 2. Chromium Browsers Setup Group
+        chrome_group = QGroupBox("Chromium Browsers (Chrome / Brave / Edge / Opera)")
+        self._chrome_group = chrome_group
+        chrome_layout = QVBoxLayout(chrome_group)
+        chrome_layout.setSpacing(8)
 
-        instructions = (
-            "<p style='line-height: 1.6; margin-bottom: 8px;'>"
-            "<b>How to install the local extension in Chrome / Brave / Edge:</b><br>"
-            "1. Open your browser and navigate to: <code style='color: #00d2ff;'>chrome://extensions/</code><br>"
-            "2. Turn <b>ON</b> the <b>Developer mode</b> toggle switch in the top-right corner.<br>"
-            "3. Click the <b>Load unpacked</b> button in the top-left corner.<br>"
-            "4. Select the <b>browser_extension</b> folder located inside your My-IDM directory."
+        chrome_instructions = (
+            "<p style='line-height: 1.6; margin: 0;'>"
+            "1. Navigate to: <a href='chrome://extensions/' style='color: #00d2ff; text-decoration: underline; font-weight: bold;'>chrome://extensions/</a> "
+            "(or <a href='edge://extensions/' style='color: #00d2ff; text-decoration: underline; font-weight: bold;'>edge://extensions/</a>) "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy URL]</span><br>"
+            "2. Turn <b>ON</b> <b>Developer mode</b> (toggle switch in the top right corner).<br>"
+            "3. Click <b>Load unpacked</b> and select the <a href='copy:extension_path' style='color: #00d2ff; text-decoration: underline; font-weight: bold;'>browser_extension</a> folder "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy folder path]</span>"
             "</p>"
         )
-        instr_lbl = QLabel(instructions)
-        instr_lbl.setTextFormat(Qt.TextFormat.RichText)
-        instr_lbl.setWordWrap(True)
-        setup_layout.addWidget(instr_lbl)
+        self._chrome_instr_lbl = QLabel(chrome_instructions)
+        self._chrome_instr_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._chrome_instr_lbl.setWordWrap(True)
+        self._chrome_instr_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self._chrome_instr_lbl.linkActivated.connect(self._on_browser_url_clicked)
+        chrome_layout.addWidget(self._chrome_instr_lbl)
+        self._instr_lbl = self._chrome_instr_lbl  # backward compatibility
 
-        btn_row = QHBoxLayout()
-
+        chrome_action_row = QHBoxLayout()
         self._btn_open_ext_folder = QPushButton("📁 Open Extension Folder")
         self._btn_open_ext_folder.setToolTip("Open the browser_extension folder in Windows File Explorer")
         self._btn_open_ext_folder.clicked.connect(self._on_open_extension_folder)
-        btn_row.addWidget(self._btn_open_ext_folder)
+        chrome_action_row.addWidget(self._btn_open_ext_folder)
 
-        self._btn_copy_ext_path = QPushButton("📋 Copy Folder Path")
-        self._btn_copy_ext_path.setToolTip("Copy absolute path of the extension directory to clipboard")
-        self._btn_copy_ext_path.clicked.connect(self._on_copy_extension_path)
-        btn_row.addWidget(self._btn_copy_ext_path)
+        self._chrome_copy_lbl = QLabel("")
+        self._chrome_copy_lbl.setStyleSheet("color: #2ed573; font-weight: bold; margin-left: 8px;")
+        chrome_action_row.addWidget(self._chrome_copy_lbl, 1)
 
-        self._btn_open_chrome_extensions = QPushButton("🌐 Open chrome://extensions")
-        self._btn_open_chrome_extensions.setToolTip("Open Chrome Extensions management page in your browser")
-        self._btn_open_chrome_extensions.clicked.connect(self._on_open_chrome_extensions)
-        btn_row.addWidget(self._btn_open_chrome_extensions)
+        chrome_layout.addLayout(chrome_action_row)
+        layout.addWidget(chrome_group)
 
-        setup_layout.addLayout(btn_row)
-        layout.addWidget(setup_group)
+        # 3. Mozilla Firefox Setup Group
+        firefox_group = QGroupBox("Mozilla Firefox")
+        firefox_layout = QVBoxLayout(firefox_group)
+        firefox_layout.setSpacing(8)
+
+        firefox_instructions = (
+            "<p style='line-height: 1.6; margin: 0;'>"
+            "1. <i>Session Only (Temporary):</i> Navigate to <a href='about:debugging#/runtime/this-firefox' style='color: #ff9d00; text-decoration: underline; font-weight: bold;'>about:debugging#/runtime/this-firefox</a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy URL]</span>, click <b>Load Temporary Add-on...</b>, and select <a href='copy:manifest_path' style='color: #ff9d00; text-decoration: underline; font-weight: bold;'>manifest.json</a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy manifest path]</span>.<br>"
+            "<span style='color: #ffb86c;'><i>⚠️ Note: Firefox removes temporary extensions on browser restart by design.</i></span><br>"
+            "2. <i>Permanent Installation (Retained Across Restarts):</i> In Developer/ESR/Nightly/Floorp, toggle <a href='xpinstall.signatures.required' style='color: #ff9d00; text-decoration: underline; font-weight: bold;'>xpinstall.signatures.required</a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy]</span> to <b>false</b> in <a href='about:config' style='color: #ff9d00; text-decoration: underline; font-weight: bold;'>about:config</a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy URL]</span>, click <b>📦 Package Firefox Add-on (.xpi)</b> below, and install via <a href='about:addons' style='color: #ff9d00; text-decoration: underline; font-weight: bold;'>about:addons</a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy URL]</span> (or view <b>🦊 Permanent Setup Guide</b> for free AMO signing)."
+            "</p>"
+        )
+        self._firefox_instr_lbl = QLabel(firefox_instructions)
+        self._firefox_instr_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._firefox_instr_lbl.setWordWrap(True)
+        self._firefox_instr_lbl.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self._firefox_instr_lbl.linkActivated.connect(self._on_browser_url_clicked)
+        firefox_layout.addWidget(self._firefox_instr_lbl)
+
+        firefox_action_row = QHBoxLayout()
+        self._btn_package_firefox = QPushButton("📦 Package Firefox Add-on (.xpi)")
+        self._btn_package_firefox.setToolTip("Package browser extension into a standard .xpi archive for Firefox")
+        self._btn_package_firefox.clicked.connect(self._on_package_firefox_extension)
+        firefox_action_row.addWidget(self._btn_package_firefox)
+
+        self._btn_firefox_guide = QPushButton("🦊 Permanent Firefox Guide")
+        self._btn_firefox_guide.setToolTip("Step-by-step guide to retaining Firefox extension across browser restarts")
+        self._btn_firefox_guide.clicked.connect(self._on_open_firefox_guide)
+        firefox_action_row.addWidget(self._btn_firefox_guide)
+
+        self._firefox_copy_lbl = QLabel("")
+        self._firefox_copy_lbl.setStyleSheet("color: #2ed573; font-weight: bold; margin-left: 8px;")
+        firefox_action_row.addWidget(self._firefox_copy_lbl, 1)
+
+        firefox_layout.addLayout(firefox_action_row)
+        layout.addWidget(firefox_group)
 
         layout.addStretch()
         return tab
@@ -1057,21 +1203,95 @@ class SettingsDialog(QDialog):
     def _on_open_extension_folder(self):
         ext_dir = self._get_extension_dir()
         if ext_dir.is_dir():
-            open_file_in_default_app(ext_dir)
+            ok, msg = show_in_folder(ext_dir)
+            if not ok:
+                QMessageBox.warning(self, "Folder Error", msg)
         else:
             QMessageBox.warning(self, "Folder Not Found", f"Extension folder does not exist:\n{ext_dir}")
 
-    def _on_copy_extension_path(self):
-        from PySide6.QtWidgets import QApplication
-        ext_dir = self._get_extension_dir()
-        QApplication.clipboard().setText(str(ext_dir))
-        QMessageBox.information(self, "Path Copied", f"Extension folder path copied to clipboard:\n{ext_dir}")
+    def _on_browser_url_clicked(self, url: str):
+        from PySide6.QtWidgets import QApplication, QToolTip
+        from PySide6.QtGui import QClipboard, QCursor
+        from PySide6.QtCore import QTimer
 
-    def _on_open_chrome_extensions(self):
+        target = url
+        if target.startswith("copy:"):
+            text = target[len("copy:"):]
+        else:
+            text = target
+
+        if text == "extension_path":
+            text = str(self._get_extension_dir())
+        elif text == "manifest_path":
+            text = str(self._get_extension_dir() / "manifest.json")
+        elif text == "xpi_path":
+            text = str(self._get_extension_dir() / "my-idm-firefox.xpi")
+
+        if text.startswith("http://") or text.startswith("https://"):
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl(text))
+            return
+
+        QApplication.clipboard().setText(text)
+        QApplication.processEvents()
         try:
-            QDesktopServices.openUrl(QUrl("chrome://extensions/"))
+            QToolTip.showText(QCursor.pos(), f"✓ Copied: {text}", self, 2500)
         except Exception:
             pass
+
+        feedback = f"✓ Copied '{text}' to clipboard"
+        if hasattr(self, "_chrome_copy_lbl"):
+            self._chrome_copy_lbl.setText(feedback)
+            QTimer.singleShot(3500, lambda: self._chrome_copy_lbl.setText(""))
+        if hasattr(self, "_firefox_copy_lbl"):
+            self._firefox_copy_lbl.setText(feedback)
+            QTimer.singleShot(3500, lambda: self._firefox_copy_lbl.setText(""))
+
+    def _on_copy_extension_path(self):
+        self._on_browser_url_clicked("extension_path")
+
+    def _on_copy_chrome_url(self):
+        self._on_browser_url_clicked("chrome://extensions/")
+
+    def _on_copy_edge_url(self):
+        self._on_browser_url_clicked("edge://extensions/")
+
+    def _on_copy_firefox_url(self):
+        self._on_browser_url_clicked("about:debugging#/runtime/this-firefox")
+
+    def _on_copy_firefox_addons_url(self):
+        self._on_browser_url_clicked("about:addons")
+
+    def _on_open_chrome_extensions(self):
+        self._on_browser_url_clicked("chrome://extensions/")
+
+
+    def _on_package_firefox_extension(self):
+        try:
+            from my_idm.extension_packager import package_firefox_extension
+            xpi_path = package_firefox_extension()
+            res = QMessageBox.information(
+                self,
+                "Firefox Package Created",
+                f"Firefox add-on packaged successfully:\n\n{xpi_path}\n\n"
+                "To make this add-on permanent across browser restarts:\n"
+                "• Firefox Developer / ESR / LibreWolf / Floorp: Set xpinstall.signatures.required=false in about:config, then install this .xpi in about:addons.\n"
+                "• Standard Firefox Release: Upload this .xpi to addons.mozilla.org (AMO) Developer Hub for free automated unlisted signing.\n\n"
+                "Would you like to open the folder containing this .xpi?",
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if res == QMessageBox.StandardButton.Open:
+                ok, msg = show_in_folder(xpi_path)
+                if not ok:
+                    QMessageBox.warning(self, "Folder Error", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Packaging Error", f"Failed to package Firefox extension:\n{e}")
+
+    def _on_open_firefox_guide(self):
+        guide = FirefoxInstallGuideDialog(self)
+        guide.exec()
 
     # -----------------------------------------------------------------------
     # Population & Handlers
@@ -1177,17 +1397,41 @@ class SettingsDialog(QDialog):
         # External Tools tab
         self._animepahe_repo_edit.setText(self._external_tools_cfg.animepahe_repo_path)
         self._animepahe_startup_cb.setChecked(self._external_tools_cfg.animepahe_launch_on_startup)
-        if self._manager and hasattr(self._manager, "is_animepahe_running") and self._manager.is_animepahe_running():
+        self._animepahe_url_edit.setText(self._external_tools_cfg.animepahe_last_url)
+        self._animepahe_episodes_edit.setText(self._external_tools_cfg.animepahe_last_episodes)
+        q_idx = self._animepahe_quality_combo.findText(self._external_tools_cfg.animepahe_last_quality)
+        if q_idx >= 0:
+            self._animepahe_quality_combo.setCurrentIndex(q_idx)
+        l_idx = self._animepahe_lang_combo.findText(self._external_tools_cfg.animepahe_last_lang)
+        if l_idx >= 0:
+            self._animepahe_lang_combo.setCurrentIndex(l_idx)
+        is_running = bool(self._manager and hasattr(self._manager, "is_animepahe_running") and self._manager.is_animepahe_running())
+        q_raw = self._manager.get_animepahe_queue_length() if (self._manager and hasattr(self._manager, "get_animepahe_queue_length")) else 0
+        try:
+            q_len = int(q_raw)
+        except (TypeError, ValueError):
+            q_len = 0
+        if is_running:
             self._btn_run_cli_now.setText("⏹️ Stop CLI Scraper")
-            self._btn_run_cli_now.setToolTip("Stop running AnimePahe background scraper")
+            self._btn_run_cli_now.setToolTip("Stop running AnimePahe background scraper and clear queue")
+            if hasattr(self, "_btn_download_animepahe_url"):
+                self._btn_download_animepahe_url.setEnabled(True)
+                self._btn_download_animepahe_url.setText("➕ Queue Anime Download")
         else:
             self._btn_run_cli_now.setText("▶️ Run CLI Now")
             self._btn_run_cli_now.setToolTip("Launch AnimePahe background scraper in CLI mode")
+            if hasattr(self, "_btn_download_animepahe_url"):
+                self._btn_download_animepahe_url.setEnabled(True)
+                self._btn_download_animepahe_url.setText("⬇️ Download via AnimePahe")
+        self._update_animepahe_queue_badge(q_len)
 
         # Browser Integration tab
         self._browser_enabled_cb.setChecked(self._browser_cfg.enabled)
         self._browser_port_spin.setValue(self._browser_cfg.port or 19582)
         self._browser_intercept_cb.setChecked(self._browser_cfg.intercept_all)
+        self._browser_intercept_torrent_cb.setChecked(self._browser_cfg.intercept_torrent_files)
+        self._browser_intercept_magnet_cb.setChecked(self._browser_cfg.intercept_magnet_links)
+        self._browser_min_size_spin.setValue(self._browser_cfg.min_file_size_kb)
         self._browser_bypass_edit.setText(", ".join(self._browser_cfg.bypassed_extensions))
         if self._manager and getattr(self._manager, "browser_server", None) and self._manager.browser_server.is_running:
             self._browser_status_lbl.setText(f"🟢 Active (Listening on http://127.0.0.1:{self._browser_cfg.port})")
@@ -1284,14 +1528,143 @@ class SettingsDialog(QDialog):
         else:
             QMessageBox.warning(self, "CLI Scraper", msg)
 
+    def _on_download_animepahe_url(self):
+        url = self._animepahe_url_edit.text().strip()
+        episodes = self._animepahe_episodes_edit.text().strip()
+
+        if not url:
+            QMessageBox.warning(self, "Missing URL", "Please enter an AnimePahe anime or episode URL.")
+            self._animepahe_url_edit.setFocus()
+            return
+
+        # Direct UUID or numeric ID support (e.g. 4380 or ef667bb4-3a9b-449e-1a22-26156a642e47)
+        if re.match(r'^[a-f0-9-]+$', url, re.IGNORECASE):
+            url = f"https://animepahe.ru/anime/{url}"
+        elif not url.startswith(("http://", "https://")):
+            url = "https://" + url
+
+        # Normalize /play/ or /a/ URLs to /anime/<id>
+        play_or_a_match = re.search(r'/(?:play|a)/([a-f0-9-]+)', url, re.IGNORECASE)
+        if play_or_a_match and '/anime/' not in url:
+            domain_match = re.search(r'https?://([^/]+)', url)
+            domain = domain_match.group(1) if domain_match else "animepahe.ru"
+            aid = play_or_a_match.group(1)
+            url = f"https://{domain}/anime/{aid}"
+
+        # Validate episodes format if provided
+        if episodes:
+            if not re.match(r'^[\d\s,-]+$', episodes):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Episode Range",
+                    "Please enter a valid episode range, e.g.:\n• 1-12\n• 1, 3, 5-10\n• 25\n\nOr leave blank to download all episodes.",
+                )
+                self._animepahe_episodes_edit.setFocus()
+                return
+            cleaned_parts = []
+            for part in episodes.split(','):
+                part = part.strip()
+                if '-' in part:
+                    sub = [s.strip() for s in part.split('-') if s.strip()]
+                    cleaned_parts.append('-'.join(sub))
+                elif part:
+                    cleaned_parts.append(part)
+            episodes = ', '.join(cleaned_parts)
+
+        self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
+        self._external_tools_cfg.animepahe_last_url = url
+        self._external_tools_cfg.animepahe_last_episodes = episodes
+        self._external_tools_cfg.animepahe_last_quality = self._animepahe_quality_combo.currentText()
+        self._external_tools_cfg.animepahe_last_lang = self._animepahe_lang_combo.currentText()
+        self._external_tools_cfg.save()
+
+        repo = self._external_tools_cfg.get_effective_repo_path()
+        if not repo or not os.path.isdir(repo):
+            QMessageBox.warning(
+                self,
+                "Repository Not Found",
+                f"AnimePahe repository directory does not exist:\n{self._external_tools_cfg.animepahe_repo_path}",
+            )
+            return
+
+        q_val = self._animepahe_quality_combo.currentText()
+        quality = q_val if q_val != "Auto" else None
+
+        l_val = self._animepahe_lang_combo.currentText()
+        lang = "en" if "Dub" in l_val else ("jap" if "Sub" in l_val else None)
+
+        if self._manager is not None:
+            self._manager.set_external_tools_config(self._external_tools_cfg)
+            ok, msg = self._manager.start_animepahe_scraper(
+                url=url,
+                episodes=episodes or None,
+                quality=quality,
+                lang=lang,
+            )
+        else:
+            ok, msg, proc = launch_animepahe_cli(
+                self._external_tools_cfg,
+                url=url,
+                episodes=episodes or None,
+                quality=quality,
+                lang=lang,
+            )
+
+        if ok:
+            ep_info = f" (Episodes: {episodes})" if episodes else " (All Episodes)"
+            if "queued" in msg.lower():
+                QMessageBox.information(
+                    self,
+                    "AnimePahe Download Queued",
+                    f"AnimePahe task has been queued for:\n{url}{ep_info}\n\n"
+                    f"{msg}\n\n"
+                    "It will automatically start once the currently running task completes.\n"
+                    "You can monitor live progress from the bottom console panel."
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "AnimePahe Download Started",
+                    f"AnimePahe scraper started for:\n{url}{ep_info}\n\n"
+                    "Discovered episodes will be queued directly into My-IDM for high-speed download.\n"
+                    "You can monitor live progress using 'View Console Logs' or from the bottom console panel."
+                )
+        else:
+            QMessageBox.warning(self, "Download Failed to Start", msg)
+
     def _on_animepahe_status_changed(self, is_running: bool):
         if hasattr(self, "_btn_run_cli_now"):
             if is_running:
                 self._btn_run_cli_now.setText("⏹️ Stop CLI Scraper")
-                self._btn_run_cli_now.setToolTip("Stop running AnimePahe background scraper")
+                self._btn_run_cli_now.setToolTip("Stop running AnimePahe background scraper and clear queue")
             else:
                 self._btn_run_cli_now.setText("▶️ Run CLI Now")
                 self._btn_run_cli_now.setToolTip("Launch AnimePahe background scraper in CLI mode")
+        if hasattr(self, "_btn_download_animepahe_url"):
+            self._btn_download_animepahe_url.setEnabled(True)
+            self._btn_download_animepahe_url.setText("➕ Queue Anime Download" if is_running else "⬇️ Download via AnimePahe")
+        q_raw = self._manager.get_animepahe_queue_length() if (self._manager and hasattr(self._manager, "get_animepahe_queue_length")) else 0
+        try:
+            q_len = int(q_raw)
+        except (TypeError, ValueError):
+            q_len = 0
+        self._update_animepahe_queue_badge(q_len)
+
+    def _on_animepahe_queue_changed(self, count: Any):
+        self._update_animepahe_queue_badge(count)
+
+    def _update_animepahe_queue_badge(self, count: Any):
+        if hasattr(self, "_animepahe_queue_lbl"):
+            try:
+                cnt = int(count)
+            except (TypeError, ValueError):
+                cnt = 0
+            if cnt > 0:
+                self._animepahe_queue_lbl.setText(f"📋 Queued: {cnt}")
+                self._animepahe_queue_lbl.setVisible(True)
+            else:
+                self._animepahe_queue_lbl.setText("")
+                self._animepahe_queue_lbl.setVisible(False)
 
     def _on_browse_tor_path(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1625,12 +1998,19 @@ class SettingsDialog(QDialog):
         # 6. Collect External Tools settings
         self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
         self._external_tools_cfg.animepahe_launch_on_startup = self._animepahe_startup_cb.isChecked()
+        self._external_tools_cfg.animepahe_last_url = self._animepahe_url_edit.text().strip()
+        self._external_tools_cfg.animepahe_last_episodes = self._animepahe_episodes_edit.text().strip()
+        self._external_tools_cfg.animepahe_last_quality = self._animepahe_quality_combo.currentText()
+        self._external_tools_cfg.animepahe_last_lang = self._animepahe_lang_combo.currentText()
         self._external_tools_cfg.save()
 
         # 7. Collect Browser Integration settings
         self._browser_cfg.enabled = self._browser_enabled_cb.isChecked()
         self._browser_cfg.port = self._browser_port_spin.value()
         self._browser_cfg.intercept_all = self._browser_intercept_cb.isChecked()
+        self._browser_cfg.intercept_torrent_files = self._browser_intercept_torrent_cb.isChecked()
+        self._browser_cfg.intercept_magnet_links = self._browser_intercept_magnet_cb.isChecked()
+        self._browser_cfg.min_file_size_kb = self._browser_min_size_spin.value()
         bypassed_text = self._browser_bypass_edit.text().strip()
         self._browser_cfg.bypassed_extensions = [
             ext.strip() for ext in bypassed_text.split(",") if ext.strip()
@@ -1668,3 +2048,181 @@ class SettingsDialog(QDialog):
     @property
     def browser_config(self) -> BrowserIntegrationConfig:
         return self._browser_cfg
+
+
+class FirefoxInstallGuideDialog(QDialog):
+    """Detailed modal guide explaining how to install and retain the Firefox add-on permanently."""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Firefox Add-on: Permanent Installation Guide")
+        self.resize(700, 520)
+        self.setMinimumSize(560, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        header_lbl = QLabel(
+            "<h3 style='margin: 0; color: #ff9d00;'>🦊 Retaining My-IDM in Mozilla Firefox</h3>"
+            "<p style='color: #8fa0b5; margin-top: 4px;'>"
+            "By default, Firefox's <code>about:debugging</code> (<b>Load Temporary Add-on</b>) "
+            "strictly removes all temporary extensions whenever Firefox closes or restarts. "
+            "To keep My-IDM permanently active, choose one of the options below:"
+            "</p>"
+        )
+        header_lbl.setTextFormat(Qt.TextFormat.RichText)
+        header_lbl.setWordWrap(True)
+        layout.addWidget(header_lbl)
+
+        tabs = QTabWidget()
+
+        # Tab 1: Firefox Developer Edition / ESR / Floorp / LibreWolf
+        dev_tab = QWidget()
+        dev_layout = QVBoxLayout(dev_tab)
+        dev_text = (
+            "<p style='line-height: 1.6;'>"
+            "<b>Option A: Firefox Developer Edition / Nightly / ESR / LibreWolf / Floorp</b><br>"
+            "<span style='color: #2ed573;'>Recommended for quick local installation without submitting to Mozilla.</span><br><br>"
+            "1. In your browser address bar, navigate to: <a href='about:config' style='color: #ff9d00; text-decoration: underline;'><b>about:config</b></a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy URL]</span><br>"
+            "2. Accept the risk warning, then search for: <a href='xpinstall.signatures.required' style='color: #00d2ff; text-decoration: underline;'><b>xpinstall.signatures.required</b></a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy]</span><br>"
+            "3. Double-click to toggle its value to: <a href='false' style='color: #00d2ff; text-decoration: underline;'><b>false</b></a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy]</span>.<br>"
+            "4. Click the <b>📦 Package Firefox Add-on (.xpi)</b> button below to generate <a href='copy:xpi_path' style='color: #ff9d00; text-decoration: underline;'><b>my-idm-firefox.xpi</b></a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy path]</span>.<br>"
+            "5. Navigate to: <a href='about:addons' style='color: #ff9d00; text-decoration: underline;'><b>about:addons</b></a> "
+            "&nbsp;<span style='color: #8fa0b5; font-size: 11px;'>[click to copy URL]</span> (or press <kbd>Ctrl+Shift+A</kbd>).<br>"
+            "6. Click the <b>⚙️ Gear icon</b> at the top of the Add-ons manager and select <b>Install Add-on From File...</b><br>"
+            "7. Choose the generated <code>my-idm-firefox.xpi</code> and click <b>Add</b>.<br><br>"
+            "🎉 <b>Result:</b> The extension remains permanently installed across all browser updates and restarts!"
+            "</p>"
+        )
+        dev_lbl = QLabel(dev_text)
+        dev_lbl.setTextFormat(Qt.TextFormat.RichText)
+        dev_lbl.setWordWrap(True)
+        dev_lbl.setOpenExternalLinks(False)
+        dev_lbl.linkActivated.connect(self._on_link_clicked)
+        dev_layout.addWidget(dev_lbl)
+        dev_layout.addStretch()
+        tabs.addTab(dev_tab, "Developer / ESR / Forks (Instant)")
+
+        # Tab 2: Standard Firefox Release (AMO Self-Distribution Signing)
+        amo_tab = QWidget()
+        amo_layout = QVBoxLayout(amo_tab)
+        amo_text = (
+            "<p style='line-height: 1.6;'>"
+            "<b>Option B: Standard Firefox Release (Free Automated AMO Signing)</b><br>"
+            "<span style='color: #2ed573;'>Works on 100% of standard official Firefox releases without modifying security flags.</span><br><br>"
+            "Standard Firefox Release requires cryptographic signatures from Mozilla. Mozilla provides free automated self-distribution signing for personal use:<br><br>"
+            "1. Click <b>📦 Package Firefox Add-on (.xpi)</b> below to create <code>my-idm-firefox.xpi</code>.<br>"
+            "2. Visit Mozilla's Add-on Developer Hub: <a href='https://addons.mozilla.org/developers/addon/submit/distribution' style='color: #00d2ff;'><b>AMO Developer Hub</b></a> or view your builds directly at <a href='https://addons.mozilla.org/en-US/developers/addon/84510108e17d4c599bce/versions/6515778' style='color: #00d2ff;'><b>AMO Version 6515778</b></a>.<br>"
+            "3. Log in with your free Mozilla Firefox Account.<br>"
+            "4. Choose <b>'On your own' (Self-Distribution / Unlisted)</b>.<br>"
+            "5. Upload <code>my-idm-firefox.xpi</code>. Mozilla's automated scanner approves and signs it in <b>1–2 minutes</b>.<br>"
+            "6. Download your signed <code>.xpi</code> from the versions page and install it into Firefox.<br><br>"
+            "🎉 <b>Result:</b> The signed add-on installs cleanly in standard Firefox and persists permanently!"
+            "</p>"
+        )
+        amo_lbl = QLabel(amo_text)
+        amo_lbl.setTextFormat(Qt.TextFormat.RichText)
+        amo_lbl.setWordWrap(True)
+        amo_lbl.linkActivated.connect(self._on_link_clicked)
+        amo_layout.addWidget(amo_lbl)
+        amo_layout.addStretch()
+        tabs.addTab(amo_tab, "Standard Firefox Release (AMO Signing)")
+
+        # Tab 3: Why Temporary Resets
+        temp_tab = QWidget()
+        temp_layout = QVBoxLayout(temp_tab)
+        temp_text = (
+            "<p style='line-height: 1.6;'>"
+            "<b>Why does <code>about:debugging</code> disappear on restart?</b><br><br>"
+            "Firefox's <i>'Load Temporary Add-on...'</i> feature is explicitly designed for developers to test code during an active session.<br><br>"
+            "• Firefox purges temporary extensions upon restart to prevent unauthorized unsigned modifications from persisting without user knowledge.<br>"
+            "• If you only need temporary downloads for a single session, <code>about:debugging</code> is sufficient.<br>"
+            "• For permanent use across all restarts, follow <b>Option A</b> (if using Developer/ESR/Floorp) or <b>Option B</b> (for Standard Firefox)."
+            "</p>"
+        )
+        temp_lbl = QLabel(temp_text)
+        temp_lbl.setTextFormat(Qt.TextFormat.RichText)
+        temp_lbl.setWordWrap(True)
+        temp_layout.addWidget(temp_lbl)
+        temp_layout.addStretch()
+        tabs.addTab(temp_tab, "Why Temporary Resets")
+
+        layout.addWidget(tabs)
+
+        btn_row = QHBoxLayout()
+        pkg_btn = QPushButton("📦 Package Firefox Add-on (.xpi)")
+        pkg_btn.clicked.connect(self._on_package_clicked)
+        btn_row.addWidget(pkg_btn)
+
+        open_folder_btn = QPushButton("📁 Open .xpi Folder")
+        open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+        btn_row.addWidget(open_folder_btn)
+
+        self._copy_status_lbl = QLabel("")
+        self._copy_status_lbl.setStyleSheet("color: #2ed573; font-weight: bold; margin-left: 8px;")
+        btn_row.addWidget(self._copy_status_lbl, 1)
+
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+
+        layout.addLayout(btn_row)
+
+    def _copy_text(self, text: str, msg: str = ""):
+        from PySide6.QtWidgets import QApplication, QToolTip
+        from PySide6.QtGui import QClipboard, QCursor
+        from PySide6.QtCore import QTimer
+        QApplication.clipboard().setText(text)
+        QApplication.processEvents()
+        try:
+            QToolTip.showText(QCursor.pos(), f"✓ Copied: {text}", self, 2500)
+        except Exception:
+            pass
+        if hasattr(self, "_copy_status_lbl"):
+            self._copy_status_lbl.setText(f"✓ Copied '{text}' to clipboard")
+            QTimer.singleShot(3500, lambda: self._copy_status_lbl.setText(""))
+
+    def _on_link_clicked(self, url: str):
+        if url.startswith("http"):
+            QDesktopServices.openUrl(QUrl(url))
+        else:
+            text = url
+            if text.startswith("copy:"):
+                text = text[len("copy:"):]
+            if text == "xpi_path":
+                from my_idm.extension_packager import get_default_extension_dir
+                text = str(get_default_extension_dir() / "my-idm-firefox.xpi")
+            self._copy_text(text)
+
+    def _on_open_folder_clicked(self):
+        from my_idm.extension_packager import get_default_extension_dir
+        ext_dir = get_default_extension_dir()
+        xpi_path = ext_dir / "my-idm-firefox.xpi"
+        target = xpi_path if xpi_path.is_file() else ext_dir
+        ok, msg = show_in_folder(target)
+        if not ok:
+            QMessageBox.warning(self, "Folder Error", msg)
+
+    def _on_package_clicked(self):
+        try:
+            from my_idm.extension_packager import package_firefox_extension
+            xpi_path = package_firefox_extension()
+            res = QMessageBox.information(
+                self,
+                "Package Created",
+                f"Firefox add-on package created successfully at:\n\n{xpi_path}\n\nWould you like to open the containing folder?",
+                QMessageBox.StandardButton.Open | QMessageBox.StandardButton.Ok,
+                QMessageBox.StandardButton.Ok,
+            )
+            if res == QMessageBox.StandardButton.Open:
+                ok, msg = show_in_folder(xpi_path)
+                if not ok:
+                    QMessageBox.warning(self, "Folder Error", msg)
+        except Exception as e:
+            QMessageBox.critical(self, "Packaging Error", f"Failed to package Firefox extension:\n{e}")
+

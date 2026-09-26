@@ -28,6 +28,7 @@ from my_idm.config import (
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
 )
+from my_idm.notifications import notify_browser_download_caught
 from my_idm.browser_server import BrowserServer
 from my_idm.external_tools import launch_animepahe_cli, launch_animepahe_gui
 from my_idm.tor_service import TorServiceManager, find_tor_executable
@@ -256,6 +257,7 @@ class DownloadManager(QObject):
     bandwidth_limits_changed = Signal(int, int)  # download_limit, upload_limit
     external_tools_config_changed = Signal(object)  # ExternalToolsConfig
     animepahe_status_changed = Signal(bool)  # is_running
+    animepahe_queue_changed = Signal(int)    # queue_size
     browser_config_changed = Signal(object)  # BrowserIntegrationConfig
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
@@ -270,6 +272,8 @@ class DownloadManager(QObject):
         self._browser_config = BrowserIntegrationConfig.load()
         self._browser_server = BrowserServer(self, self._browser_config)
         self._animepahe_process: Optional[subprocess.Popen] = None
+        self._animepahe_queue: list[dict[str, Any]] = []
+        self._animepahe_queue_lock = threading.Lock()
         self._browser_container_hwnd: Optional[int] = None
         # Enforce that Tor is only enabled on startup if auto_start_at_startup is True
         if not self._tor_config.auto_start_at_startup:
@@ -442,7 +446,9 @@ class DownloadManager(QObject):
         if self._thread:
             self._thread.join(timeout=3)
 
-        # Stop AnimePahe background scraper process if running
+        # Stop AnimePahe background scraper process and clear queue if running
+        with self._animepahe_queue_lock:
+            self._animepahe_queue.clear()
         if self._animepahe_process and self._animepahe_process.poll() is None:
             try:
                 self._animepahe_process.terminate()
@@ -476,15 +482,45 @@ class DownloadManager(QObject):
         config.save()
         self.external_tools_config_changed.emit(config)
 
-    def start_animepahe_scraper(self) -> tuple[bool, str]:
-        """Launch the AnimePahe scraper in CLI mode in the background."""
-        if self._animepahe_process and self._animepahe_process.poll() is None:
-            return True, "AnimePahe scraper is already running."
+    def start_animepahe_scraper(
+        self,
+        url: Optional[str] = None,
+        episodes: Optional[str] = None,
+        quality: Optional[str] = None,
+        lang: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        """Launch the AnimePahe scraper in CLI mode in the background, or queue if already running."""
+        with self._animepahe_queue_lock:
+            if self._animepahe_process and self._animepahe_process.poll() is None:
+                task = {
+                    "url": url,
+                    "episodes": episodes,
+                    "quality": quality,
+                    "lang": lang,
+                }
+                self._animepahe_queue.append(task)
+                q_pos = len(self._animepahe_queue)
+                self.animepahe_queue_changed.emit(q_pos)
+                target_str = f" for '{url}'" if url else ""
+                return True, f"AnimePahe task queued at position #{q_pos}{target_str}."
 
+            return self._launch_animepahe_task(url=url, episodes=episodes, quality=quality, lang=lang)
+
+    def _launch_animepahe_task(
+        self,
+        url: Optional[str] = None,
+        episodes: Optional[str] = None,
+        quality: Optional[str] = None,
+        lang: Optional[str] = None,
+    ) -> tuple[bool, str]:
         ok, msg, proc = launch_animepahe_cli(
             self._external_tools_config,
             my_idm_dir=str(Path(__file__).resolve().parent.parent),
             container_hwnd=self._browser_container_hwnd,
+            url=url,
+            episodes=episodes,
+            quality=quality,
+            lang=lang,
         )
         if ok and proc:
             self._animepahe_process = proc
@@ -495,30 +531,67 @@ class DownloadManager(QObject):
                     proc.wait()
                 except Exception:
                     pass
-                if self._animepahe_process == proc:
-                    self._animepahe_process = None
-                self.animepahe_status_changed.emit(False)
+
+                try:
+                    self.process_backlogs()
+                except Exception:
+                    pass
+
+                next_task = None
+                with self._animepahe_queue_lock:
+                    if self._animepahe_queue:
+                        next_task = self._animepahe_queue.pop(0)
+                        self.animepahe_queue_changed.emit(len(self._animepahe_queue))
+
+                if next_task and not self._stopped:
+                    self._launch_animepahe_task(
+                        url=next_task.get("url"),
+                        episodes=next_task.get("episodes"),
+                        quality=next_task.get("quality"),
+                        lang=next_task.get("lang"),
+                    )
+                else:
+                    with self._animepahe_queue_lock:
+                        if self._animepahe_process == proc:
+                            self._animepahe_process = None
+                    self.animepahe_status_changed.emit(False)
 
             threading.Thread(target=_monitor, daemon=True, name="animepahe-monitor").start()
         return ok, msg
 
     def stop_animepahe_scraper(self) -> tuple[bool, str]:
-        """Stop running AnimePahe background scraper process."""
+        """Stop running AnimePahe background scraper process and clear any queued tasks."""
+        with self._animepahe_queue_lock:
+            q_cleared = len(self._animepahe_queue)
+            self._animepahe_queue.clear()
+            self.animepahe_queue_changed.emit(0)
+
         if not self._animepahe_process or self._animepahe_process.poll() is not None:
             self._animepahe_process = None
             self.animepahe_status_changed.emit(False)
+            if q_cleared > 0:
+                return True, f"Cleared {q_cleared} queued AnimePahe task(s)."
             return True, "AnimePahe scraper is not running."
 
         try:
             self._animepahe_process.terminate()
             self._animepahe_process = None
             self.animepahe_status_changed.emit(False)
-            return True, "Stopped AnimePahe scraper."
+            extra = f" (and cleared {q_cleared} queued task{'s' if q_cleared != 1 else ''})" if q_cleared > 0 else ""
+            return True, f"Stopped AnimePahe scraper{extra}."
         except Exception as exc:
             return False, f"Failed to stop AnimePahe scraper: {exc}"
 
     def is_animepahe_running(self) -> bool:
         return self._animepahe_process is not None and self._animepahe_process.poll() is None
+
+    def get_animepahe_queue_length(self) -> int:
+        with self._animepahe_queue_lock:
+            return len(self._animepahe_queue)
+
+    def get_animepahe_queue(self) -> list[dict[str, Any]]:
+        with self._animepahe_queue_lock:
+            return list(self._animepahe_queue)
 
     @property
     def animepahe_process(self) -> Optional[subprocess.Popen]:
@@ -916,7 +989,7 @@ class DownloadManager(QObject):
         if user_agent:
             meta["user_agent"] = user_agent
 
-        return self.add_download(
+        download_id = self.add_download(
             url=url,
             save_path=save_path or self._general_config.get_effective_save_path(),
             num_segments=self._general_config.default_segments,
@@ -924,6 +997,13 @@ class DownloadManager(QObject):
             headers=combined_headers,
             metadata=meta,
         )
+
+        if download_id:
+            entry = self._db.get_download(download_id)
+            if entry:
+                notify_browser_download_caught(entry.filename or entry.id, url)
+
+        return download_id
 
     def _get_active_download_count(self) -> int:
         """Count downloads currently in active transferring states or starting."""

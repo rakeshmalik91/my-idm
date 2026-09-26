@@ -623,9 +623,11 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         from PySide6.QtCore import QPoint, QPointF, QEvent
 
         with patch.object(self.win, "_show_speed_context_menu") as mock_menu:
+            pt = QPointF(5.0, 5.0)
             press_event = QMouseEvent(
                 QEvent.Type.MouseButtonPress,
-                QPointF(5.0, 5.0),
+                pt,
+                pt,
                 Qt.MouseButton.LeftButton,
                 Qt.MouseButton.LeftButton,
                 Qt.KeyboardModifier.NoModifier,
@@ -687,9 +689,11 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
 
         # Simulate left-click directly on the filter button
         click_pt = btn_rect.center()
+        pt = QPointF(click_pt.x(), click_pt.y())
         press_event = QMouseEvent(
             QEvent.Type.MouseButtonPress,
-            QPointF(click_pt.x(), click_pt.y()),
+            pt,
+            pt,
             Qt.MouseButton.LeftButton,
             Qt.MouseButton.LeftButton,
             Qt.KeyboardModifier.NoModifier,
@@ -946,6 +950,25 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertEqual(next_win.pos().x(), 350)
         self.assertEqual(next_win.pos().y(), 250)
         next_win.close()
+
+    def test_about_dialog_contains_copyright(self):
+        """About dialog displays the application information and copyright notice."""
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+
+        captured_dialogs = []
+        original_exec = QMessageBox.exec
+
+        def _intercept_exec(dialog_self):
+            captured_dialogs.append(dialog_self)
+            return QMessageBox.StandardButton.Ok
+
+        with patch.object(QMessageBox, "exec", _intercept_exec):
+            self.win._on_about()
+            self.assertEqual(len(captured_dialogs), 1)
+            dlg = captured_dialogs[0]
+            self.assertIn("© Rakesh Malik, 2026", dlg.informativeText())
+            self.assertIn("My-IDM", dlg.text())
 
 
 if __name__ == "__main__":

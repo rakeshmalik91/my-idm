@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional, TYPE_CHECKING, Union
+import aiohttp
 from aiohttp import web
 
 from my_idm.config import BrowserIntegrationConfig
@@ -66,10 +67,66 @@ class BrowserServer:
             "status": "ok",
             "enabled": self._config.enabled,
             "port": self._config.port,
+            # snake_case canonical
             "intercept_all": self._config.intercept_all,
+            "intercept_torrent_files": self._config.intercept_torrent_files,
+            "intercept_magnet_links": self._config.intercept_magnet_links,
+            "min_file_size_kb": self._config.min_file_size_kb,
             "bypassed_extensions": self._config.bypassed_extensions,
+            # camelCase aliases for direct JS extension access
+            "interceptDownloads": self._config.intercept_all,
+            "interceptTorrentFiles": self._config.intercept_torrent_files,
+            "interceptMagnetLinks": self._config.intercept_magnet_links,
+            "minFileSizeKb": self._config.min_file_size_kb,
+            "bypassExtensions": self._config.bypassed_extensions,
         }
         return web.json_response(data, headers=self._cors_headers())
+
+    async def _probe_content_length(
+        self, url: str, headers: Optional[dict] = None, cookies: str = ""
+    ) -> Optional[int]:
+        """Perform a fast HEAD or range probe to determine file size in bytes."""
+        try:
+            req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            if headers and isinstance(headers, dict):
+                req_headers.update(headers)
+            if cookies:
+                req_headers["Cookie"] = cookies
+
+            timeout = aiohttp.ClientTimeout(total=1.8, connect=1.0)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                # 1. Try fast HEAD request
+                try:
+                    async with session.head(url, headers=req_headers, allow_redirects=True) as resp:
+                        if resp.status < 400:
+                            ct = resp.headers.get("Content-Type", "").lower()
+                            if "text/html" not in ct or url.lower().endswith((".htm", ".html")):
+                                cl = resp.headers.get("Content-Length")
+                                if cl and cl.isdigit() and int(cl) > 0:
+                                    return int(cl)
+                except Exception:
+                    pass
+
+                # 2. Try fast GET with byte range (bytes=0-0)
+                req_headers["Range"] = "bytes=0-0"
+                try:
+                    async with session.get(url, headers=req_headers, allow_redirects=True) as resp:
+                        if resp.status < 400:
+                            ct = resp.headers.get("Content-Type", "").lower()
+                            if "text/html" not in ct or url.lower().endswith((".htm", ".html")):
+                                cr = resp.headers.get("Content-Range")
+                                if cr and "/" in cr:
+                                    total_str = cr.split("/")[-1].strip()
+                                    if total_str.isdigit() and int(total_str) > 0:
+                                        return int(total_str)
+                                cl = resp.headers.get("Content-Length")
+                                if cl and cl.isdigit() and resp.status == 200 and int(cl) > 0:
+                                    return int(cl)
+                except Exception:
+                    pass
+        except Exception as exc:
+            log.debug("Probing size failed for %s: %s", url, exc)
+        return None
 
     async def _handle_add(self, request: web.Request) -> web.Response:
         if not self._config.enabled:
@@ -101,6 +158,48 @@ class BrowserServer:
         referrer = body.get("referrer", "").strip()
         user_agent = body.get("user_agent", "").strip()
         extra_headers = body.get("headers", {})
+
+        # Check minimum file size
+        raw_size = body.get("total_bytes", 0) or body.get("file_size", 0)
+        try:
+            total_bytes = int(raw_size)
+        except (ValueError, TypeError):
+            total_bytes = 0
+
+        min_bytes = self._config.min_file_size_kb * 1024
+        if self._config.min_file_size_kb > 0 and not url.startswith("magnet:"):
+            # If size was not provided by browser extension, do a fast probe
+            if total_bytes <= 0:
+                try:
+                    probe_headers = extra_headers if isinstance(extra_headers, dict) else {}
+                    if referrer:
+                        probe_headers["Referer"] = referrer
+                    if user_agent:
+                        probe_headers["User-Agent"] = user_agent
+                    probed = await self._probe_content_length(url, probe_headers, cookies=cookies)
+                    if probed is not None and probed > 0:
+                        total_bytes = probed
+                except Exception as probe_err:
+                    log.debug("Size probe error for %s: %s", url, probe_err)
+
+            if total_bytes > 0 and total_bytes < min_bytes:
+                log.info(
+                    "Skipping browser download '%s' (%d bytes < min threshold %d bytes / %d KB)",
+                    filename or url,
+                    total_bytes,
+                    min_bytes,
+                    self._config.min_file_size_kb,
+                )
+                return web.json_response(
+                    {
+                        "status": "ignored",
+                        "reason": "file_size_below_minimum",
+                        "message": f"File size ({total_bytes} bytes) is below minimum threshold ({min_bytes} bytes).",
+                    },
+                    status=200,
+                    headers=self._cors_headers(),
+                )
+
 
         try:
             download_id = self._manager.add_download_from_browser(
