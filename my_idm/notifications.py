@@ -23,7 +23,10 @@ def unregister_notification_handler(handler: Optional[Callable] = None) -> None:
 
 
 try:
-    from win10toast import ToastNotifier
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning, message=r".*pkg_resources is deprecated.*")
+        from win10toast import ToastNotifier
     _toaster = ToastNotifier()
     # Safeguard _show_toast to prevent unhandled background thread exceptions
     # (e.g. Shell_NotifyIcon failure in headless tests or non-interactive sessions)

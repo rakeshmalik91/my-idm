@@ -27,4 +27,7 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 norecursedirs = [".kilo", "*worktree*", ".git", "__pycache__", ".pytest_cache"]
+filterwarnings = [
+    "ignore:.*pkg_resources is deprecated as an API.*:UserWarning",
+]
 
