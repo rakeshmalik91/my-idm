@@ -163,8 +163,39 @@ commit after each features or set of fixes/enhancements
   - [x] active console log bottom panel (stream logs in real-time when clicking console log from footer while animepahe cli is active)
   - [x] download new anime from preferences window > animepahe, using url & optional episode range
 
-#### Youtube scraper
-- [ ] TODO
+#### Youtube scraper ([Architecture Doc](architecture/youtube-scraper.md))
+**Phase 1: Foundation**
+- [ ] Add `ytdlp_*` fields to `ExternalToolsConfig` (config, serialization, unit tests)
+- [ ] Create `youtube_tool.py` — dataclasses, availability checks, URL detection regex
+- [ ] Implement `extract_metadata()` — call `yt_dlp.extract_info(download=False)`, parse formats
+- [ ] Implement `resolve_direct_url()` for Mode A (direct CDN URL extraction)
+
+**Phase 2: Mode A — HTTPEngine Integration**
+- [ ] Add `add_youtube_download()` to `DownloadManager` (resolve URL → standard HTTP download)
+- [ ] Handle URL expiration — re-extract on resume via `_refresh_youtube_url()`
+
+**Phase 3: Mode B — yt-dlp Native Download**
+- [ ] Implement `start_native_download()` — daemon thread + progress hooks + postprocessor hooks
+- [ ] Add Mode B tracking to `DownloadManager` (progress relay, completion, cancellation)
+
+**Phase 4: YouTube Dialog (UI)**
+- [ ] Create `youtube_dialog.py` — URL input, thumbnail preview, video info panel
+- [ ] Build format selection table with quality presets
+- [ ] Add options panel (embed thumbnail, subtitles, save path)
+- [ ] Implement playlist/channel batch support (video list with checkboxes)
+
+**Phase 5: Menu & Toolbar Integration**
+- [ ] Add `Tools → Download YouTube Video…` menu action (`Ctrl+Y`)
+- [ ] Auto-detect YouTube URLs in "Add Download" dialog → redirect to YouTube dialog
+- [ ] Show 🎬 badge on YouTube downloads in the table
+
+**Phase 6: Settings UI**
+- [ ] Add YouTube sub-tab to External Tools preferences
+- [ ] Wire settings persistence + live validation (yt-dlp/ffmpeg path status)
+
+**Phase 7: Polish**
+- [ ] Handle age-restricted, geo-restricted, live stream, private/members-only videos
+- [ ] yt-dlp auto-update mechanism
 
 #### Mangareader scraper
 - [ ] TODO
