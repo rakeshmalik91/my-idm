@@ -259,6 +259,7 @@ class DownloadManager(QObject):
     animepahe_status_changed = Signal(bool)  # is_running
     animepahe_queue_changed = Signal(int)    # queue_size
     browser_config_changed = Signal(object)  # BrowserIntegrationConfig
+    process_backlogs_requested = Signal()    # Request to run process_backlogs on main thread
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -273,8 +274,9 @@ class DownloadManager(QObject):
         self._browser_server = BrowserServer(self, self._browser_config)
         self._animepahe_process: Optional[subprocess.Popen] = None
         self._animepahe_queue: list[dict[str, Any]] = []
-        self._animepahe_queue_lock = threading.Lock()
+        self._animepahe_queue_lock = threading.RLock()
         self._browser_container_hwnd: Optional[int] = None
+        self._window_visible: bool = True
         # Enforce that Tor is only enabled on startup if auto_start_at_startup is True
         if not self._tor_config.auto_start_at_startup:
             self._tor_config.enabled = False
@@ -316,6 +318,9 @@ class DownloadManager(QObject):
         self._animepahe_timer = QTimer(self)
         self._animepahe_timer.timeout.connect(self._on_animepahe_timer_tick)
         self._apply_animepahe_timer_config()
+
+        # Connect process_backlogs_requested signal to run process_backlogs on main thread
+        self.process_backlogs_requested.connect(self.process_backlogs)
 
         # Wire engine callbacks
         self._http.set_callbacks(
@@ -551,7 +556,7 @@ class DownloadManager(QObject):
         ok, msg, proc = launch_animepahe_cli(
             self._external_tools_config,
             my_idm_dir=str(Path(__file__).resolve().parent.parent),
-            container_hwnd=self._browser_container_hwnd,
+            container_hwnd=self._browser_container_hwnd if self._window_visible else None,
             url=url,
             episodes=episodes,
             quality=quality,
@@ -567,8 +572,10 @@ class DownloadManager(QObject):
                 except Exception:
                     pass
 
+                # Dispatch process_backlogs to the Qt main event loop via signal to avoid
+                # synchronous DB/signal operations on a background daemon thread
                 try:
-                    self.process_backlogs()
+                    self.process_backlogs_requested.emit()
                 except Exception:
                     pass
 
@@ -638,6 +645,13 @@ class DownloadManager(QObject):
 
     def set_browser_container_hwnd(self, hwnd: Optional[int]):
         self._browser_container_hwnd = hwnd
+
+    def set_window_visible(self, visible: bool):
+        self._window_visible = visible
+
+    @property
+    def is_window_visible(self) -> bool:
+        return self._window_visible
 
     @property
     def browser_config(self) -> BrowserIntegrationConfig:

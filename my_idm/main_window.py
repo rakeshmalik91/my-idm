@@ -362,6 +362,9 @@ class MainWindow(QMainWindow):
 
     def _on_browser_tab_requested(self):
         """Ensure bottom panel is visible and expanded when an external browser session opens."""
+        # Avoid expanding details panel while in tray (window hidden)
+        if not self.isVisible() or self.isMinimized():
+            return
         if hasattr(self, "_act_details") and not self._act_details.isChecked():
             self._act_details.setChecked(True)
             self._on_details_toggle(True)
@@ -2499,14 +2502,24 @@ class MainWindow(QMainWindow):
             if self.isMinimized() and cfg.enable_system_tray and cfg.minimize_to_tray:
                 QTimer.singleShot(0, self.hide)
         super().changeEvent(event)
+        self._update_manager_window_visibility()
 
     def showEvent(self, event):
         super().showEvent(event)
         self._update_tray_menu_text()
+        self._update_manager_window_visibility()
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self._update_tray_menu_text()
+        self._update_manager_window_visibility()
+
+    def _update_manager_window_visibility(self):
+        """Update DownloadManager with current window visibility state for AnimePahe embedding."""
+        if hasattr(self, "_manager") and self._manager:
+            # Window is usable for embedding only when visible and not minimized
+            visible = self.isVisible() and not self.isMinimized()
+            self._manager.set_window_visible(visible)
 
     def closeEvent(self, event):
         cfg = self._manager.general_config

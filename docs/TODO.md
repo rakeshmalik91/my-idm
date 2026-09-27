@@ -8,6 +8,12 @@ commit after each features or set of fixes/enhancements
 - [x] had 3 torrents, 1 completed, 2 downloading, everytime i restart the app, one of the downloading torrent gets replaced by the completed one 
 - [x] download going on even in paused state sometimes
 - [x] to check why animepahe downloads are going to queued state and not retrying, manual resume works fine
+- [x] BUG: My-IDM freezes in Windows system tray when AnimePahe background scraper triggers Cloudflare bypass
+  - [x] Do not pass `container_hwnd` (`ANIMEPAHE_EMBED_CONTAINER_HWND`) if My-IDM is minimized or hidden in system tray (run detached/headless in background)
+  - [x] Switch `_animepahe_queue_lock` in `DownloadManager` from `threading.Lock()` to `threading.RLock()` to avoid re-entrancy deadlocks
+  - [x] Dispatch `self.process_backlogs()` from `_monitor()` daemon thread safely to the Qt main event loop via `QTimer.singleShot(0, ...)` instead of synchronous DB/signal execution on background thread
+  - [x] Prevent double-docking race in `DetailsPanel._browser_monitor_timer` when window is already reparented by CLI, and avoid expanding details panel while in tray
+  - [x] In `animepahe-downloader` (`browser_embed.py`): restore window parent (`user32.SetParent(chrome_hwnd, 0)`) before closing Chrome driver
 
 ### Fixes / Enhancements
 - [x] add download popup isnt picking default folder

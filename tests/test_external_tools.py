@@ -317,6 +317,7 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
 
     def test_manager_animepahe_monitor_polls_backlog_on_completion(self):
         import time
+        from PySide6.QtWidgets import QApplication
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         mock_proc.wait.return_value = 0
@@ -326,7 +327,11 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             ok, msg = self.manager.start_animepahe_scraper()
             self.assertTrue(ok)
             # Give daemon thread a brief moment to run wait() and trigger process_backlogs()
-            time.sleep(0.05)
+            time.sleep(0.2)
+            # Process Qt events to allow QTimer.singleShot to execute
+            for _ in range(5):
+                QApplication.processEvents()
+                time.sleep(0.01)
             mock_poll.assert_called_once()
             self.assertFalse(self.manager.is_animepahe_running())
 
@@ -405,8 +410,14 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             self.assertFalse(self.manager.is_animepahe_running())
 
     def test_manager_stop_animepahe_clears_queue(self):
+        import time
         proc = MagicMock()
         proc.poll.return_value = None
+        # Make wait() block briefly so monitor thread doesn't process queue instantly
+        def slow_wait():
+            time.sleep(0.1)
+            return 0
+        proc.wait.side_effect = slow_wait
 
         with patch("my_idm.manager.launch_animepahe_cli", return_value=(True, "Started", proc)):
             self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/1")

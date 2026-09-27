@@ -306,6 +306,27 @@ class EmbeddedBrowserContainer(QWidget):
     def attach_window(self, hwnd: int) -> bool:
         if not hwnd:
             return False
+
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                if user32.IsWindow(hwnd):
+                    # Prevent double-docking: check if already a child of our container
+                    parent = user32.GetParent(ctypes.c_void_p(hwnd))
+                    if parent == self.hwnd():
+                        # Already attached, just ensure it's visible and positioned
+                        self._chrome_hwnd = hwnd
+                        self._placeholder_lbl.setVisible(False)
+                        w = max(self.width(), 400)
+                        h = max(self.height(), 300)
+                        user32.MoveWindow(ctypes.c_void_p(hwnd), 0, 0, w, h, True)
+                        user32.ShowWindow(ctypes.c_void_p(hwnd), 5)  # SW_SHOW
+                        logger.info("Browser HWND %s already attached to container %s", hwnd, self.hwnd())
+                        return True
+            except Exception:
+                pass
+
         self._chrome_hwnd = hwnd
         self._placeholder_lbl.setVisible(False)
 
@@ -2258,7 +2279,21 @@ class DetailsPanel(QWidget):
         if not self.is_browser_attached():
             chrome_hwnd = find_chrome_hwnd(proc.pid)
             if chrome_hwnd:
-                self.show_browser_tab(chrome_hwnd)
+                # Prevent double-docking race: check if Chrome window is already
+                # a child of our container (CLI may have already reparented it)
+                if sys.platform == "win32":
+                    try:
+                        import ctypes
+                        parent = ctypes.windll.user32.GetParent(ctypes.c_void_p(chrome_hwnd))
+                        if parent == self._browser_container.hwnd():
+                            # Already attached by CLI, just show the tab
+                            self.show_browser_tab(chrome_hwnd)
+                        else:
+                            self.show_browser_tab(chrome_hwnd)
+                    except Exception:
+                        self.show_browser_tab(chrome_hwnd)
+                else:
+                    self.show_browser_tab(chrome_hwnd)
         else:
             hwnd = self._browser_container.chrome_hwnd
             if hwnd and sys.platform == "win32":
