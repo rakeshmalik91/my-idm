@@ -139,12 +139,12 @@ class TestMainWindowToolbar(unittest.TestCase):
             )
 
     def test_toolbar_has_no_logo(self):
-        """Toolbar must not contain a logo widget."""
+        """Toolbar must not contain any logo or text label widgets."""
         toolbars = self.win.findChildren(QToolBar)
         self.assertTrue(len(toolbars) > 0)
         main_tb = toolbars[0]
         labels = main_tb.findChildren(QLabel)
-        self.assertEqual(len(labels), 0, "Toolbar should not have a logo QLabel widget")
+        self.assertEqual(len(labels), 0, f"Toolbar should not have any labels: {[l.text() for l in labels]}")
 
     def test_footer_active_and_total_count(self):
         """Footer displays 'X Downloads, Y Active'."""

@@ -67,6 +67,11 @@ def parse_args():
         help="Disable the startup splash screen",
     )
     parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="Internal flag: skip single-instance check when restarting",
+    )
+    parser.add_argument(
         "urls",
         nargs="*",
         default=[],
@@ -103,7 +108,7 @@ def main():
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
 
-    # Single-instance check
+    # Single-instance check (skip if --restart flag is set)
     from my_idm.single_instance import SingleInstanceManager, activate_window
 
     single_instance = SingleInstanceManager()
@@ -113,7 +118,7 @@ def main():
         "urls": [u for u in args.urls if u],
     }
 
-    if single_instance.send_message(payload):
+    if not args.restart and single_instance.send_message(payload):
         log.info("My-IDM is already running. Signal sent to bring existing window to focus.")
         sys.exit(0)
 

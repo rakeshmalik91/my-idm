@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
     QPolygonF,
@@ -176,6 +177,96 @@ def _create_details_panel_icon(size: int = 32) -> QIcon:
     p.setBrush(QColor("#58a6ff"))
     bot_rect = QRectF(size * 0.16, size * 0.58, size * 0.68, size * 0.26)
     p.drawRoundedRect(bot_rect, 2, 2)
+
+    p.end()
+    return QIcon(pix)
+
+
+def _create_pause_all_icon(size: int = 32) -> QIcon:
+    """Pause icon (two bars) with a small ≡ badge in the bottom-right to denote 'all'."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#38bdf8"))
+    p.setPen(Qt.PenStyle.NoPen)
+    bar_w = size * 0.18
+    bar_h = size * 0.54
+    y = size * 0.10
+    p.drawRoundedRect(size * 0.10, y, bar_w, bar_h, 2, 2)
+    p.drawRoundedRect(size * 0.36, y, bar_w, bar_h, 2, 2)
+    # Badge: three small yellow horizontal lines in bottom-right
+    lw = max(1.5, size * 0.065)
+    p.setPen(QPen(QColor("#facc15"), lw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    bx1 = size * 0.56
+    bx2 = size * 0.88
+    for by in (size * 0.66, size * 0.76, size * 0.86):
+        p.drawLine(QPointF(bx1, by), QPointF(bx2, by))
+    p.end()
+    return QIcon(pix)
+
+
+def _create_resume_all_icon(size: int = 32) -> QIcon:
+    """Play icon (triangle) with a small ≡ badge in the bottom-right to denote 'all'."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor("#4ade80"))
+    p.setPen(Qt.PenStyle.NoPen)
+    triangle = QPolygonF([
+        QPointF(size * 0.12, size * 0.10),
+        QPointF(size * 0.64, size * 0.38),
+        QPointF(size * 0.12, size * 0.66),
+    ])
+    p.drawPolygon(triangle)
+    # Badge: three small yellow horizontal lines in bottom-right
+    lw = max(1.5, size * 0.065)
+    p.setPen(QPen(QColor("#facc15"), lw, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    bx1 = size * 0.56
+    bx2 = size * 0.88
+    for by in (size * 0.66, size * 0.76, size * 0.86):
+        p.drawLine(QPointF(bx1, by), QPointF(bx2, by))
+    p.end()
+    return QIcon(pix)
+
+
+def _create_pause_all_seeding_icon(size: int = 32) -> QIcon:
+    """Pause icon (two bars) with a clearly visible sprout (🌱) badge in the bottom-right."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Pause bars in cyan
+    p.setBrush(QColor("#38bdf8"))
+    p.setPen(Qt.PenStyle.NoPen)
+    bar_w = size * 0.18
+    bar_h = size * 0.54
+    y = size * 0.10
+    p.drawRoundedRect(size * 0.10, y, bar_w, bar_h, 2, 2)
+    p.drawRoundedRect(size * 0.36, y, bar_w, bar_h, 2, 2)
+
+    # Seedling sprout badge in bottom-right
+    # Stem: green vertical stalk
+    p.setPen(QPen(QColor("#22c55e"), max(1.6, size * 0.08), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(size * 0.74, size * 0.92), QPointF(size * 0.74, size * 0.60))
+
+    # Left leaf
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#4ade80"))
+    path_l = QPainterPath()
+    path_l.moveTo(size * 0.74, size * 0.68)
+    path_l.quadTo(size * 0.52, size * 0.62, size * 0.52, size * 0.50)
+    path_l.quadTo(size * 0.66, size * 0.50, size * 0.74, size * 0.68)
+    p.drawPath(path_l)
+
+    # Right leaf (slightly brighter)
+    p.setBrush(QColor("#86efac"))
+    path_r = QPainterPath()
+    path_r.moveTo(size * 0.74, size * 0.64)
+    path_r.quadTo(size * 0.96, size * 0.58, size * 0.96, size * 0.46)
+    path_r.quadTo(size * 0.82, size * 0.46, size * 0.74, size * 0.64)
+    p.drawPath(path_r)
 
     p.end()
     return QIcon(pix)
@@ -416,12 +507,16 @@ class MainWindow(QMainWindow):
         self._act_start_seeding.setToolTip("Start or resume seeding for completed torrents")
         self._act_start_seeding.triggered.connect(self._on_start_seeding)
 
-        self._act_pause_all = QAction(_create_emoji_icon("⏸️"), "Pause All", self)
+        self._act_pause_all = QAction(_create_pause_all_icon(), "", self)
         self._act_pause_all.setToolTip("Pause all active and queued downloads")
         self._act_pause_all.triggered.connect(self._on_pause_all_downloads)
 
-        self._act_stop_all_seeding = QAction(_create_emoji_icon("🛑"), "Stop All Seeding", self)
-        self._act_stop_all_seeding.setToolTip("Stop all active seeding torrents (move to Completed)")
+        self._act_resume_all = QAction(_create_resume_all_icon(), "", self)
+        self._act_resume_all.setToolTip("Resume all paused and queued downloads")
+        self._act_resume_all.triggered.connect(self._on_resume_all_downloads)
+
+        self._act_stop_all_seeding = QAction(_create_pause_all_seeding_icon(), "", self)
+        self._act_stop_all_seeding.setToolTip("Pause all active seeding torrents")
         self._act_stop_all_seeding.triggered.connect(self._on_stop_all_seeding)
 
         self._act_copy_url = QAction(_create_emoji_icon("📋"), "Copy URL / Magnet", self)
@@ -546,6 +641,9 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self._act_stop)
         toolbar.addAction(self._act_start_seeding)
         toolbar.addSeparator()
+
+        # Resume All + Pause All + Pause All Seeding
+        toolbar.addAction(self._act_resume_all)
         toolbar.addAction(self._act_pause_all)
         toolbar.addAction(self._act_stop_all_seeding)
         toolbar.addSeparator()
@@ -596,6 +694,7 @@ class MainWindow(QMainWindow):
             self._act_pause,
             self._act_stop,
             self._act_start_seeding,
+            self._act_resume_all,
             self._act_pause_all,
             self._act_stop_all_seeding,
             self._act_delete,
@@ -635,6 +734,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_resume)
         edit_menu.addAction(self._act_force_start)
         edit_menu.addAction(self._act_pause)
+        edit_menu.addAction(self._act_resume_all)
         edit_menu.addAction(self._act_pause_all)
         edit_menu.addAction(self._act_stop)
         edit_menu.addAction(self._act_start_seeding)
@@ -905,6 +1005,11 @@ class MainWindow(QMainWindow):
         tray_menu.addAction(act_prefs)
         tray_menu.addSeparator()
 
+        act_restart = QAction("🔄 Restart My-IDM", self)
+        act_restart.triggered.connect(self._restart_app)
+        tray_menu.addAction(act_restart)
+        tray_menu.addSeparator()
+
         act_exit = QAction("🚪 Exit My-IDM", self)
         act_exit.triggered.connect(self._exit_app)
         tray_menu.addAction(act_exit)
@@ -981,6 +1086,37 @@ class MainWindow(QMainWindow):
                 )
             except Exception as exc:
                 log.warning("Failed to show tray notification: %s", exc)
+
+    def _restart_app(self):
+        """Restarts the application."""
+        import sys
+        import os
+        from pathlib import Path
+        
+        if self._tray_icon:
+            self._tray_icon.hide()
+        from my_idm.notifications import unregister_notification_handler
+        unregister_notification_handler(self.show_tray_notification)
+        
+        # Use QProcess to start a detached process with --restart flag, then quit
+        from PySide6.QtCore import QProcess
+        
+        project_root = Path(__file__).resolve().parent.parent
+        entry_point = str(project_root / "run.pyw")
+        python_exe = sys.executable
+        args = sys.argv[1:] + ['--restart']
+        
+        # Start detached process using Qt's QProcess
+        QProcess.startDetached(python_exe, [entry_point] + args)
+        
+        self._force_exit = True
+        from PySide6.QtGui import QCloseEvent
+        close_ev = QCloseEvent()
+        self.closeEvent(close_ev)
+
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     def _exit_app(self):
         """Forces full application exit, bypassing close-to-tray intercept."""

@@ -1562,9 +1562,7 @@ class SettingsDialog(QDialog):
     def _on_launch_animepahe_gui_from_settings(self):
         self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
         ok, msg = launch_animepahe_gui(self._external_tools_cfg)
-        if ok:
-            QMessageBox.information(self, "AnimePahe GUI", msg)
-        else:
+        if not ok:
             QMessageBox.warning(self, "Launch Failed", msg)
 
     def _on_run_animepahe_cli_from_settings(self):
@@ -1587,9 +1585,7 @@ class SettingsDialog(QDialog):
         else:
             ok, msg, proc = launch_animepahe_cli(self._external_tools_cfg)
 
-        if ok:
-            QMessageBox.information(self, "AnimePahe Scraper CLI", msg)
-        else:
+        if not ok:
             QMessageBox.warning(self, "CLI Scraper", msg)
 
     def _on_download_animepahe_url(self):
