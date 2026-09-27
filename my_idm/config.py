@@ -14,6 +14,29 @@ from my_idm.utils import normalize_path
 
 DEFAULT_DOWNLOADS_DIR = normalize_path(Path.home() / "Downloads")
 
+# Default yt-dlp format selector: best video up to 1080p + best audio, falling back to best.
+DEFAULT_YTDLP_FORMAT = "bestvideo[height<=1080]+bestaudio/best"
+
+# Playlist/channel entries listed per YouTube analysis.
+DEFAULT_YTDLP_PLAYLIST_LIMIT = 10
+MIN_YTDLP_PLAYLIST_LIMIT = 1
+MAX_YTDLP_PLAYLIST_LIMIT = 500
+
+
+def clamp_ytdlp_playlist_limit(value: Any) -> int:
+    """Coerce a stored playlist limit into a usable range.
+
+    ``None`` or an unparseable value falls back to the default; numbers are
+    clamped, so a stored ``0`` becomes the minimum rather than the default.
+    """
+    if value is None:
+        return DEFAULT_YTDLP_PLAYLIST_LIMIT
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_YTDLP_PLAYLIST_LIMIT
+    return max(MIN_YTDLP_PLAYLIST_LIMIT, min(MAX_YTDLP_PLAYLIST_LIMIT, limit))
+
 
 @dataclass
 class GeneralConfig:
@@ -435,7 +458,7 @@ class TorConfig:
 
 @dataclass
 class ExternalToolsConfig:
-    """Stores configuration for external scrapers and tools (e.g. AnimePahe)."""
+    """Stores configuration for external scrapers and tools (e.g. AnimePahe, yt-dlp)."""
 
     animepahe_repo_path: str = ""
     animepahe_launch_on_startup: bool = False
@@ -445,6 +468,21 @@ class ExternalToolsConfig:
     animepahe_last_episodes: str = ""
     animepahe_last_quality: str = "Auto"
     animepahe_last_lang: str = "Auto"
+    # YouTube / yt-dlp settings
+    ytdlp_enabled: bool = True
+    ytdlp_path: str = ""                    # yt-dlp binary (empty = use pip-installed module)
+    ytdlp_ffmpeg_path: str = ""             # ffmpeg binary (empty = system PATH)
+    ytdlp_default_format: str = DEFAULT_YTDLP_FORMAT
+    ytdlp_prefer_mode_a: bool = True       # Prefer URL extraction over native download
+    ytdlp_embed_thumbnail: bool = True      # Embed thumbnail in downloaded file
+    ytdlp_embed_subtitles: bool = False     # Download & embed subtitles
+    ytdlp_subtitle_langs: str = "en"        # Comma-separated subtitle language codes
+    ytdlp_cookies_browser: str = ""         # Browser to extract cookies from
+    ytdlp_extra_args: str = ""              # Additional args passed to yt-dlp
+    ytdlp_auto_detect_urls: bool = True     # Auto-detect YouTube URLs in Add Download dialog
+    ytdlp_playlist_limit: int = 10          # Max playlist/channel entries listed per analysis
+    ytdlp_last_save_path: str = ""          # Last used save directory for YouTube downloads
+    ytdlp_last_format: str = ""             # Last selected format string
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -456,6 +494,20 @@ class ExternalToolsConfig:
             "animepahe_last_episodes": self.animepahe_last_episodes,
             "animepahe_last_quality": self.animepahe_last_quality,
             "animepahe_last_lang": self.animepahe_last_lang,
+            "ytdlp_enabled": self.ytdlp_enabled,
+            "ytdlp_path": self.ytdlp_path,
+            "ytdlp_ffmpeg_path": self.ytdlp_ffmpeg_path,
+            "ytdlp_default_format": self.ytdlp_default_format,
+            "ytdlp_prefer_mode_a": self.ytdlp_prefer_mode_a,
+            "ytdlp_embed_thumbnail": self.ytdlp_embed_thumbnail,
+            "ytdlp_embed_subtitles": self.ytdlp_embed_subtitles,
+            "ytdlp_subtitle_langs": self.ytdlp_subtitle_langs,
+            "ytdlp_cookies_browser": self.ytdlp_cookies_browser,
+            "ytdlp_extra_args": self.ytdlp_extra_args,
+            "ytdlp_auto_detect_urls": self.ytdlp_auto_detect_urls,
+            "ytdlp_playlist_limit": self.ytdlp_playlist_limit,
+            "ytdlp_last_save_path": self.ytdlp_last_save_path,
+            "ytdlp_last_format": self.ytdlp_last_format,
         }
 
     @classmethod
@@ -469,6 +521,20 @@ class ExternalToolsConfig:
             animepahe_last_episodes=str(data.get("animepahe_last_episodes", "")),
             animepahe_last_quality=str(data.get("animepahe_last_quality", "Auto")),
             animepahe_last_lang=str(data.get("animepahe_last_lang", "Auto")),
+            ytdlp_enabled=bool(data.get("ytdlp_enabled", True)),
+            ytdlp_path=str(data.get("ytdlp_path", "")),
+            ytdlp_ffmpeg_path=str(data.get("ytdlp_ffmpeg_path", "")),
+            ytdlp_default_format=str(data.get("ytdlp_default_format", DEFAULT_YTDLP_FORMAT) or DEFAULT_YTDLP_FORMAT),
+            ytdlp_prefer_mode_a=bool(data.get("ytdlp_prefer_mode_a", True)),
+            ytdlp_embed_thumbnail=bool(data.get("ytdlp_embed_thumbnail", True)),
+            ytdlp_embed_subtitles=bool(data.get("ytdlp_embed_subtitles", False)),
+            ytdlp_subtitle_langs=str(data.get("ytdlp_subtitle_langs", "en") or "en"),
+            ytdlp_cookies_browser=str(data.get("ytdlp_cookies_browser", "")),
+            ytdlp_extra_args=str(data.get("ytdlp_extra_args", "")),
+            ytdlp_auto_detect_urls=bool(data.get("ytdlp_auto_detect_urls", True)),
+            ytdlp_playlist_limit=clamp_ytdlp_playlist_limit(data.get("ytdlp_playlist_limit")),
+            ytdlp_last_save_path=str(data.get("ytdlp_last_save_path", "")),
+            ytdlp_last_format=str(data.get("ytdlp_last_format", "")),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -484,6 +550,20 @@ class ExternalToolsConfig:
         settings.setValue("animepahe_last_episodes", self.animepahe_last_episodes)
         settings.setValue("animepahe_last_quality", self.animepahe_last_quality)
         settings.setValue("animepahe_last_lang", self.animepahe_last_lang)
+        settings.setValue("ytdlp_enabled", self.ytdlp_enabled)
+        settings.setValue("ytdlp_path", self.ytdlp_path)
+        settings.setValue("ytdlp_ffmpeg_path", self.ytdlp_ffmpeg_path)
+        settings.setValue("ytdlp_default_format", self.ytdlp_default_format)
+        settings.setValue("ytdlp_prefer_mode_a", self.ytdlp_prefer_mode_a)
+        settings.setValue("ytdlp_embed_thumbnail", self.ytdlp_embed_thumbnail)
+        settings.setValue("ytdlp_embed_subtitles", self.ytdlp_embed_subtitles)
+        settings.setValue("ytdlp_subtitle_langs", self.ytdlp_subtitle_langs)
+        settings.setValue("ytdlp_cookies_browser", self.ytdlp_cookies_browser)
+        settings.setValue("ytdlp_extra_args", self.ytdlp_extra_args)
+        settings.setValue("ytdlp_auto_detect_urls", self.ytdlp_auto_detect_urls)
+        settings.setValue("ytdlp_playlist_limit", self.ytdlp_playlist_limit)
+        settings.setValue("ytdlp_last_save_path", self.ytdlp_last_save_path)
+        settings.setValue("ytdlp_last_format", self.ytdlp_last_format)
         settings.endGroup()
 
     @classmethod
@@ -500,6 +580,20 @@ class ExternalToolsConfig:
         animepahe_last_episodes = settings.value("animepahe_last_episodes", "", type=str)
         animepahe_last_quality = settings.value("animepahe_last_quality", "Auto", type=str)
         animepahe_last_lang = settings.value("animepahe_last_lang", "Auto", type=str)
+        ytdlp_enabled = settings.value("ytdlp_enabled", True, type=bool)
+        ytdlp_path = settings.value("ytdlp_path", "", type=str)
+        ytdlp_ffmpeg_path = settings.value("ytdlp_ffmpeg_path", "", type=str)
+        ytdlp_default_format = settings.value("ytdlp_default_format", DEFAULT_YTDLP_FORMAT, type=str)
+        ytdlp_prefer_mode_a = settings.value("ytdlp_prefer_mode_a", True, type=bool)
+        ytdlp_embed_thumbnail = settings.value("ytdlp_embed_thumbnail", True, type=bool)
+        ytdlp_embed_subtitles = settings.value("ytdlp_embed_subtitles", False, type=bool)
+        ytdlp_subtitle_langs = settings.value("ytdlp_subtitle_langs", "en", type=str)
+        ytdlp_cookies_browser = settings.value("ytdlp_cookies_browser", "", type=str)
+        ytdlp_extra_args = settings.value("ytdlp_extra_args", "", type=str)
+        ytdlp_auto_detect_urls = settings.value("ytdlp_auto_detect_urls", True, type=bool)
+        ytdlp_playlist_limit = settings.value("ytdlp_playlist_limit", 10, type=int)
+        ytdlp_last_save_path = settings.value("ytdlp_last_save_path", "", type=str)
+        ytdlp_last_format = settings.value("ytdlp_last_format", "", type=str)
         settings.endGroup()
 
         # Auto-detect default if not explicitly configured
@@ -513,6 +607,20 @@ class ExternalToolsConfig:
                     animepahe_repo_path = normalize_path(str(c))
                     break
 
+        # Auto-detect yt-dlp binary if not explicitly configured
+        if not ytdlp_path:
+            import shutil
+            found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+            if found:
+                ytdlp_path = found
+
+        # Auto-detect ffmpeg if not explicitly configured
+        if not ytdlp_ffmpeg_path:
+            import shutil
+            found = shutil.which("ffmpeg")
+            if found:
+                ytdlp_ffmpeg_path = found
+
         return cls(
             animepahe_repo_path=str(animepahe_repo_path or ""),
             animepahe_launch_on_startup=bool(animepahe_launch_on_startup),
@@ -522,6 +630,20 @@ class ExternalToolsConfig:
             animepahe_last_episodes=str(animepahe_last_episodes or ""),
             animepahe_last_quality=str(animepahe_last_quality or "Auto"),
             animepahe_last_lang=str(animepahe_last_lang or "Auto"),
+            ytdlp_enabled=bool(ytdlp_enabled),
+            ytdlp_path=str(ytdlp_path or ""),
+            ytdlp_ffmpeg_path=str(ytdlp_ffmpeg_path or ""),
+            ytdlp_default_format=str(ytdlp_default_format or DEFAULT_YTDLP_FORMAT),
+            ytdlp_prefer_mode_a=bool(ytdlp_prefer_mode_a),
+            ytdlp_embed_thumbnail=bool(ytdlp_embed_thumbnail),
+            ytdlp_embed_subtitles=bool(ytdlp_embed_subtitles),
+            ytdlp_subtitle_langs=str(ytdlp_subtitle_langs or "en"),
+            ytdlp_cookies_browser=str(ytdlp_cookies_browser or ""),
+            ytdlp_extra_args=str(ytdlp_extra_args or ""),
+            ytdlp_auto_detect_urls=bool(ytdlp_auto_detect_urls),
+            ytdlp_playlist_limit=clamp_ytdlp_playlist_limit(ytdlp_playlist_limit),
+            ytdlp_last_save_path=str(ytdlp_last_save_path or ""),
+            ytdlp_last_format=str(ytdlp_last_format or ""),
         )
 
     def get_effective_repo_path(self) -> str:
@@ -554,6 +676,38 @@ class ExternalToolsConfig:
         log_dir = APP_DIR / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir / "animepahe_debug.log"
+
+    def get_effective_ytdlp_path(self) -> str:
+        """Returns the configured or auto-detected yt-dlp executable path."""
+        if self.ytdlp_path and os.path.isfile(self.ytdlp_path):
+            return normalize_path(self.ytdlp_path)
+        import shutil
+        found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+        return found or ""
+
+    def get_effective_ffmpeg_path(self) -> str:
+        """Returns the configured or auto-detected ffmpeg executable path."""
+        if self.ytdlp_ffmpeg_path and os.path.isfile(self.ytdlp_ffmpeg_path):
+            return normalize_path(self.ytdlp_ffmpeg_path)
+        import shutil
+        return shutil.which("ffmpeg") or ""
+
+    def get_effective_ytdlp_subtitle_langs(self) -> list[str]:
+        """Returns subtitle language codes as a clean list."""
+        raw = self.ytdlp_subtitle_langs or ""
+        langs = [x.strip() for x in raw.split(",") if x.strip()]
+        return langs or ["en"]
+
+    def get_effective_ytdlp_extra_args(self) -> list[str]:
+        """Parses the free-form extra-args field into an argument list."""
+        import shlex
+        raw = (self.ytdlp_extra_args or "").strip()
+        if not raw:
+            return []
+        try:
+            return shlex.split(raw, posix=not os.name == "nt")
+        except ValueError:
+            return raw.split()
 
 
 @dataclass

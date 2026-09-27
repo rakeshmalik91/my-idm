@@ -43,7 +43,7 @@ The main download table exposes 13 columns indexed by the `Col` class:
 | Column | Index | Header | Width | Alignment | Description |
 | :--- | :---: | :--- | :---: | :--- | :--- |
 | `QUEUE` | 0 | `#` | 45 px | Center | Active queue order (1, 2, 3...) or expand/collapse indicator (`▼` / `▶`) in section headers. |
-| `NAME` | 1 | `Name` | 270 px | Left | Filename or resource title with type icon (`📦`, `🎬`, `🧲`) and Tor routing badge (`🧅`). |
+| `NAME` | 1 | `Name` | 270 px | Left | Filename or resource title with type icon (`📦`, `🎬`, `🧲`) and Tor routing badge (`🧅`). YouTube downloads additionally show an engine tooltip on hover. |
 | `SOURCE_DOMAIN` | 2 | `Source Domain` | 160 px | Left | Normalized domain/hostname extracted from the source URL or magnet tracker. |
 | `SIZE` | 3 | `Size` | 90 px | Right | Total size formatted via `humanize.naturalsize()` (e.g., `450.2 MiB`). |
 | `PROGRESS` | 4 | `Progress` | 160 px | Center | Custom progress bar drawn by `ProgressBarDelegate` with status-based gradient. |

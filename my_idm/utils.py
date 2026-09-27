@@ -6,6 +6,35 @@ import re
 from pathlib import Path
 from typing import Any, Optional, Set
 
+# Reserved device names on Windows that cannot be used as filenames.
+_WINDOWS_RESERVED_NAMES = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WHITESPACE_RUN = re.compile(r"\s+")
+_MAX_FILENAME_STEM = 150
+# A dotted tail longer than this is treated as part of the name, not an
+# extension ("Arr. by J. Halvorsen [PIANO COVER]" must not look like ".Halvorsen [...]").
+_MAX_EXTENSION_LENGTH = 12
+
+
+def split_extension(name: str) -> tuple[str, str]:
+    """Split *name* into ``(stem, extension)`` using a conservative extension rule.
+
+    Only a short, trailing dotted token is treated as an extension, so titles
+    containing dots are not truncated.
+    """
+    text = str(name or "")
+    if "." not in text:
+        return text, ""
+    stem, _, ext = text.rpartition(".")
+    if not stem or len(ext) > _MAX_EXTENSION_LENGTH:
+        return text, ""
+    return stem, ext
+
 
 def to_int(value: Any, default: int = 0) -> int:
     """Safely coerce *value* to int.
@@ -21,6 +50,36 @@ def to_int(value: Any, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def sanitize_filename(name: str, max_length: int = 255, fallback: str = "download") -> str:
+    """Return a filesystem-safe filename derived from *name*.
+
+    Strips characters that are illegal on Windows or POSIX filesystems,
+    collapses whitespace, avoids reserved device names, and truncates the
+    stem while always preserving the extension.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return fallback
+
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", raw)
+    cleaned = _WHITESPACE_RUN.sub(" ", cleaned).strip().strip(".")
+    if not cleaned:
+        return fallback
+
+    stem, extension = split_extension(cleaned)
+
+    if stem.lower() in _WINDOWS_RESERVED_NAMES:
+        stem = f"_{stem}"
+
+    max_stem = max(1, min(_MAX_FILENAME_STEM, max_length - (len(extension) + 1 if extension else 0)))
+    if len(stem) > max_stem:
+        stem = stem[:max_stem].rstrip(" .")
+
+    if not stem:
+        stem = fallback
+    return f"{stem}.{extension}" if extension else stem
 
 
 def get_unique_filename(

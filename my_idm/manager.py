@@ -40,11 +40,91 @@ from my_idm.security import (
     quarantine_or_delete_file,
 )
 from my_idm.torrent_engine import TorrentEngine
-from my_idm.utils import get_unique_filename, normalize_path, robust_move_download_files, send_to_trash, to_int, unlock_path
+from my_idm.utils import get_unique_filename, normalize_path, robust_move_download_files, send_to_trash, to_int, unlock_path, split_extension
 
 log = logging.getLogger(__name__)
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
+
+
+def _pick_format(metadata: Any, format_selector: str):
+    """Resolve a format selector against extracted metadata.
+
+    Accepts a concrete format_id, a yt-dlp selector expression, or an empty
+    string. Returns the matching format object when it can be identified.
+    """
+    if metadata is None:
+        return None
+    formats = getattr(metadata, "formats", None) or []
+    if not formats:
+        return None
+
+    selector = (format_selector or "").strip()
+    if not selector:
+        return None
+
+    for fmt in formats:
+        if getattr(fmt, "format_id", "") == selector:
+            return fmt
+
+    if "+" in selector or "/" in selector or "[" in selector:
+        for part in selector.replace("+", "/").split("/"):
+            candidate = part.split("[")[0].strip()
+            if not candidate or candidate == "best":
+                continue
+            for fmt in formats:
+                if getattr(fmt, "format_id", "") == candidate:
+                    return fmt
+    return None
+
+
+def _resolve_format_id(metadata: Any, format_selector: str) -> str:
+    """Return a concrete format_id usable for Mode A, or an empty string.
+
+    Mode A needs a single self-contained file, so video-only formats (which
+    require an ffmpeg merge) are rejected.
+    """
+    fmt = _pick_format(metadata, format_selector)
+    if fmt is not None and getattr(fmt, "direct_capable", False) and not getattr(fmt, "is_video_only", False):
+        return getattr(fmt, "format_id", "")
+    return ""
+
+
+def _can_use_mode_a(metadata: Any, format_selector: str) -> bool:
+    """True when the selected format can be downloaded without an ffmpeg merge."""
+    return bool(_resolve_format_id(metadata, format_selector))
+
+
+def _expected_total_size(metadata: Any, format_selector: str) -> int:
+    """Best-effort total byte size for a selector, used before yt-dlp reports it.
+
+    yt-dlp's progress hook often omits ``total_bytes`` while fragments download,
+    so a pre-computed estimate keeps the progress bar meaningful.
+    """
+    if metadata is None:
+        return 0
+    formats = getattr(metadata, "formats", None) or []
+    if not formats:
+        return 0
+
+    wanted = [p.strip() for p in (format_selector or "").replace("+", "/").split("/")]
+    wanted = [p.split("[")[0].strip() for p in wanted if p and p not in ("best", "worst")]
+
+    if not wanted:
+        return 0
+
+    total = 0
+    matched = 0
+    for fmt in formats:
+        if fmt.format_id in wanted and fmt.filesize:
+            total += fmt.filesize
+            matched += 1
+
+    if matched == len(wanted):
+        return total
+    if matched == 1:
+        return total
+    return 0
 
 
 class ParsedBacklogEntry(tuple):
@@ -260,6 +340,7 @@ class DownloadManager(QObject):
     animepahe_queue_changed = Signal(int)    # queue_size
     browser_config_changed = Signal(object)  # BrowserIntegrationConfig
     process_backlogs_requested = Signal()    # Request to run process_backlogs on main thread
+    youtube_error = Signal(str, str)         # source_url, error_message
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -283,6 +364,8 @@ class DownloadManager(QObject):
         self._tor_service = TorServiceManager(self._tor_config)
         self._stopped = False
         self._starting_downloads: set[str] = set()
+        self._ytdlp_jobs: dict[str, dict[str, Any]] = {}
+        self._ytdlp_lock = threading.RLock()
         self._http = HTTPEngine(db)
         self._torrent = TorrentEngine(db)
         self._http.set_general_config_sync(self._general_config)
@@ -470,6 +553,19 @@ class DownloadManager(QObject):
                 pass
             self._animepahe_process = None
 
+        # Signal any running yt-dlp (Mode B) workers to abort
+        with self._ytdlp_lock:
+            jobs = list(self._ytdlp_jobs.values())
+        for job in jobs:
+            holder = job.get("cancel_holder")
+            if holder is not None:
+                holder["cancel"] = True
+            event = job.get("cancel_event")
+            if event is not None:
+                event.set()
+        if jobs:
+            log.info("Signalled %d yt-dlp job(s) to abort", len(jobs))
+
         if status_cb:
             status_cb("Shutdown complete.", 100)
         log.info("DownloadManager stopped")
@@ -489,6 +585,398 @@ class DownloadManager(QObject):
     @property
     def external_tools_config(self) -> ExternalToolsConfig:
         return self._external_tools_config
+
+    # -- YouTube / yt-dlp integration ----------------------------------------
+
+    def is_youtube_download(self, download_id: str) -> bool:
+        """True when the entry originated from a YouTube / yt-dlp download."""
+        entry = self._db.get_download(download_id)
+        if not entry or not entry.metadata:
+            return False
+        return str(entry.metadata.get("source_type", "")).startswith("youtube")
+
+    def is_ytdlp_native_job(self, download_id: str) -> bool:
+        """True when a live yt-dlp (Mode B) worker thread owns this download."""
+        with self._ytdlp_lock:
+            return download_id in self._ytdlp_jobs
+
+    def _is_ytdlp_native_entry(self, entry: DownloadEntry) -> bool:
+        """True when *entry* was created for a yt-dlp native (Mode B) download."""
+        if not entry or not entry.metadata:
+            return False
+        return entry.metadata.get("source_type") == "youtube_native"
+
+    def _cancel_ytdlp_job(self, download_id: str) -> bool:
+        """Signal a running Mode B worker to abort. Returns True if one was signalled."""
+        with self._ytdlp_lock:
+            job = self._ytdlp_jobs.get(download_id)
+            if not job:
+                return False
+            holder = job.get("cancel_holder")
+            if holder is not None:
+                holder["cancel"] = True
+            event = job.get("cancel_event")
+            if event is not None:
+                event.set()
+            return True
+
+    def _drop_ytdlp_job(self, download_id: str) -> None:
+        with self._ytdlp_lock:
+            self._ytdlp_jobs.pop(download_id, None)
+
+    def add_youtube_download(
+        self,
+        url: str,
+        metadata: Any = None,
+        save_path: str = "",
+        format_selector: str = "",
+        mode: str = "auto",
+        filename: str = "",
+    ) -> Optional[str]:
+        """Queue a YouTube download using Mode A (HTTPEngine) or Mode B (yt-dlp).
+
+        *mode* is ``"auto"``, ``"a"`` or ``"b"``. ``auto`` prefers Mode B because
+        YouTube serves video and audio as separate streams that must be merged by
+        ffmpeg; Mode A can only handle single-file (audio-only) formats.
+        """
+        url = (url or "").strip()
+        if not url:
+            return None
+
+        cfg = self._external_tools_config
+        if not cfg.ytdlp_enabled:
+            log.info("YouTube integration disabled in configuration; ignoring %s", url)
+            return None
+
+        title = getattr(metadata, "title", "") or ""
+        webpage_url = getattr(metadata, "webpage_url", "") or url
+
+        chosen_mode = (mode or "auto").lower()
+        if chosen_mode == "auto":
+            chosen_mode = "a" if cfg.ytdlp_prefer_mode_a and _can_use_mode_a(metadata, format_selector) else "b"
+
+        if chosen_mode == "a":
+            return self._add_youtube_mode_a(url, metadata, save_path, format_selector, filename, title, webpage_url)
+        return self._add_youtube_mode_b(url, metadata, save_path, format_selector, filename, title, webpage_url)
+
+    def _add_youtube_mode_a(
+        self, url: str, metadata: Any, save_path: str,
+        format_selector: str, filename: str, title: str, webpage_url: str,
+    ) -> Optional[str]:
+        """Resolve a direct CDN URL and hand it to the standard HTTP pipeline."""
+        from my_idm import youtube_tool as ytt
+
+        fmt_id = _resolve_format_id(metadata, format_selector)
+        if not fmt_id:
+            log.warning("No direct-capable YouTube format selected for %s", url)
+            return None
+
+        try:
+            direct = ytt.resolve_direct_url(url, fmt_id, self._external_tools_config, title)
+        except ytt.YouTubeToolError as exc:
+            log.warning("YouTube Mode A resolve failed for %s: %s", url, exc)
+            self._emit_youtube_error(url, str(exc))
+            return None
+
+        entry_metadata: dict[str, Any] = {
+            "source_type": "youtube",
+            "source_url": url,
+            "original_youtube_url": url,
+            "webpage_url": webpage_url,
+            "youtube_format_id": direct.format_id,
+            "youtube_mode": "a",
+        }
+        if metadata is not None:
+            if getattr(metadata, "id", ""):
+                entry_metadata["video_id"] = metadata.id
+            if getattr(metadata, "uploader", ""):
+                entry_metadata["uploader"] = metadata.uploader
+            if getattr(metadata, "thumbnail", ""):
+                entry_metadata["thumbnail"] = metadata.thumbnail
+            if getattr(metadata, "duration", None):
+                entry_metadata["duration"] = metadata.duration
+        if direct.expires_at:
+            entry_metadata["youtube_url_expires_at"] = direct.expires_at
+
+        return self.add_download(
+            url=direct.direct_url,
+            save_path=save_path or self._general_config.get_effective_save_path(),
+            filename=filename or direct.filename,
+            headers=direct.http_headers or None,
+            metadata=entry_metadata,
+        )
+
+    def _add_youtube_mode_b(
+        self, url: str, metadata: Any, save_path: str,
+        format_selector: str, filename: str, title: str, webpage_url: str,
+    ) -> Optional[str]:
+        """Create an entry and run the download inside yt-dlp with ffmpeg merging."""
+        from my_idm import youtube_tool as ytt
+
+        cfg = self._external_tools_config
+        if not ytt.check_ytdlp_available(cfg):
+            self._emit_youtube_error(url, ytt.YTDLP_INSTALL_HINT)
+            return None
+
+        resolved_path = save_path or cfg.ytdlp_last_save_path or self._general_config.get_effective_save_path()
+        resolved_path = normalize_path(resolved_path)
+
+        title = title or (getattr(metadata, "title", "") if metadata else "") or "video"
+        stem = ytt.build_stem(title)
+        if not filename:
+            fmt = _pick_format(metadata, format_selector)
+            ext = (fmt.ext if fmt else "") or "mp4"
+            filename = f"{stem}.{ext}"
+        else:
+            filename = sanitize_filename(filename)
+        filename = filename.strip()
+
+        download_id = str(uuid.uuid4())
+        entry_metadata: dict[str, Any] = {
+            "source_type": "youtube_native",
+            "source_url": url,
+            "original_youtube_url": url,
+            "webpage_url": webpage_url,
+            "youtube_mode": "b",
+            "youtube_format": format_selector or cfg.ytdlp_default_format,
+        }
+        if metadata is not None:
+            if getattr(metadata, "id", ""):
+                entry_metadata["video_id"] = metadata.id
+            if getattr(metadata, "uploader", ""):
+                entry_metadata["uploader"] = metadata.uploader
+            if getattr(metadata, "thumbnail", ""):
+                entry_metadata["thumbnail"] = metadata.thumbnail
+            if getattr(metadata, "duration", None):
+                entry_metadata["duration"] = metadata.duration
+
+        expected = _expected_total_size(metadata, format_selector or cfg.ytdlp_default_format)
+        if expected:
+            entry_metadata["youtube_expected_size"] = expected
+        entry_metadata["youtube_stem"] = stem
+        entry_metadata["title"] = title
+
+        try:
+            Path(resolved_path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("Cannot create YouTube save directory %s: %s", resolved_path, exc)
+            return None
+
+        entry = DownloadEntry(
+            id=download_id,
+            url=url,
+            save_path=resolved_path,
+            filename=filename,
+            file_path=str(Path(resolved_path) / filename),
+            download_type="http",
+            num_segments=1,
+            added_at=_now_iso(),
+            status="queued",
+            total_size=expected or 0,
+        )
+        entry.metadata = entry_metadata
+        self._db.add_download(entry)
+        self.download_added.emit(entry.id)
+
+        self._start_ytdlp_native_job(entry, format_selector, resolved_path)
+        return entry.id
+
+    def _start_ytdlp_native_job(self, entry: DownloadEntry, format_selector: str, save_dir: str):
+        """Launch a yt-dlp worker thread for *entry* and wire its callbacks."""
+        from my_idm import youtube_tool as ytt
+
+        download_id = entry.id
+        if self.is_ytdlp_native_job(download_id):
+            log.info("yt-dlp job already running for %s; not starting another", download_id)
+            return
+
+        cfg = self._external_tools_config
+        cancel_event = threading.Event()
+
+        # Control the output name so the file yt-dlp writes matches the name
+        # recorded in the database (titles often contain path separators).
+        stem = entry.metadata.get("youtube_stem") or ""
+        if not stem:
+            stem, _ext = split_extension(entry.filename or "video")
+        stem = ytt.build_stem(stem)
+        outtmpl = str(Path(save_dir) / f"{stem}.%(ext)s")
+        merge_format = "mp4" if ytt.check_ffmpeg_available(cfg) else ""
+
+        def _on_progress(status: dict):
+            self._on_ytdlp_progress(download_id, status)
+
+        def _on_postprocess(status: dict):
+            if status.get("status") == "finished" and status.get("postprocessor"):
+                log.debug("yt-dlp postprocessor %s finished for %s", status.get("postprocessor"), download_id)
+
+        try:
+            thread, cancel_holder = ytt.start_native_download(
+                url=entry.url,
+                save_dir=save_dir,
+                format_selector=format_selector or cfg.ytdlp_default_format,
+                config=cfg,
+                progress_cb=_on_progress,
+                postprocessor_cb=_on_postprocess,
+                done_cb=lambda p: self._on_ytdlp_done(download_id, p),
+                error_cb=lambda m: self._on_ytdlp_error(download_id, m),
+                cancel_event=cancel_event,
+                outtmpl=outtmpl,
+                merge_output_format=merge_format,
+            )
+        except ytt.YouTubeToolError as exc:
+            self._on_ytdlp_error(download_id, str(exc))
+            return
+
+        with self._ytdlp_lock:
+            self._ytdlp_jobs[download_id] = {
+                "thread": thread,
+                "cancel_holder": cancel_holder,
+                "cancel_event": cancel_event,
+            }
+
+        self._db.update_status(download_id, "downloading")
+        self.status_changed.emit(download_id, "downloading", "")
+
+    def _on_ytdlp_progress(self, download_id: str, status: dict):
+        """Relay a yt-dlp progress hook into the download table."""
+        entry = self._db.get_download(download_id)
+        if entry and entry.status in ("paused", "stopped", "completed", "cancelled"):
+            return
+
+        state = status.get("status")
+        downloaded = int(status.get("downloaded_bytes") or 0)
+        total = int(status.get("total_bytes") or status.get("total_bytes_estimate") or 0)
+        speed = float(status.get("speed") or 0.0)
+        eta = float(status.get("eta") or 0.0)
+
+        if not total:
+            try:
+                total = int(entry.metadata.get("youtube_expected_size") or 0)
+            except (AttributeError, TypeError, ValueError):
+                total = entry.total_size or 0
+
+        if state == "downloading" and downloaded > 0:
+            self._db.update_progress(download_id, downloaded)
+            if total > 0 and entry.total_size != total:
+                entry.total_size = total
+        elif state == "finished":
+            if downloaded <= 0:
+                downloaded = entry.downloaded_size
+            self._db.update_progress(download_id, downloaded)
+            speed = 0.0
+
+        self.progress_updated.emit(download_id, downloaded, total, speed, eta, 0, 0, 0.0)
+
+    def _on_ytdlp_done(self, download_id: str, final_path: str):
+        """Mark a Mode B download complete and record the produced file."""
+        from my_idm import youtube_tool as ytt
+
+        self._drop_ytdlp_job(download_id)
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return
+        if entry.status in ("paused", "stopped", "cancelled"):
+            log.debug("yt-dlp finished but entry is %s; not marking complete", entry.status)
+            return
+
+        produced = Path(final_path) if final_path and Path(final_path).is_file() else None
+        if produced is None:
+            stem = entry.metadata.get("youtube_stem") or ""
+            if not stem:
+                stem, _ext = split_extension(entry.filename or "")
+            found = ytt.resolve_produced_file(entry.save_path, ytt.build_stem(stem))
+            if found:
+                produced = Path(found)
+
+        if produced is not None:
+            entry.filename = produced.name
+            entry.file_path = str(produced)
+            entry.save_path = str(produced.parent)
+            try:
+                entry.total_size = produced.stat().st_size
+            except OSError:
+                pass
+            entry.downloaded_size = entry.total_size
+        elif entry.total_size <= 0:
+            entry.downloaded_size = entry.total_size = max(entry.downloaded_size, 0)
+
+        self._db.update_download(entry)
+        self._db.update_status(download_id, "completed")
+        self.status_changed.emit(download_id, "completed", "")
+        self.progress_updated.emit(
+            download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+        )
+        if self._security_config.scan_after_download and self._security_config.scan_timing == "after_complete":
+            self._handle_completed_scan(download_id)
+        self._process_queue()
+
+    def _on_ytdlp_error(self, download_id: str, message: str):
+        """Mark a Mode B download as errored (or paused when user-cancelled)."""
+        self._drop_ytdlp_job(download_id)
+        entry = self._db.get_download(download_id)
+        if not entry or entry.status in ("paused", "stopped", "cancelled", "completed"):
+            return
+
+        if "cancelled" in (message or "").lower():
+            self._db.update_status(download_id, "paused")
+            self.status_changed.emit(download_id, "paused", "")
+        else:
+            self._db.update_status(download_id, "error", message)
+            self.status_changed.emit(download_id, "error", message)
+        self.progress_updated.emit(
+            download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+        )
+        self._process_queue()
+
+    def _emit_youtube_error(self, url: str, message: str):
+        """Surface a pre-download YouTube failure to the UI."""
+        log.warning("YouTube download rejected: %s (%s)", url, message)
+        self.youtube_error.emit(url, message)
+
+    def _refresh_youtube_url(self, entry: DownloadEntry) -> bool:
+        """Re-resolve an expired YouTube CDN URL before resuming (Mode A).
+
+        Returns True when the entry URL was refreshed.
+        """
+        from my_idm import youtube_tool as ytt
+
+        source_url = entry.metadata.get("original_youtube_url") or entry.metadata.get("source_url")
+        format_id = entry.metadata.get("youtube_format_id")
+        if not source_url or not format_id:
+            return False
+
+        try:
+            direct = ytt.resolve_direct_url(
+                source_url, format_id, self._external_tools_config, entry.metadata.get("title", "")
+            )
+        except ytt.YouTubeToolError as exc:
+            log.warning("Could not refresh YouTube URL for %s: %s", entry.id, exc)
+            return False
+
+        entry.url = direct.direct_url
+        if direct.http_headers:
+            entry.metadata["headers"] = direct.http_headers
+        if direct.expires_at:
+            entry.metadata["youtube_url_expires_at"] = direct.expires_at
+        self._db.update_download(entry)
+        log.info("Refreshed YouTube CDN URL for %s (format %s)", entry.id, format_id)
+        return True
+
+    def _maybe_refresh_youtube_url(self, entry: DownloadEntry) -> bool:
+        """Refresh the CDN URL when it is close to expiring (Mode A only)."""
+        if entry.metadata.get("youtube_mode") != "a":
+            return False
+        expires_at = entry.metadata.get("youtube_url_expires_at")
+        if not expires_at:
+            return True
+        try:
+            remaining = float(expires_at) - time.time()
+        except (TypeError, ValueError):
+            return True
+        if remaining > 300:
+            return False
+        log.info("YouTube URL for %s expires in %.0fs; re-resolving", entry.id, max(remaining, 0))
+        return self._refresh_youtube_url(entry)
 
     def set_external_tools_config(self, config: ExternalToolsConfig):
         """Update external tools configuration."""
@@ -1130,6 +1618,14 @@ class DownloadManager(QObject):
                 return
 
         if entry.download_type == "http":
+            if self._is_ytdlp_native_entry(entry):
+                self._starting_downloads.discard(entry.id)
+                self._start_ytdlp_native_job(
+                    entry,
+                    entry.metadata.get("youtube_format", ""),
+                    entry.save_path,
+                )
+                return
             if self._loop:
                 asyncio.run_coroutine_threadsafe(
                     self._http.add(entry), self._loop
@@ -1176,12 +1672,15 @@ class DownloadManager(QObject):
             return
 
         self._starting_downloads.discard(download_id)
+        self._cancel_ytdlp_job(download_id)
         self._db.update_status(download_id, "paused")
         self._db.update_queue_order(download_id, 0)
         self.status_changed.emit(download_id, "paused", "")
 
         if entry.download_type == "http":
-            if self._loop:
+            if self._is_ytdlp_native_entry(entry):
+                pass
+            elif self._loop:
                 asyncio.run_coroutine_threadsafe(
                     self._http.pause(download_id), self._loop
                 )
@@ -1223,8 +1722,11 @@ class DownloadManager(QObject):
         self._starting_downloads.discard(download_id)
 
         # Halt the transfer in the engine
+        self._cancel_ytdlp_job(download_id)
         if entry.download_type == "http":
-            if self._loop:
+            if self._is_ytdlp_native_entry(entry):
+                pass
+            elif self._loop:
                 asyncio.run_coroutine_threadsafe(
                     self._http.pause(download_id), self._loop
                 )
@@ -1324,6 +1826,14 @@ class DownloadManager(QObject):
             entry.queue_order = self._db.get_next_queue_order()
         if not entry.file_path and entry.filename and entry.save_path:
             entry.file_path = str(Path(entry.save_path) / entry.filename)
+
+        # YouTube CDN URLs expire within hours; re-resolve before resuming.
+        if entry.status in ("paused", "error", "stopped", "queued"):
+            try:
+                self._maybe_refresh_youtube_url(entry)
+            except Exception as exc:
+                log.debug("YouTube URL refresh during resume failed for %s: %s", download_id, exc)
+
         self._db.update_download(entry)
         self.status_changed.emit(download_id, "queued", "")
 
@@ -1352,7 +1862,14 @@ class DownloadManager(QObject):
         self._db.update_download(entry)
 
         if entry.download_type == "http":
-            if not self._http.is_active(download_id):
+            if self._is_ytdlp_native_entry(entry):
+                if not self.is_ytdlp_native_job(download_id):
+                    self._start_ytdlp_native_job(
+                        entry,
+                        entry.metadata.get("youtube_format", ""),
+                        entry.save_path,
+                    )
+            elif not self._http.is_active(download_id):
                 if self._loop:
                     asyncio.run_coroutine_threadsafe(
                         self._http.add(entry), self._loop
@@ -1376,8 +1893,12 @@ class DownloadManager(QObject):
             return
 
         # Stop active download
+        self._cancel_ytdlp_job(download_id)
+        self._drop_ytdlp_job(download_id)
         if entry.download_type == "http":
-            if self._loop and self._loop.is_running():
+            if self._is_ytdlp_native_entry(entry):
+                pass
+            elif self._loop and self._loop.is_running():
                 fut = asyncio.run_coroutine_threadsafe(
                     self._http.cancel(download_id), self._loop
                 )
@@ -1413,8 +1934,12 @@ class DownloadManager(QObject):
             return
 
         # 1. Stop active download
+        self._cancel_ytdlp_job(download_id)
+        self._drop_ytdlp_job(download_id)
         if entry.download_type == "http":
-            if self._loop and self._loop.is_running():
+            if self._is_ytdlp_native_entry(entry):
+                pass
+            elif self._loop and self._loop.is_running():
                 fut = asyncio.run_coroutine_threadsafe(
                     self._http.cancel(download_id), self._loop
                 )
@@ -1669,11 +2194,93 @@ class DownloadManager(QObject):
         log.info("Renamed download %s to '%s'", download_id, new_name)
         return True, ""
 
+    def _relocate_youtube_file(self, entry: DownloadEntry) -> bool:
+        """Try to find a YouTube download whose recorded path is wrong.
+
+        Handles files written under a name that differs from the database entry
+        because each side sanitised the video title differently (yt-dlp maps
+        ``/`` to ``/``). Returns True when the entry was repaired.
+        """
+        from my_idm import youtube_tool as ytt
+
+        meta = entry.metadata if entry else {}
+        if not meta or not str(meta.get("source_type", "")).startswith("youtube"):
+            return False
+        if not entry.save_path or not os.path.isdir(entry.save_path):
+            return False
+
+        recorded = Path(entry.file_path) if entry.file_path else None
+        if recorded and recorded.is_file():
+            return False
+
+        def _norm(name: str) -> str:
+            # Strip the extension from the raw string: a stored YouTube name can
+            # contain "/" (Path would treat that as a directory separator).
+            base = str(name or "")
+            if "." in base:
+                base = base.rsplit(".", 1)[0]
+            base = re.sub(r"[^\w]+", "", base, flags=re.UNICODE)
+            return base.lower()
+
+        wanted = {
+            _norm(entry.filename or ""),
+            _norm(meta.get("youtube_stem") or ""),
+            _norm(meta.get("title") or ""),
+        }
+        wanted.discard("")
+        if not wanted:
+            return False
+
+        try:
+            candidates = [p for p in Path(entry.save_path).iterdir() if p.is_file()]
+        except OSError:
+            return False
+
+        best = None
+        for path in candidates:
+            if path.name.endswith((".part", ".ytdl", ".temp", ".tmp")):
+                continue
+            if re.search(r"\.f\d+\.", path.name) or path.name.startswith(".f"):
+                continue
+            if _norm(path.name) in wanted:
+                if best is None or path.stat().st_size > best.stat().st_size:
+                    best = path
+
+        if best is None:
+            return False
+
+        try:
+            entry.filename = best.name
+            entry.file_path = str(best)
+            entry.save_path = str(best.parent)
+            entry.total_size = best.stat().st_size
+            entry.downloaded_size = entry.total_size
+        except OSError:
+            return False
+
+        self._db.update_download(entry)
+        self._db.update_status(entry.id, "completed")
+        return True
+
     def mark_file_not_found(self, download_id: str):
-        """Mark download status as file_not_found when missing on disk."""
+        """Mark download status as file_not_found when missing on disk.
+
+        YouTube entries are re-checked against the save folder first: the recorded
+        path can disagree with what yt-dlp actually wrote when the title contained
+        characters that either side sanitised differently.
+        """
         entry = self._db.get_download(download_id)
         if not entry:
             return
+
+        if self._relocate_youtube_file(entry):
+            log.info("Recovered YouTube file for %s: %s", download_id, entry.file_path)
+            self.status_changed.emit(download_id, "completed", "")
+            self.progress_updated.emit(
+                download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+            )
+            return
+
         entry.status = "file_not_found"
         entry.error_message = "File not found on disk"
         self._db.update_status(download_id, "file_not_found", "File not found on disk")

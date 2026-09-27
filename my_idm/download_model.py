@@ -85,6 +85,13 @@ def _format_speed(bps: float) -> str:
     return f"{humanize.naturalsize(bps, binary=True)}/s"
 
 
+def is_youtube_entry(entry: DownloadEntry) -> bool:
+    """True when the entry came from a YouTube / yt-dlp download."""
+    if entry is None or not entry.metadata:
+        return False
+    return str(entry.metadata.get("source_type", "")).startswith("youtube")
+
+
 def _format_eta(seconds: float) -> str:
     if seconds <= 0:
         return "—"
@@ -1049,7 +1056,9 @@ class DownloadTableModel(QAbstractTableModel):
             if col == Col.NAME:
                 type_tag = f"[{entry.download_type.upper()}] " if entry.download_type else ""
                 base = f"{type_tag}{self.get_original_name(entry)}"
-                return f"{tor_note}\n{base}".strip() if tor_note else base
+                yt_note = self._youtube_note(entry)
+                notes = [n for n in (yt_note, tor_note) if n]
+                return "\n".join([*notes, base]) if notes else base
             if col == Col.FILE_NAME:
                 return normalize_path(entry.file_path) if entry.file_path else self.get_actual_name(entry)
             if col == Col.STATUS:
@@ -1075,6 +1084,20 @@ class DownloadTableModel(QAbstractTableModel):
         )
 
     # -- display helpers -----------------------------------------------------
+
+    @staticmethod
+    def _youtube_note(entry: DownloadEntry) -> str:
+        """Tooltip line describing a YouTube download's origin and engine."""
+        if not is_youtube_entry(entry):
+            return ""
+        meta = entry.metadata or {}
+        mode = "yt-dlp (ffmpeg merged)" if meta.get("youtube_mode") == "b" else "My-IDM direct URL"
+        parts = [f"YouTube download via {mode}"]
+        if meta.get("uploader"):
+            parts.append(str(meta["uploader"]))
+        if meta.get("video_id"):
+            parts.append(f"id={meta['video_id']}")
+        return " — ".join(parts[:2]) + (f"\nVideo id: {meta['video_id']}" if meta.get("video_id") else "")
 
     def _display_data(self, entry: DownloadEntry, col: int) -> Any:
         if col == Col.QUEUE:

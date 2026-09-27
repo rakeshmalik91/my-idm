@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR, TorConfig
+from my_idm.youtube_tool import detect_youtube_url
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
@@ -47,6 +49,7 @@ class AddDownloadDialog(QDialog):
         self._config = GeneralConfig.load()
         self._url = ""
         self._urls: list[str] = []
+        self._yt_result: dict = {}
         self._save_path = self._config.get_effective_save_path()
         self._num_segments = self._config.default_segments
         self._tor_enabled = (
@@ -89,6 +92,26 @@ class AddDownloadDialog(QDialog):
         browse_layout.addStretch()
         browse_layout.addWidget(browse_btn)
         url_layout.addLayout(browse_layout)
+
+        self._yt_banner = QFrame()
+        self._yt_banner.setFrameShape(QFrame.Shape.StyledPanel)
+        self._yt_banner.setStyleSheet(
+            "QFrame { background:#12261e; border:1px solid #2ea043; border-radius:4px; }"
+        )
+        yt_layout = QHBoxLayout(self._yt_banner)
+        yt_layout.setContentsMargins(10, 8, 10, 8)
+        self._yt_banner_label = QLabel("This looks like a YouTube link.")
+        self._yt_banner_label.setStyleSheet("color:#7ee787; font-weight:bold;")
+        yt_layout.addWidget(self._yt_banner_label, 1)
+        self._yt_open_btn = QPushButton("Open YouTube Downloader")
+        self._yt_open_btn.setObjectName("primaryButton")
+        self._yt_open_btn.setToolTip(
+            "Analyse the video and choose a quality. yt-dlp is required."
+        )
+        self._yt_open_btn.clicked.connect(self._on_open_youtube_dialog)
+        yt_layout.addWidget(self._yt_open_btn)
+        self._yt_banner.setVisible(False)
+        url_layout.addWidget(self._yt_banner)
 
         layout.addWidget(url_group)
 
@@ -270,6 +293,63 @@ class AddDownloadDialog(QDialog):
         if candidates:
             self._url_edit.setPlainText("\n".join(candidates))
             self._url_edit.selectAll()
+
+        self._update_youtube_banner()
+        self._url_edit.textChanged.connect(self._update_youtube_banner)
+
+    # -- YouTube detection / redirect ----------------------------------------
+
+    def _detected_youtube_url(self) -> str:
+        """Return the YouTube URL currently in the input box, or an empty string."""
+        if not self._youtube_detection_enabled():
+            return ""
+        text = self._url_edit.toPlainText() if hasattr(self, "_url_edit") else ""
+        if not text.strip():
+            return ""
+        return detect_youtube_url(text) or ""
+
+    def _youtube_detection_enabled(self) -> bool:
+        if self._manager is not None and hasattr(self._manager, "external_tools_config"):
+            return bool(self._manager.external_tools_config.ytdlp_auto_detect_urls)
+        try:
+            from my_idm.config import ExternalToolsConfig
+            return bool(ExternalToolsConfig.load().ytdlp_auto_detect_urls)
+        except Exception:
+            return False
+
+    def _update_youtube_banner(self):
+        """Show or hide the YouTube hand-off banner based on the pasted text."""
+        banner = getattr(self, "_yt_banner", None)
+        if banner is None:
+            return
+        url = self._detected_youtube_url()
+        banner.setVisible(bool(url))
+        if url:
+            self._yt_banner_label.setText("YouTube link detected — open the YouTube downloader to pick a quality.")
+
+    @property
+    def youtube_url(self) -> str:
+        """The detected YouTube URL, if any."""
+        return self._detected_youtube_url()
+
+    def _on_open_youtube_dialog(self):
+        """Hand the pasted YouTube URL to the YouTube download dialog."""
+        url = self._detected_youtube_url()
+        if not url:
+            return
+        from my_idm.youtube_dialog import YouTubeDialog
+
+        dlg = YouTubeDialog(self, manager=self._manager, initial_url=url)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._yt_result = dlg.selection()
+            self.accept()
+        else:
+            self._yt_banner.setVisible(False)
+
+    @property
+    def youtube_selection(self) -> dict:
+        """Selection returned by the YouTube dialog, if it was used."""
+        return getattr(self, "_yt_result", {}) or {}
 
     def _accept(self):
         raw_text = self._url_edit.toPlainText().strip()

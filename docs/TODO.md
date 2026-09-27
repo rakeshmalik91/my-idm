@@ -165,37 +165,43 @@ commit after each features or set of fixes/enhancements
 
 #### Youtube scraper ([Architecture Doc](architecture/youtube-scraper.md))
 **Phase 1: Foundation**
-- [ ] Add `ytdlp_*` fields to `ExternalToolsConfig` (config, serialization, unit tests)
-- [ ] Create `youtube_tool.py` — dataclasses, availability checks, URL detection regex
-- [ ] Implement `extract_metadata()` — call `yt_dlp.extract_info(download=False)`, parse formats
-- [ ] Implement `resolve_direct_url()` for Mode A (direct CDN URL extraction)
-
+- [x] Add `ytdlp_*` fields to `ExternalToolsConfig` (config, serialization, unit tests)
+- [x] Create `youtube_tool.py` — dataclasses, availability checks, URL detection regex
+- [x] Implement `extract_metadata()` — call `yt_dlp.extract_info(download=False)`, parse formats
+- [x] Implement `resolve_direct_url()` for Mode A (direct CDN URL extraction)
 **Phase 2: Mode A — HTTPEngine Integration**
-- [ ] Add `add_youtube_download()` to `DownloadManager` (resolve URL → standard HTTP download)
-- [ ] Handle URL expiration — re-extract on resume via `_refresh_youtube_url()`
-
+- [x] Add `add_youtube_download()` to `DownloadManager` (resolve URL → standard HTTP download)
+- [x] Handle URL expiration — re-extract on resume via `_refresh_youtube_url()`
 **Phase 3: Mode B — yt-dlp Native Download**
-- [ ] Implement `start_native_download()` — daemon thread + progress hooks + postprocessor hooks
-- [ ] Add Mode B tracking to `DownloadManager` (progress relay, completion, cancellation)
-
+- [x] Implement `start_native_download()` — daemon thread + progress hooks + postprocessor hooks
+- [x] Add Mode B tracking to `DownloadManager` (progress relay, completion, cancellation)
+- [x] Control the output filename so the DB path matches the file yt-dlp writes
+- [x] Locate the produced file by stem (ignores `.part` / `.fNNN` merge fragments)
+- [x] Self-heal entries whose recorded path disagrees with the file on disk
 **Phase 4: YouTube Dialog (UI)**
-- [ ] Create `youtube_dialog.py` — URL input, thumbnail preview, video info panel
-- [ ] Build format selection table with quality presets
-- [ ] Add options panel (embed thumbnail, subtitles, save path)
-- [ ] Implement playlist/channel batch support (video list with checkboxes)
-
+- [x] Create `youtube_dialog.py` — URL input, thumbnail preview, video info panel
+- [x] Build format selection table with quality presets
+- [x] Add options panel (embed thumbnail, subtitles, save path)
+- [x] Implement playlist/channel batch support (video list with checkboxes)
+- [x] Playlist listing uses one flat request (was re-extracting every video)
+- [x] Cap listed entries via `ytdlp_playlist_limit` (default 10) + report truncation
+- [x] Throttle analyses (0.75s min gap) and cache identical URLs for 5 min
+- [x] Hide Select all / Clear for a single-item list
+- [x] Closing the dialog mid-analysis no longer crashes (daemon thread, no QThread)
 **Phase 5: Menu & Toolbar Integration**
-- [ ] Add `Tools → Download YouTube Video…` menu action (`Ctrl+Y`)
-- [ ] Auto-detect YouTube URLs in "Add Download" dialog → redirect to YouTube dialog
-- [ ] Show 🎬 badge on YouTube downloads in the table
-
+- [x] Add `Tools → Download YouTube Video…` menu action (`Ctrl+Y`)
+- [x] Auto-detect YouTube URLs in "Add Download" dialog → redirect to YouTube dialog
+- [x] Surface YouTube origin in the table via a tooltip (engine + uploader + video id)
 **Phase 6: Settings UI**
-- [ ] Add YouTube sub-tab to External Tools preferences
-- [ ] Wire settings persistence + live validation (yt-dlp/ffmpeg path status)
-
+- [x] Add YouTube sub-tab to External Tools preferences
+- [x] Wire settings persistence + live validation (yt-dlp/ffmpeg path status)
+- [x] yt-dlp version display + "Update yt-dlp" button (pip or binary `-U`)
+- [x] Playlist entry limit control (1-500) + persistence
 **Phase 7: Polish**
-- [ ] Handle age-restricted, geo-restricted, live stream, private/members-only videos
-- [ ] yt-dlp auto-update mechanism
+- [x] Handle age-restricted, geo-restricted, live stream, private/members-only videos
+- [x] yt-dlp auto-update mechanism (`youtube_tool.update_ytdlp()`)
+
+**All 7 phases complete.**
 
 #### Mangareader scraper
 - [ ] TODO

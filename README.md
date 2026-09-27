@@ -32,14 +32,14 @@
 
 ## 🛠️ Tech Stack
 
-| Layer | Technology |
-|---|---|
-| **GUI** | PySide6 (Qt 6) |
-| **HTTP Engine** | `aiohttp` + `asyncio` |
-| **Torrent Engine** | `libtorrent` (graceful fallback) |
-| **Antivirus** | Windows Defender (`MpCmdRun.exe`) / Custom CLI engines |
-| **Network & Privacy** | `psutil` + Tor SOCKS5 + HTTP/SOCKS5 Proxies |
-| **Database** | SQLite3 (WAL mode) |
+| Layer                   | Technology                                             |
+| -------------------------| --------------------------------------------------------|
+| **GUI**                 | PySide6 (Qt 6)                                         |
+| **HTTP Engine**         | `aiohttp` + `asyncio`                                  |
+| **Torrent Engine**      | `libtorrent` (graceful fallback)                       |
+| **Antivirus**           | Windows Defender (`MpCmdRun.exe`) / Custom CLI engines |
+| **Network & Privacy**   | `psutil` + Tor SOCKS5 + HTTP/SOCKS5 Proxies            |
+| **Database**            | SQLite3 (WAL mode)                                     |
 
 ---
 
@@ -105,6 +105,15 @@ All settings and runtime data are persisted in the user profile:
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 - [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.
+
+---
+
+## 🤖 AI Development & Attribution
+
+This project is actively developed with AI:
+- **Models & Assistants:** 
+  - Gemini 3.8 Flash, Claude 4.6 Opus (via Antigravity IDE)
+  - Nvidia Nemotron 3 Ultra, Space Bunny Alpha, Poolside Laguna S 2.1 (via Kilo Code plugin for Antigravity IDE)
 
 ---
 

@@ -5,3 +5,4 @@ humanize>=4.9
 libtorrent>=2.0
 psutil>=5.9
 win10toast>=0.9
+yt-dlp>=2024.1.1

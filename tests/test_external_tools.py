@@ -20,6 +20,7 @@ from my_idm.external_tools import (
     show_in_folder,
 )
 from my_idm.manager import DownloadManager
+from my_idm.utils import normalize_path
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -575,6 +576,195 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         self.assertFalse(saved_cfg.animepahe_periodic_run)
         self.assertEqual(saved_cfg.animepahe_interval_hours, 10)
         dialog.close()
+
+
+class TestExternalToolsConfigYtdlp(unittest.TestCase):
+    """Test suite for yt-dlp configuration in ExternalToolsConfig."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_ytdlp_default_fields(self):
+        cfg = ExternalToolsConfig()
+        self.assertTrue(cfg.ytdlp_enabled)
+        self.assertEqual(cfg.ytdlp_path, "")
+        self.assertEqual(cfg.ytdlp_ffmpeg_path, "")
+        self.assertEqual(cfg.ytdlp_default_format, "bestvideo[height<=1080]+bestaudio/best")
+        self.assertTrue(cfg.ytdlp_prefer_mode_a)
+        self.assertTrue(cfg.ytdlp_embed_thumbnail)
+        self.assertFalse(cfg.ytdlp_embed_subtitles)
+        self.assertEqual(cfg.ytdlp_subtitle_langs, "en")
+        self.assertEqual(cfg.ytdlp_cookies_browser, "")
+        self.assertEqual(cfg.ytdlp_extra_args, "")
+        self.assertTrue(cfg.ytdlp_auto_detect_urls)
+        self.assertEqual(cfg.ytdlp_last_save_path, "")
+        self.assertEqual(cfg.ytdlp_last_format, "")
+
+    def test_ytdlp_to_dict_includes_all_fields(self):
+        cfg = ExternalToolsConfig(
+            ytdlp_enabled=False,
+            ytdlp_path="/opt/yt-dlp",
+            ytdlp_ffmpeg_path="/opt/ffmpeg",
+            ytdlp_default_format="best",
+            ytdlp_prefer_mode_a=False,
+            ytdlp_embed_thumbnail=False,
+            ytdlp_embed_subtitles=True,
+            ytdlp_subtitle_langs="en,ja",
+            ytdlp_cookies_browser="firefox",
+            ytdlp_extra_args="--retries 5",
+            ytdlp_auto_detect_urls=False,
+            ytdlp_last_save_path="/downloads/yt",
+            ytdlp_last_format="137+140",
+        )
+        d = cfg.to_dict()
+        self.assertEqual(d["ytdlp_enabled"], False)
+        self.assertEqual(d["ytdlp_path"], "/opt/yt-dlp")
+        self.assertEqual(d["ytdlp_ffmpeg_path"], "/opt/ffmpeg")
+        self.assertEqual(d["ytdlp_default_format"], "best")
+        self.assertEqual(d["ytdlp_prefer_mode_a"], False)
+        self.assertEqual(d["ytdlp_embed_thumbnail"], False)
+        self.assertEqual(d["ytdlp_embed_subtitles"], True)
+        self.assertEqual(d["ytdlp_subtitle_langs"], "en,ja")
+        self.assertEqual(d["ytdlp_cookies_browser"], "firefox")
+        self.assertEqual(d["ytdlp_extra_args"], "--retries 5")
+        self.assertEqual(d["ytdlp_auto_detect_urls"], False)
+        self.assertEqual(d["ytdlp_last_save_path"], "/downloads/yt")
+        self.assertEqual(d["ytdlp_last_format"], "137+140")
+
+    def test_ytdlp_dict_round_trip(self):
+        original = ExternalToolsConfig(
+            ytdlp_enabled=False,
+            ytdlp_path="/opt/yt-dlp",
+            ytdlp_ffmpeg_path="/opt/ffmpeg",
+            ytdlp_default_format="bestvideo[height<=720]+bestaudio",
+            ytdlp_prefer_mode_a=False,
+            ytdlp_embed_thumbnail=False,
+            ytdlp_embed_subtitles=True,
+            ytdlp_subtitle_langs="de,fr",
+            ytdlp_cookies_browser="chrome",
+            ytdlp_extra_args="--concurrent-fragments 4",
+            ytdlp_auto_detect_urls=False,
+            ytdlp_last_save_path="/dl/yt",
+            ytdlp_last_format="22",
+        )
+        restored = ExternalToolsConfig.from_dict(original.to_dict())
+        for key in (
+            "ytdlp_enabled", "ytdlp_path", "ytdlp_ffmpeg_path",
+            "ytdlp_default_format", "ytdlp_prefer_mode_a",
+            "ytdlp_embed_thumbnail", "ytdlp_embed_subtitles",
+            "ytdlp_subtitle_langs", "ytdlp_cookies_browser",
+            "ytdlp_extra_args", "ytdlp_auto_detect_urls",
+            "ytdlp_last_save_path", "ytdlp_last_format",
+        ):
+            self.assertEqual(getattr(restored, key), getattr(original, key), key)
+
+    def test_ytdlp_from_dict_missing_keys_uses_defaults(self):
+        cfg = ExternalToolsConfig.from_dict({})
+        self.assertTrue(cfg.ytdlp_enabled)
+        self.assertEqual(cfg.ytdlp_default_format, "bestvideo[height<=1080]+bestaudio/best")
+        self.assertEqual(cfg.ytdlp_subtitle_langs, "en")
+        self.assertTrue(cfg.ytdlp_auto_detect_urls)
+
+    def test_ytdlp_save_load_qsettings(self):
+        cfg = ExternalToolsConfig(
+            ytdlp_enabled=False,
+            ytdlp_path="/usr/local/bin/yt-dlp",
+            ytdlp_ffmpeg_path="/usr/local/bin/ffmpeg",
+            ytdlp_default_format="worst",
+            ytdlp_prefer_mode_a=False,
+            ytdlp_embed_thumbnail=False,
+            ytdlp_embed_subtitles=True,
+            ytdlp_subtitle_langs="es",
+            ytdlp_cookies_browser="edge",
+            ytdlp_extra_args="--no-mtime",
+            ytdlp_auto_detect_urls=False,
+            ytdlp_last_save_path="/downloads",
+            ytdlp_last_format="worst",
+        )
+        ini_file = str(Path(self.tmp_dir.name) / "ytdlp_test.ini")
+        settings = QSettings(ini_file, QSettings.Format.IniFormat)
+        cfg.save(settings)
+
+        loaded = ExternalToolsConfig.load(settings)
+        self.assertFalse(loaded.ytdlp_enabled)
+        self.assertEqual(loaded.ytdlp_path, "/usr/local/bin/yt-dlp")
+        self.assertEqual(loaded.ytdlp_ffmpeg_path, "/usr/local/bin/ffmpeg")
+        self.assertEqual(loaded.ytdlp_default_format, "worst")
+        self.assertFalse(loaded.ytdlp_prefer_mode_a)
+        self.assertFalse(loaded.ytdlp_embed_thumbnail)
+        self.assertTrue(loaded.ytdlp_embed_subtitles)
+        self.assertEqual(loaded.ytdlp_subtitle_langs, "es")
+        self.assertEqual(loaded.ytdlp_cookies_browser, "edge")
+        self.assertEqual(loaded.ytdlp_extra_args, "--no-mtime")
+        self.assertFalse(loaded.ytdlp_auto_detect_urls)
+        self.assertEqual(loaded.ytdlp_last_save_path, "/downloads")
+        self.assertEqual(loaded.ytdlp_last_format, "worst")
+
+    def test_effective_subtitle_langs_parsing(self):
+        cfg = ExternalToolsConfig(ytdlp_subtitle_langs="en, ja , ,es")
+        self.assertEqual(cfg.get_effective_ytdlp_subtitle_langs(), ["en", "ja", "es"])
+
+        fallback = ExternalToolsConfig(ytdlp_subtitle_langs="")
+        self.assertEqual(fallback.get_effective_ytdlp_subtitle_langs(), ["en"])
+
+    def test_effective_extra_args_parsing(self):
+        self.assertEqual(ExternalToolsConfig(ytdlp_extra_args="").get_effective_ytdlp_extra_args(), [])
+        args = ExternalToolsConfig(
+            ytdlp_extra_args="--retries 5 --socket-timeout 20"
+        ).get_effective_ytdlp_extra_args()
+        self.assertEqual(args, ["--retries", "5", "--socket-timeout", "20"])
+
+    def test_ytdlp_playlist_limit_default_and_serialization(self):
+        cfg = ExternalToolsConfig()
+        self.assertEqual(cfg.ytdlp_playlist_limit, 10)
+        self.assertIn("ytdlp_playlist_limit", cfg.to_dict())
+
+        cfg = ExternalToolsConfig(ytdlp_playlist_limit=42)
+        self.assertEqual(cfg.to_dict()["ytdlp_playlist_limit"], 42)
+        self.assertEqual(ExternalToolsConfig.from_dict(cfg.to_dict()).ytdlp_playlist_limit, 42)
+
+        ini = str(Path(self.tmp_dir.name) / "pl_limit.ini")
+        settings = QSettings(ini, QSettings.Format.IniFormat)
+        cfg.save(settings)
+        self.assertEqual(ExternalToolsConfig.load(settings).ytdlp_playlist_limit, 42)
+
+    def test_ytdlp_playlist_limit_is_clamped(self):
+        self.assertEqual(ExternalToolsConfig.from_dict({"ytdlp_playlist_limit": 0}).ytdlp_playlist_limit, 1)
+        self.assertEqual(ExternalToolsConfig.from_dict({"ytdlp_playlist_limit": -5}).ytdlp_playlist_limit, 1)
+        self.assertEqual(ExternalToolsConfig.from_dict({"ytdlp_playlist_limit": 9999}).ytdlp_playlist_limit, 500)
+        self.assertEqual(ExternalToolsConfig.from_dict({"ytdlp_playlist_limit": None}).ytdlp_playlist_limit, 10)
+        self.assertEqual(ExternalToolsConfig.from_dict({"ytdlp_playlist_limit": "bad"}).ytdlp_playlist_limit, 10)
+        self.assertEqual(ExternalToolsConfig.from_dict({}).ytdlp_playlist_limit, 10)
+
+    def test_effective_paths_use_existing_files_only(self):
+        bin_dir = Path(self.tmp_dir.name)
+        fake_ytdlp = bin_dir / "yt-dlp"
+        fake_ffmpeg = bin_dir / "ffmpeg"
+        fake_ytdlp.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake_ffmpeg.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        cfg = ExternalToolsConfig(
+            ytdlp_path=str(fake_ytdlp), ytdlp_ffmpeg_path=str(fake_ffmpeg)
+        )
+        self.assertEqual(
+            os.path.normcase(cfg.get_effective_ytdlp_path()),
+            os.path.normcase(normalize_path(str(fake_ytdlp))),
+        )
+        self.assertEqual(
+            os.path.normcase(cfg.get_effective_ffmpeg_path()),
+            os.path.normcase(normalize_path(str(fake_ffmpeg))),
+        )
+
+        # Nonexistent configured paths must not be returned
+        missing = ExternalToolsConfig(
+            ytdlp_path=str(bin_dir / "does-not-exist"),
+            ytdlp_ffmpeg_path=str(bin_dir / "nope"),
+        )
+        self.assertNotEqual(missing.get_effective_ytdlp_path(), str(bin_dir / "does-not-exist"))
+        self.assertNotEqual(missing.get_effective_ffmpeg_path(), str(bin_dir / "nope"))
 
 
 if __name__ == "__main__":

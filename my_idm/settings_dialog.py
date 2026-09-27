@@ -11,12 +11,14 @@ from typing import Optional
 from PySide6.QtCore import Qt, QUrl, QSettings
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -40,6 +42,7 @@ from my_idm.config import (
     TorrentConfig,
     ExternalToolsConfig,
     BrowserIntegrationConfig,
+    clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
 )
@@ -1084,8 +1087,283 @@ class SettingsDialog(QDialog):
         ap_layout.addWidget(logs_group)
 
         layout.addWidget(ap_group)
+        layout.addWidget(self._create_youtube_group())
         layout.addStretch()
         return tab
+
+    def _create_youtube_group(self) -> QGroupBox:
+        """YouTube / yt-dlp configuration (Phase 6 of the YouTube scraper)."""
+        group = QGroupBox("YouTube Downloader (yt-dlp)")
+        gl = QVBoxLayout(group)
+        gl.setSpacing(10)
+
+        cfg = self._external_tools_cfg
+
+        self._yt_enabled_cb = QCheckBox("Enable YouTube integration")
+        self._yt_enabled_cb.setToolTip(
+            "When disabled, pasting a YouTube link in the Add Download dialog\n"
+            "will not offer the YouTube downloader."
+        )
+        self._yt_enabled_cb.setChecked(cfg.ytdlp_enabled)
+        self._yt_enabled_cb.toggled.connect(self._on_youtube_enabled_toggled)
+        gl.addWidget(self._yt_enabled_cb)
+
+        # -- tool locations --
+        tools_group = QGroupBox("Tool Locations")
+        tg = QGridLayout(tools_group)
+
+        self._yt_path_edit = QLineEdit()
+        self._yt_path_edit.setPlaceholderText("auto-detect (pip-installed yt-dlp or on PATH)")
+        self._yt_path_edit.setText(cfg.ytdlp_path)
+        self._yt_path_edit.editingFinished.connect(self._on_youtube_paths_changed)
+        tg.addWidget(QLabel("yt-dlp:"), 0, 0)
+        tg.addWidget(self._yt_path_edit, 0, 1)
+        yt_browse = QPushButton("Browse…")
+        yt_browse.clicked.connect(self._on_browse_ytdlp)
+        tg.addWidget(yt_browse, 0, 2)
+        self._yt_path_status = QLabel("")
+        tg.addWidget(self._yt_path_status, 0, 3)
+
+        self._yt_ffmpeg_edit = QLineEdit()
+        self._yt_ffmpeg_edit.setPlaceholderText("auto-detect (ffmpeg on PATH)")
+        self._yt_ffmpeg_edit.setText(cfg.ytdlp_ffmpeg_path)
+        self._yt_ffmpeg_edit.editingFinished.connect(self._on_youtube_paths_changed)
+        tg.addWidget(QLabel("ffmpeg:"), 1, 0)
+        tg.addWidget(self._yt_ffmpeg_edit, 1, 1)
+        ff_browse = QPushButton("Browse…")
+        ff_browse.clicked.connect(self._on_browse_ffmpeg)
+        tg.addWidget(ff_browse, 1, 2)
+        self._yt_ffmpeg_status = QLabel("")
+        tg.addWidget(self._yt_ffmpeg_status, 1, 3)
+
+        gl.addWidget(tools_group)
+
+        # -- version / update --
+        ver_row = QHBoxLayout()
+        self._yt_version_lbl = QLabel("")
+        self._yt_version_lbl.setStyleSheet("color: #8fa0b5;")
+        ver_row.addWidget(self._yt_version_lbl, 1)
+        self._yt_update_btn = QPushButton("Update yt-dlp")
+        self._yt_update_btn.setToolTip(
+            "Runs 'pip install -U yt-dlp', or 'yt-dlp -U' when only the\n"
+            "standalone binary is available."
+        )
+        self._yt_update_btn.clicked.connect(self._on_update_ytdlp)
+        ver_row.addWidget(self._yt_update_btn)
+        gl.addLayout(ver_row)
+
+        # -- default format --
+        fmt_group = QGroupBox("Default Quality")
+        fg = QVBoxLayout(fmt_group)
+        self._yt_format_combo = QComboBox()
+        from my_idm.youtube_dialog import QUALITY_PRESETS
+        for label, selector, _h in QUALITY_PRESETS:
+            self._yt_format_combo.addItem(label, selector)
+        current = cfg.ytdlp_default_format
+        index = self._yt_format_combo.findData(current)
+        if index >= 0:
+            self._yt_format_combo.setCurrentIndex(index)
+        else:
+            self._yt_format_combo.addItem(f"Custom: {current}", current)
+            self._yt_format_combo.setCurrentIndex(self._yt_format_combo.count() - 1)
+        self._yt_format_combo.setToolTip(
+            "yt-dlp format selector used by default for YouTube downloads.\n"
+            "Merged (video+audio) selections require ffmpeg."
+        )
+        fg.addWidget(self._yt_format_combo)
+
+        self._yt_prefer_mode_a_cb = QCheckBox("Prefer direct URL mode when a single stream is available")
+        self._yt_prefer_mode_a_cb.setToolTip(
+            "Mode A hands the CDN URL to My-IDM for segmented, resumable downloading.\n"
+            "Only possible for audio-only or combined single-file formats — YouTube\n"
+            "rarely offers combined video+audio streams, so video uses Mode B."
+        )
+        self._yt_prefer_mode_a_cb.setChecked(cfg.ytdlp_prefer_mode_a)
+        fg.addWidget(self._yt_prefer_mode_a_cb)
+        gl.addWidget(fmt_group)
+
+        # -- post-processing --
+        post_group = QGroupBox("Post-processing (yt-dlp downloads only)")
+        pg = QVBoxLayout(post_group)
+        self._yt_embed_thumb_cb = QCheckBox("Embed thumbnail in the downloaded file")
+        self._yt_embed_thumb_cb.setChecked(cfg.ytdlp_embed_thumbnail)
+        self._yt_embed_thumb_cb.setToolTip("Requires ffmpeg.")
+        pg.addWidget(self._yt_embed_thumb_cb)
+
+        subs_row = QHBoxLayout()
+        self._yt_embed_subs_cb = QCheckBox("Download and embed subtitles")
+        self._yt_embed_subs_cb.setChecked(cfg.ytdlp_embed_subtitles)
+        subs_row.addWidget(self._yt_embed_subs_cb)
+        self._yt_subs_langs_edit = QLineEdit(cfg.ytdlp_subtitle_langs)
+        self._yt_subs_langs_edit.setPlaceholderText("en, ja")
+        self._yt_subs_langs_edit.setMaximumWidth(200)
+        self._yt_subs_langs_edit.setEnabled(cfg.ytdlp_embed_subtitles)
+        self._yt_embed_subs_cb.toggled.connect(self._yt_subs_langs_edit.setEnabled)
+        subs_row.addWidget(QLabel("Languages:"))
+        subs_row.addWidget(self._yt_subs_langs_edit)
+        subs_row.addStretch()
+        pg.addLayout(subs_row)
+        gl.addWidget(post_group)
+
+        # -- authentication --
+        auth_group = QGroupBox("Authentication")
+        ag = QVBoxLayout(auth_group)
+        cookie_row = QHBoxLayout()
+        cookie_row.addWidget(QLabel("Cookie source:"))
+        self._yt_cookies_combo = QComboBox()
+        from my_idm.youtube_tool import SUPPORTED_BROWSERS
+        self._yt_cookies_combo.addItem("None", "")
+        for name in SUPPORTED_BROWSERS:
+            self._yt_cookies_combo.addItem(name.capitalize(), name)
+        existing = cfg.ytdlp_cookies_browser
+        idx = self._yt_cookies_combo.findData(existing)
+        if idx >= 0:
+            self._yt_cookies_combo.setCurrentIndex(idx)
+        cookie_row.addWidget(self._yt_cookies_combo, 1)
+        ag.addLayout(cookie_row)
+
+        warn = QLabel(
+            "⚠️ Browser cookies expose your account credentials to yt-dlp and to any\n"
+            "site it visits. Use a throwaway account. Private and age-restricted\n"
+            "videos cannot be downloaded without a cookie source."
+        )
+        warn.setWordWrap(True)
+        warn.setStyleSheet("color: #f59e0b; font-size: 11px;")
+        ag.addWidget(warn)
+        gl.addWidget(auth_group)
+
+        # -- misc --
+        misc_group = QGroupBox("Misc")
+        mg = QVBoxLayout(misc_group)
+        self._yt_autodetect_cb = QCheckBox(
+            "Auto-detect YouTube URLs in the Add Download dialog"
+        )
+        self._yt_autodetect_cb.setChecked(cfg.ytdlp_auto_detect_urls)
+        mg.addWidget(self._yt_autodetect_cb)
+
+        limit_row = QHBoxLayout()
+        limit_row.addWidget(QLabel("Playlist entries to list:"))
+        self._yt_playlist_limit_spin = QSpinBox()
+        self._yt_playlist_limit_spin.setRange(1, 500)
+        self._yt_playlist_limit_spin.setValue(
+            clamp_ytdlp_playlist_limit(cfg.ytdlp_playlist_limit)
+        )
+        self._yt_playlist_limit_spin.setToolTip(
+            "Caps how many playlist or channel entries are listed per analysis.\n"
+            "Each analysis makes at most two requests regardless of this value, so\n"
+            "a large playlist cannot flood the site. Raise it only if you need more."
+        )
+        limit_row.addWidget(self._yt_playlist_limit_spin)
+        limit_row.addStretch()
+        mg.addLayout(limit_row)
+        gl.addWidget(misc_group)
+        args_row = QHBoxLayout()
+        args_row.addWidget(QLabel("Extra yt-dlp args:"))
+        self._yt_extra_args_edit = QLineEdit(cfg.ytdlp_extra_args)
+        self._yt_extra_args_edit.setPlaceholderText("--retries 5 --concurrent-fragments 4")
+        args_row.addWidget(self._yt_extra_args_edit, 1)
+        mg.addLayout(args_row)
+        gl.addWidget(misc_group)
+
+        self._on_youtube_enabled_toggled(cfg.ytdlp_enabled)
+        self._refresh_youtube_status()
+        return group
+
+    # -- YouTube settings handlers ------------------------------------------
+
+    def _on_youtube_enabled_toggled(self, enabled: bool):
+        for widget in (
+            self._yt_path_edit, self._yt_ffmpeg_edit, self._yt_format_combo,
+            self._yt_prefer_mode_a_cb, self._yt_embed_thumb_cb, self._yt_embed_subs_cb,
+            self._yt_cookies_combo, self._yt_autodetect_cb, self._yt_extra_args_edit,
+            self._yt_playlist_limit_spin, self._yt_update_btn,
+        ):
+            widget.setEnabled(enabled)
+        self._yt_subs_langs_edit.setEnabled(enabled and self._yt_embed_subs_cb.isChecked())
+        if enabled:
+            self._refresh_youtube_status()
+
+    def _current_youtube_config(self) -> ExternalToolsConfig:
+        """Build a config snapshot from the current widget values."""
+        cfg = self._external_tools_cfg
+        cfg.ytdlp_enabled = self._yt_enabled_cb.isChecked()
+        cfg.ytdlp_path = self._yt_path_edit.text().strip()
+        cfg.ytdlp_ffmpeg_path = self._yt_ffmpeg_edit.text().strip()
+        cfg.ytdlp_default_format = self._yt_format_combo.currentData() or cfg.ytdlp_default_format
+        cfg.ytdlp_prefer_mode_a = self._yt_prefer_mode_a_cb.isChecked()
+        cfg.ytdlp_embed_thumbnail = self._yt_embed_thumb_cb.isChecked()
+        cfg.ytdlp_embed_subtitles = self._yt_embed_subs_cb.isChecked()
+        cfg.ytdlp_subtitle_langs = self._yt_subs_langs_edit.text().strip() or "en"
+        cfg.ytdlp_cookies_browser = self._yt_cookies_combo.currentData() or ""
+        cfg.ytdlp_auto_detect_urls = self._yt_autodetect_cb.isChecked()
+        cfg.ytdlp_playlist_limit = self._yt_playlist_limit_spin.value()
+        cfg.ytdlp_extra_args = self._yt_extra_args_edit.text().strip()
+        return cfg
+
+    def _refresh_youtube_status(self):
+        """Live validation of the configured yt-dlp and ffmpeg paths."""
+        from my_idm import youtube_tool as ytt
+
+        cfg = self._current_youtube_config()
+
+        ytdlp_path = cfg.get_effective_ytdlp_path()
+        if ytdlp_path:
+            version = ytt.get_ytdlp_version(cfg)
+            self._yt_path_status.setText(f"✓ {version}" if version else "✓ found")
+            self._yt_path_status.setStyleSheet("color: #3fb950;")
+        else:
+            self._yt_path_status.setText("✗ not found — pip install -U yt-dlp")
+            self._yt_path_status.setStyleSheet("color: #f85149;")
+
+        if cfg.get_effective_ffmpeg_path():
+            self._yt_ffmpeg_status.setText("✓ found")
+            self._yt_ffmpeg_status.setStyleSheet("color: #3fb950;")
+        else:
+            self._yt_ffmpeg_status.setText("✗ not found")
+            self._yt_ffmpeg_status.setStyleSheet("color: #f85149;")
+
+        if not ytdlp_path:
+            self._yt_version_lbl.setText("yt-dlp unavailable")
+        else:
+            version = ytt.get_ytdlp_version(cfg) or "unknown"
+            self._yt_version_lbl.setText(f"yt-dlp {version}")
+
+    def _on_youtube_paths_changed(self):
+        self._refresh_youtube_status()
+
+    def _on_browse_ytdlp(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select yt-dlp executable", self._yt_path_edit.text() or "",
+            "Executables (*.exe);;All Files (*)",
+        )
+        if path:
+            self._yt_path_edit.setText(normalize_path(path))
+            self._refresh_youtube_status()
+
+    def _on_browse_ffmpeg(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select ffmpeg executable", self._yt_ffmpeg_edit.text() or "",
+            "Executables (*.exe);;All Files (*)",
+        )
+        if path:
+            self._yt_ffmpeg_edit.setText(normalize_path(path))
+            self._refresh_youtube_status()
+
+    def _on_update_ytdlp(self):
+        from my_idm import youtube_tool as ytt
+
+        cfg = self._current_youtube_config()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            ok, message = ytt.update_ytdlp(cfg)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if ok:
+            QMessageBox.information(self, "yt-dlp Updated", message or "yt-dlp is up to date.")
+        else:
+            QMessageBox.warning(self, "yt-dlp Update Failed", message)
+        self._refresh_youtube_status()
 
     def _create_browser_tab(self) -> QWidget:
         tab = QWidget()
@@ -2073,6 +2351,10 @@ class SettingsDialog(QDialog):
         self._external_tools_cfg.animepahe_last_episodes = self._animepahe_episodes_edit.text().strip()
         self._external_tools_cfg.animepahe_last_quality = self._animepahe_quality_combo.currentText()
         self._external_tools_cfg.animepahe_last_lang = self._animepahe_lang_combo.currentText()
+
+        # YouTube / yt-dlp settings (Phase 6)
+        if hasattr(self, "_yt_enabled_cb"):
+            self._current_youtube_config()
         self._external_tools_cfg.save()
 
         # 7. Collect Browser Integration settings

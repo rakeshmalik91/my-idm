@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QStyle,
     QSystemTrayIcon,
     QTableView,
     QToolBar,
@@ -485,6 +486,18 @@ class MainWindow(QMainWindow):
         self._act_add_torrent.setToolTip("Add .torrent file (Ctrl+T)")
         self._act_add_torrent.triggered.connect(self._on_add_torrent)
 
+        # Standard style icon rather than an emoji, so the Tools menu keeps its
+        # uniform indentation (every menu action is expected to carry an icon).
+        _yt_style_icon = (
+            QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+            if QApplication.style() is not None
+            else _create_emoji_icon("🎬")
+        )
+        self._act_youtube = QAction(_yt_style_icon, "Download YouTube Video…", self)
+        self._act_youtube.setShortcut(QKeySequence("Ctrl+Y"))
+        self._act_youtube.setToolTip("Analyse a YouTube link and choose a quality (Ctrl+Y)")
+        self._act_youtube.triggered.connect(self._on_add_youtube)
+
         self._act_resume = QAction(_create_play_icon(), "Resume", self)
         self._act_resume.setShortcut(QKeySequence("Ctrl+R"))
         self._act_resume.setToolTip("Resume selected downloads (Ctrl+R)")
@@ -507,15 +520,15 @@ class MainWindow(QMainWindow):
         self._act_start_seeding.setToolTip("Start or resume seeding for completed torrents")
         self._act_start_seeding.triggered.connect(self._on_start_seeding)
 
-        self._act_pause_all = QAction(_create_pause_all_icon(), "", self)
+        self._act_pause_all = QAction(_create_pause_all_icon(), "Pause All", self)
         self._act_pause_all.setToolTip("Pause all active and queued downloads")
         self._act_pause_all.triggered.connect(self._on_pause_all_downloads)
 
-        self._act_resume_all = QAction(_create_resume_all_icon(), "", self)
+        self._act_resume_all = QAction(_create_resume_all_icon(), "Resume All", self)
         self._act_resume_all.setToolTip("Resume all paused and queued downloads")
         self._act_resume_all.triggered.connect(self._on_resume_all_downloads)
 
-        self._act_stop_all_seeding = QAction(_create_pause_all_seeding_icon(), "", self)
+        self._act_stop_all_seeding = QAction(_create_pause_all_seeding_icon(), "Pause All Seeding", self)
         self._act_stop_all_seeding.setToolTip("Pause all active seeding torrents")
         self._act_stop_all_seeding.triggered.connect(self._on_stop_all_seeding)
 
@@ -832,6 +845,8 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self._act_export_csv)
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_torrent_settings)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self._act_youtube)
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_tor)
         self._act_tor_settings = QAction(_create_emoji_icon("🧅"), "Tor Network Settings…", self)
@@ -1238,12 +1253,51 @@ class MainWindow(QMainWindow):
 
     def _on_add(self):
         dlg = AddDownloadDialog(self, manager=self._manager)
-        if dlg.exec() == AddDownloadDialog.DialogCode.Accepted:
-            urls = getattr(dlg, "urls", [dlg.url] if dlg.url else [])
-            for u in urls:
-                self._manager.add_download(
-                    u, dlg.save_path, dlg.num_segments
-                )
+        if dlg.exec() != AddDownloadDialog.DialogCode.Accepted:
+            return
+
+        yt_selection = getattr(dlg, "youtube_selection", None)
+        if isinstance(yt_selection, dict) and yt_selection.get("videos"):
+            self._queue_youtube_selection(yt_selection)
+            return
+
+        urls = getattr(dlg, "urls", [dlg.url] if dlg.url else [])
+        for u in urls:
+            self._manager.add_download(
+                u, dlg.save_path, dlg.num_segments
+            )
+
+    def _on_add_youtube(self):
+        """Open the YouTube downloader directly (Tools menu / Ctrl+Y)."""
+        from my_idm.youtube_dialog import YouTubeDialog
+
+        dlg = YouTubeDialog(self, manager=self._manager)
+        if dlg.exec() == YouTubeDialog.DialogCode.Accepted:
+            self._queue_youtube_selection(dlg.selection())
+
+    def _queue_youtube_selection(self, selection: dict):
+        """Dispatch a confirmed YouTube dialog selection to the manager."""
+        videos = selection.get("videos") or []
+        if not videos:
+            return
+        selector = selection.get("format_selector") or ""
+        save_path = selection.get("save_path") or ""
+        queued = 0
+        for md in videos:
+            url = getattr(md, "webpage_url", "") or ""
+            if not url:
+                continue
+            if self._manager.add_youtube_download(
+                url=url,
+                metadata=md,
+                save_path=save_path,
+                format_selector=selector,
+            ):
+                queued += 1
+        if queued and hasattr(self, "_status_label"):
+            self._status_label.setText(
+                f"Queued {queued} YouTube download{'s' if queued != 1 else ''}"
+            )
 
     def _on_add_torrent(self):
         paths, _ = QFileDialog.getOpenFileNames(
