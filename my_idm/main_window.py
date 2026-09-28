@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF, QEvent, Signal
+from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF, QEvent, QItemSelectionModel, Signal
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -79,7 +79,13 @@ log = logging.getLogger(__name__)
 # Single source of truth for the startup layout, "Reset View", and the heal applied
 # when restoring a UI state saved before columns were appended. New columns are
 # added here to sit at the very end.
-_DEFAULT_TAIL_COLUMNS = (Col.SOURCE_DOMAIN, Col.FILE_NAME, Col.LAST_SEEDED, Col.SOURCE)
+_DEFAULT_TAIL_COLUMNS = (
+    Col.SOURCE_DOMAIN,
+    Col.FILE_NAME,
+    Col.LAST_SEEDED,
+    Col.SOURCE,
+    Col.SEEDING_STARTED_AT,
+)
 
 
 def _apply_default_tail_order(header) -> None:
@@ -454,6 +460,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.FILE_NAME, 220)
         self._table.setColumnWidth(Col.LAST_SEEDED, 130)
         self._table.setColumnWidth(Col.SOURCE, 100)
+        self._table.setColumnWidth(Col.SEEDING_STARTED_AT, 150)
 
         # Row height
         self._table.verticalHeader().setDefaultSectionSize(36)
@@ -1239,6 +1246,33 @@ class MainWindow(QMainWindow):
             self._table.selectionModel().selectedIndexes()
         )
 
+    def _restore_selection(self, download_ids) -> None:
+        """Re-select *download_ids* after a model rebuild.
+
+        Segregated view and the header filters both rebuild the model, and a
+        model reset drops the view's selection. Without this, any status change
+        silently deselects the row the user was working on. Ids that are no
+        longer visible (filtered out or moved to another section) are skipped.
+        """
+        if not download_ids:
+            return
+        wanted = list(dict.fromkeys(download_ids))
+        sm = self._table.selectionModel()
+        sm.clearSelection()
+        first_index = None
+        for did in wanted:
+            row = self._model.row_for_id(did)
+            if row is None or row < 0:
+                continue
+            index = self._model.index(row, 0)
+            sm.select(index, QItemSelectionModel.SelectionFlag.Select)
+            sm.select(index, QItemSelectionModel.SelectionFlag.Rows)
+            if first_index is None:
+                first_index = index
+        if first_index is not None:
+            self._table.setCurrentIndex(first_index)
+            self._table.scrollTo(first_index, QAbstractItemView.ScrollHint.EnsureVisible)
+
     def _first_selected_entry(self) -> Optional[DownloadEntry]:
         ids = self._selected_ids()
         if ids:
@@ -1505,7 +1539,9 @@ class MainWindow(QMainWindow):
     def _on_toggle_segregated_view(self, checked: bool):
         self._segregated_view_enabled = checked
         self._manager.db.set_ui_state("segregated_view_enabled", checked)
+        selected = self._selected_ids()
         self._model.set_segregated_view(checked, mode=self._segregated_view_mode)
+        self._restore_selection(selected)
         self._apply_table_spans()
         mode_str = "Status" if self._segregated_view_mode == "status" else "Date"
         if checked:
@@ -1774,8 +1810,18 @@ class MainWindow(QMainWindow):
             self._details_panel.refresh()
 
     def _on_status_changed(self, download_id: str, status: str,
-                           error_msg: str):
+                              error_msg: str):
+        # Segregated view rebuilds the model on every status change, and a model
+        # reset drops the view's selection. Capture it first and put it back.
+        selected = self._selected_ids()
         self._model.update_status(download_id, status, error_msg)
+        # The engine writes more than the status: seeding timestamps, resolved
+        # filenames and sizes all change alongside it, and the model holds its
+        # own snapshot of the row.
+        fresh = self._manager.get_entry(download_id)
+        if fresh is not None:
+            self._model.refresh_entry(download_id, fresh)
+        self._restore_selection(selected)
         self._update_count_label()
         self._update_speed_label()
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
@@ -2462,6 +2508,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.FILE_NAME, 220)
         self._table.setColumnWidth(Col.LAST_SEEDED, 130)
         self._table.setColumnWidth(Col.SOURCE, 100)
+        self._table.setColumnWidth(Col.SEEDING_STARTED_AT, 150)
 
     # 2. Show all columns (reset column visibility)
         header = self._header_view

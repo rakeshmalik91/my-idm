@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from my_idm.download_model import (
     Col,
+    SIZE_FILTER_LABELS,
     STATUS_FILTER_GROUPS,
     STATUS_FILTER_LABELS,
     TYPE_FILTER_LABELS,
@@ -117,8 +118,12 @@ class MultiselectFilterPopup(QFrame):
         layout.setSpacing(8)
 
         # Header Title
-        title_text = "Filter by Status" if column == Col.STATUS else "Filter by Download Type"
-        title_lbl = QLabel(title_text)
+        popup_titles = {
+            Col.STATUS: "Filter by Status",
+            Col.NAME: "Filter by Download Type",
+            Col.SIZE: "Filter by Size",
+        }
+        title_lbl = QLabel(popup_titles.get(column, "Filter"))
         layout.addWidget(title_lbl)
 
         # Quick actions row: Select All / Clear All
@@ -151,8 +156,12 @@ class MultiselectFilterPopup(QFrame):
         items_layout.setContentsMargins(0, 2, 0, 2)
         items_layout.setSpacing(4)
 
+        # Each filterable column has its own key -> label map. Falling back to
+        # the type labels here made the Size popup list HTTP/BitTorrent.
         if column == Col.STATUS:
             items = STATUS_FILTER_LABELS.items()
+        elif column == Col.SIZE:
+            items = SIZE_FILTER_LABELS.items()
         else:
             items = TYPE_FILTER_LABELS.items()
 
@@ -239,8 +248,15 @@ class FilterHeaderView(QHeaderView):
 
     FILTER_BTN_OFFSET = 20
 
+    # Columns that expose a filter popup, mapped to their popup title.
+    _FILTER_COLUMNS: dict[int, str] = {
+        Col.NAME: "Download Type",
+        Col.STATUS: "Status",
+        Col.SIZE: "Size",
+    }
+
     def _get_filter_btn_rect(self, logical_index: int) -> QRect:
-        if logical_index not in (Col.NAME, Col.STATUS):
+        if logical_index not in self._FILTER_COLUMNS:
             return QRect()
         pos = self.sectionViewportPosition(logical_index)
         width = self.sectionSize(logical_index)
@@ -253,8 +269,8 @@ class FilterHeaderView(QHeaderView):
         # 1. Base header section rendering
         super().paintSection(painter, rect, logical_index)
 
-        # 2. Paint filter icon for Name (Type) and Status columns
-        if logical_index in (Col.NAME, Col.STATUS):
+        # 2. Paint filter icon for Type, Status and Size columns
+        if logical_index in self._FILTER_COLUMNS:
             model = self.model()
             is_filtered = False
             if model is not None:
@@ -262,6 +278,8 @@ class FilterHeaderView(QHeaderView):
                     is_filtered = getattr(model, "is_status_filtered", lambda: False)()
                 elif logical_index == Col.NAME:
                     is_filtered = getattr(model, "is_type_filtered", lambda: False)()
+                elif logical_index == Col.SIZE:
+                    is_filtered = getattr(model, "is_size_filtered", lambda: False)()
 
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -302,7 +320,7 @@ class FilterHeaderView(QHeaderView):
         pos = event.position().toPoint()
         if event.button() == Qt.MouseButton.LeftButton:
             logical_idx = self.logicalIndexAt(pos)
-            if logical_idx in (Col.NAME, Col.STATUS):
+            if logical_idx in self._FILTER_COLUMNS:
                 btn_rect = self._get_filter_btn_rect(logical_idx)
                 if btn_rect.contains(pos):
                     self._open_filter_popup(logical_idx, btn_rect)
@@ -314,15 +332,14 @@ class FilterHeaderView(QHeaderView):
     def mouseMoveEvent(self, event: QMouseEvent):
         pos = event.position().toPoint()
         logical_idx = self.logicalIndexAt(pos)
-        if logical_idx in (Col.NAME, Col.STATUS):
+        if logical_idx in self._FILTER_COLUMNS:
             btn_rect = self._get_filter_btn_rect(logical_idx)
             if btn_rect.contains(pos):
                 if not self._hover_filter_btn or self._hover_logical_index != logical_idx:
                     self._hover_filter_btn = True
                     self._hover_logical_index = logical_idx
                     self.setCursor(Qt.CursorShape.PointingHandCursor)
-                    title = "Status" if logical_idx == Col.STATUS else "Download Type"
-                    self.setToolTip(f"Filter by {title}")
+                    self.setToolTip(f"Filter by {self._FILTER_COLUMNS[logical_idx]}")
                     self.viewport().update()
                 return
 
@@ -356,6 +373,9 @@ class FilterHeaderView(QHeaderView):
         if logical_index == Col.STATUS:
             current_selection = getattr(model, "status_filter", lambda: None)()
             counts = getattr(model, "get_status_counts", lambda: {})()
+        elif logical_index == Col.SIZE:
+            current_selection = getattr(model, "size_filter", lambda: None)()
+            counts = getattr(model, "get_size_counts", lambda: {})()
         else:
             current_selection = getattr(model, "type_filter", lambda: None)()
             counts = getattr(model, "get_type_counts", lambda: {})()
@@ -381,5 +401,8 @@ class FilterHeaderView(QHeaderView):
             elif column == Col.NAME:
                 if hasattr(model, "set_type_filter"):
                     model.set_type_filter(selected_keys)
+            elif column == Col.SIZE:
+                if hasattr(model, "set_size_filter"):
+                    model.set_size_filter(selected_keys)
         self.filter_requested.emit(column, selected_keys)
         self.viewport().update()

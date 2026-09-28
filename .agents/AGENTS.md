@@ -21,6 +21,10 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Browser Integration** | [`docs/architecture/browser-integration.md`](file:///d:/Projects/my-idm/docs/architecture/browser-integration.md) | Chromium & Mozilla Firefox Manifest V3 extension, loopback REST server (127.0.0.1:19582), automated download interception, and cookie preservation. |
 | **Window & System Tray** | [`docs/architecture/window-system-tray.md`](file:///d:/Projects/my-idm/docs/architecture/window-system-tray.md) | Windows system tray icon lifecycle, minimize-to-tray, close-to-tray, desktop completion toast notifications, and preferences reorganization. |
 | **Table Views & Segregation** | [`docs/architecture/table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md) | Table model architecture, custom delegates, status/date segregation algorithms, section header spans, context menus, and telemetry tables. |
+| **YouTube Scraper** | [`docs/architecture/youtube-scraper.md`](file:///d:/Projects/my-idm/docs/architecture/youtube-scraper.md) | `yt-dlp` integration, Mode A (direct CDN URL via `HTTPEngine`) vs Mode B (yt-dlp + ffmpeg merge), the download dialog, playlist listing, and rate-limit budgeting. |
+
+> When adding a new subsystem doc, add a row here **and** to the index in
+> [`README.md`](file:///d:/Projects/my-idm/README.md) so the two do not drift.
 
 ---
 
@@ -36,12 +40,22 @@ The canonical architecture documentation is organized under [`docs/architecture/
 ## 🛠️ Key Conventions for Agents
 
 1. **Commit Convention**: Follow standard conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
-2. **Testing**: Always run `python -m pytest` and ensure 100% of unit tests pass before committing.
+2. **Testing**: Always run `python -m pytest` and ensure all unit tests pass before committing.
+   - **Known pre-existing failure:** `tests/test_settings.py::TestExternalToolsSettings::test_settings_dialog_run_cli_button`
+     fails on a clean checkout. Do not treat it as a regression from your change, and do not "fix" it
+     as a drive-by.
+   - Prefer deterministic tests. Mocking `libtorrent` handles and driving `TorrentEngine.poll_all()`
+     with fakes crashes the interpreter (it reaches into libtorrent internals); test the pure helpers
+     instead, and use real `TorrentConfig` / `GeneralConfig` objects rather than `MagicMock` where the
+     engine compares their values against ints.
 3. **Threading Architecture**:
    - Qt GUI runs on the main thread.
    - `HTTPEngine` uses an asyncio event loop running on a dedicated background thread (`idm-async`).
    - `TorrentEngine` uses `libtorrent` session managed via periodic Qt timer polls (`_poll_torrents`).
    - Background scans (antivirus) run on short-lived daemon threads (`scan-<id>`).
+   - yt-dlp work runs on plain daemon threads (`ytdlp-download`, `yt-extract`). Never use `QThread` for
+     it: destroying a `QThread` whose `run()` is still executing aborts the process, and detaching does
+     not help because it is still destroyed at interpreter exit.
 4. **Preserve User Settings & Environment (CRITICAL)**:
    - **NEVER** clear, wipe, or overwrite the user's live settings (`QSettings("MyIDM", "My-IDM").clear()`) during testing, debugging, or local development.
    - On Windows, un-isolated `QSettings("MyIDM", "My-IDM")` modifies the live Windows Registry (`HKEY_CURRENT_USER\Software\MyIDM\My-IDM`), which causes the user's default download folder, UI state, and configured preferences to be wiped repeatedly.
@@ -51,4 +65,22 @@ The canonical architecture documentation is organized under [`docs/architecture/
    - **NEVER** push automatically (`git push`).
    - Only commit changes locally (`git commit`).
    - Pushing to the remote repository must only be done if explicitly instructed by the user.
+6. **Adding a Downloads-Table Column**:
+   - **Append** a new `Col` constant. Never insert, because persisted `column_widths`,
+     `header_state`, and `sort_column` in `ui_state` address columns by logical index.
+   - Add a `NOT NULL DEFAULT ''` column guarded by `PRAGMA table_info` in `Database._create_tables()`.
+     Migrations must stay additive and idempotent, and existing rows must read back with the default.
+   - Record `column_count` in the saved UI state (already done). A state whose stored count differs
+     from `Col.COUNT` predates the append, so the tail is re-pinned on restore and the user's own
+     ordering of the older columns is preserved.
+   - Add the column to `_DEFAULT_TAIL_COLUMNS` in `main_window.py` and set a default width in both
+     `_setup_ui()` and `_on_reset_view()`. The tail helper must stay an **ascending** sweep:
+     `moveSection()` shifts everything between source and target, so placing a column left of its
+     target displaces an already-placed neighbour.
+7. **File Deletion**: never call `Path.unlink()` or `os.remove()` on user data. Use
+   `utils.send_to_trash()` and `utils.unlock_path()`, and stop any worker holding the file first — on
+   Windows an open handle makes the file undeletable.
+8. **Verify Against Real Data**: when a change touches persistence, column layout, or anything the user
+   sees, confirm it against a copy of the real `~/.my-idm/downloads.db` or a rendered screenshot
+   rather than trusting mocks alone.
 

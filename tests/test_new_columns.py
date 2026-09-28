@@ -131,11 +131,13 @@ class TestNewColumnDefinitions(unittest.TestCase):
     def test_appended_indices(self):
         self.assertEqual(Col.LAST_SEEDED, 14)
         self.assertEqual(Col.SOURCE, 15)
-        self.assertEqual(Col.COUNT, 16)
+        self.assertEqual(Col.SEEDING_STARTED_AT, 16)
+        self.assertEqual(Col.COUNT, 17)
 
     def test_headers(self):
         self.assertEqual(Col.HEADERS[Col.LAST_SEEDED], "Last Seeded")
         self.assertEqual(Col.HEADERS[Col.SOURCE], "Source")
+        self.assertEqual(Col.HEADERS[Col.SEEDING_STARTED_AT], "Seeding Started At")
 
     def test_last_seeded_not_in_date_columns(self):
         """Kept out of DATE_COLUMNS so the existing date-sort contract is unchanged."""
@@ -616,6 +618,275 @@ class TestYoutubeProgressMonotonic(unittest.TestCase):
         self.assertEqual(events[-1]["downloaded_bytes"], 55_000_000)
         self.assertEqual(events[-1]["total_bytes"], 55_000_000)
 
+
+class TestSizeFilter(unittest.TestCase):
+    """Size-bucket filter on the Col.SIZE column header."""
+
+    MB = 1024 * 1024
+    GB = 1024 * 1024 * 1024
+
+    def _model(self):
+        model = DownloadTableModel()
+        sizes = [
+            1 * self.MB, 50 * self.MB, 500 * self.MB, 3 * self.GB,
+            8 * self.GB, 25 * self.GB, 80 * self.GB,
+        ]
+        entries = [
+            DownloadEntry(
+                id=f"e{i}", url=f"http://x/{i}", filename=f"f{i}.bin",
+                save_path=".", file_path=f"./f{i}.bin", total_size=s,
+                downloaded_size=s, status="completed", download_type="http",
+            )
+            for i, s in enumerate(sizes)
+        ]
+        model.load_entries(entries)
+        return model, entries
+
+    def test_bucket_labels_match_spec(self):
+        from my_idm.download_model import SIZE_FILTER_LABELS
+
+        self.assertEqual(
+            list(SIZE_FILTER_LABELS.values()),
+            ["<10MB", "10-100MB", "100MB-1GB", "1-5GB", "5-10GB", "10-50GB", ">50GB"],
+        )
+
+    def test_bucket_boundaries(self):
+        from my_idm.download_model import size_bucket_for
+
+        cases = [
+            (0, "lt_10mb"), (10 * self.MB - 1, "lt_10mb"),
+            (10 * self.MB, "10mb_100mb"), (100 * self.MB - 1, "10mb_100mb"),
+            (100 * self.MB, "100mb_1gb"), (self.GB - 1, "100mb_1gb"),
+            (self.GB, "1gb_5gb"), (5 * self.GB - 1, "1gb_5gb"),
+            (5 * self.GB, "5gb_10gb"), (10 * self.GB - 1, "5gb_10gb"),
+            (10 * self.GB, "10gb_50gb"), (50 * self.GB - 1, "10gb_50gb"),
+            (50 * self.GB, "gt_50gb"), (500 * self.GB, "gt_50gb"),
+        ]
+        for size, expected in cases:
+            self.assertEqual(size_bucket_for(size), expected, f"{size} bytes")
+
+    def test_unknown_and_negative_sizes_fall_into_smallest_bucket(self):
+        from my_idm.download_model import size_bucket_for
+
+        self.assertEqual(size_bucket_for(None), "lt_10mb")
+        self.assertEqual(size_bucket_for(""), "lt_10mb")
+        self.assertEqual(size_bucket_for(-5), "lt_10mb")
+
+    def test_filter_selects_only_that_bucket(self):
+        model, _ = self._model()
+        model.set_size_filter({"1gb_5gb"})
+        self.assertEqual(model.rowCount(), 1)
+        self.assertTrue(model.is_size_filtered())
+        self.assertTrue(model.is_filtered())
+
+    def test_filter_supports_multiple_buckets(self):
+        model, _ = self._model()
+        model.set_size_filter({"lt_10mb", "gt_50gb"})
+        self.assertEqual(model.rowCount(), 2)
+
+    def test_selecting_every_bucket_clears_the_filter(self):
+        from my_idm.download_model import SIZE_FILTER_BUCKETS
+
+        model, _ = self._model()
+        model.set_size_filter({key for key, _l, _a, _b in SIZE_FILTER_BUCKETS})
+        self.assertFalse(model.is_size_filtered())
+        self.assertEqual(model.rowCount(), 7)
+
+    def test_counts_cover_every_bucket_and_honour_other_filters(self):
+        model, _ = self._model()
+        counts = model.get_size_counts()
+        self.assertEqual(len(counts), 7)
+        self.assertEqual(sum(counts.values()), 7)
+        model.set_type_filter({"torrent"})
+        self.assertEqual(sum(model.get_size_counts().values()), 0)
+
+    def test_combines_with_type_filter(self):
+        model, _ = self._model()
+        model.set_size_filter({"10gb_50gb"})
+        model.set_type_filter({"torrent"})
+        self.assertEqual(model.rowCount(), 0)
+        model.set_type_filter({"http"})
+        self.assertEqual(model.rowCount(), 1)
+
+    def test_clear_filters_resets_size(self):
+        model, _ = self._model()
+        model.set_size_filter({"lt_10mb"})
+        model.clear_filters()
+        self.assertFalse(model.is_size_filtered())
+        self.assertFalse(model.is_filtered())
+        self.assertEqual(model.rowCount(), 7)
+
+    def test_header_exposes_size_column(self):
+        from my_idm.header_view import FilterHeaderView
+
+        self.assertIn(Col.SIZE, FilterHeaderView._FILTER_COLUMNS)
+        self.assertEqual(FilterHeaderView._FILTER_COLUMNS[Col.SIZE], "Size")
+        self.assertIn(Col.STATUS, FilterHeaderView._FILTER_COLUMNS)
+        self.assertIn(Col.NAME, FilterHeaderView._FILTER_COLUMNS)
+
+    def test_size_filter_popup_lists_size_buckets(self):
+        """Regression: the Size popup listed the HTTP/BitTorrent type labels."""
+        from my_idm.download_model import SIZE_FILTER_LABELS
+        from my_idm.header_view import MultiselectFilterPopup
+
+        MB = 1024 * 1024
+        model = DownloadTableModel()
+        model.load_entries(
+            [
+                DownloadEntry(
+                    id=f"e{i}", url=f"http://x/{i}", filename=f"f{i}.bin",
+                    save_path=".", file_path=f"./f{i}.bin", total_size=s,
+                    downloaded_size=s, status="completed", download_type="http",
+                )
+                for i, s in enumerate((1 * MB, 3 * 1024 ** 3, 80 * 1024 ** 3))
+            ]
+        )
+
+        popup = MultiselectFilterPopup(Col.SIZE, None, model.get_size_counts())
+        self.assertEqual(
+            set(popup._checkboxes.keys()), set(SIZE_FILTER_LABELS.keys()),
+            "popup keys must be the size bucket ids",
+        )
+        labels = [cb.text() for cb in popup._checkboxes.values()]
+        for expected in SIZE_FILTER_LABELS.values():
+            self.assertTrue(
+                any(lbl.startswith(expected) for lbl in labels),
+                f"missing bucket {expected!r} in {labels}",
+            )
+        # The download-type labels must not leak into the Size popup.
+        self.assertFalse(any(lbl.startswith("HTTP") for lbl in labels))
+        self.assertFalse(any(lbl.startswith("BitTorrent") for lbl in labels))
+        # Counts are per bucket, so three rows spread over three buckets.
+        counted = [lbl for lbl in labels if not lbl.endswith("(0)")]
+        self.assertEqual(len(counted), 3, f"expected 3 non-zero buckets, got {labels}")
+
+
+class TestSeedingStartedAtColumn(unittest.TestCase):
+    """The Seeding Started At column and its use for the duration limit."""
+
+    def _entry(self, **kw):
+        e = DownloadEntry(
+            id="t1", url="magnet:?xt=urn:btih:abc", filename="a.torrent",
+            save_path=".", file_path="./a.torrent", download_type="torrent",
+            status="completed",
+        )
+        for k, v in kw.items():
+            setattr(e, k, v)
+        return e
+
+    def test_defaults_to_empty(self):
+        self.assertEqual(self._entry().seeding_started_at, "")
+
+    def test_index_and_header(self):
+        self.assertEqual(Col.SEEDING_STARTED_AT, 16)
+        self.assertEqual(Col.HEADERS[Col.SEEDING_STARTED_AT], "Seeding Started At")
+
+    def test_display_and_sort(self):
+        model = DownloadTableModel()
+        unset = self._entry()
+        set_ = self._entry(seeding_started_at="2026-09-28T10:11:12+00:00")
+        self.assertEqual(model._display_data(unset, Col.SEEDING_STARTED_AT), "—")
+        self.assertRegex(
+            model._display_data(set_, Col.SEEDING_STARTED_AT), r"^\d{4}-\d{2}-\d{2} "
+        )
+        self.assertIsInstance(
+            model._entry_sort_key(set_, Col.SEEDING_STARTED_AT, True), tuple
+        )
+
+    def test_mark_seeding_started_mirrors_both_fields(self):
+        from datetime import datetime, timezone
+        from my_idm.torrent_engine import mark_seeding_started
+
+        e = self._entry()
+        stamp = mark_seeding_started(e)
+        self.assertEqual(e.seeding_started_at, stamp)
+        self.assertEqual(e.metadata.get("seeding_since"), stamp)
+
+    def test_mark_seeding_started_overwrites_previous_session(self):
+        from datetime import datetime, timedelta, timezone
+        from my_idm.torrent_engine import mark_seeding_started
+
+        e = self._entry()
+        t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first = mark_seeding_started(e, t0)
+        second = mark_seeding_started(e, t0 + timedelta(minutes=5))
+        self.assertNotEqual(first, second)
+        self.assertEqual(e.seeding_started_at, second)
+
+    def test_seeding_session_start_prefers_column(self):
+        from my_idm.torrent_engine import seeding_session_start
+
+        e = self._entry(seeding_started_at="2026-09-28T10:00:00+00:00")
+        e.metadata["seeding_since"] = "2020-01-01T00:00:00+00:00"
+        self.assertEqual(seeding_session_start(e), "2026-09-28T10:00:00+00:00")
+
+    def test_seeding_session_start_falls_back_to_metadata(self):
+        from my_idm.torrent_engine import seeding_session_start
+
+        e = self._entry()
+        e.metadata["seeding_since"] = "2020-01-01T00:00:00+00:00"
+        self.assertEqual(seeding_session_start(e), "2020-01-01T00:00:00+00:00")
+
+    def test_progress_update_repaints_seeding_telemetry_columns(self):
+        """Regression: the tail columns kept a stale value after a silent stamp.
+
+        The engine can stamp seeding_started_at / last_seeded_at from the poll
+        with no status transition, so update_progress must repaint those cells.
+        """
+        model = DownloadTableModel()
+        entry = make_entry()
+        entry.download_type = "torrent"
+        entry.status = "seeding"
+        entry.total_size = 1000
+        entry.downloaded_size = 1000
+        model.load_entries([entry])
+
+        seen = []
+        model.dataChanged.connect(
+            lambda tl, br, roles=None: seen.append((tl.column(), br.column()))
+        )
+        model.update_progress(entry.id, 1000, 1000, 0.0, 0.0, 1, 0, 0.0)
+
+        covered = {(a, b) for a, b in seen}
+        self.assertTrue(
+            any(a <= Col.LAST_SEEDED and b >= Col.SEEDING_STARTED_AT for a, b in covered),
+            f"seeding columns not repainted: {covered}",
+        )
+
+    def test_status_change_syncs_volatile_fields_into_the_row(self):
+        """Regression: seeding timestamps were written but never shown.
+
+        update_status only patches status and error_message, and the model keeps
+        its own snapshot of each row, so fields the engine writes alongside the
+        status stayed stale until the whole table reloaded.
+        """
+        model = DownloadTableModel()
+        entry = make_entry()
+        entry.download_type = "torrent"
+        entry.status = "seeding"
+        model.load_entries([entry])
+
+        row = model.row_for_id(entry.id)
+        self.assertIsNotNone(row)
+        self.assertEqual(model._display_data(model._entries[row], Col.SEEDING_STARTED_AT), "—")
+
+        fresh = make_entry()
+        fresh.download_type = "torrent"
+        fresh.status = "seeding"
+        fresh.seeding_started_at = "2026-09-28T10:00:00+00:00"
+        fresh.last_seeded_at = "2026-09-28T10:00:00+00:00"
+        model.update_status(entry.id, "seeding", "")
+        model.refresh_entry(entry.id, fresh)
+
+        shown = model._display_data(
+            model._entries[model.row_for_id(entry.id)], Col.SEEDING_STARTED_AT
+        )
+        self.assertRegex(shown, r"^\d{4}-\d{2}-\d{2} ")
+
+    def test_seeding_session_start_empty(self):
+        from my_idm.torrent_engine import seeding_session_start
+
+        self.assertEqual(seeding_session_start(self._entry()), "")
 
 class TestAnimePaheBacklogProvenance(unittest.TestCase):
     """AnimePahe writes a comment above each backlog URL; it must mark the source."""

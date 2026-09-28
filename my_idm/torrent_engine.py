@@ -156,6 +156,41 @@ def _newer_seed_stamp(previous: str, epoch: int) -> str:
     return stamped.isoformat()
 
 
+def mark_seeding_started(entry, when: Optional[datetime] = None) -> str:
+    """Record the start of a seeding session on *entry* and return the timestamp.
+
+    Writes both the ``seeding_started_at`` column and the legacy
+    ``metadata["seeding_since"]`` key, which pre-dates the column and is still
+    read by older code paths. Routing every call site through this helper keeps
+    the two in step, so the displayed value can never disagree with the timer
+    used for the duration limit.
+    """
+    stamp = (when or datetime.now(timezone.utc)).isoformat()
+    entry.seeding_started_at = stamp
+    try:
+        entry.metadata["seeding_since"] = stamp
+    except Exception:  # pragma: no cover - metadata is best-effort here
+        log.debug("Could not mirror seeding_since for %s", getattr(entry, "id", "?"))
+    return stamp
+
+
+def seeding_session_start(entry) -> str:
+    """Return the current seeding session start, preferring the column.
+
+    Falls back to ``metadata["seeding_since"]`` so torrents that were already
+    seeding before the column existed keep their duration-limit baseline.
+    """
+    value = (getattr(entry, "seeding_started_at", "") or "").strip()
+    if value:
+        return value
+    try:
+        if entry.metadata:
+            return str(entry.metadata.get("seeding_since", "") or "")
+    except Exception:  # pragma: no cover
+        pass
+    return ""
+
+
 class TorrentEngine:
     """Manages torrent downloads via libtorrent."""
 
@@ -780,12 +815,12 @@ class TorrentEngine:
             handle.resume()
             self._apply_seeding_limit_to_handle(handle)
             # Reset seeding session timestamp so duration timer starts fresh from now
-            entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+            mark_seeding_started(entry)
             entry.metadata["manual_seeding"] = True
             # A seeding session has begun, so this is the newest "last seeded".
             # libtorrent's last_seen_complete is not a reliable signal here: it stays
             # 0 for torrents completed from fastresume, so it is only a backstop.
-            entry.last_seeded_at = entry.metadata["seeding_since"]
+            entry.last_seeded_at = entry.seeding_started_at
             cur_status = self.get_status(download_id) or {}
             entry.metadata["seeding_baseline_upload"] = cur_status.get("total_upload", 0) or getattr(entry, "uploaded_size", 0) or 0
             entry.status = "seeding"
@@ -831,7 +866,7 @@ class TorrentEngine:
                 if new_status == "seeding":
                     self._apply_seeding_limit_to_handle(handle)
                     if entry:
-                        entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+                        mark_seeding_started(entry)
                         entry.status = "seeding"
                         self._db.update_download(entry)
             else:
@@ -1283,10 +1318,9 @@ class TorrentEngine:
                     target_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
                     entry.status = target_status
                     if target_status == "seeding":
-                        if not entry.metadata.get("seeding_since"):
-                            entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+                        mark_seeding_started(entry)
                         # Completion of the download starts the first seed.
-                        entry.last_seeded_at = entry.metadata["seeding_since"]
+                        entry.last_seeded_at = entry.seeding_started_at
                     self._db.update_download(entry)
                     self._db.update_status(download_id, target_status)
                     if target_status == "seeding":
@@ -1308,17 +1342,18 @@ class TorrentEngine:
 
                 # Check seeding limits for currently seeding torrents
                 if entry.status == "seeding":
-                    if not entry.metadata.get("seeding_since"):
-                        entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+                    if not seeding_session_start(entry):
+                        mark_seeding_started(entry)
                         self._db.update_download(entry)
 
                     should_stop_seeding = False
                     stop_reason = ""
 
-                    # 1. Seeding duration limit (in minutes)
+                    # 1. Seeding duration limit (in minutes), measured from the
+                    #    start of the current session.
                     limit_min = getattr(self._torrent_config, "seeding_time_limit_minutes", 0) if self._torrent_config else 0
                     if limit_min > 0:
-                        seeding_since_str = entry.metadata.get("seeding_since")
+                        seeding_since_str = seeding_session_start(entry)
                         if seeding_since_str:
                             try:
                                 since_dt = datetime.fromisoformat(seeding_since_str)

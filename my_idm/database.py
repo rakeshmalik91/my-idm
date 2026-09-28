@@ -59,6 +59,7 @@ class DownloadEntry:
     fetching_metadata_since: str = ""  # ISO timestamp when fetching_metadata started
     uploaded_size: int = 0             # Total cumulative seeded/uploaded bytes
     last_seeded_at: str = ""           # ISO timestamp of the most recent completed seed (torrents only)
+    seeding_started_at: str = ""       # ISO timestamp the current seeding session began (torrents only)
 
     # --- UI section header attributes (transient) ---
     is_section_header: bool = False
@@ -158,6 +159,7 @@ _DOWNLOAD_DB_COLUMNS = [
     "added_at", "last_tried_at", "completed_at",
     "etag", "content_hash", "torrent_info_hash", "metadata_json",
     "queue_order", "fetching_metadata_since", "uploaded_size", "last_seeded_at",
+    "seeding_started_at",
 ]
 
 _SEGMENT_DB_COLUMNS = [
@@ -218,7 +220,8 @@ class Database:
                 queue_order     INTEGER NOT NULL DEFAULT 0,
                 fetching_metadata_since TEXT NOT NULL DEFAULT '',
                 uploaded_size   INTEGER NOT NULL DEFAULT 0,
-                last_seeded_at  TEXT NOT NULL DEFAULT ''
+                last_seeded_at  TEXT NOT NULL DEFAULT '',
+                seeding_started_at TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS segments (
@@ -256,6 +259,8 @@ class Database:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN uploaded_size INTEGER NOT NULL DEFAULT 0")
         if "last_seeded_at" not in cols:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''")
+        if "seeding_started_at" not in cols:
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN seeding_started_at TEXT NOT NULL DEFAULT ''")
 
         # Create indexes after ensuring columns exist
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")

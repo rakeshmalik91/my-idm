@@ -652,6 +652,45 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.manager.stop()
         self.db.close()
 
+    def test_row_selection_survives_status_change_with_segregated_view(self):
+        """Regression: any status change deselected the row under the cursor.
+
+        Segregated view rebuilds the model on every status change and a model
+        reset drops the view's selection.
+        """
+        self.win._model.set_segregated_view(True, mode="status")
+        QApplication.processEvents()
+
+        entry = next(
+            (e for e in self.manager.db.get_all_downloads()
+             if e.status == "completed" and e.download_type != "torrent"),
+            None,
+        )
+        if entry is None:
+            self.skipTest("no suitable entry")
+
+        row = self.win._model.row_for_id(entry.id)
+        self.assertIsNotNone(row)
+        self.win._table.selectRow(row)
+        QApplication.processEvents()
+        self.assertIn(entry.id, self.win._selected_ids())
+
+        self.win._model.update_status(entry.id, "downloading", "")
+        QApplication.processEvents()
+        fresh = self.manager.get_entry(entry.id)
+        self.win._model.refresh_entry(entry.id, fresh)
+        self.win._restore_selection(self.win._selected_ids() or [entry.id])
+        QApplication.processEvents()
+
+        self.assertIn(entry.id, self.win._selected_ids())
+
+    def test_restore_selection_ignores_ids_no_longer_visible(self):
+        self.win._model.load_entries([])
+        # Must not raise when nothing is selected or nothing resolves.
+        self.win._restore_selection([])
+        self.win._restore_selection(["missing-id"])
+        self.assertEqual(self.win._selected_ids(), [])
+
     def test_header_sort_indicator_and_painting(self):
         header = self.win._header_view
         self.assertTrue(header.isSortIndicatorShown())
@@ -676,9 +715,15 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertEqual(status_rect.width(), 16)
         self.assertEqual(status_rect.height(), 16)
 
-        # Non-filterable column has empty rect
+        # Size is filterable too
         size_rect = header._get_filter_btn_rect(Col.SIZE)
-        self.assertTrue(size_rect.isEmpty())
+        self.assertFalse(size_rect.isEmpty())
+        self.assertEqual(size_rect.width(), 16)
+        self.assertEqual(size_rect.height(), 16)
+
+        # A genuinely non-filterable column has an empty rect
+        self.assertTrue(header._get_filter_btn_rect(Col.SPEED).isEmpty())
+        self.assertTrue(header._get_filter_btn_rect(Col.PROGRESS).isEmpty())
 
     def test_header_filter_button_click_opens_popup(self):
         from PySide6.QtGui import QMouseEvent
@@ -797,8 +842,7 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             self.win._restore_ui_state_from_db()
 
         # New columns land at the very end...
-        self.assertEqual(header.visualIndex(Col.LAST_SEEDED), Col.COUNT - 2)
-        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
         self.assertEqual(header.count(), Col.COUNT)
         # ...the tail is fully pinned...
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
@@ -842,15 +886,20 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             )
 
     def test_new_columns_default_to_the_very_end(self):
-        """Last Seeded and Source are the final two columns by default."""
+        """The appended columns sit at the end of the table by default."""
+        from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
+
         header = self.win._table.horizontalHeader()
-        self.assertEqual(header.visualIndex(Col.LAST_SEEDED), Col.COUNT - 2)
-        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 1)
+        span = len(_DEFAULT_TAIL_COLUMNS)
+        for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
+            self.assertEqual(header.visualIndex(col), Col.COUNT - span + i, Col.HEADERS[col])
+        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
 
     def test_new_column_indices_do_not_shift_existing_columns(self):
         """Persisted column indices must keep pointing at the same columns."""
         self.assertEqual(Col.LAST_SEEDED, 14)
         self.assertEqual(Col.SOURCE, 15)
+        self.assertEqual(Col.SEEDING_STARTED_AT, 16)
         for name, value in (
             ("QUEUE", 0), ("NAME", 1), ("SOURCE_DOMAIN", 2), ("SIZE", 3),
             ("PROGRESS", 4), ("STATUS", 5), ("SPEED", 6), ("ETA", 7),
@@ -858,16 +907,17 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             ("COMPLETED", 11), ("SAVE_PATH", 12), ("FILE_NAME", 13),
         ):
             self.assertEqual(getattr(Col, name), value, name)
-        self.assertEqual(Col.COUNT, 16)
+        self.assertEqual(Col.COUNT, 17)
         self.assertEqual(Col.HEADERS[Col.LAST_SEEDED], "Last Seeded")
         self.assertEqual(Col.HEADERS[Col.SOURCE], "Source")
+        self.assertEqual(Col.HEADERS[Col.SEEDING_STARTED_AT], "Seeding Started At")
 
     def test_reset_view_restores_new_column_order(self):
         header = self.win._table.horizontalHeader()
         header.moveSection(header.visualIndex(Col.SOURCE), 0)
         self.win._on_reset_view()
-        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 1)
-        self.assertEqual(header.visualIndex(Col.LAST_SEEDED), Col.COUNT - 2)
+        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 2)
 
     def test_ui_state_restore_preserves_user_column_order(self):
         """Restoring UI state does not forcefully push File / Folder Name or Source Domain to the front."""

@@ -50,13 +50,14 @@ class Col:
     # header_state, sort_column in ui_state) keep pointing at the same columns.
     LAST_SEEDED = 14
     SOURCE = 15
+    SEEDING_STARTED_AT = 16
 
     DATE_COLUMNS = (ADDED, LAST_TRIED, COMPLETED)
 
     HEADERS = [
         "#", "Name", "Source Domain", "Size", "Progress", "Status", "Speed", "ETA",
         "Seeds / Peers", "Added", "Last Tried", "Completed",
-        "Save Path", "File / Folder Name", "Last Seeded", "Source",
+        "Save Path", "File / Folder Name", "Last Seeded", "Source", "Seeding Started At",
     ]
     COUNT = len(HEADERS)
 
@@ -198,6 +199,41 @@ TYPE_FILTER_LABELS: dict[str, str] = {
     "torrent": "BitTorrent Swarm",
 }
 
+# Size buckets for the Col.SIZE filter popup. Ordered smallest to largest, and
+# keyed by a stable id (the popup persists a selection set), with the label used
+# for display. Thresholds are binary (1024-based) to match how the Size column
+# renders sizes. Ranges are half-open: [low, high), so a bucket's lower bound is
+# inclusive and its upper bound exclusive.
+_MB = 1024 * 1024
+_GB = 1024 * _MB
+
+SIZE_FILTER_BUCKETS: list[tuple[str, str, int, float]] = [
+    ("lt_10mb", "<10MB", 0, 10 * _MB),
+    ("10mb_100mb", "10-100MB", 10 * _MB, 100 * _MB),
+    ("100mb_1gb", "100MB-1GB", 100 * _MB, 1 * _GB),
+    ("1gb_5gb", "1-5GB", 1 * _GB, 5 * _GB),
+    ("5gb_10gb", "5-10GB", 5 * _GB, 10 * _GB),
+    ("10gb_50gb", "10-50GB", 10 * _GB, 50 * _GB),
+    ("gt_50gb", ">50GB", 50 * _GB, float("inf")),
+]
+
+SIZE_FILTER_LABELS: dict[str, str] = {k: label for k, label, _lo, _hi in SIZE_FILTER_BUCKETS}
+
+
+def size_bucket_for(size_bytes: Any) -> str:
+    """Return the size-bucket id for *size_bytes*.
+
+    A zero or unknown size falls into the smallest bucket, which is the literal
+    reading of "<10MB" and keeps such rows selectable rather than invisible.
+    """
+    size = to_int(size_bytes, 0)
+    if size < 0:
+        size = 0
+    for key, _label, low, high in SIZE_FILTER_BUCKETS:
+        if low <= size < high:
+            return key
+    return SIZE_FILTER_BUCKETS[-1][0]
+
 SECTION_ACTIVE = "active"
 SECTION_SEEDING = "seeding"
 SECTION_INACTIVE = "inactive"
@@ -287,6 +323,7 @@ class DownloadTableModel(QAbstractTableModel):
         self._tor_config: Optional[TorConfig] = None
         self._status_filter: Optional[set[str]] = None
         self._type_filter: Optional[set[str]] = None
+        self._size_filter: Optional[set[str]] = None
         self._segregated_view: bool = False
         self._segregated_mode: str = "status"
         self._collapsed_sections: set[str] = set()
@@ -337,6 +374,9 @@ class DownloadTableModel(QAbstractTableModel):
         if self._type_filter is not None:
             dtype = entry.download_type or "http"
             if dtype not in self._type_filter:
+                return False
+        if self._size_filter is not None:
+            if size_bucket_for(entry.total_size) not in self._size_filter:
                 return False
         if self._status_filter is not None:
             matched = False
@@ -415,13 +455,23 @@ class DownloadTableModel(QAbstractTableModel):
         return self._type_filter
 
     def is_filtered(self) -> bool:
-        return self._status_filter is not None or self._type_filter is not None
+        return (
+            self._status_filter is not None
+            or self._type_filter is not None
+            or self._size_filter is not None
+        )
 
     def is_status_filtered(self) -> bool:
         return self._status_filter is not None
 
     def is_type_filtered(self) -> bool:
         return self._type_filter is not None
+
+    def is_size_filtered(self) -> bool:
+        return self._size_filter is not None
+
+    def size_filter(self) -> Optional[set[str]]:
+        return self._size_filter
 
     def set_status_filter(self, allowed_groups: Optional[set[str]]):
         if allowed_groups is not None and len(allowed_groups) >= len(STATUS_FILTER_GROUPS):
@@ -439,12 +489,37 @@ class DownloadTableModel(QAbstractTableModel):
         self._type_filter = set(allowed_types) if allowed_types is not None else None
         self._reapply_filter()
 
+    def set_size_filter(self, allowed_buckets: Optional[set[str]]):
+        if allowed_buckets is not None and len(allowed_buckets) >= len(SIZE_FILTER_BUCKETS):
+            allowed_buckets = None
+        if self._size_filter == allowed_buckets:
+            return
+        self._size_filter = set(allowed_buckets) if allowed_buckets is not None else None
+        self._reapply_filter()
+
     def clear_filters(self):
-        if self._status_filter is None and self._type_filter is None:
+        if self._status_filter is None and self._type_filter is None and self._size_filter is None:
             return
         self._status_filter = None
         self._type_filter = None
+        self._size_filter = None
         self._reapply_filter()
+
+    def get_size_counts(self) -> dict[str, int]:
+        """Rows per size bucket, honouring the other active filters."""
+        counts = {key: 0 for key, _label, _lo, _hi in SIZE_FILTER_BUCKETS}
+        for e in self._all_entries:
+            if getattr(e, "is_section_header", False):
+                continue
+            if self._type_filter is not None and (e.download_type or "http") not in self._type_filter:
+                continue
+            if self._status_filter is not None:
+                if not any(
+                    e.status in STATUS_FILTER_GROUPS.get(g, {g}) for g in self._status_filter
+                ):
+                    continue
+            counts[size_bucket_for(e.total_size)] += 1
+        return counts
 
     def total_unfiltered_count(self) -> int:
         return len(self._all_entries)
@@ -727,6 +802,13 @@ class DownloadTableModel(QAbstractTableModel):
         if col == Col.SOURCE:
             return resolve_download_source(entry).lower()
 
+        if col == Col.SEEDING_STARTED_AT:
+            has_time = bool(entry.seeding_started_at)
+            if ascending:
+                return (0, entry.seeding_started_at) if has_time else (1, "")
+            else:
+                return (1, entry.seeding_started_at) if has_time else (0, "")
+
         return ""
 
     def _find_insert_row(self, entry: DownloadEntry) -> int:
@@ -761,6 +843,13 @@ class DownloadTableModel(QAbstractTableModel):
         for e in self._all_entries:
             if e.id == download_id:
                 return e
+        return None
+
+    def row_for_id(self, download_id: str) -> Optional[int]:
+        """Row of *download_id* in the currently visible list, or None."""
+        row = self._id_to_row.get(download_id)
+        if row is not None and 0 <= row < len(self._entries):
+            return row
         return None
 
     def get_selected_ids(self, indexes: list[QModelIndex]) -> list[str]:
@@ -835,6 +924,16 @@ class DownloadTableModel(QAbstractTableModel):
         left = self.index(row, Col.SIZE)
         right = self.index(row, Col.SEEDS_PEERS)
         self.dataChanged.emit(left, right, [Qt.ItemDataRole.DisplayRole])
+
+        # The engine can also stamp the seeding telemetry columns from the poll
+        # without any status transition (a session backfilled on upgrade, or the
+        # last_seen_complete backstop), so those cells would otherwise keep
+        # showing a stale value until the whole table reloaded.
+        self.dataChanged.emit(
+            self.index(row, Col.LAST_SEEDED),
+            self.index(row, Col.SEEDING_STARTED_AT),
+            [Qt.ItemDataRole.DisplayRole],
+        )
 
     def update_status(self, download_id: str, status: str,
                       error_msg: str = ""):
@@ -1271,6 +1370,9 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.SOURCE:
             return resolve_download_source(entry) or ""
+
+        if col == Col.SEEDING_STARTED_AT:
+            return _format_time(entry.seeding_started_at)
 
         return None
 

@@ -137,7 +137,10 @@ All settings and runtime data are persisted in the user profile:
 - [**Browser Integration (Chrome & Firefox)**](docs/architecture/browser-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**YouTube Scraper**](docs/architecture/youtube-scraper.md) — yt-dlp integration, Mode A (direct URL) vs Mode B (ffmpeg merge), dialog, and rate-limit budgeting.
+- [**Table Views & Segregation**](docs/architecture/table-views.md) — Column definitions and ordering, delegates, date-segregation algorithms, and the size/status/type header filters.
+- [**Window Lifecycle & System Tray**](docs/architecture/window-system-tray.md) — Window geometry persistence, close-to-tray behaviour, and the tray context menu.
 - [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
+- [**User Guide**](docs/user-guide.md) — End-user walkthrough of every feature, settings tab, and keyboard shortcut.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 - [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.
 

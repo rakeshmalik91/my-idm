@@ -312,10 +312,15 @@ class TestDatabase(unittest.TestCase):
             db.open()
             after_cols = [r["name"] for r in db._conn.execute("PRAGMA table_info(downloads)")]
 
-            # Column added, and appended rather than inserted: every pre-existing
-            # column keeps its relative order, and the new ones land after them.
+            # Columns added, and appended rather than inserted: every pre-existing
+            # column keeps its relative order and the new ones land after them.
             self.assertIn("last_seeded_at", after_cols)
-            self.assertEqual(after_cols[-1], "last_seeded_at")
+            self.assertIn("seeding_started_at", after_cols)
+            self.assertLess(
+                after_cols.index("last_seeded_at"),
+                after_cols.index("seeding_started_at"),
+                "columns are appended in declaration order",
+            )
             self.assertEqual(after_cols[: len(before_cols)], before_cols)
 
             entries = {e.id: e for e in db.get_all_downloads()}
