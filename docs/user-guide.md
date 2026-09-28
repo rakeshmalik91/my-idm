@@ -8,6 +8,7 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 
 - [Getting Started](#getting-started)
 - [Adding Downloads](#adding-downloads)
+  - [YouTube & Video-Site Downloads](#youtube--video-site-downloads)
 - [Managing Downloads](#managing-downloads)
 - [Bottom Details Panel](#bottom-details-panel)
 - [Preferences & Settings](#preferences--settings)
@@ -29,6 +30,8 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 
 - Python 3.11 or later
 - `pip` package manager
+- `ffmpeg` on your `PATH` (or configured in Preferences) — only needed to merge YouTube
+  video + audio streams. Not required for audio-only or regular downloads.
 
 ### Installation
 
@@ -67,6 +70,81 @@ The main window opens with an empty download list. The status bar at the bottom 
 | HTTP/HTTPS URL | `https://example.com/file.zip` | HTTP segmented download |
 | Magnet link | `magnet:?xt=urn:btih:HASH&dn=name` | Torrent via libtorrent |
 | `.torrent` file path | `D:\Torrents\file.torrent` | Torrent via libtorrent |
+| YouTube / video-site URL | `https://www.youtube.com/watch?v=…` | Routed to the YouTube downloader (see below) |
+
+### YouTube & Video-Site Downloads
+
+My-IDM does not implement YouTube's protocols itself — it delegates all extraction to
+[`yt-dlp`](https://github.com/yt-dlp/yt-dlp), and plays the result through one of two engines.
+
+#### Opening the dialog
+
+1. **Paste** — open **Add Download** (<kbd>Ctrl</kbd>+<kbd>N</kbd>) and paste a YouTube link. A banner
+   appears: click **Open YouTube Downloader**.
+2. **Menu** — **Tools → Download YouTube Video…** (<kbd>Ctrl</kbd>+<kbd>Y</kbd>).
+3. **System tray** — right-click the tray icon → **➕ Add Download…**, or **ℹ️ About My-IDM**.
+
+Supported link shapes include `youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/…`, `/embed/…`,
+`/live/…`, and `/playlist?list=…`.
+
+#### Analyzing
+
+Click **Analyze ▶**. The video's title, uploader, duration, upload date, and thumbnail are
+fetched along with the list of available formats. For a playlist or channel you get a
+checkbox list instead; **Select all** / **Clear** toggle it.
+
+#### Choosing quality
+
+| Preset | Selector | Notes |
+|--------|----------|-------|
+| Best available | `bestvideo*+bestaudio/best` | Default |
+| Best 1080p / 720p / 480p / 360p | `bestvideo[height<=N]+bestaudio/best` | Caps the vertical resolution |
+| Audio only (M4A / Opus) | `bestaudio[ext=…]/bestaudio` | No ffmpeg needed |
+
+The format table labels each row with the engine that will handle it:
+
+| Label | Meaning |
+|-------|---------|
+| `A (audio)` | Audio-only stream — downloaded by My-IDM's own engine, with segments, resume, throttle, and VPN/Tor support |
+| `A (fast)` | A combined video+audio file (rare on YouTube) — also My-IDM's engine |
+| `B (merge)` | Video-only stream — downloaded by yt-dlp and merged with ffmpeg |
+
+> [!IMPORTANT]
+> YouTube serves video and audio as **separate** streams and no longer offers combined files, so
+> **video downloads always use yt-dlp + ffmpeg**. Only audio-only formats use My-IDM's engine.
+> ffmpeg is auto-detected on your `PATH`; if it is missing, the dialog warns that merging is
+> unavailable. Its location can be set in **Preferences → External Tools → YouTube**.
+
+For playlists, the quality preset applies to **every** selected video — the per-format table is
+hidden because only the first video's formats are resolved (listing a playlist costs at most two
+requests regardless of how many videos it holds).
+
+#### Options
+
+- **Embed thumbnail** — writes the thumbnail into the file (needs ffmpeg).
+- **Download and embed subtitles** — with a comma-separated language list, e.g. `en, ja`.
+- **Save to** — defaults to the last used directory.
+
+#### Deleting a video download
+
+Deleting a YouTube download mid-transfer also removes yt-dlp's scratch files (`.part`, `.ytdl`,
+and per-format `.fNNN` fragments) after waiting for the worker to release them. If a stray
+`.part` file is ever left behind, close the app first — Windows locks files held by the worker.
+
+#### Private, age-restricted, and geo-restricted videos
+
+These need a cookie source. Set one under **Preferences → External Tools → YouTube → Cookie
+source**, and route geo-restricted videos through **VPN** or **Tor** in
+**Preferences → Network & Privacy**.
+
+> [!WARNING]
+> Reading browser cookies exposes your account credentials to `yt-dlp`. Use a throwaway account.
+
+#### Updating yt-dlp
+
+**Preferences → External Tools → YouTube → Update yt-dlp** runs `pip install -U yt-dlp`, or
+`yt-dlp -U` when only the standalone binary is available. The same panel shows the detected
+version and a live ✓/✗ for both `yt-dlp` and `ffmpeg`.
 
 ### Duplicate Detection
 
@@ -218,6 +296,8 @@ My-IDM integrates natively with the **Windows System Tray** (notification area) 
   - **⏸️ Pause All Downloads**: Instantly pause all ongoing, queued, and stalled transfers.
   - **▶️ Resume All Downloads**: Resume all paused and stopped transfers.
   - **⚙️ Preferences…**: Quick shortcut directly to Settings.
+  - **ℹ️ About My-IDM**: Version, feature summary, and AI co-author credits.
+  - **🔄 Restart My-IDM**: Restarts the application in place.
   - **🚪 Exit My-IDM**: Completely terminate My-IDM and stop all background services.
 
 ### Window Minimize & Close Behavior
@@ -301,6 +381,28 @@ Configure pre-download safety checks, executable warnings, double-extension bloc
 
 ### 6. External Tools Tab
 Manage integration with external scrapers and download tools (e.g. AnimePahe Auto-Downloader).
+
+Contains two groups:
+
+**AnimePahe Auto-Downloader / Scraper** — repository path, launch-on-startup, periodic execution
+with a configurable interval, and embedded console/debug log viewers.
+
+**🎬 YouTube Downloader (yt-dlp)** — configuration for video-site downloads:
+
+| Control | Purpose |
+|---------|---------|
+| Enable YouTube integration | Master switch; greys out the rest of the group. Disabling it also stops the Add Download banner from appearing for YouTube links. |
+| yt-dlp path | Leave empty to auto-detect. Browse for a standalone binary or `pip`-installed copy. |
+| ffmpeg path | Leave empty to auto-detect on `PATH`. Required to merge video + audio. |
+| Live status | A ✓/✗ indicator per tool, refreshed whenever a path changes. |
+| Version / Update yt-dlp | Shows the detected version; the button runs `pip install -U yt-dlp` (or `yt-dlp -U` for a binary install). |
+| Default quality | The quality preset applied to new video downloads. |
+| Prefer direct URL mode | Use My-IDM's engine when a single self-contained stream exists. In practice YouTube serves no combined streams, so video still uses ffmpeg merging. |
+| Embed thumbnail / subtitles | Post-processing performed by yt-dlp (needs ffmpeg), with a subtitle language list. |
+| Cookie source | Browser to extract cookies from, for private, members-only, age-restricted, or geo-restricted videos. |
+| Auto-detect YouTube URLs | Show the YouTube hand-off banner when a YouTube link is pasted into Add Download. |
+| Playlist entries to list | How many playlist/channel entries are listed per analysis. The limit affects only how many are *displayed* — a listing costs at most two requests regardless. |
+| Extra yt-dlp args | Free-form arguments appended to every yt-dlp call. |
 
 ---
 
@@ -559,6 +661,7 @@ Duplicate URLs are automatically skipped or resumed. See [backlog.txt.example](.
 | Shortcut | Action |
 |----------|--------|
 | **Ctrl+N** | Add Download (URL, Magnet link, or .torrent) |
+| **Ctrl+Y** | Download YouTube Video… |
 | **Ctrl+T** | Add .torrent file directly |
 | **Ctrl+R** | Resume selected downloads (Play) |
 | **Space** | Pause selected downloads |
@@ -612,7 +715,7 @@ python -m my_idm.main -b urls.txt -v
 |------|------|
 | Application data | `~/.my-idm/` |
 | Download database | `~/.my-idm/downloads.db` |
-| Log file | `~/.my-idm/my-idm.log` |
+| Log file | `~/.my-idm/logs/my-idm.log` |
 | Torrent fast-resume | `~/.my-idm/fastresume/` |
 | Default backlog | `~/.my-idm/backlog.txt` |
 | Default save directory | `~/Downloads/` |

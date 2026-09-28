@@ -7,10 +7,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import tempfile
 import unittest
 import unittest.mock
-from PySide6.QtWidgets import QApplication
+from unittest.mock import MagicMock, patch
+from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtGui import QGuiApplication
 
-from my_idm.config import GeneralConfig
+from my_idm.config import ExternalToolsConfig, GeneralConfig
 from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, RenameDialog
 
 app = QApplication.instance() or QApplication([])
@@ -153,6 +154,83 @@ class TestAddDownloadDialogTorButton(unittest.TestCase):
             self.assertFalse(dlg.is_tor_enabled())
         finally:
             dlg.close()
+
+
+class TestAddDownloadDialogYouTubeBanner(unittest.TestCase):
+    """Paste-detection banner and its hand-off to the YouTube dialog."""
+
+    YT_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def _dialog(self):
+        mgr = MagicMock()
+        mgr.external_tools_config = ExternalToolsConfig(ytdlp_auto_detect_urls=True)
+        mgr.general_config.get_effective_save_path.return_value = "."
+        return AddDownloadDialog(manager=mgr)
+
+    def test_banner_appears_for_youtube_url(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.YT_URL)
+        dlg._update_youtube_banner()
+        self.assertFalse(dlg._yt_banner.isHidden())
+        self.assertEqual(dlg.youtube_url, self.YT_URL)
+        dlg.close()
+
+    def test_banner_survives_cancelled_youtube_dialog(self):
+        """Regression: dismissing the YouTube dialog hid the hand-off banner."""
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.YT_URL)
+        dlg._update_youtube_banner()
+
+        with patch("my_idm.youtube_dialog.YouTubeDialog") as mock_cls:
+            mock_cls.return_value.exec.return_value = QDialog.DialogCode.Rejected
+            dlg._on_open_youtube_dialog()
+
+        self.assertFalse(dlg._yt_banner.isHidden(), "banner must remain after cancel")
+        self.assertEqual(dlg.youtube_selection, {})
+        dlg.close()
+
+    def test_youtube_dialog_can_be_reopened_after_cancel(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.YT_URL)
+        dlg._update_youtube_banner()
+
+        for _ in range(2):
+            with patch("my_idm.youtube_dialog.YouTubeDialog") as mock_cls:
+                mock_cls.return_value.exec.return_value = QDialog.DialogCode.Rejected
+                dlg._on_open_youtube_dialog()
+                self.assertEqual(mock_cls.call_count, 1)
+                self.assertEqual(
+                    mock_cls.call_args.kwargs.get("initial_url"), self.YT_URL
+                )
+        self.assertFalse(dlg._yt_banner.isHidden())
+        dlg.close()
+
+    def test_banner_still_tracks_input_after_cancel(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.YT_URL)
+        with patch("my_idm.youtube_dialog.YouTubeDialog") as mock_cls:
+            mock_cls.return_value.exec.return_value = QDialog.DialogCode.Rejected
+            dlg._on_open_youtube_dialog()
+
+        dlg._url_edit.setPlainText("https://example.com/file.zip")
+        self.assertTrue(dlg._yt_banner.isHidden())
+        dlg._url_edit.setPlainText(self.YT_URL)
+        self.assertFalse(dlg._yt_banner.isHidden())
+        dlg.close()
+
+    def test_accepting_hands_selection_back(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.YT_URL)
+        dlg._update_youtube_banner()
+
+        sentinel = {"videos": ["a"], "format_selector": "best", "save_path": "C:/x"}
+        with patch("my_idm.youtube_dialog.YouTubeDialog") as mock_cls:
+            mock_cls.return_value.exec.return_value = QDialog.DialogCode.Accepted
+            mock_cls.return_value.selection.return_value = sentinel
+            dlg._on_open_youtube_dialog()
+
+        self.assertEqual(dlg.youtube_selection, sentinel)
+        dlg.close()
 
 
 class TestDialogsScrollable(unittest.TestCase):

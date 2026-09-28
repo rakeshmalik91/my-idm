@@ -31,7 +31,7 @@ DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
 
 class AddDownloadDialog(QDialog):
-    """Dialog to add a new download (URL, magnet link, or .torrent file)."""
+    """Dialog to add a new download (URL, magnet link, YouTube URL, or .torrent file)."""
 
     def __init__(self, parent=None, initial_url: str = "", manager=None):
         super().__init__(parent)
@@ -73,7 +73,7 @@ class AddDownloadDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
 
         # URL / Magnet input
-        url_group = QGroupBox("URL / Magnet Link")
+        url_group = QGroupBox("URL / Magnet Link / YouTube URL")
         url_layout = QVBoxLayout(url_group)
 
         self._url_edit = QPlainTextEdit()
@@ -333,7 +333,11 @@ class AddDownloadDialog(QDialog):
         return self._detected_youtube_url()
 
     def _on_open_youtube_dialog(self):
-        """Hand the pasted YouTube URL to the YouTube download dialog."""
+        """Hand the pasted YouTube URL to the YouTube download dialog.
+
+        Dismissing the YouTube dialog leaves this one open with the hand-off
+        banner still showing, so the link can be re-opened without re-pasting.
+        """
         url = self._detected_youtube_url()
         if not url:
             return
@@ -344,7 +348,7 @@ class AddDownloadDialog(QDialog):
             self._yt_result = dlg.selection()
             self.accept()
         else:
-            self._yt_banner.setVisible(False)
+            self._update_youtube_banner()
 
     @property
     def youtube_selection(self) -> dict:

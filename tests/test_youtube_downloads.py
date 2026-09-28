@@ -129,19 +129,21 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # Registered first so it runs LAST (cleanups are LIFO). The fake yt-dlp
+        # worker registered by _start_fake_ytdlp() must be stopped before this
+        # directory is removed, or Windows refuses to unlink its still-open
+        # .part file.
+        self.addCleanup(self.tmp.cleanup)
         self.out = str(Path(self.tmp.name) / "yt")
         self.db = Database(":memory:")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
         self.manager._external_tools_config = ExternalToolsConfig(ytdlp_enabled=True)
         # Disable the post-download AV scan so completion assertions are deterministic.
         self.manager._security_config.scan_after_download = False
         self.md = make_metadata()
-
-    def tearDown(self):
-        self.manager.stop()
-        self.db.close()
-        self.tmp.cleanup()
 
     # -- Mode A ------------------------------------------------------------
 

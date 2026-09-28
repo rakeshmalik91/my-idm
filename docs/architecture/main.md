@@ -21,6 +21,7 @@ Technical documentation for developers working on the My-IDM codebase.
 - [Backlog Processing Subsystem](#backlog-processing-subsystem)
 - [Browser Integration Subsystem](#browser-integration-subsystem)
 - [External Tools Subsystem](#external-tools-subsystem)
+- [YouTube / yt-dlp Download Subsystem](#youtube--yt-dlp-download-subsystem)
 - [Window Lifecycle & System Tray Subsystem](#window-lifecycle--system-tray-subsystem)
 - [Preferences & Configuration Architecture](#preferences--configuration-architecture)
 - [Dynamic Filename Resolution & Crash Resilience](#dynamic-filename-resolution--crash-resilience)
@@ -750,6 +751,38 @@ My-IDM allows integration with companion scrapers and download tools (e.g., Anim
    - Web-based tools or automation views can be docked inside an embedded browser subtab.
 3. **Status Bar Indicators**:
    - A dedicated footer badge indicates tool status, allows toggling background execution, and triggers quick log inspection.
+
+---
+
+## YouTube / yt-dlp Download Subsystem
+
+Video-site downloads are delegated entirely to `yt-dlp` (library mode). My-IDM implements no YouTube protocol of its own. Full design: [`youtube-scraper.md`](youtube-scraper.md).
+
+1. **Extraction Layer** (`my_idm/youtube_tool.py`):
+   - Lazy-imports `yt_dlp`, so the app runs normally when it is not installed.
+   - `extract_metadata()` / `extract_playlist()` return dataclasses with per-format classification
+     (`is_video_only`, `is_audio_only`, `is_muxed`, `direct_capable`).
+   - `detect_youtube_url()` recognises watch / shorts / embed / live / playlist forms and rejects
+     spoofed hosts such as `youtube.com.evil.com`.
+2. **Dual Download Modes**:
+   - **Mode A** — `resolve_direct_url()` hands a CDN URL to `HTTPEngine`, retaining segmented,
+     resumable, throttled and VPN/Tor-aware downloading. Valid for self-contained streams only.
+   - **Mode B** — `start_native_download()` runs `ydl.download()` on a daemon thread; ffmpeg merges
+     separate video+audio streams. Progress and postprocessor hooks relay into the download table.
+   - `add_youtube_download(mode="auto")` picks per format via `_can_use_mode_a()`.
+3. **Rate-Limit Budgeting**:
+   - A playlist listing costs at most **two** requests regardless of size (one flat list, one
+     format resolution for the first entry).
+   - A 0.75 s minimum gap between extractions, plus a 5-minute result cache keyed by
+     `(mode, config fingerprint, url)`.
+4. **URL Expiry** (Mode A): YouTube CDN links expire in ~6 h. `_maybe_refresh_youtube_url()`
+   re-resolves on resume when under 5 minutes remain.
+5. **Temp-File Hygiene**: yt-dlp keeps `.part` files for resume. `_purge_youtube_temp_files()`
+   removes `.part` / `.ytdl` / `.fNNN` siblings on delete, after a bounded join releases the
+   worker's file handles.
+6. **Tracking**: entries use `download_type="http"` with `metadata["source_type"]` set to
+   `youtube` (Mode A) or `youtube_native` (Mode B), so existing pause/resume/delete paths keep
+   working while YouTube-specific behaviour branches on that field.
 
 ---
 

@@ -1039,6 +1039,61 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             self.assertIn("© Rakesh Malik, 2026", dlg.informativeText())
             self.assertIn("My-IDM", dlg.text())
 
+    def test_about_lists_advertised_features(self):
+        """About text should mention the feature set the dialog advertises."""
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+
+        captured = []
+
+        def _intercept_exec(dialog_self):
+            captured.append(dialog_self)
+            return QMessageBox.StandardButton.Ok
+
+        with patch.object(QMessageBox, "exec", _intercept_exec):
+            self.win._on_about()
+
+        info = captured[0].informativeText()
+        for feature in (
+            "multi-segment",
+            "bittorrent",
+            "tor",
+            "vpn kill switch",
+            "youtube",
+            "animepahe",
+            "malware",
+        ):
+            self.assertIn(
+                feature, info.lower(), f"missing feature: {feature}"
+            )
+
+    def test_about_credits_ai_coauthors(self):
+        """The About dialog credits the AI tools that co-authored the project."""
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+
+        captured_dialogs = []
+
+        def _intercept_exec(dialog_self):
+            captured_dialogs.append(dialog_self)
+            return QMessageBox.StandardButton.Ok
+
+        with patch.object(QMessageBox, "exec", _intercept_exec):
+            self.win._on_about()
+
+        info = captured_dialogs[0].informativeText()
+        self.assertIn("Co-authored with", info)
+        for credit in (
+            "Gemini 3.8 Flash",
+            "Claude 4.6 Opus",
+            "Nvidia Nemotron 3 Ultra",
+            "Space Bunny Alpha",
+            "Poolside Laguna S 2.1",
+            "Antigravity IDE",
+            "Kilo Code plugin for Antigravity IDE",
+        ):
+            self.assertIn(credit, info, f"missing credit: {credit}")
+
     def test_system_tray_setup_and_actions(self):
         """System tray icon and context menu actions are properly initialized."""
         if self.win._tray_icon is not None:
@@ -1050,7 +1105,84 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             self.assertTrue(any("Pause All" in t for t in action_texts))
             self.assertTrue(any("Resume All" in t for t in action_texts))
             self.assertTrue(any("Preferences" in t for t in action_texts))
+            self.assertTrue(any("Add Download" in t for t in action_texts))
             self.assertTrue(any("Exit" in t for t in action_texts))
+
+    def test_system_tray_has_add_download_action(self):
+        """Tray context menu exposes an Add Download entry."""
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        menu = self.win._tray_icon.contextMenu()
+        self.assertIsNotNone(menu)
+        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertTrue(any("Add Download" in t for t in texts), texts)
+
+    def test_tray_add_download_opens_dialog(self):
+        """Triggering the tray action opens the Add Download dialog."""
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        with patch.object(self.win, "_on_add") as mock_add:
+            self.win._on_tray_add_download()
+        mock_add.assert_called_once()
+
+    def test_tray_add_download_restores_hidden_window(self):
+        """The modal dialog's parent must be visible, so the window is restored first."""
+        self.win.hide()
+        self.assertFalse(self.win.isVisible())
+        with patch.object(self.win, "_on_add"):
+            self.win._on_tray_add_download()
+        self.assertTrue(self.win.isVisible())
+
+    def test_tray_menu_groups_restart_and_exit(self):
+        """Restart and Exit share one group with no separator between them."""
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        menu = self.win._tray_icon.contextMenu()
+        actions = menu.actions()
+        restart = next(a for a in actions if "Restart" in a.text())
+        exit_ = next(a for a in actions if "Exit" in a.text())
+        gap = actions[actions.index(restart) + 1 : actions.index(exit_)]
+        self.assertFalse(
+            any(a.isSeparator() for a in gap),
+            "no separator expected between Restart and Exit",
+        )
+
+    def test_tray_has_about_action(self):
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        menu = self.win._tray_icon.contextMenu()
+        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertTrue(any("About" in t for t in texts), texts)
+
+    def test_tray_about_restores_hidden_window(self):
+        """The About dialog is parented to the window, so it must be restored."""
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QMessageBox
+
+        self.win.hide()
+        self.assertFalse(self.win.isVisible())
+        with patch.object(QMessageBox, "exec", lambda d: QMessageBox.StandardButton.Ok):
+            self.win._on_about()
+        self.assertTrue(self.win.isVisible())
+
+    def test_tray_add_download_matches_tray_indentation(self):
+        """Every tray entry must use the same style or the labels misalign.
+
+        Qt reserves the icon column for the whole menu, so mixing an icon-based
+        entry with glyph-in-text entries leaves the labels at different indents.
+        """
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        menu = self.win._tray_icon.contextMenu()
+        for action in menu.actions():
+            if action.isSeparator():
+                continue
+            has_icon = not action.icon().isNull()
+            has_glyph = any(ord(ch) > 0x2000 for ch in action.text())
+            self.assertNotEqual(
+                has_icon, has_glyph,
+                f"'{action.text()}' mixes icon and glyph styling",
+            )
 
     def test_system_tray_toggle_show_window(self):
         """_toggle_show_window toggles between visible and hidden."""

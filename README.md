@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>A modern, high-speed download manager with a sleek dark-themed GUI built in Python and Qt (PySide6).</b><br>
-  <i>Segmented Parallel HTTP • BitTorrent Engine • VPN Kill Switch Privacy • Automated Malware Scanning</i>
+  <i>Segmented Parallel HTTP • BitTorrent Engine • YouTube & Video-Site Downloader • VPN Kill Switch Privacy • Automated Malware Scanning</i>
 </p>
 
 <p align="center">
@@ -21,6 +21,7 @@
 ## ✨ Features
 
 - 🚀 **Segmented HTTP & BitTorrent** — 1–32 parallel connections, magnet/torrent support, and crash auto-resume.
+- 📺 **YouTube & Video-Site Downloader** — yt-dlp powered: paste a link, pick a quality, download video (merged via ffmpeg) or audio-only through My-IDM's own engine. Supports playlists and channels with checkboxes.
 - 🌐 **Browser Integration** — Local unpacked Chrome extension for 1-click downloads, automatic intercept, and cookie forwarding.
 - 🧅 **Tor & VPN Privacy** — 1-click Tor routing, network adapter binding, and instant kill switch protection.
 - 🛡️ **Antivirus & Safety** — Pre-download deceptive extension blocks and background Windows Defender scans.
@@ -37,6 +38,7 @@
 | **GUI**                 | PySide6 (Qt 6)                                         |
 | **HTTP Engine**         | `aiohttp` + `asyncio`                                  |
 | **Torrent Engine**      | `libtorrent` (graceful fallback)                       |
+| **Video Extraction**    | `yt-dlp` (library mode) + `ffmpeg` for stream merging   |
 | **Antivirus**           | Windows Defender (`MpCmdRun.exe`) / Custom CLI engines |
 | **Network & Privacy**   | `psutil` + Tor SOCKS5 + HTTP/SOCKS5 Proxies            |
 | **Database**            | SQLite3 (WAL mode)                                     |
@@ -65,11 +67,42 @@ python -m my_idm.main # Or direct python execution
 
 ---
 
+## 📺 Downloading YouTube & Video-Site Videos
+
+My-IDM never speaks YouTube's protocols directly — all extraction is delegated to [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), which is bundled as a Python library.
+
+**Three ways in:**
+
+1. **Paste** — open **Add Download** (<kbd>Ctrl</kbd>+<kbd>N</kbd>), paste a YouTube link, then click **Open YouTube Downloader** in the banner that appears.
+2. **Menu** — **Tools → Download YouTube Video…** (<kbd>Ctrl</kbd>+<kbd>Y</kbd>).
+3. **System tray** — right-click the tray icon → **➕ Add Download…**.
+
+**How it downloads:** two engines are used, chosen automatically.
+
+| Mode | Engine | When it is used |
+|---|---|---|
+| **A** | My-IDM's own HTTP engine | Audio-only streams. The CDN URL is handed to `HTTPEngine`, so you keep segmented, resumable, throttled and VPN/Tor-aware downloading. |
+| **B** | `yt-dlp` + `ffmpeg` | Video. YouTube serves video and audio as *separate* streams that must be merged by ffmpeg. |
+
+> [!NOTE]
+> YouTube no longer offers combined video+audio files, so **video always uses Mode B**. Audio-only downloads use Mode A and get My-IDM's full download manager treatment.
+
+**Playlists & channels** are listed with checkboxes. Listing one costs at most **two** network requests regardless of playlist size — one flat request for the list, plus one to resolve the first video's formats — and a quality preset applies to every selected video.
+
+**Requirements:** `yt-dlp` is a declared dependency (`pip install -r requirements.txt`). `ffmpeg` is needed to merge video and audio; it is auto-detected on `PATH`, and its location plus the `yt-dlp` binary can be set in **Tools → Preferences → External Tools → YouTube**, which also offers an **Update yt-dlp** button and a live ✓/✗ validity check for both tools.
+
+Private, members-only, age-restricted, and geo-restricted videos need a browser cookie source — also configurable in that settings tab. **Cookie access exposes your account credentials to yt-dlp, so use a throwaway account.**
+
+See the **[YouTube Scraper Architecture](docs/architecture/youtube-scraper.md)** for the full design, including the Mode A/B decision logic and its measured API cost.
+
+---
+
 ## ⌨️ Keyboard Shortcuts
 
 | Shortcut | Action |
 |---|---|
 | <kbd>Ctrl</kbd> + <kbd>N</kbd> | Add Download (URL / Magnet / .torrent) |
+| <kbd>Ctrl</kbd> + <kbd>Y</kbd> | Download YouTube Video… |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd> | Resume Selected Download(s) |
 | <kbd>Space</kbd> | Pause Selected Download(s) |
 | <kbd>Delete</kbd> | Delete Selected Download(s) |
@@ -87,7 +120,7 @@ python -m my_idm.main # Or direct python execution
 All settings and runtime data are persisted in the user profile:
 - **Database**: `~/.my-idm/downloads.db`
 - **Resume Cache**: `~/.my-idm/fastresume/`
-- **Application Logs**: `~/.my-idm/my-idm.log`
+- **Application Logs**: `~/.my-idm/logs/my-idm.log`
 - **Preferences**: Configurable via **Tools → Preferences** (<kbd>Ctrl</kbd>+<kbd>,</kbd>) or status bar badges.
 
 ---
@@ -103,6 +136,8 @@ All settings and runtime data are persisted in the user profile:
 - [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
 - [**Browser Integration (Chrome & Firefox)**](docs/architecture/browser-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
+- [**YouTube Scraper**](docs/architecture/youtube-scraper.md) — yt-dlp integration, Mode A (direct URL) vs Mode B (ffmpeg merge), dialog, and rate-limit budgeting.
+- [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 - [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.
 

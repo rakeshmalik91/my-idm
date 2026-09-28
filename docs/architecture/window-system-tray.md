@@ -54,10 +54,17 @@ System tray behavior is managed via [`my_idm.config.GeneralConfig`](file:///d:/P
 1. **Availability Check**: Verifies `QSystemTrayIcon.isSystemTrayAvailable()`.
 2. **Icon & Tooltip**: Sets the application icon via `get_app_icon()` and assigns tooltip `My-IDM — Download Manager`.
 3. **Tray Context Menu**:
+   - Entries use an **emoji glyph in the action text with no icon**, so every label shares one
+     indent. Qt reserves the icon column for the whole menu, so mixing an icon-based entry with
+     glyph-based entries renders them at visibly different indents.
    - `🪟 Show My-IDM` / `🪟 Hide My-IDM`: Dynamic toggle tracking window foreground visibility.
+   - `➕ Add Download…`: Opens the Add Download dialog. The main window is restored first via
+     `_restore_and_focus()` — the dialog is modal and parented to the window, so without it the
+     dialog would open unreachable behind the hidden window.
    - `⏸️ Pause All Downloads`: Pauses all active, queued, and stalled transfers.
    - `▶️ Resume All Downloads`: Resumes all paused and stopped transfers.
    - `⚙️ Preferences…`: Opens the Preferences modal directly to tab 0 (General & Downloads).
+   - `🔄 Restart My-IDM`: Restarts the application in place.
    - `🚪 Exit My-IDM`: Sets `_force_exit = True` and triggers clean application termination.
 4. **Activation Handling (`_on_tray_activated`)**:
    - Left-click (`Trigger`) or double-click (`DoubleClick`) toggles the main window (`_toggle_show_window`).

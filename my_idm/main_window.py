@@ -1006,6 +1006,12 @@ class MainWindow(QMainWindow):
         tray_menu.addAction(self._tray_act_toggle)
         tray_menu.addSeparator()
 
+        act_add = QAction("➕ Add Download…", self)
+        act_add.setToolTip("Add a URL, magnet link, or .torrent file")
+        act_add.triggered.connect(self._on_tray_add_download)
+        tray_menu.addAction(act_add)
+        tray_menu.addSeparator()
+
         act_pause_all = QAction("⏸️ Pause All Downloads", self)
         act_pause_all.triggered.connect(self._on_pause_all_downloads)
         tray_menu.addAction(act_pause_all)
@@ -1018,12 +1024,15 @@ class MainWindow(QMainWindow):
         act_prefs = QAction("⚙️ Preferences…", self)
         act_prefs.triggered.connect(lambda: self._on_open_preferences(0))
         tray_menu.addAction(act_prefs)
+
+        act_about = QAction("ℹ️ About My-IDM", self)
+        act_about.triggered.connect(self._on_about)
+        tray_menu.addAction(act_about)
         tray_menu.addSeparator()
 
         act_restart = QAction("🔄 Restart My-IDM", self)
         act_restart.triggered.connect(self._restart_app)
         tray_menu.addAction(act_restart)
-        tray_menu.addSeparator()
 
         act_exit = QAction("🚪 Exit My-IDM", self)
         act_exit.triggered.connect(self._exit_app)
@@ -1250,6 +1259,17 @@ class MainWindow(QMainWindow):
         self._last_sort_section = col
 
     # -- action handlers -----------------------------------------------------
+
+    def _on_tray_add_download(self):
+        """Open the Add Download dialog from the tray menu.
+
+        The main window is restored first: the dialog is modal and parented to it,
+        so it would otherwise open behind (or be unreachable while) the hidden
+        window that the tray implies.
+        """
+        if not self.isVisible() or self.isMinimized():
+            self._restore_and_focus()
+        self._on_add()
 
     def _on_add(self):
         dlg = AddDownloadDialog(self, manager=self._manager)
@@ -1531,6 +1551,10 @@ class MainWindow(QMainWindow):
             )
 
     def _on_about(self):
+        # Reachable from the tray, where the window may be hidden; the dialog is
+        # parented to it and would otherwise open unreachable.
+        if not self.isVisible() or self.isMinimized():
+            self._restore_and_focus()
         dlg = QMessageBox(self)
         dlg.setWindowTitle("About My-IDM")
         logo_pm = get_app_logo_pixmap(72)
@@ -1540,10 +1564,18 @@ class MainWindow(QMainWindow):
         dlg.setInformativeText(
             "<p><b>Version 1.0.0</b></p>"
             "<p>A high-speed download manager featuring multi-segment parallel HTTP "
-            "downloading, full BitTorrent swarm engine, VPN Kill Switch privacy protection, "
+            "downloading, full BitTorrent swarm engine, Tor & VPN Kill Switch privacy protection, Youtube & AnimePahe scrapers "
             "and automated virus & malware inspection.</p>"
             "<p>Built with Python, PySide6, asyncio/aiohttp, and libtorrent.</p>"
             "<p style='color: #8fa0b5; margin-top: 8px;'>© Rakesh Malik, 2026</p>"
+            "<p style='color: #8fa0b5; margin-top: 14px; margin-bottom: 0px;'>"
+            "<b>Co-authored with</b></p>"
+            "<p style='color: #8fa0b5; margin-top: 3px; margin-bottom: 0px; margin-left: 8px;'>"
+            "•&nbsp; Gemini 3.8 Flash, Claude 4.6 Opus "
+            "<span style='color: #6e7681;'>(via Antigravity IDE)</span></p>"
+            "<p style='color: #8fa0b5; margin-top: 3px; margin-bottom: 0px; margin-left: 8px;'>"
+            "•&nbsp; Nvidia Nemotron 3 Ultra, Space Bunny Alpha, Poolside Laguna S 2.1 "
+            "<span style='color: #6e7681;'>(via Kilo Code plugin for Antigravity IDE)</span></p>"
         )
         dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
         dlg.exec()

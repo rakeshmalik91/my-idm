@@ -275,6 +275,29 @@ QLineEdit:focus {{
     border-color: {Colors.ACCENT};
 }}
 
+/* Editable combos embed a QLineEdit; without an outer border the control reads
+   as a borderless text field, unlike every other input. Scope the rule to
+   editable combos so the plain drop-downs keep their existing appearance. */
+QComboBox[editable="true"] {{
+    background-color: {Colors.BG_DARK};
+    border: 1px solid {Colors.BORDER};
+    border-radius: 6px;
+    padding: 4px 6px;
+    color: {Colors.TEXT};
+}}
+
+QComboBox[editable="true"]:focus {{
+    border-color: {Colors.ACCENT};
+}}
+
+QComboBox[editable="true"] QLineEdit {{
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    color: {Colors.TEXT};
+    selection-background-color: {Colors.ACCENT};
+}}
+
 QSpinBox {{
     background-color: {Colors.BG_DARK};
     border: 1px solid {Colors.BORDER};
