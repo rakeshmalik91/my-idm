@@ -778,13 +778,96 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
                 self.win._act_start_seeding.trigger()
                 mock_seed.assert_called_once_with("dl-seed-1")
 
-    def test_default_column_order_places_source_domain_and_file_name_at_end(self):
-        """Source Domain and File / Folder Name default to the end of the table."""
+    def test_stale_ui_state_adds_new_columns_at_end(self):
+        """A state saved when the table had fewer columns must not scramble order."""
+        from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
+
         header = self.win._table.horizontalHeader()
-        v_source = header.visualIndex(Col.SOURCE_DOMAIN)
-        v_file = header.visualIndex(Col.FILE_NAME)
-        self.assertGreaterEqual(v_source, Col.COUNT - 2)
-        self.assertGreaterEqual(v_file, Col.COUNT - 2)
+        # The user had dragged Size to position 1 on a 14-column build.
+        header.moveSection(header.visualIndex(Col.SIZE), 1)
+        legacy = {
+            "column_widths": {str(c): 120 for c in range(14)},
+            "header_state": bytes(header.saveState().toHex()).decode(),
+            "column_count": 14,
+            "sort_column": Col.ADDED,
+            "sort_order": 0,
+        }
+
+        with patch.object(self.manager, "get_ui_state", return_value=legacy):
+            self.win._restore_ui_state_from_db()
+
+        # New columns land at the very end...
+        self.assertEqual(header.visualIndex(Col.LAST_SEEDED), Col.COUNT - 2)
+        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 1)
+        self.assertEqual(header.count(), Col.COUNT)
+        # ...the tail is fully pinned...
+        for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
+            self.assertEqual(header.visualIndex(col), Col.COUNT - len(_DEFAULT_TAIL_COLUMNS) + i)
+        # ...and the user's own ordering of the older columns survives.
+        self.assertEqual(Col.HEADERS[header.logicalIndex(1)], "Size")
+
+    def test_current_ui_state_respects_user_order(self):
+        """Once the stored state matches the column count, order is left alone."""
+        header = self.win._table.horizontalHeader()
+        header.moveSection(header.visualIndex(Col.SOURCE), 0)
+        current = {
+            "column_widths": {str(c): 120 for c in range(Col.COUNT)},
+            "header_state": bytes(header.saveState().toHex()).decode(),
+            "column_count": Col.COUNT,
+            "sort_column": Col.ADDED,
+            "sort_order": 0,
+        }
+        with patch.object(self.manager, "get_ui_state", return_value=current):
+            self.win._restore_ui_state_from_db()
+        self.assertEqual(Col.HEADERS[header.logicalIndex(0)], "Source")
+
+    def test_saved_ui_state_records_column_count(self):
+        """column_count must be written so a later upgrade can detect a stale state."""
+        self.win._save_ui_state_to_db()
+        state = self.manager.get_ui_state()
+        self.assertIsNotNone(state)
+        self.assertEqual(state.get("column_count"), Col.COUNT)
+
+    def test_default_column_order_places_source_domain_and_file_name_at_end(self):
+        """The tail columns default to the end of the table, in the documented order."""
+        header = self.win._table.horizontalHeader()
+        from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
+
+        expected = {col: Col.COUNT - len(_DEFAULT_TAIL_COLUMNS) + i
+                    for i, col in enumerate(_DEFAULT_TAIL_COLUMNS)}
+        for col, visual in expected.items():
+            self.assertEqual(
+                header.visualIndex(col), visual,
+                f"{Col.HEADERS[col]} should sit at visual {visual}",
+            )
+
+    def test_new_columns_default_to_the_very_end(self):
+        """Last Seeded and Source are the final two columns by default."""
+        header = self.win._table.horizontalHeader()
+        self.assertEqual(header.visualIndex(Col.LAST_SEEDED), Col.COUNT - 2)
+        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 1)
+
+    def test_new_column_indices_do_not_shift_existing_columns(self):
+        """Persisted column indices must keep pointing at the same columns."""
+        self.assertEqual(Col.LAST_SEEDED, 14)
+        self.assertEqual(Col.SOURCE, 15)
+        for name, value in (
+            ("QUEUE", 0), ("NAME", 1), ("SOURCE_DOMAIN", 2), ("SIZE", 3),
+            ("PROGRESS", 4), ("STATUS", 5), ("SPEED", 6), ("ETA", 7),
+            ("SEEDS_PEERS", 8), ("ADDED", 9), ("LAST_TRIED", 10),
+            ("COMPLETED", 11), ("SAVE_PATH", 12), ("FILE_NAME", 13),
+        ):
+            self.assertEqual(getattr(Col, name), value, name)
+        self.assertEqual(Col.COUNT, 16)
+        self.assertEqual(Col.HEADERS[Col.LAST_SEEDED], "Last Seeded")
+        self.assertEqual(Col.HEADERS[Col.SOURCE], "Source")
+
+    def test_reset_view_restores_new_column_order(self):
+        header = self.win._table.horizontalHeader()
+        header.moveSection(header.visualIndex(Col.SOURCE), 0)
+        self.win._on_reset_view()
+        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.LAST_SEEDED), Col.COUNT - 2)
 
     def test_ui_state_restore_preserves_user_column_order(self):
         """Restoring UI state does not forcefully push File / Folder Name or Source Domain to the front."""

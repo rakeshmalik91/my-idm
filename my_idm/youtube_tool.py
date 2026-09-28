@@ -902,24 +902,66 @@ def start_native_download(
     cancel_event: Optional[Any] = None,
     outtmpl: Optional[str] = None,
     merge_output_format: str = "",
+    expected_total: int = 0,
 ) -> Any:
     """Start a Mode B yt-dlp download in a daemon thread.
 
     Returns a tuple ``(thread, cancel_holder)``. Setting the holder's ``cancel``
     attribute aborts the in-flight download. ``done_cb`` receives the absolute
     path of the file that was actually produced.
+
+    ``expected_total`` is the known byte size of the selected formats. Supplying
+    it keeps reported progress monotonic, because the running total discovered
+    from yt-dlp grows as each stream is reached.
     """
     import threading  # noqa: PLC0415
 
     module = _import_ytdlp()
     cancel_holder: dict[str, Any] = {"cancel": False}
 
+    # yt-dlp reports progress per stream. A merged video+audio download therefore
+    # reports the video stream 0→100% and then restarts at 0% for the audio stream,
+    # which makes the UI progress bar jump backwards. Aggregate across streams so
+    # the reported figures are monotonic and describe the download as a whole.
+    streams: dict[str, tuple[int, int]] = {}
+
+    def _stream_key(status: dict) -> str:
+        info = status.get("info_dict")
+        if isinstance(info, dict):
+            for field in ("format_id", "format", "filename"):
+                value = info.get(field)
+                if value:
+                    return str(value)
+        return str(status.get("filename") or "__default__")
+
     def _progress_hook(status: dict) -> None:
-        if progress_cb:
-            try:
-                progress_cb(dict(status))
-            except Exception as exc:
-                log.debug("yt-dlp progress hook error: %s", exc)
+        if not progress_cb:
+            return
+        try:
+            payload = dict(status)
+            key = _stream_key(status)
+            done = int(status.get("downloaded_bytes") or 0)
+            total = int(
+                status.get("total_bytes")
+                or status.get("total_bytes_estimate")
+                or 0
+            )
+            prev_done, prev_total = streams.get(key, (0, 0))
+            # max() keeps each stream monotonic even if yt-dlp re-reports from 0.
+            streams[key] = (max(prev_done, done), max(prev_total, total))
+            payload["downloaded_bytes"] = sum(d for d, _t in streams.values())
+            agg_total = sum(t for _d, t in streams.values())
+            if expected_total > 0:
+                # Prefer the size we already know, so the total does not jump
+                # when a later stream is reached and drag the percentage back.
+                payload["total_bytes"] = int(expected_total)
+                payload.pop("total_bytes_estimate", None)
+            elif agg_total:
+                payload["total_bytes"] = agg_total
+                payload.pop("total_bytes_estimate", None)
+            progress_cb(payload)
+        except Exception as exc:
+            log.debug("yt-dlp progress hook error: %s", exc)
 
     def _postprocessor_hook(status: dict) -> None:
         if postprocessor_cb:

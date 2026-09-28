@@ -516,7 +516,7 @@ Once a download finishes (for both HTTP segmented transfers and BitTorrent downl
 
 ## The Download List
 
-The main table shows 13 columns of information for each download:
+The main table shows 16 columns of information for each download:
 
 | Column | Description |
 |--------|-------------|
@@ -533,6 +533,20 @@ The main table shows 13 columns of information for each download:
 | **Last Tried** | When the last download attempt started |
 | **Completed** | When the download finished |
 | **Save Path** | Directory where the file is saved |
+| **File / Folder Name** | Resolved on-disk name (torrents fill this in once metadata is fetched) |
+| **Last Seeded** | When the torrent last completed a seed. `—` for non-torrent downloads |
+| **Source** | Where it came from: `Chrome`, `Firefox`, `Edge`, `AnimePahe`, or `YouTube`. Blank for manually added downloads |
+
+> **Source** is derived automatically: browser downloads are identified from the User-Agent the
+> extension sends, AnimePahe items from the marker it writes into the backlog file, and YouTube
+> items from the yt-dlp download path. Downloads added by hand — and anything added before this
+> column existed — simply show blank, which means "added manually".
+
+> [!TIP]
+> **Last Seeded** and **Source** are appended at the end of the table, after **Save Path**,
+> **Source Domain**, and **File / Folder Name**. If you had a custom column layout saved from an
+> earlier version, they are pinned to the end on first launch and your existing ordering is kept.
+> **View → Reset View** restores the full default layout.
 
 ### Status Values
 

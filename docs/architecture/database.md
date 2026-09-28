@@ -36,7 +36,8 @@ erDiagram
         TEXT file_path "Full absolute path to file"
         INTEGER total_size "File size in bytes (0 if unknown)"
         INTEGER downloaded_size "Downloaded bytes on disk"
-        INTEGER uploaded_size "Total cumulative uploaded/seeded bytes"
+         INTEGER uploaded_size "Total cumulative uploaded/seeded bytes"
+         TEXT last_seeded_at "ISO timestamp of last seed"
         TEXT status "Current lifecycle state"
         TEXT download_type "http | torrent"
         INTEGER num_segments "Configured HTTP segment count"
@@ -103,6 +104,15 @@ The primary entity table storing download tasks, progress state, connection para
 | `metadata_json`           | `TEXT`    | **NO**   | `'{}'`     | Extensible JSON object storing subsystem-specific attributes.                                |
 | `queue_order`             | `INTEGER` | **NO**   | `0`        | Sequential order position in the active download queue (`1` = highest).                      |
 | `fetching_metadata_since` | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp when magnet metadata fetching began.                                  |
+| `last_seeded_at`          | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp of the most recent seed. Stamped when a seed session begins — on `TorrentEngine.start_seeding()` and on the completion→seeding transition — and backfilled from libtorrent's `last_seen_complete` only when that is strictly newer. Torrents only; empty for HTTP/YouTube rows and for every row that predates this column. |
+
+> `last_seeded_at` was **appended** as the final column, never inserted, so every pre-existing
+> logical index is unchanged. The migration is the usual idempotent `PRAGMA table_info` guard:
+> `ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''` runs only when the
+> column is absent, so existing rows are left untouched and read back with `''`.
+> There is deliberately **no** `source` column — the Source table column is derived from
+> `metadata_json` at display time (see [`table-views.md`](table-views.md#source-derivation)), which
+> classifies existing rows with no backfill.
 
 #### Status Values
 
@@ -315,6 +325,16 @@ if "metadata_json" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 if "fetching_metadata_since" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN fetching_metadata_since TEXT NOT NULL DEFAULT ''")
+if "uploaded_size" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN uploaded_size INTEGER NOT NULL DEFAULT 0")
+if "last_seeded_at" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''")
+```
+
+Every guard is **additive and idempotent** — it runs only when the column is missing, and a `NOT NULL
+DEFAULT` keeps existing rows valid without a backfill. New columns are always **appended** (never
+inserted mid-table) so that logical column indices stay stable for the UI state persisted in
+`ui_state`.
 ```
 
 ### 2. Orphaned Segment Pruning

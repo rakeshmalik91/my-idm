@@ -133,6 +133,29 @@ def _is_save_resume_data_failed_alert(alert: Any) -> bool:
     return type(alert).__name__ in ("save_resume_data_failed_alert", "FakeSaveResumeDataFailedAlert")
 
 
+def _newer_seed_stamp(previous: str, epoch: int) -> str:
+    """Return the ISO stamp to record for a completed seed, or "" to leave it alone.
+
+    Used to fold libtorrent's ``last_seen_complete`` into ``last_seeded_at`` without
+    ever regressing a newer manual stamp: a torrent already seeding from
+    fastresume has no manual stamp, so the backstop only applies when the field is
+    empty or the libtorrent value is strictly newer.
+    """
+    if not epoch or epoch <= 0:
+        return ""
+    try:
+        stamped = datetime.fromtimestamp(epoch, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return ""
+    if previous:
+        try:
+            if stamped <= datetime.fromisoformat(previous):
+                return ""
+        except (TypeError, ValueError):
+            pass
+    return stamped.isoformat()
+
+
 class TorrentEngine:
     """Manages torrent downloads via libtorrent."""
 
@@ -759,6 +782,10 @@ class TorrentEngine:
             # Reset seeding session timestamp so duration timer starts fresh from now
             entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
             entry.metadata["manual_seeding"] = True
+            # A seeding session has begun, so this is the newest "last seeded".
+            # libtorrent's last_seen_complete is not a reliable signal here: it stays
+            # 0 for torrents completed from fastresume, so it is only a backstop.
+            entry.last_seeded_at = entry.metadata["seeding_since"]
             cur_status = self.get_status(download_id) or {}
             entry.metadata["seeding_baseline_upload"] = cur_status.get("total_upload", 0) or getattr(entry, "uploaded_size", 0) or 0
             entry.status = "seeding"
@@ -1070,6 +1097,16 @@ class TorrentEngine:
             total_upload = getattr(s, "all_time_upload", getattr(s, "total_upload", 0))
             total_download = getattr(s, "all_time_download", getattr(s, "total_download", 0))
 
+            # Most recent completed seed. libtorrent exposes this as a POSIX
+            # timestamp; `last_seen_complete` is the 2.x name (1.2 alias).
+            last_seen_complete = getattr(s, "last_seen_complete", 0)
+            if not last_seen_complete:
+                last_seen_complete = getattr(s, "last_seen", 0)
+            try:
+                last_seeded = int(last_seen_complete or 0)
+            except (TypeError, ValueError):
+                last_seeded = 0
+
             return {
                 "total_size": total_size,
                 "downloaded": downloaded,
@@ -1085,6 +1122,7 @@ class TorrentEngine:
                 "name": name,
                 "total_upload": total_upload,
                 "total_download": total_download,
+                "last_seeded_epoch": last_seeded if last_seeded > 0 else 0,
             }
         except Exception as exc:
             log.debug("Failed to get status for %s: %s", download_id, exc)
@@ -1134,6 +1172,14 @@ class TorrentEngine:
             new_upload = status.get("total_upload", 0)
             if new_upload > 0:
                 entry.uploaded_size = max(getattr(entry, "uploaded_size", 0), int(new_upload))
+
+            # Backstop for torrents that were already seeding before this session
+            # (e.g. resumed from fastresume). Only applied when genuinely newer, so
+            # it can never regress a manual stamp from start_seeding().
+            last_seeded_epoch = int(status.get("last_seeded_epoch", 0) or 0)
+            stamped = _newer_seed_stamp(entry.last_seeded_at, last_seeded_epoch)
+            if stamped:
+                entry.last_seeded_at = stamped
             if entry.metadata is not None:
                 entry.metadata["seeds"] = seeds
                 entry.metadata["peers"] = peers
@@ -1239,6 +1285,8 @@ class TorrentEngine:
                     if target_status == "seeding":
                         if not entry.metadata.get("seeding_since"):
                             entry.metadata["seeding_since"] = datetime.now(timezone.utc).isoformat()
+                        # Completion of the download starts the first seed.
+                        entry.last_seeded_at = entry.metadata["seeding_since"]
                     self._db.update_download(entry)
                     self._db.update_status(download_id, target_status)
                     if target_status == "seeding":

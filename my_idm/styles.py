@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
+# Asset paths
+# ---------------------------------------------------------------------------
+
+# Qt resolves stylesheet url() relative to the process working directory, so the
+# tick used by list-item checkboxes is referenced by absolute path instead.
+_CHECK_SVG_URL = ""
+try:  # pragma: no cover - import guard only
+    from my_idm.resources import RESOURCES_DIR
+
+    _CHECK_SVG = RESOURCES_DIR / "check.svg"
+    if _CHECK_SVG.is_file():
+        _CHECK_SVG_URL = _CHECK_SVG.as_posix()
+except Exception:  # pragma: no cover - fall back to the native tick
+    _CHECK_SVG_URL = ""
+
+# ---------------------------------------------------------------------------
 # Color palette
 # ---------------------------------------------------------------------------
 
@@ -41,6 +57,10 @@ class Colors:
 # ---------------------------------------------------------------------------
 # Qt Stylesheet (QSS)
 # ---------------------------------------------------------------------------
+
+# Injected into the indicator rules. Empty when the SVG is unavailable, which
+# leaves the tick unstyled rather than breaking the whole stylesheet.
+_check_image = f"image: url({_CHECK_SVG_URL});" if _CHECK_SVG_URL else ""
 
 DARK_STYLESHEET = f"""
 /* ---- Global ---- */
@@ -378,6 +398,40 @@ QCheckBox::indicator {{
 QCheckBox::indicator:checked {{
     background: {Colors.ACCENT};
     border-color: {Colors.ACCENT};
+}}
+
+/* Item-view checkboxes are drawn through the *view's* ::indicator sub-control,
+   not QCheckBox::indicator, so they fell back to a dark default whose border is
+   invisible on these backgrounds. Only the outline is declared here: the tick
+   itself stays the native one, so these still read as "✓ in a box" rather than
+   the solid accent fill used by QCheckBox. */
+QListWidget::indicator,
+QListView::indicator,
+QTreeWidget::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {Colors.BORDER};
+    border-radius: 3px;
+    background: {Colors.BG_DARK};
+}}
+
+QListWidget::indicator:hover,
+QListView::indicator:hover,
+QTreeWidget::indicator:hover {{
+    border-color: {Colors.ACCENT};
+}}
+
+/* Styling ::indicator at all suppresses Qt's native check primitive, so the tick
+   has to be supplied explicitly. Only the outline and the tick change: the fill
+   stays dark, which keeps these reading as "✓ in a box" rather than the solid
+   accent block used by QCheckBox. */
+QListWidget::indicator:checked,
+QListView::indicator:checked,
+QTreeWidget::indicator:checked {{
+    border: 1px solid {Colors.ACCENT};
+    border-radius: 3px;
+    background: {Colors.BG_DARK};
+    {_check_image}
 }}
 
 /* ---- Tooltips ---- */

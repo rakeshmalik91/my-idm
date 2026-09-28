@@ -257,5 +257,114 @@ class TestDatabase(unittest.TestCase):
         self.assertEqual(healed.progress, 100.0)
 
 
+    def test_migration_adds_last_seeded_without_touching_existing_rows(self):
+        """last_seeded_at is appended to legacy DBs; no existing row is modified."""
+        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        tmp.close()
+        tmp_path = Path(tmp.name)
+
+        try:
+            raw = sqlite3.connect(str(tmp_path))
+            raw.row_factory = sqlite3.Row
+            # A schema from before uploaded_size / last_seeded_at existed.
+            raw.execute("""
+                CREATE TABLE downloads (
+                    id              TEXT PRIMARY KEY,
+                    url             TEXT NOT NULL,
+                    filename        TEXT NOT NULL DEFAULT '',
+                    save_path       TEXT NOT NULL DEFAULT '',
+                    file_path       TEXT NOT NULL DEFAULT '',
+                    total_size      INTEGER NOT NULL DEFAULT 0,
+                    downloaded_size INTEGER NOT NULL DEFAULT 0,
+                    status          TEXT NOT NULL DEFAULT 'queued',
+                    download_type   TEXT NOT NULL DEFAULT 'http',
+                    num_segments    INTEGER NOT NULL DEFAULT 8,
+                    error_message   TEXT NOT NULL DEFAULT '',
+                    retry_count     INTEGER NOT NULL DEFAULT 0,
+                    max_retries     INTEGER NOT NULL DEFAULT 5,
+                    added_at        TEXT NOT NULL DEFAULT '',
+                    last_tried_at   TEXT NOT NULL DEFAULT '',
+                    completed_at    TEXT NOT NULL DEFAULT '',
+                    etag            TEXT NOT NULL DEFAULT '',
+                    content_hash    TEXT NOT NULL DEFAULT ''
+                );
+            """)
+            for i in range(3):
+                # 'paused' with a partial downloaded_size is deliberate: Database.open()
+                # self-heals completed/seeding rows whose downloaded_size is incomplete,
+                # which would otherwise mask whether this migration touched the data.
+                raw.execute(
+                    "INSERT INTO downloads (id, url, filename, status, total_size, "
+                    "downloaded_size) VALUES (?, ?, ?, 'paused', ?, ?)",
+                    (f"row-{i}", f"http://example.com/{i}.zip", f"{i}.zip", 2000 + i, 500 + i),
+                )
+            raw.commit()
+            before_cols = [r["name"] for r in raw.execute("PRAGMA table_info(downloads)")]
+            before_rows = {
+                r["id"]: dict(r)
+                for r in raw.execute("SELECT * FROM downloads").fetchall()
+            }
+            raw.close()
+
+            self.assertNotIn("last_seeded_at", before_cols)
+
+            db = Database(tmp_path)
+            db.open()
+            after_cols = [r["name"] for r in db._conn.execute("PRAGMA table_info(downloads)")]
+
+            # Column added, and appended rather than inserted: every pre-existing
+            # column keeps its relative order, and the new ones land after them.
+            self.assertIn("last_seeded_at", after_cols)
+            self.assertEqual(after_cols[-1], "last_seeded_at")
+            self.assertEqual(after_cols[: len(before_cols)], before_cols)
+
+            entries = {e.id: e for e in db.get_all_downloads()}
+            self.assertEqual(len(entries), 3)
+            for eid, pre in before_rows.items():
+                entry = entries[eid]
+                # New column defaults to empty for pre-existing rows.
+                self.assertEqual(entry.last_seeded_at, "", eid)
+                # Every pre-existing value survives untouched.
+                for col, old in pre.items():
+                    self.assertEqual(getattr(entry, col), old, f"{eid}.{col}")
+
+            # The new column round-trips once written.
+            entries["row-0"].last_seeded_at = "2026-01-02T03:04:05+00:00"
+            db.update_download(entries["row-0"])
+            self.assertEqual(
+                db.get_download("row-0").last_seeded_at, "2026-01-02T03:04:05+00:00"
+            )
+            self.assertEqual(db.get_download("row-1").last_seeded_at, "")
+
+            # Re-opening is idempotent.
+            db.close()
+            db2 = Database(tmp_path)
+            db2.open()
+            self.assertEqual(db2.get_download("row-0").last_seeded_at, "2026-01-02T03:04:05+00:00")
+            self.assertEqual(len(db2.get_all_downloads()), 3)
+            db2.close()
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def test_last_seeded_defaults_and_round_trip(self):
+        db = Database(":memory:")
+        db.open()
+        try:
+            entry = DownloadEntry(id="seed-1", url="magnet:?xt=urn:btih:abc", filename="a.torrent")
+            self.assertEqual(entry.last_seeded_at, "")
+            db.add_download(entry)
+            self.assertEqual(db.get_download("seed-1").last_seeded_at, "")
+
+            entry.last_seeded_at = "2026-05-06T07:08:09+00:00"
+            db.update_download(entry)
+            self.assertEqual(
+                db.get_download("seed-1").last_seeded_at, "2026-05-06T07:08:09+00:00"
+            )
+        finally:
+            db.close()
+
 if __name__ == "__main__":
     unittest.main()

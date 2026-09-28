@@ -55,6 +55,48 @@ The main download table exposes 13 columns indexed by the `Col` class:
 | `LAST_TRIED` | 10 | `Last Tried` | 130 px | Center | Localized datetime of most recent connection/transfer attempt. |
 | `COMPLETED` | 11 | `Completed` | 130 px | Center | Localized datetime of successful download completion. |
 | `SAVE_PATH` | 12 | `Save Path` | 200 px | Left | Target destination path shortened with leaf-node priority. |
+| `LAST_SEEDED` | 14 | `Last Seeded` | 130 px | Center | When the torrent last started or completed a seed. `—` for non-torrents. |
+| `SOURCE` | 15 | `Source` | 100 px | Left | Where the download originated: `Chrome`, `Firefox`, `Edge`, `AnimePahe`, or `YouTube`. Blank for manually added and legacy rows. |
+
+### Column Tail & Upgrades
+
+Four columns are pinned to the right-hand tail, in this display order:
+
+```
+… SAVE_PATH, SOURCE_DOMAIN, FILE_NAME, LAST_SEEDED, SOURCE
+```
+
+The order is defined once, in `_DEFAULT_TAIL_COLUMNS` (`main_window.py`), and applied by
+`_apply_default_tail_order()` from three places: startup, **View → Reset View**, and the stale-state
+heal described below. That helper sweeps slots in ascending order, because `moveSection()` shifts
+everything between the source and the target — placing a tail column that currently sits *left* of
+its slot would otherwise push an already-placed neighbour back out of position.
+
+`LAST_SEEDED` and `SOURCE` were **appended** (indices 14 and 15) rather than inserted, so every
+pre-existing logical index is unchanged and the persisted `column_widths`, `header_state`, and
+`sort_column` in `ui_state` keep addressing the same columns.
+
+`ui_state` also records `column_count`. On restore, if the stored count differs from `Col.COUNT`, the
+state predates an append: `QHeaderView.restoreState()` only describes the sections that existed
+then, so the new columns can land anywhere. The tail helper is re-applied, which pins them to the end
+while preserving the user's own ordering of the older columns. Once the state is re-saved with the
+current count, custom ordering is respected as-is.
+
+### `Source` Derivation
+
+Resolved at display time from `metadata_json` rather than stored in its own column, so existing rows
+classify immediately with no migration or backfill (`resolve_download_source()` in
+`download_model.py`):
+
+| Value | Key |
+|---|---|
+| `YouTube` | `source_type` starts with `youtube` |
+| `AnimePahe` | `added_by` contains `animepahe` — written by `load_backlog()` from AnimePahe's `# AnimePahe Download` comment above the URL |
+| `Chrome` / `Firefox` / `Edge` | `source == "browser_extension"`, then matched against `user_agent` |
+| *(blank)* | Everything else, including manual adds and legacy rows |
+
+Edge is matched on `Edg/` (and legacy `Edge/`) **before** Chrome, because Edge's User-Agent also
+advertises `Chrome/`.
 
 ---
 

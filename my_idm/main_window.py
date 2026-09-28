@@ -75,6 +75,34 @@ from my_idm.styles import Colors
 
 log = logging.getLogger(__name__)
 
+# Columns pinned to the right-hand tail of the download table, in display order.
+# Single source of truth for the startup layout, "Reset View", and the heal applied
+# when restoring a UI state saved before columns were appended. New columns are
+# added here to sit at the very end.
+_DEFAULT_TAIL_COLUMNS = (Col.SOURCE_DOMAIN, Col.FILE_NAME, Col.LAST_SEEDED, Col.SOURCE)
+
+
+def _apply_default_tail_order(header) -> None:
+    """Pin the tail columns to the last slots, preserving the order of the rest.
+
+    Moves one column at a time in ascending slot order. Doing it incrementally
+    is not enough: ``moveSection`` shifts everything between the source and the
+    target, so placing a tail column that currently sits *left* of its target
+    pushes an already-placed neighbour back out of position. Sweeping ascending
+    fixes each slot permanently, because later moves only ever touch higher slots.
+    """
+    tail = list(_DEFAULT_TAIL_COLUMNS)
+    tail_set = set(tail)
+    non_tail = [
+        header.logicalIndex(v)
+        for v in range(header.count())
+        if header.logicalIndex(v) not in tail_set
+    ]
+    for slot, col in enumerate(non_tail + tail):
+        visual = header.visualIndex(col)
+        if visual != slot:
+            header.moveSection(visual, slot)
+
 SPEED_LIMIT_PRESETS = [
     ("Unlimited", 0),
     ("1 kbps", 1 * 1024),
@@ -405,9 +433,9 @@ class MainWindow(QMainWindow):
         self._model.set_segregated_view(self._segregated_view_enabled, mode=self._segregated_view_mode)
         self._apply_table_spans()
 
-        # Move Col.SOURCE_DOMAIN and Col.FILE_NAME to the end of the table by default
-        header.moveSection(header.visualIndex(Col.SOURCE_DOMAIN), Col.COUNT - 2)
-        header.moveSection(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
+        # Tail columns, in display order. New columns are appended to the end of
+        # the tail list so the two new ones land last.
+        _apply_default_tail_order(header)
 
         # Set specific default column widths
         self._table.setColumnWidth(Col.QUEUE, 45)
@@ -424,6 +452,8 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.COMPLETED, 130)
         self._table.setColumnWidth(Col.SAVE_PATH, 220)
         self._table.setColumnWidth(Col.FILE_NAME, 220)
+        self._table.setColumnWidth(Col.LAST_SEEDED, 130)
+        self._table.setColumnWidth(Col.SOURCE, 100)
 
         # Row height
         self._table.verticalHeader().setDefaultSectionSize(36)
@@ -2430,19 +2460,24 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.COMPLETED, 130)
         self._table.setColumnWidth(Col.SAVE_PATH, 220)
         self._table.setColumnWidth(Col.FILE_NAME, 220)
+        self._table.setColumnWidth(Col.LAST_SEEDED, 130)
+        self._table.setColumnWidth(Col.SOURCE, 100)
 
-        # 2. Show all columns (reset column visibility)
+    # 2. Show all columns (reset column visibility)
         header = self._header_view
         for col in range(Col.COUNT):
             header.setSectionHidden(col, False)
 
-        # 3. Reset column order to default with Source Domain and File / Folder Name at the end
-        for visual in range(Col.COUNT - 1, -1, -1):
-            logical = header.logicalIndex(visual)
-            if logical != visual:
+        # 3. Reset column order to default (tail columns pinned to the end)
+        # Ascending order is required: moving each logical index into place in
+        # sequence restores true identity order. A descending sweep leaves the
+        # displaced section stranded near the front, which then shifts every
+        # subsequent tail position.
+        for logical in range(Col.COUNT):
+            visual = header.visualIndex(logical)
+            if visual != logical:
                 header.moveSection(visual, logical)
-        header.moveSection(header.visualIndex(Col.SOURCE_DOMAIN), Col.COUNT - 2)
-        header.moveSection(header.visualIndex(Col.FILE_NAME), Col.COUNT - 1)
+        _apply_default_tail_order(header)
 
         # 4. Clear all filters (status and type filters)
         self._model.clear_filters()
@@ -2516,6 +2551,10 @@ class MainWindow(QMainWindow):
                 "is_maximized": is_max,
                 "column_widths": col_widths,
                 "header_state": header_hex,
+                # Recorded so a state written by an older build (fewer columns)
+                # can be recognised on restore and healed instead of scrambling
+                # the order of any columns added since.
+                "column_count": Col.COUNT,
                 "splitter_state": splitter_hex,
                 "splitter_sizes": splitter_sizes,
                 "details_visible": details_vis,
@@ -2643,6 +2682,14 @@ class MainWindow(QMainWindow):
             header.setFirstSectionMovable(True)
             header.setStretchLastSection(False)
             header.setCascadingSectionResizes(False)
+
+            # A state saved before columns were appended only describes the older
+            # sections, so restoreState() drops the new ones wherever it likes.
+            # Re-pin the tail so newly added columns land at the end while the
+            # user's own ordering of the older ones is preserved.
+            saved_count = state.get("column_count")
+            if saved_count is not None and int(saved_count) != Col.COUNT:
+                _apply_default_tail_order(header)
 
             # Ensure Col.FILE_NAME is visible and properly sized if restored from an older state
             header.setSectionHidden(Col.FILE_NAME, False)

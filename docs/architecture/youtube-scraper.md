@@ -50,7 +50,20 @@ here because each one invalidated an assumption in the original design:
    is required — cookie source and ffmpeg location change what a URL resolves to, so a cached
    result must never cross configurations.
 
-5. **Deleting a Mode B download must clean up yt-dlp's scratch files.** yt-dlp deliberately keeps
+5. **Progress must be aggregated across streams, not passed through.** yt-dlp's `progress_hooks`
+   fire **per stream**: a merged video+audio download reports the video stream 0→100% and then
+   restarts at 0% for the audio stream. Forwarding those figures verbatim made the UI progress bar
+   jump backwards, which looked like several threads writing to one bar. `_progress_hook()` in
+   `youtube_tool.py` keeps a per-stream `downloaded`/`total` map (keyed by `info_dict.format_id`)
+   and emits the **sum** of all streams, each held monotonic via `max()`.
+
+   The reported *total* comes from `youtube_expected_size` — the summed size of the selected
+   formats, computed by `_expected_total_size()` before the download starts — rather than yt-dlp's
+   running total. That total grows as each stream is reached, so using it made progress fall from
+   100% back to ~91% when the second stream began. With the known total, a merged download advances
+   smoothly 0→100%. When the expected size is unknown the hook falls back to summed stream totals.
+
+6. **Deleting a Mode B download must clean up yt-dlp's scratch files.** yt-dlp deliberately keeps
    `<stem>.part` files so a download can resume, and merged streams leave per-format fragments
    (`<stem>.f616.mp4.part`). `delete_download(delete_files=True)` only ever targeted
    `entry.file_path` — the *final* name — so a download deleted mid-transfer left

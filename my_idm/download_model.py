@@ -46,13 +46,17 @@ class Col:
     COMPLETED = 11
     SAVE_PATH = 12
     FILE_NAME = 13
+    # Appended at the end so persisted column indices (column_widths,
+    # header_state, sort_column in ui_state) keep pointing at the same columns.
+    LAST_SEEDED = 14
+    SOURCE = 15
 
     DATE_COLUMNS = (ADDED, LAST_TRIED, COMPLETED)
 
     HEADERS = [
         "#", "Name", "Source Domain", "Size", "Progress", "Status", "Speed", "ETA",
         "Seeds / Peers", "Added", "Last Tried", "Completed",
-        "Save Path", "File / Folder Name",
+        "Save Path", "File / Folder Name", "Last Seeded", "Source",
     ]
     COUNT = len(HEADERS)
 
@@ -90,6 +94,56 @@ def is_youtube_entry(entry: DownloadEntry) -> bool:
     if entry is None or not entry.metadata:
         return False
     return str(entry.metadata.get("source_type", "")).startswith("youtube")
+
+
+# Order matters: Edge's User-Agent also advertises "Chrome", so its token
+# ("Edg/", or "Edge/" for the legacy EdgeHTML build) must be tested first.
+_BROWSER_UA_SIGNATURES = (
+    ("Edge", "edg/"),
+    ("Edge", "edge/"),
+    ("Firefox", "firefox"),
+    ("Chrome", "chrome"),
+)
+
+ANIMEPAHE_SOURCE = "AnimePahe"
+YOUTUBE_SOURCE = "YouTube"
+
+
+def browser_from_user_agent(user_agent: str) -> str:
+    """Return Chrome, Firefox, or Edge from a User-Agent string, else empty."""
+    ua = (user_agent or "").lower()
+    if not ua:
+        return ""
+    for label, token in _BROWSER_UA_SIGNATURES:
+        if token in ua:
+            return label
+    return ""
+
+
+def resolve_download_source(entry: DownloadEntry) -> str:
+    """Return where a download came from: Chrome, Firefox, Edge, AnimePahe, YouTube.
+
+    Returns an empty string for manually added downloads and for legacy rows that
+    carry no provenance metadata, which is what the Source column renders as blank.
+
+    Derived from ``metadata_json`` rather than stored in its own column so existing
+    rows are classified immediately with no migration and no backfill.
+    """
+    if entry is None or not entry.metadata:
+        return ""
+    meta = entry.metadata
+
+    if str(meta.get("source_type", "")).startswith("youtube"):
+        return YOUTUBE_SOURCE
+
+    added_by = str(meta.get("added_by", "")).lower()
+    if "animepahe" in added_by:
+        return ANIMEPAHE_SOURCE
+
+    if meta.get("source") == "browser_extension":
+        return browser_from_user_agent(str(meta.get("user_agent", "")))
+
+    return ""
 
 
 def _format_eta(seconds: float) -> str:
@@ -661,6 +715,18 @@ class DownloadTableModel(QAbstractTableModel):
         if col == Col.FILE_NAME:
             return self.get_actual_name(entry).lower()
 
+        if col == Col.LAST_SEEDED:
+            # Same (has_value, value) shape as the other date columns so the
+            # key stays type-compatible and empty timestamps sort last.
+            has_time = bool(entry.last_seeded_at)
+            if ascending:
+                return (0, entry.last_seeded_at) if has_time else (1, "")
+            else:
+                return (1, entry.last_seeded_at) if has_time else (0, "")
+
+        if col == Col.SOURCE:
+            return resolve_download_source(entry).lower()
+
         return ""
 
     def _find_insert_row(self, entry: DownloadEntry) -> int:
@@ -1199,6 +1265,12 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.FILE_NAME:
             return self.get_actual_name(entry)
+
+        if col == Col.LAST_SEEDED:
+            return _format_time(entry.last_seeded_at)
+
+        if col == Col.SOURCE:
+            return resolve_download_source(entry) or ""
 
         return None
 

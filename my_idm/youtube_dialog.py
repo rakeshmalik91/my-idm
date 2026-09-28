@@ -293,8 +293,11 @@ class YouTubeDialog(QDialog):
         self._playlist_list.currentRowChanged.connect(self._on_playlist_row_changed)
         self._playlist_list.itemChanged.connect(self._on_playlist_item_changed)
         # A batch can hold up to `ytdlp_playlist_limit` entries, so give the list
-        # enough room to be browsable and keep it scrollable.
-        self._playlist_list.setMinimumHeight(300)
+        # plenty of room. The minimum is deliberately modest: the widget sits in a
+        # stretch-1 slot, so it absorbs the spare height on a tall dialog and
+        # shrinks to this floor on a short one. A large hard minimum instead
+        # overflows the slot and the list paints over the buttons below it.
+        self._playlist_list.setMinimumHeight(170)
         self._playlist_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._playlist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._playlist_list.setUniformItemSizes(True)
@@ -306,6 +309,11 @@ class YouTubeDialog(QDialog):
         self._sel_none_btn.clicked.connect(lambda: self._set_all_checked(False))
 
         self._playlist_btns = QWidget()
+        # Fixed vertically so the row is never squeezed against the list, and
+        # sized to the button so the surrounding layout cannot shrink it.
+        self._playlist_btns.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         pbl = QHBoxLayout(self._playlist_btns)
         pbl.setContentsMargins(0, 0, 0, 0)
         pbl.addWidget(self._sel_all_btn)
@@ -315,8 +323,9 @@ class YouTubeDialog(QDialog):
         wrapper = QWidget()
         wl = QVBoxLayout(wrapper)
         wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(10)
         wl.addWidget(self._playlist_list, 1)
-        wl.addWidget(self._playlist_btns)
+        wl.addWidget(self._playlist_btns, 0)
         self._playlist_wrap = wrapper
         self._playlist_wrap.setVisible(False)
         self._playlist_btns.setVisible(False)

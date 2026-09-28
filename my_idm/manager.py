@@ -803,6 +803,10 @@ class DownloadManager(QObject):
         stem = ytt.build_stem(stem)
         outtmpl = str(Path(save_dir) / f"{stem}.%(ext)s")
         merge_format = "mp4" if ytt.check_ffmpeg_available(cfg) else ""
+        try:
+            expected_total = int(entry.metadata.get("youtube_expected_size") or 0)
+        except (AttributeError, TypeError, ValueError):
+            expected_total = 0
 
         def _on_progress(status: dict):
             self._on_ytdlp_progress(download_id, status)
@@ -824,6 +828,7 @@ class DownloadManager(QObject):
                 cancel_event=cancel_event,
                 outtmpl=outtmpl,
                 merge_output_format=merge_format,
+                expected_total=expected_total,
             )
         except ytt.YouTubeToolError as exc:
             self._on_ytdlp_error(download_id, str(exc))
@@ -2537,6 +2542,13 @@ class DownloadManager(QObject):
                 entries_info.append((idx, raw_line, False, True))
                 continue
 
+            # The comment above a download line is retained as provenance, so an
+            # AnimePahe-generated backlog still identifies its origin. The text is
+            # variable ("# AnimePahe Download" vs "# <title> - Episode N"), so match
+            # on the substring rather than an exact prefix.
+            entry_source: dict[str, str] = {}
+            if "animepahe" in last_comment.lower():
+                entry_source["added_by"] = "animepahe"
             # Clear last_comment after being consumed by a download line
             last_comment = ""
 
@@ -2554,6 +2566,7 @@ class DownloadManager(QObject):
                         save_path=save_path,
                         filename=entry_filename,
                         headers=entry_headers,
+                        metadata=entry_source or None,
                     )
                     if res:
                         count += 1

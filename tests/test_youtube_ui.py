@@ -15,6 +15,7 @@ from my_idm.config import ExternalToolsConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import DownloadTableModel, is_youtube_entry
 from my_idm.settings_dialog import SettingsDialog
+from my_idm.styles import Colors
 from my_idm import youtube_tool as ytt
 from my_idm.youtube_dialog import YouTubeDialog
 
@@ -719,12 +720,48 @@ class TestPlaylistDialogBatchUi(unittest.TestCase):
     def test_playlist_list_is_tall_and_scrollable(self):
         """Regression: the batch list was too short to browse."""
         dlg = self._dialog()
-        self.assertGreaterEqual(dlg._playlist_list.minimumHeight(), 280)
+        self.assertGreaterEqual(dlg._playlist_list.minimumHeight(), 160)
         self.assertEqual(
             dlg._playlist_list.verticalScrollBarPolicy(),
             Qt.ScrollBarPolicy.ScrollBarAsNeeded,
         )
         self.assertGreaterEqual(dlg.minimumHeight(), 800)
+        dlg.deleteLater()
+
+    def test_playlist_list_does_not_overlap_buttons(self):
+        """Regression: the list painted over the Select all / Clear row."""
+        dlg = self._dialog()
+        videos = [ytt.YouTubeMetadata(title=f"V{i}", formats=[]) for i in range(16)]
+        dlg._on_extract_finished(ytt.PlaylistResult(videos=videos, total=16))
+        dlg.show()
+        for _ in range(5):
+            QApplication.processEvents()
+
+        lst, btns = dlg._playlist_list, dlg._playlist_btns
+        gap = btns.y() - (lst.y() + lst.height())
+        self.assertLessEqual(lst.y() + lst.height(), btns.y(), "list must not overlap buttons")
+        self.assertGreaterEqual(gap, 6, f"expected a gap below the list, got {gap}px")
+        dlg.close()
+        dlg.deleteLater()
+
+    def test_playlist_list_does_not_overlap_when_resized(self):
+        """The overlap must stay fixed across dialog heights."""
+        dlg = self._dialog()
+        videos = [ytt.YouTubeMetadata(title=f"V{i}", formats=[]) for i in range(16)]
+        dlg._on_extract_finished(ytt.PlaylistResult(videos=videos, total=16))
+        dlg.show()
+        for height in (620, 700, 900):
+            dlg.resize(880, height)
+            for _ in range(4):
+                QApplication.processEvents()
+            lst, btns = dlg._playlist_list, dlg._playlist_btns
+            self.assertLessEqual(
+                lst.y() + lst.height(), btns.y(), f"overlap at height {height}"
+            )
+            self.assertGreaterEqual(
+                btns.y() - (lst.y() + lst.height()), 6, f"missing gap at height {height}"
+            )
+        dlg.close()
         dlg.deleteLater()
 
     def test_playlist_list_scrolls_when_long(self):
@@ -745,6 +782,47 @@ class TestPlaylistDialogBatchUi(unittest.TestCase):
         self.assertGreaterEqual(dlg._playlist_list.viewport().height(), 200)
         dlg.close()
         dlg.deleteLater()
+
+    def test_checkbox_indicator_styling_covers_list_items(self):
+        """List-item checkboxes need their own rule, and must keep the native tick.
+
+        They are drawn through the view's ``::indicator`` sub-control, not
+        ``QCheckBox::indicator``, so the rule must cover both. Styling that
+        sub-control suppresses Qt's native check primitive, so the tick is
+        supplied explicitly -- but the fill must stay dark, leaving these as
+        "tick in a box" rather than the solid accent block used by QCheckBox.
+        """
+        from my_idm.styles import DARK_STYLESHEET
+
+        sheet = DARK_STYLESHEET
+        for selector in ("QCheckBox::indicator", "QListWidget::indicator",
+                         "QListView::indicator", "QTreeWidget::indicator"):
+            self.assertIn(selector, sheet, f"missing indicator rule: {selector}")
+        checked_block = sheet.split("QTreeWidget::indicator:checked")[1].split("}")[0]
+        self.assertIn("border:", checked_block, "checked state must show an outline")
+        # The tick is supplied, and the accent is used for the border, not a fill.
+        self.assertIn("image:", checked_block, "checked state must supply a tick")
+        self.assertNotIn(
+            f"background: {Colors.ACCENT}", checked_block,
+            "checked list items must keep a dark fill, not the accent block",
+        )
+
+    def test_standalone_checkbox_style_is_unchanged(self):
+        """The tick fix must not alter how a normal QCheckBox looks."""
+        from my_idm.styles import DARK_STYLESHEET
+
+        sheet = DARK_STYLESHEET
+        cb_checked = sheet.split("QCheckBox::indicator:checked")[1].split("}")[0]
+        self.assertIn(
+            f"background: {Colors.ACCENT}", cb_checked,
+            "QCheckBox keeps its accent fill",
+        )
+        self.assertNotIn("image:", cb_checked, "QCheckBox must not gain a tick image")
+
+    def test_check_tick_asset_exists(self):
+        from my_idm.resources import RESOURCES_DIR
+
+        self.assertTrue((RESOURCES_DIR / "check.svg").is_file())
 
     def test_batch_quality_is_global_not_per_video(self):
         """Regression: only the first video showed quality / wiped the table."""
