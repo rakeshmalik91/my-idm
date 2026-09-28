@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -540,6 +541,158 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
 
     def test_mark_file_not_found_without_entry(self):
         self.manager.mark_file_not_found("does-not-exist")
+
+    # -- deleting while running (regression: orphaned .part, locked file) ----
+
+    STEM = "Mariage d'Amour - Paul de Senneville __ Jacob's Piano"
+
+    def _start_fake_ytdlp(self):
+        """Fake worker that holds a .f616.mp4.part file open until cancelled."""
+        import threading
+        import time
+
+        state = {
+            "holder": {"cancel": False},
+            "exited": threading.Event(),
+            "stop": threading.Event(),
+            "handle": None,
+            "thread": None,
+        }
+        part_path = {}
+
+        def fake_start(url, save_dir, format_selector, config, outtmpl=None, **kwargs):
+            part = Path(save_dir) / f"{self.STEM}.f616.mp4.part"
+            part_path["path"] = part
+            state["handle"] = open(part, "wb")
+            written = {"n": 0}
+
+            def run():
+                try:
+                    while not state["holder"].get("cancel") and not state["stop"].is_set():
+                        state["handle"].write(b"x" * 8192)
+                        written["n"] += 8192
+                        cb = kwargs.get("progress_cb")
+                        if cb:
+                            try:
+                                cb({"status": "downloading", "downloaded_bytes": written["n"]})
+                            except Exception:
+                                # The test may have torn the manager down already.
+                                break
+                        time.sleep(0.02)
+                finally:
+                    state["handle"].close()
+                    state["exited"].set()
+
+            thread = threading.Thread(target=run, daemon=True)
+            state["thread"] = thread
+            thread.start()
+            return thread, state["holder"]
+
+        patcher = patch("my_idm.youtube_tool.start_native_download", side_effect=fake_start)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        def _shutdown():
+            state["holder"]["cancel"] = True
+            state["stop"].set()
+            thread = state["thread"]
+            if thread is not None:
+                thread.join(timeout=5)
+
+        self.addCleanup(_shutdown)
+        return state, part_path
+
+    def test_delete_during_download_removes_part_file(self):
+        state, part_path = self._start_fake_ytdlp()
+        md = make_metadata()
+        md.title = self.STEM
+        did = self.manager.add_youtube_download(
+            URL, md, save_path=self.out, format_selector="137+140", mode="b"
+        )
+        deadline = time.time() + 5
+        while time.time() < deadline and not part_path["path"].exists():
+            time.sleep(0.02)
+        self.assertTrue(part_path["path"].is_file(), "fake .part was never created")
+
+        self.manager.delete_download(did, delete_files=True)
+        state["exited"].wait(timeout=15)
+
+        self.assertTrue(state["exited"].is_set(), "worker should have exited")
+        self.assertFalse(part_path["path"].exists(), ".part file must be removed")
+        self.assertEqual(list(Path(self.out).iterdir()), [])
+        self.assertIsNone(self.db.get_download(did))
+
+    def test_delete_during_download_releases_lock(self):
+        state, _ = self._start_fake_ytdlp()
+        md = make_metadata()
+        md.title = self.STEM
+        did = self.manager.add_youtube_download(
+            URL, md, save_path=self.out, format_selector="137+140", mode="b"
+        )
+        time.sleep(0.3)
+        self.assertFalse(state["handle"].closed)
+
+        self.manager.delete_download(did, delete_files=True)
+        state["exited"].wait(timeout=15)
+        self.assertTrue(state["handle"].closed, "file handle must be released")
+
+    def test_purge_removes_all_scratch_variants(self):
+        md = make_metadata()
+        md.title = self.STEM
+        with patch("my_idm.youtube_tool.start_native_download") as mock_start:
+            mock_start.return_value = (MagicMock(), {"cancel": False})
+            did = self.manager.add_youtube_download(
+                URL, md, save_path=self.out, format_selector="137+140", mode="b"
+            )
+        entry = self.db.get_download(did)
+        stem = self.manager.external_tools_config and entry.metadata.get("youtube_stem")
+
+        kept = Path(self.out) / f"{stem}.mp4"
+        kept.write_bytes(b"final")
+        for suffix in (".f616.mp4.part", ".f140.m4a.part", ".mp4.ytdl", ".mp4.temp"):
+            Path(self.out) / f"{stem}{suffix}".replace(".mp4.f616.mp4.part", ".f616.mp4.part")
+            (Path(self.out) / f"{stem}{suffix}").write_bytes(b"scratch")
+
+        removed = self.manager._purge_youtube_temp_files(entry)
+        self.assertEqual(len(removed), 4)
+        self.assertTrue(kept.is_file(), "the final media file must survive")
+        self.assertEqual(
+            sorted(p.name for p in Path(self.out).iterdir()),
+            [f"{stem}.mp4"],
+        )
+
+    def test_progress_hook_is_noop_after_entry_deleted(self):
+        """Regression: a late hook raised 'NoneType' has no 'total_size'."""
+        md = make_metadata()
+        with patch("my_idm.youtube_tool.start_native_download") as mock_start:
+            mock_start.return_value = (MagicMock(), {"cancel": False})
+            did = self.manager.add_youtube_download(
+                URL, md, save_path=self.out, format_selector="137+140", mode="b"
+            )
+        self.db.delete_download(did)
+        # Must not raise.
+        self.manager._on_ytdlp_progress(did, {"status": "downloading", "downloaded_bytes": 10})
+        self.manager._on_ytdlp_done(did, "")
+        self.manager._on_ytdlp_error(did, "boom")
+
+    def test_stop_worker_times_out_without_hanging(self):
+        """A worker that ignores cancellation must not block delete indefinitely."""
+        import threading
+        import time
+
+        never = threading.Event()
+        with patch("my_idm.youtube_tool.start_native_download") as mock_start:
+            mock_start.return_value = (threading.Thread(target=never.wait, daemon=True), {"cancel": False})
+            did = self.manager.add_youtube_download(
+                URL, make_metadata(), save_path=self.out,
+                format_selector="137+140", mode="b",
+            )
+        t0 = time.time()
+        self.manager.delete_download(did, delete_files=True)
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 8.0, "delete must not block on an unresponsive worker")
+        self.assertIsNone(self.db.get_download(did))
+        never.set()
 
 
 class TestPasteDetection(unittest.TestCase):

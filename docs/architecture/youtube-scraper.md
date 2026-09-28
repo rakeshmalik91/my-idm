@@ -50,6 +50,26 @@ here because each one invalidated an assumption in the original design:
    is required — cookie source and ffmpeg location change what a URL resolves to, so a cached
    result must never cross configurations.
 
+5. **Deleting a Mode B download must clean up yt-dlp's scratch files.** yt-dlp deliberately keeps
+   `<stem>.part` files so a download can resume, and merged streams leave per-format fragments
+   (`<stem>.f616.mp4.part`). `delete_download(delete_files=True)` only ever targeted
+   `entry.file_path` — the *final* name — so a download deleted mid-transfer left
+   `….f616.mp4.part` behind, still locked, because the worker still held the handle. The fix has
+   three parts:
+   - `_stop_ytdlp_worker()` signals cancellation and **joins the worker (5 s bound)** before any
+     file operation, so Windows has released the handle. Delete paths pass `force=True` so the job
+     is dropped from the registry even if the thread ignores cancellation — otherwise the entry
+     leaks and a later resume is blocked.
+   - `_purge_youtube_temp_files()` removes `.part`, `.ytdl`, `.temp` and `.fNNN` siblings of the
+     entry's stem while deliberately keeping the final media file.
+   - `_on_ytdlp_progress()` returns early when the DB entry has already been deleted. It previously
+     dereferenced `None`, producing a flood of
+     `'NoneType' object has no attribute 'total_size'` in the log after every delete.
+
+   Cancellation also raises `yt_dlp.utils.DownloadError` from the progress hook rather than a bare
+   exception; yt-dlp only unwinds cleanly for its own error type and otherwise reports
+   "bad parameter or other API misuse".
+
 ---
 
 ## Table of Contents
@@ -645,6 +665,12 @@ Ordered checklist with dependencies. Each step is independently testable.
   - `_cancel_ytdlp_job()` signals the worker; wired into `pause_download()`, `stop_download()`,
     `delete_download()`, `delete_download_file()` and `DownloadManager.stop()`
   - `_start_ytdlp_native_job()` refuses to start a duplicate worker for the same entry
+  - `_stop_ytdlp_worker()` additionally joins the worker (5 s bound) so file handles are released
+    before cleanup; delete paths use `force=True` to drop the registry entry unconditionally
+  - `_purge_youtube_temp_files()` removes `.part` / `.ytdl` / `.temp` / `.fNNN` scratch files left
+    behind by yt-dlp, keeping the final media file
+  - Cancellation raises `yt_dlp.utils.DownloadError` from the progress hook so yt-dlp unwinds
+    without "bad parameter or other API misuse"
 
 ### Phase 4: YouTube Dialog (UI) — ✅ complete
 

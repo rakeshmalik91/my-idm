@@ -929,6 +929,12 @@ def start_native_download(
                 log.debug("yt-dlp postprocessor hook error: %s", exc)
 
     def _worker() -> None:
+        _download_error = None
+        try:
+            from yt_dlp.utils import DownloadError as _download_error  # noqa: PLC0415
+        except Exception:  # pragma: no cover - yt-dlp always provides this
+            log.debug("yt_dlp.utils.DownloadError unavailable; using YouTubeToolError for cancel")
+
         options = get_download_options(
             config, format_selector, save_dir,
             outtmpl=outtmpl, merge_output_format=merge_output_format,
@@ -942,8 +948,14 @@ def start_native_download(
         try:
             with module.YoutubeDL(options) as ydl:
                 def _abort(_status: dict) -> None:
-                    if cancel_holder.get("cancel") or (cancel_event is not None and cancel_event.is_set()):
-                        raise YouTubeToolError("Download cancelled by user.", kind="cancelled")
+                    if not (cancel_holder.get("cancel") or (cancel_event is not None and cancel_event.is_set())):
+                        return
+                    # yt-dlp only unwinds cleanly when a progress hook raises
+                    # DownloadError; anything else surfaces as
+                    # "bad parameter or other API misuse".
+                    if _download_error is not None:
+                        raise _download_error("Download cancelled by user.")
+                    raise YouTubeToolError("Download cancelled by user.", kind="cancelled")
 
                 ydl.add_progress_hook(_abort)
                 ydl.download([url])

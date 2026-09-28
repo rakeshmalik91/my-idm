@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import logging
 import os
 import re
@@ -31,6 +32,7 @@ from my_idm.config import (
 from my_idm.notifications import notify_browser_download_caught
 from my_idm.browser_server import BrowserServer
 from my_idm.external_tools import launch_animepahe_cli, launch_animepahe_gui
+from my_idm import youtube_tool
 from my_idm.tor_service import TorServiceManager, find_tor_executable
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.security import (
@@ -840,7 +842,11 @@ class DownloadManager(QObject):
     def _on_ytdlp_progress(self, download_id: str, status: dict):
         """Relay a yt-dlp progress hook into the download table."""
         entry = self._db.get_download(download_id)
-        if entry and entry.status in ("paused", "stopped", "completed", "cancelled"):
+        if entry is None:
+            # The entry was deleted while the worker was still finishing; the
+            # hook can still fire briefly, and it must not touch the DB.
+            return
+        if entry.status in ("paused", "stopped", "completed", "cancelled", "file_not_found"):
             return
 
         state = status.get("status")
@@ -853,6 +859,8 @@ class DownloadManager(QObject):
             try:
                 total = int(entry.metadata.get("youtube_expected_size") or 0)
             except (AttributeError, TypeError, ValueError):
+                total = 0
+            if not total:
                 total = entry.total_size or 0
 
         if state == "downloading" and downloaded > 0:
@@ -1672,7 +1680,8 @@ class DownloadManager(QObject):
             return
 
         self._starting_downloads.discard(download_id)
-        self._cancel_ytdlp_job(download_id)
+        if self._is_ytdlp_native_entry(entry):
+            self._stop_ytdlp_worker(download_id, "paused")
         self._db.update_status(download_id, "paused")
         self._db.update_queue_order(download_id, 0)
         self.status_changed.emit(download_id, "paused", "")
@@ -1722,7 +1731,8 @@ class DownloadManager(QObject):
         self._starting_downloads.discard(download_id)
 
         # Halt the transfer in the engine
-        self._cancel_ytdlp_job(download_id)
+        if self._is_ytdlp_native_entry(entry):
+            self._stop_ytdlp_worker(download_id, "stopped")
         if entry.download_type == "http":
             if self._is_ytdlp_native_entry(entry):
                 pass
@@ -1887,16 +1897,96 @@ class DownloadManager(QObject):
 
         self.status_changed.emit(download_id, target_status, "")
 
+    def _stop_ytdlp_worker(self, download_id: str, reason: str, timeout: float = 5.0,
+                          force: bool = False) -> bool:
+        """Signal a Mode B worker to abort and wait for it to release its files.
+
+        yt-dlp keeps the file handle open while running, so deleting temp files
+        before the worker exits leaves them locked on Windows.
+
+        Returns True when the worker exited. With *force* the job is dropped from
+        the registry regardless — used when the download is being removed, where
+        keeping a stale entry would leak and a later resume must be allowed.
+        """
+        with self._ytdlp_lock:
+            job = self._ytdlp_jobs.get(download_id)
+        if not job:
+            return False
+
+        holder = job.get("cancel_holder")
+        if holder is not None:
+            holder["cancel"] = True
+        event = job.get("cancel_event")
+        if event is not None:
+            event.set()
+
+        thread = job.get("thread")
+        exited = True
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                exited = False
+                log.warning(
+                    "yt-dlp worker for %s did not exit within %.0fs (%s); "
+                    "its temporary files may stay locked",
+                    download_id, timeout, reason,
+                )
+
+        if exited or force:
+            self._drop_ytdlp_job(download_id)
+            log.info("yt-dlp worker for %s stopped (%s)", download_id, reason)
+        return exited
+
+    def _purge_youtube_temp_files(self, entry: DownloadEntry) -> list[str]:
+        """Delete yt-dlp scratch files (``.part``, ``.ytdl``, ``.fNNN.*``) for an entry.
+
+        yt-dlp deliberately keeps ``.part`` files so a download can resume, and
+        merged streams leave per-format fragments behind. Removing only
+        ``entry.file_path`` leaves those on disk after a delete.
+        """
+        removed: list[str] = []
+        directory = Path(entry.save_path) if entry.save_path else None
+        if directory is None or not directory.is_dir():
+            return removed
+
+        stem = entry.metadata.get("youtube_stem") or ""
+        if not stem:
+            stem, _ext = split_extension(entry.filename or "")
+        if not stem:
+            return removed
+        stem = youtube_tool.build_stem(stem)
+
+        for candidate in directory.glob(f"{glob.escape(stem)}.*"):
+            if not candidate.is_file():
+                continue
+            name = candidate.name
+            is_scratch = (
+                name.endswith((".part", ".ytdl", ".temp", ".tmp"))
+                or re.search(r"\.f\d+", name) is not None
+            )
+            if not is_scratch:
+                continue
+            try:
+                candidate.unlink()
+                removed.append(name)
+            except OSError as exc:
+                log.warning("Could not remove yt-dlp temp file %s: %s", candidate, exc)
+        if removed:
+            log.info("Removed %d yt-dlp temp file(s) for %s: %s",
+                     len(removed), entry.id, ", ".join(removed))
+        return removed
+
     def delete_download(self, download_id: str, delete_files: bool = False):
         entry = self._db.get_download(download_id)
         if not entry:
             return
 
         # Stop active download
-        self._cancel_ytdlp_job(download_id)
-        self._drop_ytdlp_job(download_id)
+        is_ytdlp = self._is_ytdlp_native_entry(entry)
+        if is_ytdlp:
+            self._stop_ytdlp_worker(download_id, "download deleted", force=True)
         if entry.download_type == "http":
-            if self._is_ytdlp_native_entry(entry):
+            if is_ytdlp:
                 pass
             elif self._loop and self._loop.is_running():
                 fut = asyncio.run_coroutine_threadsafe(
@@ -1920,6 +2010,8 @@ class DownloadManager(QObject):
                     success = send_to_trash(fp)
                     if not success and fp.exists():
                         log.warning("Failed to move file to trash: %s", fp)
+            if is_ytdlp:
+                self._purge_youtube_temp_files(entry)
 
         # Remove from DB
         self._db.delete_segments(download_id)
@@ -1934,10 +2026,11 @@ class DownloadManager(QObject):
             return
 
         # 1. Stop active download
-        self._cancel_ytdlp_job(download_id)
-        self._drop_ytdlp_job(download_id)
+        is_ytdlp = self._is_ytdlp_native_entry(entry)
+        if is_ytdlp:
+            self._stop_ytdlp_worker(download_id, "file deleted", force=True)
         if entry.download_type == "http":
-            if self._is_ytdlp_native_entry(entry):
+            if is_ytdlp:
                 pass
             elif self._loop and self._loop.is_running():
                 fut = asyncio.run_coroutine_threadsafe(
@@ -1960,6 +2053,8 @@ class DownloadManager(QObject):
                 success = send_to_trash(fp)
                 if not success and fp.exists():
                     log.warning("Failed to move file to trash: %s", fp)
+        if is_ytdlp:
+            self._purge_youtube_temp_files(entry)
 
         # 3. Clean up HTTP segment records in DB
         self._db.delete_segments(download_id)
