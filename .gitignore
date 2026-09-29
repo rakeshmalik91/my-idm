@@ -222,3 +222,4 @@ backlog.txt
 *.db
 
 .kilo
+.idea

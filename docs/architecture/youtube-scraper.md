@@ -773,10 +773,9 @@ Checked against real videos and a real playlist on 2026-09-27 (yt-dlp 2026.08.19
 Automated coverage: `tests/test_youtube_tool.py` (83), `tests/test_youtube_downloads.py` (57),
 `tests/test_youtube_ui.py` (72), plus the `ytdlp_*` config tests in
 `tests/test_external_tools.py`. All `yt_dlp` interaction is mocked so the suite stays
-offline-safe. Full suite: **617 passing**.
+offline-safe.
 
-**Known pre-existing failure (unrelated):** `tests/test_settings.py::TestExternalToolsSettings::
-test_settings_dialog_run_cli_button` also fails on a clean checkout.
+Full suite: **767 passing, 1 skipped, 0 failing.**
 
 ---
 

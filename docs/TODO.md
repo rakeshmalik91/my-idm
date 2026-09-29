@@ -89,23 +89,28 @@ commit after each features or set of fixes/enhancements
   - [x] add a button in tools menu to launch animepahe downloader gui
   - [x] show footer badge while background CLI scraper is active (status popup for logs, stop/start, GUI, settings)
   - [x] active console log bottom panel (stream logs in real-time when clicking console log from footer while animepahe cli is active)
+    - [x] group the output into collapsible sessions, one per scraper run, titled by start timestamp; all collapsed except the newest
   - [x] download new anime from preferences window > animepahe, using url & optional episode range
 
 #### Youtube scraper ([Architecture Doc](architecture/youtube-scraper.md))
+
 **Phase 1: Foundation**
 - [x] Add `ytdlp_*` fields to `ExternalToolsConfig` (config, serialization, unit tests)
 - [x] Create `youtube_tool.py` — dataclasses, availability checks, URL detection regex
 - [x] Implement `extract_metadata()` — call `yt_dlp.extract_info(download=False)`, parse formats
 - [x] Implement `resolve_direct_url()` for Mode A (direct CDN URL extraction)
+
 **Phase 2: Mode A — HTTPEngine Integration**
 - [x] Add `add_youtube_download()` to `DownloadManager` (resolve URL → standard HTTP download)
 - [x] Handle URL expiration — re-extract on resume via `_refresh_youtube_url()`
+
 **Phase 3: Mode B — yt-dlp Native Download**
 - [x] Implement `start_native_download()` — daemon thread + progress hooks + postprocessor hooks
 - [x] Add Mode B tracking to `DownloadManager` (progress relay, completion, cancellation)
 - [x] Control the output filename so the DB path matches the file yt-dlp writes
 - [x] Locate the produced file by stem (ignores `.part` / `.fNNN` merge fragments)
 - [x] Self-heal entries whose recorded path disagrees with the file on disk
+
 **Phase 4: YouTube Dialog (UI)**
 - [x] Create `youtube_dialog.py` — URL input, thumbnail preview, video info panel
 - [x] Build format selection table with quality presets
@@ -116,15 +121,18 @@ commit after each features or set of fixes/enhancements
 - [x] Throttle analyses (0.75s min gap) and cache identical URLs for 5 min
 - [x] Hide Select all / Clear for a single-item list
 - [x] Closing the dialog mid-analysis no longer crashes (daemon thread, no QThread)
+
 **Phase 5: Menu & Toolbar Integration**
 - [x] Add `Tools → Download YouTube Video…` menu action (`Ctrl+Y`)
 - [x] Auto-detect YouTube URLs in "Add Download" dialog → redirect to YouTube dialog
 - [x] Surface YouTube origin in the table via a tooltip (engine + uploader + video id)
+
 **Phase 6: Settings UI**
 - [x] Add YouTube sub-tab to External Tools preferences
 - [x] Wire settings persistence + live validation (yt-dlp/ffmpeg path status)
 - [x] yt-dlp version display + "Update yt-dlp" button (pip or binary `-U`)
 - [x] Playlist entry limit control (1-500) + persistence
+
 **Phase 7: Polish**
 - [x] Handle age-restricted, geo-restricted, live stream, private/members-only videos
 - [x] yt-dlp auto-update mechanism (`youtube_tool.update_ytdlp()`)
@@ -145,16 +153,20 @@ commit after each features or set of fixes/enhancements
 - [x] Fix segment rows showing "Pending" while downloading; cancelled/retrying segments now report "Paused"
 - [x] Fix columns not refreshing after a status change; keep row selection across segregated-view rebuilds
 - [x] Append new columns at the end so saved column order/widths survive, and heal stale saved layouts
+
 *Tor*
 - [x] Add "Route through Tor" to the row context menu, enabled only while Tor is reachable
 - [x] Route a single HTTP download through a dedicated Tor SOCKS5 session (general proxy suppressed for it)
 - [x] Cache Tor availability and probe it on a background thread (was freezing the GUI ~1s per menu open / row repaint)
+
 *Toolbar / window*
 - [x] Add a quick-search box in the toolbar gap; filters by name, original name, URL, or domain
 - [x] Move Preferences to the far right of the toolbar
 - [x] Add "Add Download…" and "About My-IDM" to the system tray menu
 - [x] Fix editable combo boxes (Add/YouTube dialogs) rendering without a visible outline
+- [x] Group the AnimePahe console log into collapsible per-session blocks (newest open, rest collapsed)
 - [x] Fix playlist list overlapping the Select all / Clear buttons, and grow the list height
+
 *Dialogs / about*
 - [x] Relabel the Add Download group to "URL / Magnet Link / YouTube URL"
 - [x] Keep the YouTube hand-off banner visible after closing the YouTube dialog

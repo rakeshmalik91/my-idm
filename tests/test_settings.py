@@ -664,7 +664,12 @@ class TestExternalToolsSettings(unittest.TestCase):
         dlg.close()
 
     def test_settings_dialog_run_cli_button(self):
-        """SettingsDialog includes Run CLI button that starts/stops AnimePahe scraper."""
+        """SettingsDialog includes Run CLI button that starts/stops AnimePahe scraper.
+
+        Success is deliberately silent - the button label and the footer badge
+        already reflect the new state, so no dialog is raised. Only failures
+        warn, and a missing repository warns without starting anything.
+        """
         from unittest.mock import MagicMock
         mock_mgr = MagicMock()
         mock_mgr.is_animepahe_running.return_value = False
@@ -675,10 +680,14 @@ class TestExternalToolsSettings(unittest.TestCase):
         dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5, manager=mock_mgr)
         self.assertIn("Run CLI Now", dlg._btn_run_cli_now.text())
 
-        with patch("os.path.isdir", return_value=True), patch("PySide6.QtWidgets.QMessageBox.information") as mock_info:
+        with patch("os.path.isdir", return_value=True), \
+             patch("PySide6.QtWidgets.QMessageBox.information") as mock_info, \
+             patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
             dlg._on_run_animepahe_cli_from_settings()
             mock_mgr.start_animepahe_scraper.assert_called_once()
-            mock_info.assert_called_once()
+            # Silent on success: state is conveyed by the button/footer badge.
+            mock_info.assert_not_called()
+            mock_warn.assert_not_called()
 
             # Simulate scraper now running
             mock_mgr.is_animepahe_running.return_value = True
@@ -688,6 +697,33 @@ class TestExternalToolsSettings(unittest.TestCase):
             # Clicking again stops scraper
             dlg._on_run_animepahe_cli_from_settings()
             mock_mgr.stop_animepahe_scraper.assert_called_once()
+            mock_info.assert_not_called()
+            mock_warn.assert_not_called()
+
+            # A failure does warn, and the message is surfaced.
+            mock_mgr.is_animepahe_running.return_value = False
+            mock_mgr.start_animepahe_scraper.return_value = (False, "tor.exe not found")
+            dlg._on_run_animepahe_cli_from_settings()
+            mock_warn.assert_called_once()
+            self.assertIn("tor.exe not found", mock_warn.call_args[0][2])
+
+        dlg.close()
+
+    def test_settings_dialog_run_cli_missing_repo_warns_without_starting(self):
+        """A missing repository is reported and the scraper is never started."""
+        from unittest.mock import MagicMock
+        mock_mgr = MagicMock()
+        mock_mgr.is_animepahe_running.return_value = False
+
+        cfg = ExternalToolsConfig(animepahe_repo_path="")
+        dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5, manager=mock_mgr)
+
+        with patch("os.path.isdir", return_value=False), \
+             patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
+            dlg._on_run_animepahe_cli_from_settings()
+            mock_warn.assert_called_once()
+            self.assertEqual(mock_warn.call_args[0][1], "Repository Not Found")
+            mock_mgr.start_animepahe_scraper.assert_not_called()
 
         dlg.close()
 

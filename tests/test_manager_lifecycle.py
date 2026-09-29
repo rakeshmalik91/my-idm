@@ -953,9 +953,10 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         e_paused = DownloadEntry(id="d_paused", url="http://example.com/p.zip", status="paused")
         e_stopped = DownloadEntry(id="d_stopped", url="http://example.com/s.zip", status="stopped")
         e_suspended = DownloadEntry(id="d_suspended", url="http://example.com/sus.zip", status="suspended")
-        self.db.add_download(e_paused)
-        self.db.add_download(e_stopped)
-        self.db.add_download(e_suspended)
+        # A live entry proves the suppression is status-based, not a blanket mute.
+        e_active = DownloadEntry(id="d_active", url="http://example.com/a.zip", status="downloading")
+        for entry in (e_paused, e_stopped, e_suspended, e_active):
+            self.db.add_download(entry)
 
         emitted = []
         self.manager.progress_updated.connect(lambda *args: emitted.append(args))
@@ -964,11 +965,28 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.manager._on_http_progress("d_paused", 500, 1000, 100.0, 5.0)
         self.manager._on_http_progress("d_stopped", 500, 1000, 100.0, 5.0)
         self.manager._on_http_progress("d_suspended", 500, 1000, 100.0, 5.0)
+        self.manager._on_http_progress("d_active", 500, 1000, 100.0, 5.0)
 
         # Torrent progress callbacks
         self.manager._on_torrent_progress("d_paused", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
         self.manager._on_torrent_progress("d_stopped", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
         self.manager._on_torrent_progress("d_suspended", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
+        self.manager._on_torrent_progress("d_active", 500, 1000, 100.0, 5.0, 1, 1, 0.0)
+
+        # Only the active download may report progress.
+        ids = [args[0] for args in emitted]
+        self.assertEqual(
+            ids, ["d_active", "d_active"],
+            f"progress must be suppressed for paused/stopped/suspended, got {ids}",
+        )
+
+    def test_progress_emitted_for_unknown_download_id(self):
+        """An entry that has vanished must not break the progress relay."""
+        emitted = []
+        self.manager.progress_updated.connect(lambda *args: emitted.append(args))
+        self.manager._on_http_progress("does-not-exist", 1, 2, 3.0, 4.0)
+        # Still relayed: the handler guards on status, and there is no entry to read.
+        self.assertEqual([a[0] for a in emitted], ["does-not-exist"])
 
     def test_startup_resumes_seeding_torrents_when_configured(self):
         """Torrents in seeding status are resumed on startup when resume_seeding_on_startup is enabled."""

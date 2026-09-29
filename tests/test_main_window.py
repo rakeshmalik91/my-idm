@@ -994,6 +994,61 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
         self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 2)
 
+    def test_details_panel_state_survives_a_hidden_window_save(self):
+        """Regression: the panel appeared closed after restart.
+
+        Every child widget reports isVisible() == False while the window is
+        hidden (minimised, or closed to tray), so saving that value persisted
+        "panel closed" even when the user had it open.
+        """
+        self.win.show()
+        QApplication.processEvents()
+        self.win._act_toggle_details.setChecked(True)
+        self.win._on_toggle_details(True)
+        QApplication.processEvents()
+        self.assertTrue(self.win._details_panel.isVisible())
+
+        # Simulate the window being hidden, as when closed to the tray.
+        self.win.hide()
+        self.assertFalse(self.win._details_panel.isVisible())
+
+        self.win._save_ui_state_to_db()
+        state = self.manager.get_ui_state()
+        self.assertTrue(
+            state.get("details_visible"),
+            "panel intent must be saved from the toggle, not live visibility",
+        )
+
+        # Restoring brings it back open.
+        self.win._act_toggle_details.setChecked(False)
+        self.win._details_panel.setVisible(False)
+        self.win._restore_ui_state_from_db()
+        # A fresh launch shows the window, so the child becomes visible again.
+        self.win.show()
+        QApplication.processEvents()
+        self.assertTrue(self.win._details_panel.isVisible())
+        self.assertTrue(self.win._act_toggle_details.isChecked())
+
+    def test_details_panel_closed_state_is_persisted(self):
+        """A deliberately closed panel must stay closed after a restart."""
+        self.win.show()
+        QApplication.processEvents()
+        # Drive the action, which is what the UI does (toggled -> _on_toggle_details).
+        self.win._act_toggle_details.setChecked(True)
+        QApplication.processEvents()
+        self.assertTrue(self.win._details_panel.isVisible())
+
+        self.win._act_toggle_details.setChecked(False)
+        QApplication.processEvents()
+        self.win._save_ui_state_to_db()
+        self.assertFalse(self.manager.get_ui_state().get("details_visible"))
+
+        self.win._act_toggle_details.setChecked(True)
+        QApplication.processEvents()
+        self.win._restore_ui_state_from_db()
+        self.assertFalse(self.win._details_panel.isVisible())
+        self.assertFalse(self.win._act_toggle_details.isChecked())
+
     def test_ui_state_restore_preserves_user_column_order(self):
         """Restoring UI state does not forcefully push File / Folder Name or Source Domain to the front."""
         header = self.win._table.horizontalHeader()

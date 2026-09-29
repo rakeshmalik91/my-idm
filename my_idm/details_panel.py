@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import humanize
+from datetime import datetime, timedelta, timezone
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
 from PySide6.QtWidgets import (
@@ -268,6 +269,162 @@ class SideTabBar(QWidget):
     def setTabText(self, index: int, text: str):
         if 0 <= index < len(self._tabs):
             self._tabs[index].setText(text)
+
+
+class SessionTabList(QWidget):
+    """Vertical, scrollable list of scraper log sessions.
+
+    One entry per run, newest first, so the live session is always visible
+    without scrolling. Deliberately a plain button list inside a scroll area
+    rather than a QTabWidget: the log body stays a QPlainTextEdit, which keeps
+    native multi-line text selection and Ctrl+C copying.
+    """
+
+    currentKeyChanged = Signal(str)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+
+        self._keys: list[str] = []
+        self._labels: list[str] = []
+        self._buttons: list[QPushButton] = []
+        self._current_key: str = ""
+        self._following_live = True
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._holder = QWidget()
+        self._holder.setObjectName("session_tab_holder")
+        self._list_layout = QVBoxLayout(self._holder)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(1)
+        self._list_layout.addStretch(1)
+        self._scroll.setWidget(self._holder)
+        outer.addWidget(self._scroll)
+
+        self._btn_group = QButtonGroup(self)
+        self._btn_group.setExclusive(True)
+
+        self.setFixedWidth(118)
+        self.setStyleSheet(f"""
+            SessionTabList {{
+                background-color: {Colors.BG_DARK};
+                border-right: 1px solid {Colors.BORDER};
+            }}
+        """)
+
+    # -- population ---------------------------------------------------------
+
+    @staticmethod
+    def _format_label(title: str) -> str:
+        """Compact, sortable label for a session banner timestamp."""
+        try:
+            stamp = datetime.fromisoformat(title.strip())
+        except (TypeError, ValueError):
+            return title.strip() or "Session"
+        if stamp.year == datetime.now().year:
+            return stamp.strftime("%d %b %H:%M")
+        return stamp.strftime("%d %b %y %H:%M")
+
+    def set_sessions(self, entries: list[tuple[str, str]]) -> None:
+        """Replace the list. *entries* is ``[(key, banner_title), ...]``, oldest first.
+
+        The newest session is prepended so it sits at the top of the list.
+        """
+        ordered = list(reversed(entries))
+        self._keys = [k for k, _t in ordered]
+        self._labels = [self._format_label(t) for _k, t in ordered]
+        self._rebuild_buttons()
+        if self._keys:
+            if self._current_key in self._keys:
+                self._select_key(self._current_key, notify=False)
+            else:
+                self._select_key(self._keys[0], notify=False)
+
+    def _clear_buttons(self) -> None:
+        while self._list_layout.count() > 1:  # keep the trailing stretch
+            item = self._list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                self._btn_group.removeButton(widget)
+                widget.deleteLater()
+        self._buttons.clear()
+
+    def _rebuild_buttons(self) -> None:
+        self._clear_buttons()
+        for key, label in zip(self._keys, self._labels):
+            btn = QPushButton(label, self._holder)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(30)
+            btn.setToolTip(key.split("#", 1)[0])
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {Colors.TEXT_SECONDARY};
+                    border: none;
+                    border-left: 3px solid transparent;
+                    border-radius: 0px;
+                    padding: 4px 8px;
+                    font-size: 11px;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.BG_HOVER};
+                    color: {Colors.TEXT};
+                }}
+                QPushButton:checked {{
+                    background-color: {Colors.BG_MID};
+                    color: {Colors.ACCENT};
+                    border-left: 3px solid {Colors.ACCENT};
+                    font-weight: bold;
+                }}
+            """)
+            btn.clicked.connect(lambda _c=False, k=key: self._select_key(k))
+            self._btn_group.addButton(btn)
+            self._list_layout.insertWidget(self._list_layout.count() - 1, btn)
+            self._buttons.append(btn)
+
+    # -- selection ----------------------------------------------------------
+
+    def _select_key(self, key: str, notify: bool = True) -> None:
+        if key not in self._keys:
+            return
+        changed = self._current_key != key
+        self._current_key = key
+        index = self._keys.index(key)
+        for i, btn in enumerate(self._buttons):
+            btn.setChecked(i == index)
+        if changed and notify:
+            self.currentKeyChanged.emit(key)
+
+    def current_key(self) -> str:
+        return self._current_key
+
+    def set_current_key(self, key: str) -> None:
+        self._select_key(key)
+
+    def count(self) -> int:
+        return len(self._keys)
+
+    def tabText(self, index: int) -> str:
+        return self._labels[index] if 0 <= index < len(self._labels) else ""
+
+    def keyAt(self, index: int) -> str:
+        return self._keys[index] if 0 <= index < len(self._keys) else ""
+
+    def is_following_live(self) -> bool:
+        """True when the newest session is selected (i.e. the user is tailing)."""
+        return bool(self._keys) and self._current_key == self._keys[0]
 
 
 class EmbeddedBrowserContainer(QWidget):
@@ -1949,7 +2106,15 @@ class DetailsPanel(QWidget):
 
         layout.addLayout(ctrl_bar)
 
-        # Log Text Viewer
+        # Session list on the left, log text on the right. The text stays a
+        # QPlainTextEdit so a user can drag-select several lines and press Ctrl+C.
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
+
+        self._console_session_tabs = SessionTabList(widget)
+        body.addWidget(self._console_session_tabs)
+
         self._console_text = QPlainTextEdit(widget)
         self._console_text.setReadOnly(True)
         self._console_text.setMaximumBlockCount(15000)
@@ -1968,7 +2133,10 @@ class DetailsPanel(QWidget):
                 selection-color: #ffffff;
             }
         """)
-        layout.addWidget(self._console_text, stretch=1)
+        body.addWidget(self._console_text, stretch=1)
+        layout.addLayout(body, stretch=1)
+
+        self._console_session_tabs.currentKeyChanged.connect(self._on_console_session_selected)
 
         return widget
 
@@ -2076,11 +2244,82 @@ class DetailsPanel(QWidget):
     def _start_log_timer(self):
         if not self._log_timer.isActive():
             self._log_timer.start(250)
+        self._prune_console_log()
         self._poll_console_log()
 
     def _stop_log_timer(self):
         if self._log_timer.isActive():
             self._log_timer.stop()
+
+    # -- Retention -----------------------------------------------------------
+    #
+    # The scraper appends to console_log.txt forever, so it grows without bound.
+    # Only the last CONSOLE_LOG_RETENTION_DAYS days of sessions are kept.
+
+    CONSOLE_LOG_RETENTION_DAYS = 3
+
+    def _session_within_retention(self, header_lines) -> bool:
+        """True when a session is inside the retention window (or undated)."""
+        if not header_lines:
+            return True
+        title = self._session_title(header_lines)
+        try:
+            stamp = datetime.fromisoformat(title.strip())
+        except (TypeError, ValueError):
+            return True  # undated preamble: keep it rather than guess
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp >= self._retention_cutoff()
+
+    @classmethod
+    def _retention_cutoff(cls) -> datetime:
+        return datetime.now(timezone.utc) - timedelta(days=cls.CONSOLE_LOG_RETENTION_DAYS)
+
+    def _prune_console_log(self) -> None:
+        """Drop sessions older than the retention window, on disk and in memory.
+
+        Rewrites the log file so it stops growing. Only safe while the scraper is
+        idle; a running scraper holds the file open for append, so the on-disk
+        rewrite is skipped in that case and the in-memory drop still applies.
+        """
+        if not self._raw_log_lines:
+            return
+
+        sessions = self._console_sessions()
+        keep = [s for s in sessions if self._session_within_retention(s[1])]
+        if len(keep) == len(sessions):
+            return
+
+        dropped = len(sessions) - len(keep)
+        rebuilt: list[str] = []
+        for _key, header, body in keep:
+            rebuilt.extend(header)
+            rebuilt.extend(body)
+        if not rebuilt:
+            return
+        rebuilt.append("\n")
+
+        self._raw_log_lines = rebuilt
+        logger.info(
+            "Console log retention: dropped %d session(s) older than %d days",
+            dropped, self.CONSOLE_LOG_RETENTION_DAYS,
+        )
+
+        if self._manager.is_animepahe_running():
+            return  # scraper owns the file right now
+
+        log_path = self._manager.external_tools_config.get_console_log_path()
+        if not log_path or not log_path.is_file():
+            return
+        try:
+            with open(log_path, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write("".join(rebuilt))
+            self._log_offset = os.path.getsize(log_path)
+        except OSError as exc:
+            logger.debug("Could not compact console log: %s", exc)
+
+        # Refresh the session list so the dropped runs disappear from the tabs.
+        self._render_console()
 
     def _poll_console_log(self):
         log_path = self._manager.external_tools_config.get_console_log_path()
@@ -2106,43 +2345,180 @@ class DetailsPanel(QWidget):
         except Exception as exc:
             logger.debug("Error reading console log: %s", exc)
 
+    # -- console session grouping -------------------------------------------
+    #
+    # The scraper writes a banner before every run:
+    #
+    #   =======================================================
+    #     AnimePahe CLI Scraper Session Started: 2026-09-29 16:18:01
+    #     Command: <argv>
+    #   =======================================================
+    #
+    # Those four lines are consumed as a collapsible group header; everything
+    # after them is that session's output.
+
+    _SESSION_RULE_CHARS = "="
+
+    @classmethod
+    def _is_session_rule(cls, line: str) -> bool:
+        stripped = line.strip()
+        return bool(stripped) and set(stripped) == {cls._SESSION_RULE_CHARS}
+
+    @classmethod
+    def _split_sessions(cls, lines):
+        """Split raw log lines into ``(header_lines, body_lines)`` per session.
+
+        A banner is the block *between* two ``====`` rules, so the body has to be
+        held until the following banner is seen in full. Flushing on the closing
+        rule instead would attach each session's output to the *next* banner,
+        because the blank separator before that banner has already been read.
+        """
+        sessions: list[tuple[list[str], list[str]]] = []
+        pending_header: list[str] = []
+        block: list[str] = []
+        in_block = False
+        body: list[str] = []
+
+        for line in lines:
+            if cls._is_session_rule(line):
+                if in_block:
+                    # The banner is complete. Whatever came before it belongs to
+                    # the previously seen banner (or to "earlier output").
+                    if pending_header or body:
+                        sessions.append((pending_header, body))
+                    pending_header = block
+                    body = []
+                    in_block = False
+                else:
+                    block = [line]
+                    in_block = True
+                continue
+            (block if in_block else body).append(line)
+
+        if in_block:  # trailing banner with no closing rule
+            block.append("")
+            pending_header = block
+        if pending_header or body:
+            sessions.append((pending_header, body))
+        return sessions
+
+    @classmethod
+    def _session_key(cls, header_lines, ordinal: int) -> str:
+        """Stable identity for a session.
+
+        Two runs can start within the same second, so the timestamp alone is not
+        a unique key; the ordinal disambiguates them.
+        """
+        return f"{cls._session_title(header_lines)}#{ordinal}"
+
+    @staticmethod
+    def _session_title(header_lines) -> str:
+        """Derive a group label from the banner, e.g. '2026-09-29 16:18:01'."""
+        for line in header_lines:
+            if "Session Started:" in line:
+                return line.split("Session Started:", 1)[1].strip()
+        for line in header_lines:
+            if "Command:" in line:
+                return line.split("Command:", 1)[1].strip()[:60]
+        return "Earlier output"
+
+    @staticmethod
+    def _session_command(header_lines) -> str:
+        for line in header_lines:
+            if "Command:" in line:
+                return line.split("Command:", 1)[1].strip()
+        return ""
+
+    def _console_sessions(self):
+        """Parsed sessions as ``[(key, header_lines, body_lines), ...]``, oldest first.
+
+        Sessions with no banner and no actual output are dropped: the scraper
+        writes a blank line before each banner, which would otherwise produce an
+        empty "Earlier output" tab in a freshly created log.
+        """
+        out = []
+        for i, (header, body) in enumerate(self._split_sessions(self._raw_log_lines)):
+            if not header and not any(line.strip() for line in body):
+                continue
+            out.append((self._session_key(header, i), header, body))
+        return out
+
+    def _render_console(self):
+        """Refresh the session list and show the selected session's log text.
+
+        Only the selected session is rendered. That keeps the pane a plain text
+        widget - so multi-line selection and Ctrl+C work - instead of needing an
+        in-place collapsible tree.
+        """
+        sessions = self._console_sessions()
+        filter_term = self._console_filter_edit.text().strip().lower()
+
+        self._console_session_tabs.set_sessions(
+            [(key, self._session_title(header)) for key, header, _b in sessions]
+        )
+
+        if not sessions:
+            self._console_text.setPlainText("")
+            return
+
+        by_key = {key: (header, body) for key, header, body in sessions}
+        current = self._console_session_tabs.current_key()
+
+        def matches(body):
+            return not filter_term or any(
+                filter_term in line.lower() for line in body
+            )
+
+        # A filter can leave the current session empty; jump to the newest one
+        # that actually has matches rather than showing a blank pane. Without a
+        # filter the user's selection is always honoured.
+        if filter_term and (current not in by_key or not matches(by_key[current][1])):
+            fallback = next(
+                (key for key, _h, body in reversed(sessions) if matches(body)),
+                current,
+            )
+            if fallback in by_key:
+                self._console_session_tabs.set_current_key(fallback)
+                current = fallback
+
+        header, body = by_key[current]
+        shown = [
+            line for line in body
+            if not filter_term or filter_term in line.lower()
+        ]
+        out = [line.rstrip("\r\n") for line in header]
+        out.extend(line.rstrip("\r\n") for line in shown if line.strip())
+        self._console_text.setPlainText("\n".join(out))
+        if self._console_autoscroll_cb.isChecked():
+            self._scroll_to_bottom()
+
+    def _console_visible_text(self) -> str:
+        """Currently rendered log text (used by tests and Clear)."""
+        return self._console_text.toPlainText()
+
     def _append_log_text(self, text: str):
-        lines = text.splitlines(True)
-        self._raw_log_lines.extend(lines)
+        was_following_live = self._console_session_tabs.is_following_live()
+        self._raw_log_lines.extend(text.splitlines(True))
         if len(self._raw_log_lines) > 10000:
             self._raw_log_lines = self._raw_log_lines[-10000:]
-
-        filter_term = self._console_filter_edit.text().strip().lower()
-        if filter_term:
-            matching = [line for line in lines if filter_term in line.lower()]
-            to_append = "".join(matching)
-        else:
-            to_append = text
-
-        if to_append:
-            cursor = self._console_text.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.insertText(to_append)
-            if self._console_autoscroll_cb.isChecked():
-                self._scroll_to_bottom()
 
         if "[Browser Resolve]" in text or "Opening browser" in text:
             self._on_browser_monitor_tick()
 
+        self._render_console()
+        # Follow a brand-new session only if the user was already tailing the
+        # newest one; never yank them away from a session they are reading.
+        if was_following_live:
+            self._console_session_tabs.set_current_key(
+                self._console_session_tabs._keys[0] if self._console_session_tabs._keys else ""
+            )
+            self._render_console()
+
+    def _on_console_session_selected(self, key: str):
+        self._render_console()
+
     def _on_console_filter_changed(self, text: str):
-        filter_term = text.strip().lower()
-        self._console_text.clear()
-        if not filter_term:
-            content = "".join(self._raw_log_lines)
-        else:
-            matching = [line for line in self._raw_log_lines if filter_term in line.lower()]
-            content = "".join(matching)
-        if content:
-            cursor = self._console_text.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.insertText(content)
-            if self._console_autoscroll_cb.isChecked():
-                self._scroll_to_bottom()
+        self._render_console()
 
     def _on_console_wrap_toggled(self, checked: bool):
         mode = QPlainTextEdit.LineWrapMode.WidgetWidth if checked else QPlainTextEdit.LineWrapMode.NoWrap
@@ -2151,6 +2527,7 @@ class DetailsPanel(QWidget):
     def _on_clear_console_clicked(self):
         self._console_text.clear()
         self._raw_log_lines.clear()
+        self._console_session_tabs.set_sessions([])
 
     def _on_open_console_file_clicked(self):
         from my_idm.external_tools import open_file_in_default_app

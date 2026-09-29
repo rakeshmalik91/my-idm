@@ -41,9 +41,20 @@ The canonical architecture documentation is organized under [`docs/architecture/
 
 1. **Commit Convention**: Follow standard conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
 2. **Testing**: Always run `python -m pytest` and ensure all unit tests pass before committing.
-   - **Known pre-existing failure:** `tests/test_settings.py::TestExternalToolsSettings::test_settings_dialog_run_cli_button`
-     fails on a clean checkout. Do not treat it as a regression from your change, and do not "fix" it
-     as a drive-by.
+   - The full suite is green: `767 passed, 1 skipped`.
+   - The clipboard-dependent tests (`test_copy_multiple_urls_to_clipboard`,
+     `test_browser_extension_urls_copyable`, `test_edge_url_copying_and_links`) are occasionally
+     flaky when the whole suite shares one QClipboard. Re-run before investigating; they pass in
+     isolation.
+   - `TestManagerYouTubeIntegration::test_delete_during_download_releases_lock` fails roughly
+     1 run in 4 under full-suite load with `OperationalError` from `Database.update_status`.
+     Cause: `DownloadManager.stop()` stops the Qt timers but cannot cancel one already
+     executing, so a background write can reach a test-torn-down database. It passes in
+     isolation. This is a production-code shutdown race, not a test bug - do not paper over it
+     with sleeps; fix `stop()` to join in-flight timer work if you address it.
+   - The AnimePahe settings buttons are **intentionally silent on success** - the button label and
+     the footer badge already show the new state, and only failures raise a dialog. Do not
+     "fix" this by adding a success alert.
    - Prefer deterministic tests. Mocking `libtorrent` handles and driving `TorrentEngine.poll_all()`
      with fakes crashes the interpreter (it reaches into libtorrent internals); test the pure helpers
      instead, and use real `TorrentConfig` / `GeneralConfig` objects rather than `MagicMock` where the

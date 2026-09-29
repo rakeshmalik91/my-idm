@@ -1023,7 +1023,7 @@ class TestDetailsPanel(unittest.TestCase):
 
             # Check initial log loaded
             panel._poll_console_log()
-            self.assertIn("Line 1: Initializing animepahe scraper...", panel._console_text.toPlainText())
+            self.assertIn("Line 1: Initializing animepahe scraper...", panel._console_visible_text())
 
             # Append new lines to simulate real-time active output
             with open(log_file, "a", encoding="utf-8") as f:
@@ -1031,29 +1031,304 @@ class TestDetailsPanel(unittest.TestCase):
                 f.write("Line 3: Found magnet link, forwarding to backlog.\n")
 
             panel._poll_console_log()
-            text = panel._console_text.toPlainText()
+            text = panel._console_visible_text()
             self.assertIn("Line 2: Checking episode 5...", text)
             self.assertIn("Line 3: Found magnet link", text)
 
             # Test filter
             panel._console_filter_edit.setText("magnet")
-            filtered = panel._console_text.toPlainText()
+            filtered = panel._console_visible_text()
             self.assertIn("Line 3: Found magnet link", filtered)
             self.assertNotIn("Line 2: Checking episode 5...", filtered)
 
             # Clear filter
             panel._console_filter_edit.setText("")
-            self.assertIn("Line 2: Checking episode 5...", panel._console_text.toPlainText())
+            self.assertIn("Line 2: Checking episode 5...", panel._console_visible_text())
 
             # Test clear button
             panel._console_clear_btn.click()
-            self.assertEqual(panel._console_text.toPlainText(), "")
+            self.assertEqual(panel._console_visible_text(), "")
 
             # Test wrap toggle
             panel._console_wrap_cb.setChecked(True)
-            self.assertEqual(panel._console_text.lineWrapMode(), QPlainTextEdit.LineWrapMode.WidgetWidth)
+            self.assertEqual(
+                panel._console_text.lineWrapMode(),
+                QPlainTextEdit.LineWrapMode.WidgetWidth,
+            )
             panel._console_wrap_cb.setChecked(False)
-            self.assertEqual(panel._console_text.lineWrapMode(), QPlainTextEdit.LineWrapMode.NoWrap)
+            self.assertEqual(
+                panel._console_text.lineWrapMode(),
+                QPlainTextEdit.LineWrapMode.NoWrap,
+            )
+
+    @staticmethod
+    def _session_banner(ts, cmd="py scraper.py"):
+        rule = "=" * 55
+        return (
+            f"\n{rule}\n"
+            f"  AnimePahe CLI Scraper Session Started: {ts}\n"
+            f"  Command: {cmd}\n"
+            f"{rule}\n\n"
+        )
+
+    def _reset_console(self):
+        panel = self.win._details_panel
+        panel.show_animepahe_console()
+        panel._raw_log_lines.clear()
+        panel._console_text.clear()
+        panel._console_session_tabs.set_sessions([])
+        panel._console_filter_edit.setText("")
+        return panel
+
+    def test_animepahe_console_lists_one_side_tab_per_session(self):
+        """Each scraper run gets its own entry in the left-hand list."""
+        panel = self._reset_console()
+        for ts in ("2026-09-29 10:00:00", "2026-09-29 12:00:00", "2026-09-29 16:18:01"):
+            panel._append_log_text(self._session_banner(ts))
+            panel._append_log_text("line for " + ts + "\n")
+
+        tabs = panel._console_session_tabs
+        self.assertEqual(tabs.count(), 3)
+        # Newest first, so the live session is visible without scrolling.
+        self.assertIn("16:18", tabs.tabText(0))
+        self.assertIn("10:00", tabs.tabText(2))
+
+    def test_animepahe_console_defaults_to_the_newest_session(self):
+        panel = self._reset_console()
+        for ts in ("2026-09-29 10:00:00", "2026-09-29 16:18:01"):
+            panel._append_log_text(self._session_banner(ts))
+            panel._append_log_text("line for " + ts + "\n")
+
+        text = panel._console_visible_text()
+        self.assertIn("16:18:01", text)
+        self.assertIn("line for 2026-09-29 16:18:01", text)
+        # Older runs are reachable but not shown.
+        self.assertNotIn("line for 2026-09-29 10:00:00", text)
+
+    def test_animepahe_console_selecting_a_tab_switches_the_pane(self):
+        panel = self._reset_console()
+        for ts in ("2026-09-29 10:00:00", "2026-09-29 16:18:01"):
+            panel._append_log_text(self._session_banner(ts))
+            panel._append_log_text("line for " + ts + "\n")
+
+        tabs = panel._console_session_tabs
+        older = next(
+            tabs.keyAt(i) for i in range(tabs.count())
+            if "10:00:00" in tabs.keyAt(i)
+        )
+        tabs.set_current_key(older)
+        panel._on_console_session_selected(older)
+
+        text = panel._console_visible_text()
+        self.assertIn("line for 2026-09-29 10:00:00", text)
+        self.assertNotIn("line for 2026-09-29 16:18:01", text)
+
+    def test_animepahe_console_supports_multi_line_selection_and_copy(self):
+        """Regression: a tree widget lost free-text select-and-copy.
+
+        The log body must stay a real text widget so a user can drag-select
+        several lines and press Ctrl+C.
+        """
+        panel = self._reset_console()
+        panel._append_log_text("\n".join(f"line {i}" for i in range(40)) + "\n")
+
+        text_widget = panel._console_text
+        self.assertTrue(text_widget.isReadOnly())
+
+        text_widget.selectAll()
+        selected = text_widget.textCursor().selectedText()
+        self.assertIn("line 0", selected)
+        self.assertIn("line 39", selected)
+        # QTextCursor uses U+2029 (paragraph separator) between blocks, not "\n".
+        # A selection spanning many of them is what a row-based list cannot do.
+        self.assertGreater(selected.count(chr(0x2029)), 10)
+
+    def test_animepahe_console_filter_finds_a_match_in_any_session(self):
+        panel = self._reset_console()
+        panel._append_log_text(self._session_banner("2026-09-29 08:00:00") + "A1\nNEEDLE\n")
+        panel._append_log_text(self._session_banner("2026-09-29 09:00:00") + "B1\n")
+
+        # The needle sits in an older, unselected session.
+        self.assertNotIn("NEEDLE", panel._console_visible_text())
+
+        panel._console_filter_edit.setText("NEEDLE")
+        text = panel._console_visible_text()
+        self.assertIn("NEEDLE", text, "filter must jump to the session that matches")
+        self.assertNotIn("B1", text)
+
+    def test_animepahe_console_keeps_your_selection_when_a_session_starts(self):
+        """A new run must not yank the user off the session they are reading."""
+        panel = self._reset_console()
+        panel._append_log_text(self._session_banner("2026-09-29 09:00:00") + "OLD\n")
+        panel._append_log_text(self._session_banner("2026-09-29 10:00:00") + "NEW\n")
+
+        tabs = panel._console_session_tabs
+        older = next(
+            tabs.keyAt(i) for i in range(tabs.count()) if "09:00:00" in tabs.keyAt(i)
+        )
+        tabs.set_current_key(older)
+        panel._on_console_session_selected(older)
+        self.assertIn("OLD", panel._console_visible_text())
+
+        panel._append_log_text(self._session_banner("2026-09-29 11:00:00") + "LATEST\n")
+        self.assertEqual(tabs.current_key(), older, "selection must be preserved")
+        self.assertIn("OLD", panel._console_visible_text())
+
+    def test_animepahe_console_follows_a_new_session_while_tailing_live(self):
+        """If you are on the newest session, a new run should take over."""
+        panel = self._reset_console()
+        panel._append_log_text(self._session_banner("2026-09-29 09:00:00") + "A\n")
+        self.assertTrue(panel._console_session_tabs.is_following_live())
+
+        panel._append_log_text(self._session_banner("2026-09-29 10:00:00") + "B\n")
+        self.assertIn("B", panel._console_visible_text())
+        self.assertTrue(panel._console_session_tabs.is_following_live())
+
+    def test_animepahe_console_clear_empties_both_panes(self):
+        panel = self._reset_console()
+        panel._append_log_text(self._session_banner("2026-09-29 09:00:00") + "A\n")
+        self.assertEqual(panel._console_session_tabs.count(), 1)
+
+        panel._console_clear_btn.click()
+        self.assertEqual(panel._console_visible_text(), "")
+        self.assertEqual(panel._console_session_tabs.count(), 0)
+
+    # -- console log retention ------------------------------------------
+
+    def test_console_log_keeps_only_the_last_three_days(self):
+        """Only sessions inside the retention window survive a prune."""
+        from datetime import datetime, timedelta, timezone
+
+        rule = "=" * 55
+
+        def banner(ts):
+            return (
+                f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {ts}\n"
+                f"  Command: py scraper.py\n{rule}\n\n"
+            )
+
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+        just_outside = (now - timedelta(days=3, hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        recent = (now - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+
+        log_text = (
+            banner(old) + "OLD-LINE\n"
+            + banner(just_outside) + "EDGE-LINE\n"
+            + banner(recent) + "RECENT-LINE\n"
+        )
+
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock
+        from my_idm.config import ExternalToolsConfig
+
+        tmpdir = tempfile.mkdtemp()
+        log_path = Path(tmpdir) / "console_log.txt"
+        log_path.write_text(log_text, encoding="utf-8")
+
+        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
+        mgr = MagicMock()
+        mgr.external_tools_config = cfg
+        mgr.is_animepahe_running.return_value = False
+        cfg.get_console_log_path = MagicMock(return_value=log_path)
+        cfg.get_debug_log_path = MagicMock(return_value=log_path)
+
+        panel = DetailsPanel(mgr)
+        panel.show_animepahe_console()
+        panel._poll_console_log()
+        self.assertEqual(panel._console_session_tabs.count(), 3)
+
+        panel._prune_console_log()
+
+        body = "".join(panel._raw_log_lines)
+        self.assertIn("RECENT-LINE", body)
+        self.assertNotIn("OLD-LINE", body)
+        self.assertNotIn("EDGE-LINE", body)
+
+        # The tab list shrinks to the surviving session...
+        self.assertEqual(panel._console_session_tabs.count(), 1)
+
+        # ...and the file on disk is compacted so it stops growing.
+        on_disk = log_path.read_text(encoding="utf-8")
+        self.assertIn("RECENT-LINE", on_disk)
+        self.assertNotIn("OLD-LINE", on_disk)
+        self.assertLess(log_path.stat().st_size, len(log_text))
+
+    def test_console_log_prune_keeps_undated_preamble(self):
+        """Output before any banner is kept rather than dropped on a guess."""
+        rule = "=" * 55
+        from datetime import datetime, timedelta, timezone
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock
+        from my_idm.config import ExternalToolsConfig
+
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        log_text = (
+            "preamble line before any banner\n"
+            f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {recent}\n"
+            f"  Command: py scraper.py\n{rule}\n\nRECENT\n"
+        )
+        tmpdir = tempfile.mkdtemp()
+        log_path = Path(tmpdir) / "console_log.txt"
+        log_path.write_text(log_text, encoding="utf-8")
+
+        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
+        mgr = MagicMock()
+        mgr.external_tools_config = cfg
+        mgr.is_animepahe_running.return_value = False
+        cfg.get_console_log_path = MagicMock(return_value=log_path)
+        cfg.get_debug_log_path = MagicMock(return_value=log_path)
+
+        panel = DetailsPanel(mgr)
+        panel.show_animepahe_console()
+        panel._poll_console_log()
+        panel._prune_console_log()
+
+        body = "".join(panel._raw_log_lines)
+        self.assertIn("preamble line before any banner", body)
+        self.assertIn("RECENT", body)
+
+    def test_console_log_not_rewritten_while_scraper_runs(self):
+        """The scraper holds the log open, so pruning must not touch the file."""
+        from datetime import datetime, timedelta, timezone
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock
+        from my_idm.config import ExternalToolsConfig
+
+        rule = "=" * 55
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(days=20)).strftime("%Y-%m-%d %H:%M:%S")
+        recent = (now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+        log_text = (
+            f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {old}\n"
+            f"  Command: py x.py\n{rule}\n\nOLD\n"
+            f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {recent}\n"
+            f"  Command: py x.py\n{rule}\n\nNEW\n"
+        )
+        tmpdir = tempfile.mkdtemp()
+        log_path = Path(tmpdir) / "console_log.txt"
+        log_path.write_text(log_text, encoding="utf-8")
+
+        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
+        mgr = MagicMock()
+        mgr.external_tools_config = cfg
+        mgr.is_animepahe_running.return_value = True
+        cfg.get_console_log_path = MagicMock(return_value=log_path)
+        cfg.get_debug_log_path = MagicMock(return_value=log_path)
+
+        panel = DetailsPanel(mgr)
+        panel.show_animepahe_console()
+        panel._poll_console_log()
+        panel._prune_console_log()
+
+        # In-memory view is pruned...
+        self.assertNotIn("OLD", "".join(panel._raw_log_lines))
+        # ...but the file the running scraper owns is left untouched.
+        self.assertIn("OLD", log_path.read_text(encoding="utf-8"))
 
     def test_animepahe_console_status_change_reflection(self):
         """AnimePahe status change reflects on console tab badges and action button."""

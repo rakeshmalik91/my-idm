@@ -2667,7 +2667,11 @@ class MainWindow(QMainWindow):
             header_hex = bytes(self._table.horizontalHeader().saveState().toHex()).decode()
             splitter_hex = bytes(self._splitter.saveState().toHex()).decode()
             sizes = self._splitter.sizes()
-            details_vis = self._details_panel.isVisible()
+            # Use the toggle's checked state, not isVisible(): every child widget
+            # reports isVisible() == False while the window is hidden or
+            # minimised (e.g. closed to tray), which would persist "panel closed"
+            # even when the user had it open.
+            details_vis = self._act_toggle_details.isChecked()
 
             if details_vis and len(sizes) == 2 and sizes[1] >= 50:
                 self._details_height = sizes[1]
