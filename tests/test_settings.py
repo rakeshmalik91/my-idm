@@ -20,15 +20,88 @@ from my_idm.settings_dialog import SettingsDialog
 
 app = QApplication.instance() or QApplication(sys.argv)
 
+# Every config group that production persists. The autouse guard below snapshots
+# and restores all of them so a test can never leave a poisoned value (e.g. a
+# `default_save_path` pointing into an already-deleted TemporaryDirectory) for
+# the rest of the session.
+_CONFIG_GROUPS = (
+    "General",
+    "Torrent",
+    "Tor",
+    "ExternalTools",
+    "BrowserIntegration",
+    "Network",
+    "Security",
+)
 
-class TestGeneralConfig(unittest.TestCase):
+
+class ConfigIsolationMixin:
+    """Snapshot/restore the whole QSettings tree around every test.
+
+    Replaces the previous ad-hoc ``GeneralConfig().save()`` "restore default"
+    calls, which were inconsistent, ran only on the success path, and left a
+    *stale* value (not the default) behind -- for example a
+    ``default_save_path`` naming a directory that no longer exists.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Snapshot BOTH the production tree and the dedicated test-org tree in
+        # full, so a test cannot leak into either. allKeys() covers every group
+        # (including any group a test may introduce), which is why the explicit
+        # _CONFIG_GROUPS list is only used to prove coverage in
+        # test_qsettings_are_redirected_away_from_the_registry.
+        settings = QSettings("MyIDM", "My-IDM")
+        test_settings = QSettings("MyIDMTest", "My-IDMTest")
+        self.addCleanup(
+            self._restore_settings,
+            settings, self._snapshot(settings),
+            test_settings, self._snapshot(test_settings),
+        )
+
+    @staticmethod
+    def _snapshot(settings):
+        return {key: settings.value(key) for key in settings.allKeys()}
+
+    @staticmethod
+    def _unlink_strict(path: Path):
+        """Remove a sqlite file, surfacing a genuinely stuck handle.
+
+        The old code used ``except Exception: pass``, which hid a leaked
+        connection behind a silently orphaned ``.db`` file in %TEMP% on Windows.
+        """
+        for suffix in ("", "-wal", "-shm"):
+            target = Path(str(path) + suffix)
+            if not target.exists():
+                continue
+            try:
+                os.remove(target)
+            except PermissionError as exc:
+                raise AssertionError(
+                    f"{target} could not be removed; a sqlite handle is still open"
+                ) from exc
+        if path.exists():  # pragma: no cover - defensive
+            raise AssertionError(f"{path} still exists after removal")
+
+    @staticmethod
+    def _restore_settings(settings, snapshot, test_settings, test_snapshot):
+        settings.clear()
+        for group, values in snapshot.items():
+            for key, value in values.items():
+                settings.setValue(f"{group}/{key}", value)
+        settings.sync()
+        test_settings.clear()
+        for key, value in test_snapshot.items():
+            test_settings.setValue(key, value)
+        test_settings.sync()
+
+
+class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
     """Test GeneralConfig persistence and logic."""
 
     def setUp(self):
+        super().setUp()
         self.test_settings = QSettings("MyIDMTest", "My-IDMTest")
-        self.test_settings.clear()
-
-    def tearDown(self):
         self.test_settings.clear()
 
     def test_default_values(self):
@@ -124,14 +197,8 @@ class TestGeneralConfig(unittest.TestCase):
             self.assertEqual(cfg.get_effective_save_path(), default_dir)
 
 
-class TestAddDownloadDialogSettings(unittest.TestCase):
+class TestAddDownloadDialogSettings(ConfigIsolationMixin, unittest.TestCase):
     """Test that AddDownloadDialog uses and updates GeneralConfig."""
-
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
 
     def test_prefill_and_set_as_default(self):
         with tempfile.TemporaryDirectory() as custom_dir:
@@ -140,6 +207,7 @@ class TestAddDownloadDialogSettings(unittest.TestCase):
             cfg.save()
 
             dlg = AddDownloadDialog(initial_url="https://example.com/file.zip")
+            self.addCleanup(dlg.close)
             self.assertEqual(dlg._save_edit.currentText(), custom_dir)
             self.assertEqual(dlg._seg_spin.value(), 8)
 
@@ -153,8 +221,90 @@ class TestAddDownloadDialogSettings(unittest.TestCase):
                 reloaded = GeneralConfig.load()
                 self.assertEqual(reloaded.default_save_path, new_default_dir)
 
+    def test_autouse_guard_restores_a_deleted_temp_save_path(self):
+        """The file-wide guard must undo a persisted path to a deleted temp dir.
 
-class TestTorrentConfig(unittest.TestCase):
+        Previously each test restored "defaults" by hand (``GeneralConfig().save()``)
+        and several paths were simply left behind, so later tests in the same
+        process resolved a save path that no longer existed.
+        """
+        with tempfile.TemporaryDirectory() as doomed:
+            GeneralConfig(default_save_path=doomed, remember_last_save_path=False).save()
+            self.assertEqual(GeneralConfig.load().default_save_path, doomed)
+
+        # Run the registered cleanup exactly as the runner would, then re-check.
+        self.doCleanups()
+        after = GeneralConfig.load()
+        self.assertNotEqual(
+            after.default_save_path, doomed,
+            "the guard must not leave a path that points at a deleted directory",
+        )
+        self.assertEqual(
+            after.default_save_path, DEFAULT_DOWNLOADS_DIR,
+            "with nothing saved beforehand the guard restores the pristine default",
+        )
+
+    def test_qsettings_are_redirected_away_from_the_registry(self):
+        """Both QSettings trees must be backed by temp INI files, not the registry.
+
+        On Windows a native-format QSettings writes to
+        HKCU\\Software\\MyIDM\\... , so an unredirected test would mutate the real
+        user preferences. The conftest patches QSettings.__init__ for the whole
+        session; this pins the effect for the two org/app pairs this file uses.
+        """
+        for org, app_name in (("MyIDM", "My-IDM"), ("MyIDMTest", "My-IDMTest")):
+            with self.subTest(app=app_name):
+                s = QSettings(org, app_name)
+                self.assertEqual(
+                    s.format(), QSettings.Format.IniFormat,
+                    f"{org}/{app_name} must not use the native (registry) backend",
+                )
+                filename = s.fileName()
+                self.assertTrue(
+                    filename.lower().endswith(".ini"),
+                    f"{org}/{app_name} must live in an .ini file, got {filename}",
+                )
+                self.assertNotIn(
+                    "\\Software\\", filename,
+                    "the settings file must not be a registry hive path",
+                )
+                self.assertFalse(
+                    Path(filename).exists(),
+                    f"{filename} must not pre-exist; the conftest gives each test "
+                    "a fresh temp directory",
+                )
+                s.setValue("__probe__", "1")
+                self.assertEqual(s.value("__probe__"), "1")
+                s.sync()
+                self.assertTrue(
+                    Path(filename).exists(),
+                    "writing must materialise the file inside the temp directory",
+                )
+                s.remove("__probe__")
+                s.sync()
+
+    def test_every_production_config_group_round_trips_through_the_tree(self):
+        """Proves the guard covers every group that actually persists values."""
+        settings = QSettings("MyIDM", "My-IDM")
+        for group in _CONFIG_GROUPS:
+            with self.subTest(group=group):
+                settings.setValue(f"{group}/__probe__", "x")
+        written = {key for key in settings.allKeys() if key.endswith("__probe__")}
+        self.assertEqual(
+            sorted(written),
+            sorted(f"{group}/__probe__" for group in _CONFIG_GROUPS),
+            "every declared group must be writable, so the snapshot really covers it",
+        )
+        # Restoring must remove them again, proving the guard is not a no-op.
+        self.doCleanups()
+        after = QSettings("MyIDM", "My-IDM")
+        self.assertEqual(
+            [key for key in after.allKeys() if key.endswith("__probe__")], [],
+            "the guard must undo anything a test wrote",
+        )
+
+
+class TestTorrentConfig(ConfigIsolationMixin, unittest.TestCase):
     """Test TorrentConfig persistence and speed limit calculations."""
 
     def test_default_values(self):
@@ -218,18 +368,17 @@ class TestTorrentConfig(unittest.TestCase):
         self.assertEqual(loaded.max_seeding_speed, 300)
         self.assertEqual(loaded.download_to_seeding_ratio, 2.5)
         self.assertEqual(loaded.metadata_fetch_timeout_days, 7)
-        # Restore default
-        TorrentConfig().save()
+        # Restoring the pristine state is the autouse guard's job, not this
+        # test's; previously a bare `TorrentConfig().save()` ran only on the
+        # success path, so a failing assert left the poisoned values behind.
+        self.assertEqual(
+            TorrentConfig().max_seeding_speed, 200,
+            "the default config is the pristine baseline the guard restores to",
+        )
 
 
-class TestSettingsDialog(unittest.TestCase):
+class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
     """Test Preferences and SettingsDialog functionality."""
-
-    def setUp(self):
-        pass
-
-    def tearDown(self):
-        pass
 
     def test_dialog_population_and_save(self):
         with tempfile.TemporaryDirectory() as custom_dir:
@@ -430,73 +579,77 @@ class TestSettingsDialog(unittest.TestCase):
         self.assertEqual(saved.max_retries, 4)
         self.assertFalse(saved.retry_exponential_backoff)
         self.assertEqual(saved.retry_delay, 5.0)
-        GeneralConfig().save()
         dlg.close()
 
-
-
     def test_preferences_window_width_and_db_persistence(self):
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
+        tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp_dir.cleanup)
+        tmp_path = Path(tmp_dir.name) / "prefs.db"
+        # Registered BEFORE db.close so it runs AFTER it (addCleanup is LIFO):
+        # that is the only order in which the handle is actually released. The
+        # old `except Exception: pass` hid a leaked connection behind a
+        # silently orphaned .db file in %TEMP%.
+        self.addCleanup(self._unlink_strict, tmp_path)
         db = Database(tmp_path)
         db.open()
-        try:
-            # First instance: should have increased default width 820 and minimum width 740
-            dlg = SettingsDialog(db=db)
-            self.assertGreaterEqual(dlg.minimumWidth(), 740)
-            self.assertEqual(dlg.width(), 820)
-            self.assertEqual(dlg.height(), 600)
+        self.addCleanup(db.close)
 
-            # Resize the dialog and simulate closing
-            dlg.resize(960, 700)
-            dlg.done(0)
+        # First instance: should have increased default width 820 and minimum width 740
+        dlg = SettingsDialog(db=db)
+        self.addCleanup(dlg.close)
+        self.assertGreaterEqual(dlg.minimumWidth(), 740)
+        self.assertEqual(dlg.width(), 820)
+        self.assertEqual(dlg.height(), 600)
 
-            # Check persisted size in database
-            saved_size = db.get_preferences_window_size()
-            self.assertEqual(saved_size, {"width": 960, "height": 700})
+        # Resize the dialog and simulate closing
+        dlg.resize(960, 700)
+        dlg.done(0)
 
-            # New instance with same DB should restore resized dimensions
-            dlg2 = SettingsDialog(db=db)
-            self.assertEqual(dlg2.width(), 960)
-            self.assertEqual(dlg2.height(), 700)
-        finally:
-            db.close()
-            if tmp_path.exists():
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
+        # Check persisted size in database
+        saved_size = db.get_preferences_window_size()
+        self.assertEqual(saved_size, {"width": 960, "height": 700})
+
+        # New instance with same DB should restore resized dimensions
+        dlg2 = SettingsDialog(db=db)
+        self.addCleanup(dlg2.close)
+        self.assertEqual(dlg2.width(), 960)
+        self.assertEqual(dlg2.height(), 700)
 
 
-class TestManagerGeneralConfigIntegration(unittest.TestCase):
+class TestManagerGeneralConfigIntegration(ConfigIsolationMixin, unittest.TestCase):
     """Test DownloadManager with GeneralConfig."""
 
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.db = Database(Path(self.tmp.name))
+        super().setUp()
+        tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp_dir.cleanup)
+        self.tmp_path = Path(tmp_dir.name) / "mgr.db"
+        # Registered before db.close so it runs after it (addCleanup is LIFO).
+        self.addCleanup(self._unlink_strict, self.tmp_path)
+        self.db = Database(self.tmp_path)
         self.db.open()
+        self.addCleanup(self.db.close)
         self.test_settings = QSettings("MyIDMTest", "My-IDMTest")
         self.test_settings.clear()
 
-    def tearDown(self):
-        self.test_settings.clear()
-        self.db.close()
-        if os.path.exists(self.tmp.name):
-            try:
-                os.remove(self.tmp.name)
-            except Exception:
-                pass
-
     def test_manager_preferences_window_size_persistence(self):
         mgr = DownloadManager(self.db)
+        self.addCleanup(mgr.stop)
         mgr.save_preferences_window_size(920, 650)
         size = mgr.get_preferences_window_size()
         self.assertEqual(size, {"width": 920, "height": 650})
+        # A second manager reading the same row must see the same geometry.
+        mgr2 = DownloadManager(self.db)
+        self.addCleanup(mgr2.stop)
+        self.assertEqual(
+            mgr2.get_preferences_window_size(), {"width": 920, "height": 650},
+            "the geometry is persisted in the database, not kept in memory",
+        )
 
     def test_manager_uses_configured_default_save_path(self):
         with tempfile.TemporaryDirectory() as custom_dir:
             mgr = DownloadManager(self.db)
+            self.addCleanup(mgr.stop)
             cfg = GeneralConfig(default_save_path=custom_dir, remember_last_save_path=False)
             mgr.set_general_config(cfg)
 
@@ -507,6 +660,10 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
             self.assertIsNotNone(entry)
             from my_idm.utils import normalize_path
             self.assertEqual(entry.save_path, normalize_path(custom_dir))
+            self.assertTrue(
+                entry.file_path.startswith(normalize_path(custom_dir)),
+                f"the file must be resolved under the configured dir, got {entry.file_path!r}",
+            )
 
     def test_general_config_backlog_locations_and_clear_settings(self):
         cfg = GeneralConfig(
@@ -568,7 +725,13 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         self.assertFalse(dlg.general_config.clear_backlog_after_load)
         self.assertTrue(dlg.general_config.backlog_poll_enabled)
         self.assertEqual(dlg.general_config.backlog_poll_interval, 120)
-        GeneralConfig().save()
+        # The values are persisted, so the guard is what undoes them -- a bare
+        # `GeneralConfig().save()` here only ran on the success path and left a
+        # `backlog_poll_enabled=True` value behind for later tests.
+        persisted = GeneralConfig.load()
+        self.assertTrue(persisted.backlog_poll_enabled)
+        self.assertEqual(persisted.backlog_poll_interval, 120)
+        self.assertEqual(persisted.backlog_locations, dlg.general_config.backlog_locations)
         dlg.close()
 
     def test_settings_dialog_test_antivirus_scanner(self):
@@ -621,16 +784,15 @@ class TestManagerGeneralConfigIntegration(unittest.TestCase):
         dlg.close()
 
 
-class TestExternalToolsSettings(unittest.TestCase):
+class TestExternalToolsSettings(ConfigIsolationMixin, unittest.TestCase):
     """Tests for ExternalToolsConfig and SettingsDialog External Tools tab."""
 
     def setUp(self):
+        super().setUp()
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
         self.ini_path = Path(self.tmp_dir.name) / "test_settings.ini"
         self.settings = QSettings(str(self.ini_path), QSettings.Format.IniFormat)
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
 
     def test_external_tools_config_defaults_and_save_load(self):
         cfg = ExternalToolsConfig(

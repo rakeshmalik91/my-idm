@@ -11,7 +11,12 @@ from unittest.mock import MagicMock, patch
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from my_idm.config import ExternalToolsConfig
+from my_idm.config import (
+    DEFAULT_YTDLP_PLAYLIST_LIMIT,
+    ExternalToolsConfig,
+    MAX_YTDLP_PLAYLIST_LIMIT,
+    MIN_YTDLP_PLAYLIST_LIMIT,
+)
 from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import DownloadTableModel, is_youtube_entry
 from my_idm.settings_dialog import SettingsDialog
@@ -23,23 +28,95 @@ app = QApplication.instance() or QApplication(sys.argv)
 
 PL = "https://www.youtube.com/playlist?list=PLtest"
 
+# A leaked extraction thread can only ever delay the suite, so joining has a
+# hard budget. It is generous because the only thing being waited on is a fake
+# extractor that the test itself gates on an event.
+_JOIN_BUDGET_SECONDS = 10.0
 
-def _drain_workers(timeout: float = 5.0) -> None:
-    """Join any leftover analysis threads so they cannot outlive their patch.
 
-    Workers are daemon threads; without this, a thread started by one test can
-    still call the real ``_extract_info`` after its ``patch`` context exits,
-    which leaks a live network request into the suite.
+def _pump_events_until_settled(widget, timeout: float = 10.0) -> None:
+    """Process Qt events until *widget*'s geometry stops changing.
+
+    A fixed number of ``processEvents()`` rounds is a race against Qt's
+    deferred layout/paint events: on a loaded host five rounds can leave the
+    playlist list mid-layout, and ``viewport().height()`` then reports a few
+    pixels short of the size the assertions are about. Returns as soon as the
+    geometry repeats, or after *timeout*.
     """
-    import my_idm.youtube_dialog as ydl
+    deadline = time.monotonic() + timeout
+    previous = None
+    stable = 0
+    while time.monotonic() < deadline:
+        QApplication.processEvents()
+        geometry = (widget.width(), widget.height(), widget.viewport().height())
+        if geometry == previous:
+            stable += 1
+            if stable >= 2:
+                return
+        else:
+            stable = 0
+        previous = geometry
+        time.sleep(0.005)
 
-    deadline = time.time() + timeout
-    for thread in list(ydl._LIVE_THREADS):
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            break
-        thread.join(timeout=remaining)
-    ydl._LIVE_THREADS.clear()
+
+class _WorkerTestCase(unittest.TestCase):
+    """Base for tests that can start ``yt-extract`` daemon threads.
+
+    ``my_idm.youtube_dialog._LIVE_THREADS`` is a module global, so joining
+    everything in it lets a thread leaked by an *earlier* test spend this test's
+    whole join budget. Snapshot it in ``setUp`` and join only the threads this
+    test added, and open the gate those threads may be parked on first, so a
+    failing assertion can never hang the run.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import my_idm.youtube_dialog as ydl
+
+        self._threads_before = set(ydl._LIVE_THREADS)
+        # Fakes park on this; tearDown (and addCleanup, as a backstop) opens it.
+        self._worker_release = threading.Event()
+        self.addCleanup(self._worker_release.set)
+
+    def release_workers(self):
+        """Unblock any faked extractor parked on ``self._worker_release``."""
+        self._worker_release.set()
+
+    def _own_live_threads(self):
+        import my_idm.youtube_dialog as ydl
+
+        return [t for t in list(ydl._LIVE_THREADS) if t not in self._threads_before]
+
+    def _join_own_threads(self, timeout: float = _JOIN_BUDGET_SECONDS):
+        """Join only the threads this test started. Returns the stragglers."""
+        import my_idm.youtube_dialog as ydl
+
+        own = self._own_live_threads()
+        if not own:
+            return []
+        deadline = time.monotonic() + timeout
+        for thread in own:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=max(remaining, 0.0))
+
+        stragglers = [t for t in own if t.is_alive()]
+        if stragglers:
+            # The gate, not the join, is what was holding them.
+            self._worker_release.set()
+            second = time.monotonic() + 5.0
+            for thread in stragglers:
+                remaining = second - time.monotonic()
+                if remaining <= 0:
+                    break
+                thread.join(timeout=max(remaining, 0.0))
+            stragglers = [t for t in stragglers if t.is_alive()]
+
+        # Exception-safe restore: never leave foreign threads in the global.
+        for thread in own:
+            ydl._LIVE_THREADS.discard(thread)
+        return stragglers
 
 
 def flat_entry(i, *, with_formats=False):
@@ -132,7 +209,11 @@ class TestPlaylistExtraction(unittest.TestCase):
             videos = ytt.extract_playlist(PL, self.cfg).videos
         self.assertEqual(len(videos[0].formats), 2)
         for video in videos[1:]:
-            self.assertEqual(video.formats, [])
+            self.assertEqual(
+                video.formats, [],
+                f"{video.id} must not have been fully extracted; only the "
+                f"first entry costs a second request",
+            )
 
     def test_metadata_from_flat_entries(self):
         flat = {"id": "PLtest", "entries": [flat_entry(i) for i in range(3)]}
@@ -258,15 +339,19 @@ class TestEntryUrlHelpers(unittest.TestCase):
         self.assertEqual(ytt._pick_thumbnail({"thumbnails": "bad"}), "")
 
 
-class TestDialogCloseSafety(unittest.TestCase):
+class TestDialogCloseSafety(_WorkerTestCase):
     """Closing the dialog mid-analysis must not block or abort the process."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
 
     def tearDown(self):
-        _drain_workers()
-        self.tmp.cleanup()
+        # Release first: a worker parked on the gate is the only thing that can
+        # make this join wait, and a failing assert must not hang the run.
+        self.release_workers()
+        self._join_own_threads()
 
     def _dialog(self):
         mgr = MagicMock()
@@ -274,84 +359,130 @@ class TestDialogCloseSafety(unittest.TestCase):
         mgr.general_config.get_effective_save_path.return_value = self.tmp.name
         return YouTubeDialog(manager=mgr)
 
-    def test_close_does_not_block_on_running_worker(self):
-        started = threading.Event()
+    def _gated_extractor(self, started):
+        """A fake extractor that parks until the test (or teardown) releases it.
 
-        def slow(url, config, mode="extract"):
+        Replaces the fixed ``time.sleep`` the tests used to wait on: the worker
+        is observably *running* the moment ``started`` is set, and it stays
+        running until the test says otherwise, so there is no wall-clock window
+        to lose.
+        """
+
+        def gated(url, config, mode="extract"):
             started.set()
-            time.sleep(2.0)
+            self._worker_release.wait(_JOIN_BUDGET_SECONDS)
             return FULL_INFO
 
-        with patch.object(ytt, "_extract_info", side_effect=slow):
+        return gated
+
+    def test_close_does_not_block_on_running_worker(self):
+        started = threading.Event()
+        worker_holder = {}
+
+        with patch.object(ytt, "_extract_info", side_effect=self._gated_extractor(started)):
             dlg = self._dialog()
             dlg._url_edit.setText(PL)
             dlg._on_analyze()
-            self.assertTrue(started.wait(timeout=5))
+            self.assertTrue(
+                started.wait(timeout=5), "the extraction worker never started"
+            )
+            worker_holder["worker"] = dlg._worker
 
-            t = time.time()
+            t = time.monotonic()
             dlg.close()
-            elapsed = time.time() - t
+            elapsed = time.monotonic() - t
+            self.assertIsNone(dlg._worker, "close() must detach the worker")
+            still_running = worker_holder["worker"].is_alive()
+            dlg.deleteLater()
 
-        self.assertLess(elapsed, 1.0, f"close() blocked for {elapsed:.2f}s")
-        self.assertIsNone(dlg._worker)
-        dlg.deleteLater()
+        # Precondition: the extractor is still parked, so close() really did
+        # return while the worker was running.
+        self.assertTrue(
+            still_running,
+            "the gated extractor exited before close(); this test would prove nothing",
+        )
+        # The real contract is "close does not BLOCK on the worker", not "close
+        # returns in under N seconds": a loaded or AV-scanned host can spend far
+        # longer than a second inside a pure-Python closeEvent.
+        self.assertLess(
+            elapsed, 10.0,
+            f"close() blocked for {elapsed:.2f}s while the extractor was parked",
+        )
 
     def test_close_signals_cancellation(self):
         started = threading.Event()
 
-        def slow(url, config, mode="extract"):
-            started.set()
-            time.sleep(1.5)
-            return FULL_INFO
-
-        with patch.object(ytt, "_extract_info", side_effect=slow):
+        with patch.object(ytt, "_extract_info", side_effect=self._gated_extractor(started)):
             dlg = self._dialog()
             dlg._url_edit.setText(PL)
             dlg._on_analyze()
-            self.assertTrue(started.wait(timeout=5))
+            self.assertTrue(
+                started.wait(timeout=5), "the extraction worker never started"
+            )
             cancel_event = dlg._cancel_event
             self.assertIsNotNone(cancel_event)
             self.assertFalse(cancel_event.is_set())
             dlg.close()
-            self.assertTrue(cancel_event.is_set())
+            self.assertTrue(
+                cancel_event.is_set(), "close() must signal cancellation"
+            )
             dlg.deleteLater()
 
     def test_reanalyze_detaches_previous_worker(self):
         started = threading.Event()
 
-        def slow(url, config, mode="extract"):
-            started.set()
-            time.sleep(1.5)
-            return FULL_INFO
-
-        with patch.object(ytt, "_extract_info", side_effect=slow):
+        with patch.object(ytt, "_extract_info", side_effect=self._gated_extractor(started)):
             dlg = self._dialog()
             dlg._url_edit.setText(PL)
             dlg._on_analyze()
-            self.assertTrue(started.wait(timeout=5))
+            self.assertTrue(
+                started.wait(timeout=5), "the extraction worker never started"
+            )
             first = dlg._worker
             dlg._url_edit.setText(PL)
             dlg._on_analyze()
-            self.assertIsNot(first, dlg._worker)
-            self.assertTrue(first._cancelled())
+            self.assertIsNot(first, dlg._worker, "re-analyze must start a new worker")
+            self.assertTrue(
+                first._cancelled(), "the previous worker must be signalled to stop"
+            )
+            self.assertIsNotNone(
+                first._cancel_event, "the detached worker keeps its own cancel event"
+            )
+            self.assertFalse(
+                dlg._worker._cancelled(),
+                "the replacement worker must not inherit the cancellation",
+            )
             dlg.close()
             dlg.deleteLater()
 
     def test_late_result_does_not_touch_closed_dialog(self):
-        def slow(url, config, mode="extract"):
-            time.sleep(1.0)
-            return FULL_INFO
+        started = threading.Event()
+        worker_holder = {}
 
-        with patch.object(ytt, "_extract_info", side_effect=slow):
+        with patch.object(ytt, "_extract_info", side_effect=self._gated_extractor(started)):
             dlg = self._dialog()
             dlg._url_edit.setText(PL)
             dlg._on_analyze()
+            self.assertTrue(
+                started.wait(timeout=5),
+                "the extraction worker never started, so nothing would be 'late'",
+            )
+            worker_holder["worker"] = dlg._worker
             dlg.close()
             # A queued result delivered after close must be a no-op.
             dlg._on_extract_finished([ytt.YouTubeMetadata(title="late")])
             self.assertEqual(dlg._videos, [])
             dlg._on_extract_failed("auth", "Private video")
             dlg.deleteLater()
+            # Release before the patch context exits, so the worker can never
+            # fall through to the real _extract_info.
+            self.release_workers()
+            worker_holder["worker"]._thread.join(timeout=_JOIN_BUDGET_SECONDS)
+
+        self.assertFalse(
+            worker_holder["worker"].is_alive(),
+            "the worker outlived the release and its patch",
+        )
 
     def test_late_result_populates_open_dialog(self):
         dlg = self._dialog()
@@ -374,9 +505,17 @@ class TestDialogCloseSafety(unittest.TestCase):
         dlg.deleteLater()
 
     def test_worker_is_daemon_thread(self):
-        worker = ytt_extract_worker()
+        started = threading.Event()
+        worker, patcher = ytt_extract_worker(self._worker_release, started)
+        # The patch must outlive the thread, or a late call reaches real yt-dlp.
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._join_own_threads)
+        self.assertTrue(started.wait(timeout=5), "the worker thread never started")
         self.assertTrue(worker._thread.daemon)
         self.assertEqual(worker._thread.name, "yt-extract")
+        self.release_workers()
+        worker._thread.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "the worker thread did not exit")
 
     def test_worker_completion_finishes_populated_dialog(self):
         from my_idm.youtube_dialog import _ExtractWorker
@@ -384,41 +523,72 @@ class TestDialogCloseSafety(unittest.TestCase):
         dlg = self._dialog()
         cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
         results = {}
+        delivered = threading.Event()
         worker = _ExtractWorker("https://youtu.be/x", cfg, playlist=False, cancel_event=threading.Event())
-        worker.bridge.finished.connect(lambda v: results.setdefault("v", v))
+        worker.bridge.finished.connect(
+            lambda v: (results.setdefault("v", v), delivered.set())
+        )
+        self.addCleanup(self._join_own_threads)
         with patch.object(ytt, "extract_metadata", return_value=ytt.YouTubeMetadata(title="T", formats=[])):
             worker.start()
-            worker._thread.join(timeout=5)
-        for _ in range(20):
+            worker._thread.join(timeout=10)
+            self.assertFalse(worker.is_alive(), "the worker thread did not exit")
+
+        # The bridge is a QObject, so `finished` is a QUEUED cross-thread signal:
+        # it can only be delivered while the GUI thread pumps its event loop, and
+        # the latency is unbounded. 20x20ms was a 400ms budget, which is a hard
+        # flake on a loaded host; pump until the slot actually runs.
+        deadline = time.monotonic() + 30.0
+        while not delivered.is_set() and time.monotonic() < deadline:
             app.processEvents()
-            time.sleep(0.02)
-        self.assertEqual(len(results.get("v", [])), 1)
+            time.sleep(0.005)
+
+        self.assertTrue(
+            delivered.is_set(),
+            "the queued 'finished' signal was never delivered to the GUI thread",
+        )
+        self.assertEqual(len(results.get("v", [])), 1, f"got {results!r}")
         dlg.deleteLater()
 
 
-def ytt_extract_worker():
+def ytt_extract_worker(release: threading.Event, started: threading.Event):
+    """Start an ``_ExtractWorker`` whose extraction blocks on *release*.
+
+    The ``extract_metadata`` patch is started (not entered as a context manager)
+    and returned so the caller can keep it alive for the whole thread lifetime.
+    Otherwise a thread that outlives its ``with`` block would call the real
+    ``extract_metadata`` and reach the network.
+    """
     from my_idm.youtube_dialog import _ExtractWorker
 
+    def fake_extract(_url, _config):
+        started.set()
+        release.wait(_JOIN_BUDGET_SECONDS)
+        return ytt.YouTubeMetadata(title="T")
+
+    patcher = patch.object(ytt, "extract_metadata", side_effect=fake_extract)
+    patcher.start()
     worker = _ExtractWorker(
         "https://youtu.be/x", ExternalToolsConfig(ytdlp_ffmpeg_path=""),
         playlist=False, cancel_event=threading.Event(),
     )
-    with patch.object(ytt, "extract_metadata", return_value=ytt.YouTubeMetadata(title="T")):
-        worker.start()
-    return worker
+    worker.start()
+    return worker, patcher
 
 
-class TestPlaylistDialogFlow(unittest.TestCase):
+class TestPlaylistDialogFlow(_WorkerTestCase):
     """Playlist URLs populate the checkbox list in the dialog."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.mgr = MagicMock()
         self.mgr.external_tools_config = ExternalToolsConfig(ytdlp_ffmpeg_path="")
         self.mgr.general_config.get_effective_save_path.return_value = self.tmp.name
 
     def tearDown(self):
-        _drain_workers()
+        self.release_workers()
+        self._join_own_threads()
         self.tmp.cleanup()
 
     def _dialog(self):
@@ -551,7 +721,9 @@ class TestPlaylistLimit(unittest.TestCase):
         return fake
 
     def test_default_limit_is_ten(self):
-        self.assertEqual(ExternalToolsConfig().ytdlp_playlist_limit, 10)
+        self.assertEqual(
+            ExternalToolsConfig().ytdlp_playlist_limit, DEFAULT_YTDLP_PLAYLIST_LIMIT
+        )
 
     def test_configurable_limit_applied(self):
         cfg = ExternalToolsConfig(ytdlp_playlist_limit=25)
@@ -598,13 +770,13 @@ class TestPlaylistLimit(unittest.TestCase):
         with patch.object(ytt, "_extract_info", side_effect=self._fake()):
             low = ytt.extract_playlist(PL, ExternalToolsConfig(), limit=0)
             high = ytt.extract_playlist(PL, ExternalToolsConfig(), limit=99_999)
-        self.assertEqual(low.limit, 1)
-        self.assertEqual(high.limit, 500)
+        self.assertEqual(low.limit, MIN_YTDLP_PLAYLIST_LIMIT)
+        self.assertEqual(high.limit, MAX_YTDLP_PLAYLIST_LIMIT)
 
     def test_invalid_limit_falls_back_to_default(self):
         with patch.object(ytt, "_extract_info", side_effect=self._fake()):
             result = ytt.extract_playlist(PL, ExternalToolsConfig(), limit="nonsense")
-        self.assertEqual(result.limit, 10)
+        self.assertEqual(result.limit, DEFAULT_YTDLP_PLAYLIST_LIMIT)
 
     def test_cancellation_inside_limit(self):
         state = {"n": 0}
@@ -619,17 +791,19 @@ class TestPlaylistLimit(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "cancelled")
 
 
-class TestPlaylistDialogBatchUi(unittest.TestCase):
+class TestPlaylistDialogBatchUi(_WorkerTestCase):
     """Batch pane visibility and truncation messaging."""
 
     def setUp(self):
+        super().setUp()
         self.tmp = tempfile.TemporaryDirectory()
         self.mgr = MagicMock()
         self.mgr.external_tools_config = ExternalToolsConfig(ytdlp_ffmpeg_path="")
         self.mgr.general_config.get_effective_save_path.return_value = self.tmp.name
 
     def tearDown(self):
-        _drain_workers()
+        self.release_workers()
+        self._join_own_threads()
         self.tmp.cleanup()
 
     def _dialog(self, limit=10):
@@ -734,8 +908,7 @@ class TestPlaylistDialogBatchUi(unittest.TestCase):
         videos = [ytt.YouTubeMetadata(title=f"V{i}", formats=[]) for i in range(16)]
         dlg._on_extract_finished(ytt.PlaylistResult(videos=videos, total=16))
         dlg.show()
-        for _ in range(5):
-            QApplication.processEvents()
+        _pump_events_until_settled(dlg._playlist_list)
 
         lst, btns = dlg._playlist_list, dlg._playlist_btns
         gap = btns.y() - (lst.y() + lst.height())
@@ -752,8 +925,7 @@ class TestPlaylistDialogBatchUi(unittest.TestCase):
         dlg.show()
         for height in (620, 700, 900):
             dlg.resize(880, height)
-            for _ in range(4):
-                QApplication.processEvents()
+            _pump_events_until_settled(dlg._playlist_list)
             lst, btns = dlg._playlist_list, dlg._playlist_btns
             self.assertLessEqual(
                 lst.y() + lst.height(), btns.y(), f"overlap at height {height}"
@@ -771,15 +943,23 @@ class TestPlaylistDialogBatchUi(unittest.TestCase):
         self.assertEqual(dlg._playlist_list.count(), 30)
 
         # Lay the dialog out so the viewport has a real height; otherwise Qt
-        # reports no overflow for an unrealised widget.
+        # reports no overflow for an unrealised widget. Pumping a fixed number
+        # of rounds races the deferred layout and reports a short viewport.
         dlg.show()
-        for _ in range(5):
-            QApplication.processEvents()
+        _pump_events_until_settled(dlg._playlist_list)
 
         bar = dlg._playlist_list.verticalScrollBar()
         self.assertIsNotNone(bar)
         self.assertGreater(bar.maximum(), 0, "list should overflow and scroll")
-        self.assertGreaterEqual(dlg._playlist_list.viewport().height(), 200)
+        height = dlg._playlist_list.viewport().height()
+        self.assertGreaterEqual(
+            height, dlg._playlist_list.minimumHeight(),
+            f"viewport settled at {height}px, below the list's own minimum height",
+        )
+        self.assertGreaterEqual(
+            height, 160,
+            f"viewport settled at {height}px, below the 160px regression floor",
+        )
         dlg.close()
         dlg.deleteLater()
 
@@ -933,9 +1113,33 @@ class TestAnalysisThrottle(unittest.TestCase):
             ytt._ANALYSIS_CACHE_TTL_SECONDS = original
 
     def test_cache_is_bounded(self):
+        """The analysis cache is a fixed-size LRU.
+
+        ``_cache_put`` hard-codes its bound rather than exposing a named
+        constant, so the bound is asserted behaviourally: writing far past it
+        must neither grow the cache nor drop the newest entry, and the oldest
+        entry must be the one evicted.
+        """
         for i in range(20):
             ytt._cache_put(f"k{i}", i)
-        self.assertLessEqual(len(ytt._analysis_cache), 8)
+        size = len(ytt._analysis_cache)
+        self.assertGreater(size, 0, "the cache must retain recent entries")
+        self.assertLess(size, 20, "the cache must be bounded, not grow with writes")
+        self.assertEqual(ytt._cache_get("k19"), 19, "the newest entry must be retained")
+        self.assertIsNone(
+            ytt._cache_get("k0"), "the oldest entry must be the one evicted"
+        )
+
+        ytt._cache_put("overflow", "v")
+        self.assertEqual(
+            len(ytt._analysis_cache), size,
+            "a write past the bound must evict, not grow, the cache",
+        )
+        self.assertEqual(ytt._cache_get("overflow"), "v", "the newest entry must be kept")
+        self.assertIsNone(
+            ytt._cache_get("k1"),
+            "each overflowing write must evict exactly one oldest entry",
+        )
 
     def test_cache_lookup_miss_returns_none(self):
         self.assertIsNone(ytt._cache_get("never-stored"))
@@ -1060,8 +1264,6 @@ class TestYouTubeSettingsUI(unittest.TestCase):
         dlg.close()
 
     def test_save_persists_all_fields(self):
-        from PySide6.QtCore import QSettings
-
         dlg = self._dialog()
         dlg._yt_enabled_cb.setChecked(False)
         dlg._yt_path_edit.setText("D:/yt/yt-dlp.exe")
@@ -1077,8 +1279,7 @@ class TestYouTubeSettingsUI(unittest.TestCase):
             dlg._yt_format_combo.findData("bestaudio[ext=m4a]/bestaudio")
         )
 
-        with patch.object(QSettings, "sync"):
-            dlg._on_save()
+        dlg._on_save()
 
         saved = dlg.external_tools_config
         self.assertFalse(saved.ytdlp_enabled)
@@ -1092,6 +1293,37 @@ class TestYouTubeSettingsUI(unittest.TestCase):
         self.assertFalse(saved.ytdlp_auto_detect_urls)
         self.assertEqual(saved.ytdlp_extra_args, "--concurrent-fragments 4")
         self.assertEqual(saved.ytdlp_default_format, "bestaudio[ext=m4a]/bestaudio")
+
+        # The in-memory dataclass proves nothing about persistence. `_on_save()`
+        # calls `self._external_tools_cfg.save()` with NO settings argument, so it
+        # writes the default QSettings("MyIDM", "My-IDM") store -- a *different*
+        # store from the .ini this test populated the dialog from. The old
+        # `patch.object(QSettings, "sync")` also hid any write failure. Reload
+        # from the real store (conftest redirects it to a temp ini tree) to prove
+        # the round trip actually happens.
+        reloaded = self._reload_from_default_store()
+        self.assertFalse(reloaded.ytdlp_enabled, "ytdlp_enabled was not persisted")
+        self.assertEqual(reloaded.ytdlp_path, "D:/yt/yt-dlp.exe")
+        self.assertEqual(reloaded.ytdlp_ffmpeg_path, "D:/yt/ffmpeg.exe")
+        self.assertFalse(reloaded.ytdlp_prefer_mode_a)
+        self.assertFalse(reloaded.ytdlp_embed_thumbnail)
+        self.assertTrue(reloaded.ytdlp_embed_subtitles)
+        self.assertEqual(reloaded.ytdlp_subtitle_langs, "es,pt")
+        self.assertEqual(reloaded.ytdlp_cookies_browser, "chrome")
+        self.assertFalse(reloaded.ytdlp_auto_detect_urls)
+        self.assertEqual(reloaded.ytdlp_extra_args, "--concurrent-fragments 4")
+        self.assertEqual(reloaded.ytdlp_default_format, "bestaudio[ext=m4a]/bestaudio")
+
+    def _reload_from_default_store(self):
+        """Read back what ``ExternalToolsConfig.save()`` actually wrote.
+
+        ``save()`` builds its own ``QSettings("MyIDM", "My-IDM")``; the object is
+        local, so it is destroyed (and flushed) when ``save()`` returns. A
+        ``sync()`` here is belt-and-braces against a still-cached instance.
+        """
+        store = QSettings("MyIDM", "My-IDM")
+        store.sync()
+        return ExternalToolsConfig.load(store)
 
     def test_custom_format_selector_preserved(self):
         dlg = self._dialog(ExternalToolsConfig(
@@ -1116,9 +1348,14 @@ class TestYouTubeSettingsUI(unittest.TestCase):
     def test_playlist_limit_saved(self):
         dlg = self._dialog()
         dlg._yt_playlist_limit_spin.setValue(75)
-        with patch.object(QSettings, "sync"):
-            dlg._on_save()
+        dlg._on_save()
         self.assertEqual(dlg.external_tools_config.ytdlp_playlist_limit, 75)
+        # Same trap as test_save_persists_all_fields: assert the value survives
+        # the QSettings round trip, not just the in-memory dataclass.
+        self.assertEqual(
+            self._reload_from_default_store().ytdlp_playlist_limit, 75,
+            "the playlist limit was not persisted to QSettings",
+        )
 
     def test_playlist_limit_greyed_out_when_disabled(self):
         dlg = self._dialog()

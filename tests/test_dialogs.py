@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import unittest.mock
 from unittest.mock import MagicMock, patch
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtGui import QGuiApplication
 
@@ -16,36 +17,109 @@ from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, RenameDialog
 
 app = QApplication.instance() or QApplication([])
 
+# Every config group that production persists. The autouse guard below snapshots
+# and restores all of them so a test can never leave a poisoned value behind --
+# e.g. a `default_save_path` pointing into an already-deleted TemporaryDirectory.
+_CONFIG_GROUPS = (
+    "General",
+    "Torrent",
+    "Tor",
+    "ExternalTools",
+    "BrowserIntegration",
+    "Network",
+    "Security",
+)
 
-class TestAddDownloadDialogClipboard(unittest.TestCase):
+
+class ConfigIsolationMixin:
+    """Snapshot/restore the whole QSettings tree around every test.
+
+    ``AddDownloadDialog`` reads ``GeneralConfig`` at construction time, so
+    ``test_add_download_picks_default_folder`` used to persist a
+    ``default_save_path`` naming a temp directory that the ``with`` block then
+    deleted -- poisoning every later test in the process.
+    """
 
     def setUp(self):
-        clipboard = QGuiApplication.clipboard()
-        self._orig_clipboard = clipboard.text() if clipboard else ""
+        super().setUp()
+        settings = QSettings("MyIDM", "My-IDM")
+        snapshot = {
+            group: {key: settings.value(f"{group}/{key}", None) for key in settings.childKeys()}
+            for group in _CONFIG_GROUPS
+        }
+        self.addCleanup(self._restore_settings, settings, snapshot)
 
-    def tearDown(self):
-        clipboard = QGuiApplication.clipboard()
-        if clipboard:
-            clipboard.setText(self._orig_clipboard)
+    @staticmethod
+    def _restore_settings(settings, snapshot):
+        settings.clear()
+        for group, values in snapshot.items():
+            for key, value in values.items():
+                settings.setValue(f"{group}/{key}", value)
+        settings.sync()
+
+
+class FakeClipboard:
+    """In-memory stand-in for the system clipboard.
+
+    ``QClipboard.setText`` is a silent no-op when another process holds the
+    clipboard lock, so a real clipboard makes these assertions a coin flip. The
+    conftest fixture already snapshots/clears/restores the real clipboard; this
+    swaps the object entirely so no test depends on OS state.
+    """
+
+    def __init__(self):
+        self._text = ""
+        self._image = None
+        self._mime = None
+        self.set_calls = []
+
+    # -- QClipboard API surface used by production code --------------------
+    def text(self, mode=None):
+        return self._text
+
+    def setText(self, text, mode=None):
+        self._text = text
+        self.set_calls.append(text)
+
+    def clear(self, mode=None):
+        self._text = ""
+        self._image = None
+        self._mime = None
+
+    def image(self, mode=None):
+        return self._image
+
+    def setImage(self, image, mode=None):
+        self._image = image
+
+    def mimeData(self, mode=None):
+        return self._mime
+
+    def setMimeData(self, data, mode=None):
+        self._mime = data
+
+
+class TestAddDownloadDialogClipboard(ConfigIsolationMixin, unittest.TestCase):
+    """Prefill-from-clipboard behaviour, driven through a fake clipboard."""
+
+    def setUp(self):
+        super().setUp()
+        self.clipboard = FakeClipboard()
+        patcher = patch.object(
+            QGuiApplication, "clipboard", staticmethod(lambda: self.clipboard)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(QApplication.processEvents)
 
     def test_prefill_http_url_from_clipboard(self):
         """HTTP URL in clipboard is automatically prefilled."""
-        import time
-        clipboard = QGuiApplication.clipboard()
         url = "https://downloads.example.com/test-file.tar.gz"
-        for _ in range(10):
-            clipboard.setText(url)
-            QApplication.processEvents()
-            if clipboard.text() == url:
-                break
-            time.sleep(0.02)
+        self.clipboard.setText(url)
 
         dlg = AddDownloadDialog()
         try:
-            self.assertEqual(
-                dlg._url_edit.text(),
-                "https://downloads.example.com/test-file.tar.gz"
-            )
+            self.assertEqual(dlg._url_edit.text(), url)
             # Text should be selected for quick replace
             self.assertTrue(dlg._url_edit.hasSelectedText())
         finally:
@@ -53,15 +127,8 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
 
     def test_prefill_magnet_link_from_clipboard(self):
         """Magnet link in clipboard is automatically prefilled."""
-        import time
-        clipboard = QGuiApplication.clipboard()
         magnet = "magnet:?xt=urn:btih:da39a3ee5e6b4b0d3255bfef95601890afd80709&dn=sample_download_dialog_test"
-        for _ in range(10):
-            clipboard.setText(magnet)
-            QApplication.processEvents()
-            if clipboard.text() == magnet:
-                break
-            time.sleep(0.02)
+        self.clipboard.setText(magnet)
 
         dlg = AddDownloadDialog()
         try:
@@ -72,8 +139,7 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
 
     def test_do_not_prefill_non_url_text(self):
         """Non-URL text in clipboard is ignored."""
-        clipboard = QGuiApplication.clipboard()
-        clipboard.setText("Just some random copied text from another app")
+        self.clipboard.setText("Just some random copied text from another app")
 
         dlg = AddDownloadDialog()
         try:
@@ -83,8 +149,7 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
 
     def test_do_not_prefill_multiline_text(self):
         """Multi-line text starting with http is not mistakenly prefilled."""
-        clipboard = QGuiApplication.clipboard()
-        clipboard.setText("https://example.com\nsome notes\nmore notes")
+        self.clipboard.setText("https://example.com\nsome notes\nmore notes")
 
         dlg = AddDownloadDialog()
         try:
@@ -94,22 +159,19 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
 
     def test_explicit_initial_url_overrides_clipboard(self):
         """Passing initial_url overrides clipboard content."""
-        clipboard = QGuiApplication.clipboard()
-        clipboard.setText("https://clipboard.example.com/clip.zip")
+        self.clipboard.setText("https://clipboard.example.com/clip.zip")
 
         dlg = AddDownloadDialog(initial_url="https://override.example.com/explicit.zip")
         try:
             self.assertEqual(
-                dlg._url_edit.text(),
-                "https://override.example.com/explicit.zip"
+                dlg._url_edit.text(), "https://override.example.com/explicit.zip"
             )
         finally:
             dlg.close()
 
     def test_empty_clipboard(self):
         """Empty clipboard leaves the input empty."""
-        clipboard = QGuiApplication.clipboard()
-        clipboard.clear()
+        self.clipboard.clear()
 
         dlg = AddDownloadDialog()
         try:
@@ -127,8 +189,19 @@ class TestAddDownloadDialogClipboard(unittest.TestCase):
             try:
                 self.assertEqual(dlg.save_path, custom_dir)
                 self.assertEqual(dlg._save_edit.currentText(), custom_dir)
+                # The dialog must not quietly "remember" the folder either.
+                self.assertEqual(GeneralConfig.load().default_save_path, custom_dir)
             finally:
                 dlg.close()
+
+        # The autouse guard is what undoes the save; run it now and prove the
+        # deleted temp path is not left behind for the rest of the session.
+        self.doCleanups()
+        self.assertNotEqual(
+            GeneralConfig.load().default_save_path, custom_dir,
+            "the snapshot/restore guard must not leave a deleted temp path behind",
+        )
+
 
 
 class TestAddDownloadDialogTorButton(unittest.TestCase):
@@ -270,7 +343,7 @@ class TestDialogsScrollable(unittest.TestCase):
             dlg.close()
 
 
-class TestAddDownloadDialogMultiline(unittest.TestCase):
+class TestAddDownloadDialogMultiline(ConfigIsolationMixin, unittest.TestCase):
     """Test multiline URL support in AddDownloadDialog."""
 
     def test_multiline_urls_property(self):

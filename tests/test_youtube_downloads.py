@@ -145,6 +145,26 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         self.manager._security_config.scan_after_download = False
         self.md = make_metadata()
 
+        # Hermetic tool detection. `_add_youtube_mode_b` calls
+        # `ytt.check_ytdlp_available(cfg)` and `_start_ytdlp_native_job` picks
+        # `merge_output_format` from `ytt.check_ffmpeg_available(cfg)`; both
+        # resolve `shutil.which(...)` on the host. Without these patches every
+        # Mode B test below silently depends on the developer having yt-dlp and
+        # ffmpeg installed, and the options dict differs per machine.
+        # `manager` does a function-local `from my_idm import youtube_tool as ytt`,
+        # so the module attribute is what has to be patched.
+        self.ffmpeg_available = True
+        ytdlp_patcher = patch(
+            "my_idm.youtube_tool.check_ytdlp_available", return_value=True
+        )
+        ffmpeg_patcher = patch(
+            "my_idm.youtube_tool.check_ffmpeg_available",
+            side_effect=lambda cfg=None: self.ffmpeg_available,
+        )
+        for patcher in (ytdlp_patcher, ffmpeg_patcher):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     # -- Mode A ------------------------------------------------------------
 
     def test_mode_a_creates_http_entry_from_direct_url(self):
@@ -210,6 +230,10 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
                 URL, self.md, save_path=self.out, format_selector=selector,
                 mode="b", filename=filename,
             )
+        self.assertIsNotNone(
+            did, "Mode B download was not created (yt-dlp availability is "
+            "pinned in setUp, so this is a real failure)"
+        )
         return did, mock_start
 
     def test_mode_b_creates_native_entry(self):
@@ -235,6 +259,22 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         self.assertIsNotNone(did)
         kwargs = mock_start.call_args.kwargs
         self.assertEqual(kwargs["format_selector"], self.manager.external_tools_config.ytdlp_default_format)
+
+    def test_mode_b_merge_format_is_pinned_by_ffmpeg_availability(self):
+        """`merge_output_format` is chosen from a real shutil.which("ffmpeg")."""
+        self.ffmpeg_available = True
+        _did, mock_start = self._start_mode_b()
+        self.assertEqual(
+            mock_start.call_args.kwargs["merge_output_format"], "mp4",
+            "ffmpeg present: merged streams must be muxed to mp4",
+        )
+
+        self.ffmpeg_available = False
+        _did, mock_start = self._start_mode_b()
+        self.assertEqual(
+            mock_start.call_args.kwargs["merge_output_format"], "",
+            "ffmpeg absent: no forced merge container",
+        )
 
     def test_mode_b_registers_job(self):
         did, _ = self._start_mode_b()
@@ -293,7 +333,12 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         entry = self.db.get_download(did)
         self.assertEqual(entry.downloaded_size, 500_000)
         self.assertEqual(entry.total_size, 2_000_000)
-        self.assertTrue(events)
+        self.assertEqual(len(events), 1, f"expected exactly one progress signal, got {events}")
+        self.assertEqual(
+            events[0][1:3], (500_000, 2_000_000),
+            f"progress signal must carry the reported bytes and the expected total, got {events[0]!r}",
+        )
+        self.assertEqual(events[0][0], did)
 
     def test_progress_ignored_when_paused(self):
         did, _ = self._start_mode_b()
@@ -403,6 +448,88 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
             self.assertTrue(self.manager._maybe_refresh_youtube_url(self.db.get_download(did)))
             mock_refresh.assert_called_once()
 
+    def test_maybe_refresh_runs_real_refresh_body(self):
+        """The near-expiry path must run the real body, not a mocked-out method.
+
+        The three tests above patch ``_refresh_youtube_url`` itself, so the
+        ``source_url``/``format_id`` guard and the header/URL/expiry write-back
+        in manager.py are never executed. Here only ``resolve_direct_url`` -- the
+        single network call -- is stubbed, so the whole refresh path runs.
+        """
+        import time as _time
+        did, _ = self._start_mode_b()
+        entry = self.db.get_download(did)
+        entry.metadata["source_type"] = "youtube"
+        entry.metadata["youtube_mode"] = "a"
+        entry.metadata["youtube_format_id"] = "18"
+        entry.metadata["original_youtube_url"] = URL
+        entry.metadata["youtube_url_expires_at"] = _time.time() + 30
+        entry.url = "https://cdn.example.com/expired"
+        self.db.update_download(entry)
+
+        fresh = ytt.DirectUrlResult(
+            direct_url="https://cdn.example.com/fresh",
+            filename="Test Video.mp4",
+            format_id="18",
+            http_headers={"User-Agent": "refreshed"},
+            expires_at=1_900_000_000.0,
+        )
+        with patch("my_idm.youtube_tool.resolve_direct_url", return_value=fresh) as mock_resolve:
+            self.assertTrue(self.manager._maybe_refresh_youtube_url(self.db.get_download(did)))
+
+        mock_resolve.assert_called_once()
+        self.assertEqual(mock_resolve.call_args[0][0], URL)
+        self.assertEqual(mock_resolve.call_args[0][1], "18")
+        updated = self.db.get_download(did)
+        self.assertEqual(updated.url, "https://cdn.example.com/fresh", "URL was not written back")
+        self.assertEqual(updated.metadata.get("headers"), {"User-Agent": "refreshed"})
+        self.assertEqual(updated.metadata.get("youtube_url_expires_at"), 1_900_000_000.0)
+
+    def test_real_refresh_body_requires_source_and_format(self):
+        """Same un-mocked body: the guard must reject a partial Mode A entry."""
+        import time as _time
+        did, _ = self._start_mode_b()
+        entry = self.db.get_download(did)
+        entry.metadata["source_type"] = "youtube"
+        entry.metadata["youtube_mode"] = "a"
+        entry.metadata["original_youtube_url"] = URL
+        # Near expiry, so _maybe_refresh really does call into the body.
+        entry.metadata["youtube_url_expires_at"] = _time.time() + 30
+        self.db.update_download(entry)
+
+        fresh = ytt.DirectUrlResult(
+            direct_url="https://cdn.example.com/fresh",
+            filename="Test Video.mp4",
+            format_id="18",
+        )
+        with patch("my_idm.youtube_tool.resolve_direct_url", return_value=fresh) as mock_resolve:
+            # No youtube_format_id recorded: the body must bail out without
+            # resolving anything.
+            self.assertFalse(self.manager._maybe_refresh_youtube_url(self.db.get_download(did)))
+        mock_resolve.assert_not_called()
+
+    def test_real_refresh_body_swallows_resolve_failure(self):
+        import time as _time
+        did, _ = self._start_mode_b()
+        entry = self.db.get_download(did)
+        entry.metadata["source_type"] = "youtube"
+        entry.metadata["youtube_mode"] = "a"
+        entry.metadata["youtube_format_id"] = "18"
+        entry.metadata["original_youtube_url"] = URL
+        entry.metadata["youtube_url_expires_at"] = _time.time() + 30
+        entry.url = "https://cdn.example.com/expired"
+        self.db.update_download(entry)
+
+        with patch(
+            "my_idm.youtube_tool.resolve_direct_url",
+            side_effect=ytt.YouTubeToolError("expired", kind="error"),
+        ):
+            self.assertFalse(self.manager._maybe_refresh_youtube_url(self.db.get_download(did)))
+
+        updated = self.db.get_download(did)
+        self.assertEqual(updated.url, "https://cdn.example.com/expired", "URL must be left alone")
+        self.assertNotIn("headers", updated.metadata)
+
     def test_resume_does_not_refresh_mode_b(self):
         import time as _time
         did, _ = self._start_mode_b()
@@ -429,7 +556,11 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         self.assertNotIn("/", entry.filename)
         self.assertNotIn("\\", entry.filename)
         self.assertTrue(entry.filename.endswith(".mp4"))
-        self.assertEqual(Path(entry.file_path).parent, Path(self.out).resolve() if Path(self.out).exists() else Path(self.out))
+        # manager.py builds file_path with a bare `Path(save_dir) / filename`
+        # and does not resolve it, so compare the unresolved form (as
+        # test_mode_b_passes_explicit_outtmpl does) rather than mixing
+        # resolve()d and raw forms of the same directory.
+        self.assertEqual(Path(entry.file_path).parent, Path(self.out))
 
     def test_mode_b_records_stem_in_metadata(self):
         md = make_metadata()
@@ -542,21 +673,67 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         self.assertEqual(self.db.get_download(did).status, "file_not_found")
 
     def test_mark_file_not_found_without_entry(self):
+        """An unknown id must be a no-op: no row, no signal, no exception."""
+        did, _ = self._start_mode_b()
+        before = self._snapshot_downloads()
+        self.assertNotIn(did, before, "fixture: the Mode B entry should exist")
+
+        signals = []
+        self.manager.status_changed.connect(
+            lambda *a: signals.append(("status_changed",) + a))
+        self.manager.progress_updated.connect(
+            lambda *a: signals.append(("progress_updated",) + a))
+
         self.manager.mark_file_not_found("does-not-exist")
+
+        self.assertIsNone(self.db.get_download("does-not-exist"))
+        self.assertEqual(
+            self._snapshot_downloads(), before,
+            "mark_file_not_found() must not create, mutate or drop any download",
+        )
+        self.assertEqual(
+            signals, [],
+            "mark_file_not_found() on an unknown id must not emit status/progress",
+        )
+        self.assertEqual(
+            self.db.get_download(did).status, "downloading",
+            "the unrelated in-flight download must be left alone",
+        )
+
+    def _snapshot_downloads(self):
+        """Comparable fingerprint of the whole download table."""
+        return sorted(
+            (e.id, e.status, e.filename, e.file_path, e.downloaded_size, e.total_size)
+            for e in self.db.get_all_downloads()
+        )
 
     # -- deleting while running (regression: orphaned .part, locked file) ----
 
     STEM = "Mariage d'Amour - Paul de Senneville __ Jacob's Piano"
 
     def _start_fake_ytdlp(self):
-        """Fake worker that holds a .f616.mp4.part file open until cancelled."""
+        """Fake worker that holds a .f616.mp4.part file open until cancelled.
+
+        The worker opens the file, delivers one progress callback (so the entry
+        reaches "downloading" in the database) and then *parks* on an Event
+        while keeping the handle open. Parking rather than spinning matters: a
+        tight write+callback loop competes with ``delete_download`` for the
+        shared sqlite connection and with the OS for a file the purge is about
+        to move, so under host load the worker can miss the 5s cancel budget
+        inside ``_stop_ytdlp_worker`` and the lock assertion then flakes.
+        ``state["parked"]`` is only set once the callback has been delivered, so
+        a test that waits on it knows no database call is in flight.
+        """
         import threading
-        import time
 
         state = {
             "holder": {"cancel": False},
             "exited": threading.Event(),
             "stop": threading.Event(),
+            # Set once the .part file is open, the first progress callback has
+            # been delivered and the worker is parked holding the handle.
+            "parked": threading.Event(),
+            "park_gate": threading.Event(),
             "handle": None,
             "thread": None,
         }
@@ -566,21 +743,21 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
             part = Path(save_dir) / f"{self.STEM}.f616.mp4.part"
             part_path["path"] = part
             state["handle"] = open(part, "wb")
-            written = {"n": 0}
+            written = {"n": 8192}
 
             def run():
                 try:
+                    state["handle"].write(b"x" * 8192)
+                    cb = kwargs.get("progress_cb")
+                    if cb:
+                        try:
+                            cb({"status": "downloading", "downloaded_bytes": written["n"]})
+                        except Exception:
+                            # The test may have torn the manager down already.
+                            return
+                    state["parked"].set()
                     while not state["holder"].get("cancel") and not state["stop"].is_set():
-                        state["handle"].write(b"x" * 8192)
-                        written["n"] += 8192
-                        cb = kwargs.get("progress_cb")
-                        if cb:
-                            try:
-                                cb({"status": "downloading", "downloaded_bytes": written["n"]})
-                            except Exception:
-                                # The test may have torn the manager down already.
-                                break
-                        time.sleep(0.02)
+                        state["park_gate"].wait(0.01)
                 finally:
                     state["handle"].close()
                     state["exited"].set()
@@ -597,6 +774,7 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         def _shutdown():
             state["holder"]["cancel"] = True
             state["stop"].set()
+            state["park_gate"].set()
             thread = state["thread"]
             if thread is not None:
                 thread.join(timeout=5)
@@ -611,15 +789,19 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         did = self.manager.add_youtube_download(
             URL, md, save_path=self.out, format_selector="137+140", mode="b"
         )
-        deadline = time.time() + 5
-        while time.time() < deadline and not part_path["path"].exists():
-            time.sleep(0.02)
+        self.assertIsNotNone(did, "Mode B download was not created")
+        self.assertIn("path", part_path, "start_native_download was never called")
+        self.assertTrue(
+            state["parked"].wait(timeout=10),
+            "fake yt-dlp worker never opened its .part file and parked",
+        )
         self.assertTrue(part_path["path"].is_file(), "fake .part was never created")
+        self.assertFalse(state["handle"].closed, "the worker must still hold the file open")
 
         self.manager.delete_download(did, delete_files=True)
-        state["exited"].wait(timeout=15)
+        self.assertTrue(state["exited"].wait(timeout=15), "worker should have exited")
 
-        self.assertTrue(state["exited"].is_set(), "worker should have exited")
+        self.assertTrue(state["handle"].closed, "file handle must be released")
         self.assertFalse(part_path["path"].exists(), ".part file must be removed")
         self.assertEqual(list(Path(self.out).iterdir()), [])
         self.assertIsNone(self.db.get_download(did))
@@ -631,12 +813,27 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         did = self.manager.add_youtube_download(
             URL, md, save_path=self.out, format_selector="137+140", mode="b"
         )
-        time.sleep(0.3)
-        self.assertFalse(state["handle"].closed)
+        self.assertIsNotNone(did, "Mode B download was not created")
+        self.assertTrue(
+            state["parked"].wait(timeout=10),
+            "fake yt-dlp worker never opened its .part file and parked",
+        )
+        self.assertIsNotNone(state["handle"])
+        self.assertFalse(state["handle"].closed, "the worker must still hold the file open")
 
         self.manager.delete_download(did, delete_files=True)
-        state["exited"].wait(timeout=15)
+        self.assertTrue(
+            state["exited"].wait(timeout=15),
+            f"the worker never noticed the cancellation (handle closed="
+            f"{state['handle'].closed})",
+        )
         self.assertTrue(state["handle"].closed, "file handle must be released")
+        surviving = self.db.get_download(did)
+        self.assertIsNone(
+            surviving,
+            f"the row survived delete_download: {surviving!r}; "
+            f"table now holds {self._snapshot_downloads()}",
+        )
 
     def test_purge_removes_all_scratch_variants(self):
         md = make_metadata()
@@ -648,15 +845,24 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
             )
         entry = self.db.get_download(did)
         stem = self.manager.external_tools_config and entry.metadata.get("youtube_stem")
+        self.assertTrue(stem, "Mode B entries must record their output stem")
 
         kept = Path(self.out) / f"{stem}.mp4"
         kept.write_bytes(b"final")
+        scratch_names = []
         for suffix in (".f616.mp4.part", ".f140.m4a.part", ".mp4.ytdl", ".mp4.temp"):
-            Path(self.out) / f"{stem}{suffix}".replace(".mp4.f616.mp4.part", ".f616.mp4.part")
-            (Path(self.out) / f"{stem}{suffix}").write_bytes(b"scratch")
+            # yt-dlp writes the raw format fragment as "<stem>.f616.mp4.part";
+            # normalise the ".mp4" the stem already carries before writing it.
+            name = f"{stem}{suffix}".replace(".mp4.f616.mp4.part", ".f616.mp4.part")
+            (Path(self.out) / name).write_bytes(b"scratch")
+            scratch_names.append(name)
 
         removed = self.manager._purge_youtube_temp_files(entry)
-        self.assertEqual(len(removed), 4)
+        self.assertEqual(len(removed), 4, f"expected 4 scratch files, got {removed}")
+        self.assertEqual(
+            sorted(Path(p).name for p in removed), sorted(scratch_names),
+            "purge must report exactly the scratch files that were written",
+        )
         self.assertTrue(kept.is_file(), "the final media file must survive")
         self.assertEqual(
             sorted(p.name for p in Path(self.out).iterdir()),
@@ -664,18 +870,44 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         )
 
     def test_progress_hook_is_noop_after_entry_deleted(self):
-        """Regression: a late hook raised 'NoneType' has no 'total_size'."""
-        md = make_metadata()
-        with patch("my_idm.youtube_tool.start_native_download") as mock_start:
-            mock_start.return_value = (MagicMock(), {"cancel": False})
-            did = self.manager.add_youtube_download(
-                URL, md, save_path=self.out, format_selector="137+140", mode="b"
-            )
+        """Regression: a late hook raised 'NoneType' has no 'total_size'.
+
+        It must not raise, and it must not emit or write anything: the row it
+        would have updated is gone, and `_on_ytdlp_done` must not resurrect it.
+        """
+        did, _ = self._start_mode_b()
+        self.db.delete_segments(did)
         self.db.delete_download(did)
+        self.assertIsNone(self.db.get_download(did), "precondition: the entry is gone")
+
+        signals = []
+        self.manager.progress_updated.connect(
+            lambda *a: signals.append(("progress_updated",) + a))
+        self.manager.status_changed.connect(
+            lambda *a: signals.append(("status_changed",) + a))
+        self.manager.download_added.connect(
+            lambda *a: signals.append(("download_added",) + a))
+        before = self._snapshot_downloads()
+        self.assertEqual(before, [], "precondition: the table is empty")
+
         # Must not raise.
         self.manager._on_ytdlp_progress(did, {"status": "downloading", "downloaded_bytes": 10})
         self.manager._on_ytdlp_done(did, "")
         self.manager._on_ytdlp_error(did, "boom")
+
+        self.assertEqual(
+            signals, [],
+            "late hooks for a deleted entry must not emit any signal",
+        )
+        self.assertEqual(
+            self._snapshot_downloads(), [],
+            "late hooks for a deleted entry must not recreate or mutate a row",
+        )
+        self.assertEqual(self.db.get_segments(did), [], "no segment rows may reappear")
+        self.assertEqual(
+            Path(self.out).exists() and list(Path(self.out).iterdir()), [],
+            "late hooks for a deleted entry must not write files",
+        )
 
     def test_stop_worker_times_out_without_hanging(self):
         """A worker that ignores cancellation must not block delete indefinitely."""
@@ -683,22 +915,55 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         import time
 
         never = threading.Event()
+        self.addCleanup(never.set)
         with patch("my_idm.youtube_tool.start_native_download") as mock_start:
             mock_start.return_value = (threading.Thread(target=never.wait, daemon=True), {"cancel": False})
             did = self.manager.add_youtube_download(
                 URL, make_metadata(), save_path=self.out,
                 format_selector="137+140", mode="b",
             )
-        t0 = time.time()
+        self.assertIsNotNone(did, "Mode B download was not created")
+
+        # The real contract is "the join is bounded", not "delete returns in
+        # under N seconds": _stop_ytdlp_worker has a hard join timeout of its
+        # own, and the wall-clock leftover is mostly unrelated teardown.
+        stops = []
+        real_stop_worker = self.manager._stop_ytdlp_worker
+
+        def spy(download_id, reason, timeout=5.0, force=False):
+            stops.append({"id": download_id, "reason": reason, "timeout": timeout, "force": force})
+            return real_stop_worker(download_id, reason, timeout=timeout, force=force)
+
+        self.manager._stop_ytdlp_worker = spy
+        t0 = time.monotonic()
         self.manager.delete_download(did, delete_files=True)
-        elapsed = time.time() - t0
-        self.assertLess(elapsed, 8.0, "delete must not block on an unresponsive worker")
+        elapsed = time.monotonic() - t0
+
+        self.assertEqual(len(stops), 1, f"delete must stop the worker exactly once, got {stops}")
+        self.assertEqual(stops[0]["id"], did, f"the wrong worker was stopped: {stops}")
+        self.assertTrue(stops[0]["force"], "delete must force-drop the job registry entry")
+        self.assertGreater(stops[0]["timeout"], 0, f"join must have a finite timeout: {stops}")
+        self.assertLessEqual(
+            stops[0]["timeout"], 30.0,
+            f"join timeout too generous to be a bound: {stops[0]['timeout']}s",
+        )
+        self.assertLess(
+            elapsed, stops[0]["timeout"] + 15.0,
+            f"delete must not block on an unresponsive worker (took {elapsed:.1f}s)",
+        )
         self.assertIsNone(self.db.get_download(did))
-        never.set()
+        self.assertFalse(self.manager.is_ytdlp_native_job(did))
 
 
-async def _no_sleep(_delay):
-    return None
+async def _no_sleep(_delay, result=None):
+    """Collapse the segment retry backoff.
+
+    Scoped to ``my_idm.http_engine.asyncio.sleep`` (never the stdlib attribute):
+    ``asyncio.sleep`` is used by aiohttp itself, and the previous module-level
+    ``patch("asyncio.sleep")`` mutated it process-wide with a signature that
+    rejected ``asyncio.sleep(delay, result=...)``.
+    """
+    return result
 
 
 class TestSegmentStatusReporting(unittest.TestCase):
@@ -761,17 +1026,67 @@ class TestSegmentStatusReporting(unittest.TestCase):
             )
         )
 
-    def test_active_segment_is_marked_downloading_first(self):
-        """The first status write for a transferring segment must be 'downloading'."""
+    def _run_forcing_curl_path(self, seg):
+        """Drive *seg* down the curl-impersonation branch until the retries run out.
+
+        ``_download_one_segment`` only uses curl when
+        ``_requires_curl_impersonation(entry.url)`` matches (owocdn.top, kwik.cx,
+        kwik.si, pahe.win) or ``entry.metadata["use_curl_cffi"]`` is set. The URL
+        here is ``https://example.com/big.bin``, so the persisted metadata flag is
+        what selects the branch -- without it the patched
+        ``_download_segment_curl`` was never called and the test passed
+        identically with the patch removed.
+        """
         from my_idm import http_engine as he
 
+        stored = self.db.get_download("d1")
+        stored.metadata["use_curl_cffi"] = True
+        self.db.update_download(stored)
+        self.assertTrue(
+            self.db.get_download("d1").metadata.get("use_curl_cffi"),
+            "precondition: the curl flag must be persisted for the run",
+        )
+
+        curl = MagicMock(side_effect=OSError("boom"))
+        with patch.object(he.HTTPEngine, "_download_segment_curl", curl), \
+             patch.object(he.asyncio, "sleep", new=_no_sleep), \
+             patch.object(he, "_HAS_CURL_CFFI", True):
+            with self.assertRaises(Exception) as ctx:
+                self._run(seg)
+        return ctx.exception, curl
+
+    def test_active_segment_is_marked_downloading_first(self):
+        """The first status write for a transferring segment must be 'downloading'."""
         seg = self.db.get_segments("d1")[0]
-        with patch.object(he.HTTPEngine, "_download_segment_curl",
-                          side_effect=OSError("boom")):
-            with patch("asyncio.sleep", new=_no_sleep):
-                with self.assertRaises(Exception):
-                    self._run(seg)
-        self.assertEqual(self.updates[0], ("d1-seg0", "downloading"))
+        exc, curl = self._run_forcing_curl_path(seg)
+
+        self.assertGreaterEqual(
+            curl.call_count, 1,
+            "_download_segment_curl was never called; the curl branch was not exercised",
+        )
+        self.assertEqual(
+            type(exc), Exception,
+            f"expected the retries-exhausted error, got {type(exc).__name__}: {exc}",
+        )
+        self.assertIn("failed after", str(exc), f"unexpected failure: {exc!r}")
+        self.assertEqual(
+            self.updates[0], ("d1-seg0", "downloading"),
+            f"first segment status write must be 'downloading', got {self.updates[0]!r}",
+        )
+        self.assertIn(
+            ("d1-seg0", "downloading"), self.updates,
+            "the curl attempt must not skip the 'downloading' write",
+        )
+        self.assertIn(
+            ("d1-seg0", "pending"), self.updates,
+            "a failed attempt must be rolled back to 'pending' before retrying",
+        )
+        self.assertEqual(
+            len([u for u in self.updates if u == ("d1-seg0", "downloading")]),
+            curl.call_count,
+            "each retry must re-announce 'downloading'",
+        )
+        self.assertEqual(seg.status, "error", f"exhausted retries must end at 'error'")
 
     def test_cancelled_segment_reports_paused_not_pending(self):
         import asyncio
@@ -794,16 +1109,16 @@ class TestSegmentStatusReporting(unittest.TestCase):
 
     def test_in_memory_status_tracks_database(self):
         """The panel reads the live object, so it must never go stale."""
-        from my_idm import http_engine as he
-
         seg = self.db.get_segments("d1")[0]
-        with patch.object(he.HTTPEngine, "_download_segment_curl",
-                          side_effect=OSError("boom")):
-            with patch("asyncio.sleep", new=_no_sleep):
-                with self.assertRaises(Exception):
-                    self._run(seg)
+        _exc, curl = self._run_forcing_curl_path(seg)
         stored = self.db.get_segments("d1")[0]
-        self.assertEqual(seg.status, stored.status)
+        self.assertGreaterEqual(curl.call_count, 1, "curl branch was not exercised")
+        self.assertEqual(seg.status, stored.status, f"in-memory={seg.status!r} db={stored.status!r}")
+        self.assertEqual(seg.status, "error")
+        self.assertEqual(
+            stored.downloaded_bytes, seg.downloaded_bytes,
+            "byte counters must stay in lock-step with the status",
+        )
 
 
 class TestPasteDetection(unittest.TestCase):

@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union, Any
@@ -392,6 +393,14 @@ class DownloadManager(QObject):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
 
+        # QTimer.stop() cannot cancel a callback that is already executing, so a
+        # poll that is mid-flight when stop() runs can still reach the database
+        # afterwards (this is what made DownloadManager::stop() race a caller
+        # that tears the database down). Every timer slot therefore runs inside
+        # _timer_slot(), and stop() waits for the in-flight ones to finish.
+        self._timer_slots_cond = threading.Condition()
+        self._timer_slots_inflight = 0
+
         # Torrent poll timer (runs in Qt main thread)
         self._torrent_timer = QTimer(self)
         self._torrent_timer.setInterval(1000)  # 1 second
@@ -428,6 +437,48 @@ class DownloadManager(QObject):
         )
 
     # -- lifecycle -----------------------------------------------------------
+
+    @contextmanager
+    def _timer_slot(self):
+        """Mark a periodic Qt callback as in-flight so ``stop()`` can wait for it.
+
+        ``QTimer.stop()`` only stops *future* emissions: a slot that is already
+        running keeps going, and a poll that has reached ``Database.update_status``
+        can write after ``stop()`` has returned. The counter is incremented and
+        decremented under a short-lived lock (never held across the body) so
+        ``stop()`` can block until the last in-flight slot has returned without
+        ever deadlocking against the slot itself.
+        """
+        with self._timer_slots_cond:
+            self._timer_slots_inflight += 1
+        try:
+            yield
+        finally:
+            with self._timer_slots_cond:
+                self._timer_slots_inflight -= 1
+                if self._timer_slots_inflight <= 0:
+                    self._timer_slots_cond.notify_all()
+
+    def _await_timer_slots(self, timeout: float = 5.0) -> bool:
+        """Block until no timer slot is in flight, or *timeout* elapses.
+
+        Returns True when the manager is quiescent. Almost always instantaneous,
+        because timer slots and ``stop()`` both live on the Qt thread; it only
+        blocks when ``stop()`` is driven from another thread while a poll is
+        already running.
+        """
+        deadline = time.monotonic() + timeout
+        with self._timer_slots_cond:
+            while self._timer_slots_inflight > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log.warning(
+                        "DownloadManager.stop(): %d timer callback(s) still running "
+                        "after %.0fs", self._timer_slots_inflight, timeout,
+                    )
+                    return False
+                self._timer_slots_cond.wait(remaining)
+        return True
 
     def start(self):
         """Start engines and background loop."""
@@ -507,6 +558,11 @@ class DownloadManager(QObject):
         self._retry_timer.stop()
         self._backlog_timer.stop()
         self._animepahe_timer.stop()
+
+        # A timer callback that was already executing survives .stop(), so a
+        # poll can still be mid-write when this method returns. Join it before
+        # the caller tears anything down (the database, in particular).
+        self._await_timer_slots(timeout=5.0)
 
         # Stop browser integration server
         if getattr(self, "_browser_server", None) and self._browser_server.is_running and self._loop and self._loop.is_running():
@@ -1019,6 +1075,10 @@ class DownloadManager(QObject):
 
     def _on_animepahe_timer_tick(self):
         """Periodically triggers AnimePahe scraper in background CLI mode."""
+        with self._timer_slot():
+            self._on_animepahe_timer_tick_body()
+
+    def _on_animepahe_timer_tick_body(self):
         if getattr(self, "_stopped", False):
             return
         cfg = self._external_tools_config
@@ -1463,12 +1523,13 @@ class DownloadManager(QObject):
                 self._backlog_timer.stop()
 
     def _on_backlog_timer_tick(self):
-        try:
-            count = self.process_backlogs()
-            if count > 0:
-                log.info("Periodic backlog poll added %d download(s)", count)
-        except Exception as exc:
-            log.error("Error in periodic backlog poll: %s", exc)
+        with self._timer_slot():
+            try:
+                count = self.process_backlogs()
+                if count > 0:
+                    log.info("Periodic backlog poll added %d download(s)", count)
+            except Exception as exc:
+                log.error("Error in periodic backlog poll: %s", exc)
 
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
@@ -3029,23 +3090,25 @@ class DownloadManager(QObject):
     # -- periodic callbacks --------------------------------------------------
 
     def _poll_torrents(self):
-        self._torrent.poll_all()
+        with self._timer_slot():
+            self._torrent.poll_all()
 
     def _process_retry_queue(self):
         """Re-start any downloads that are queued for retry."""
-        if (
-            self._network_config
-            and self._network_config.kill_switch
-            and self._network_config.is_interface_bound
-        ):
-            if not is_interface_active(
-                self._network_config.interface_name,
-                self._network_config.interface_ip,
+        with self._timer_slot():
+            if (
+                self._network_config
+                and self._network_config.kill_switch
+                and self._network_config.is_interface_bound
             ):
-                log.debug("Skipping retry queue: VPN/interface is disconnected")
-                return
+                if not is_interface_active(
+                    self._network_config.interface_name,
+                    self._network_config.interface_ip,
+                ):
+                    log.debug("Skipping retry queue: VPN/interface is disconnected")
+                    return
 
-        self._process_queue()
+            self._process_queue()
 
     # -- helpers -------------------------------------------------------------
 

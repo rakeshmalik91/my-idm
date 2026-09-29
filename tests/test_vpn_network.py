@@ -1,12 +1,14 @@
 """Unit tests for VPN adapter binding, proxy configuration, and kill switch."""
 
-import os
+import socket
 import sys
 import tempfile
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
@@ -24,6 +26,17 @@ from my_idm.network_dialog import NetworkSettingsDialog
 from my_idm.torrent_engine import TorrentEngine
 
 app = QApplication.instance() or QApplication([])
+
+
+class _FakeSnic:
+    """Stand-in for a `psutil.net_if_addrs()` address tuple."""
+
+    def __init__(self, family, address):
+        self.family = family
+        self.address = address
+        self.netmask = None
+        self.broadcast = None
+        self.ptp = None
 
 
 class TestNetworkConfig(unittest.TestCase):
@@ -113,12 +126,63 @@ class TestNetworkConfig(unittest.TestCase):
         self.assertFalse(is_vpn_adapter_name("Local Area Connection"))
 
     def test_get_available_interfaces(self):
-        interfaces = get_available_interfaces()
+        """Enumeration must be exercised, not just called on a host with no adapters.
+
+        `get_available_interfaces()` silently returns an empty list when the host
+        has no non-loopback IPv4 adapter, which would make a bare `for` loop over
+        the result assert nothing at all. psutil is therefore faked first so the
+        loop is guaranteed to run over known adapters, and the real host scan is
+        still checked afterwards.
+        """
+        addrs = {
+            "NordLynx": [_FakeSnic(socket.AF_INET, "10.5.0.2")],
+            "Ethernet": [
+                _FakeSnic(socket.AF_INET, "192.168.1.50"),
+                _FakeSnic(socket.AF_INET6, "fe80::1234"),
+            ],
+            "Loopback Only": [_FakeSnic(socket.AF_INET, "127.0.0.1")],
+        }
+        stats = {
+            "NordLynx": SimpleNamespace(isup=True),
+            "Ethernet": SimpleNamespace(isup=False),
+            "Loopback Only": SimpleNamespace(isup=True),
+        }
+        with patch("psutil.net_if_addrs", return_value=addrs), \
+             patch("psutil.net_if_stats", return_value=stats):
+            interfaces = get_available_interfaces()
+
         self.assertIsInstance(interfaces, list)
+        self.assertEqual(
+            len(interfaces), 2,
+            f"only adapters with a non-loopback IPv4 belong in the list, got {interfaces}",
+        )
+        by_name = {iface.name: iface for iface in interfaces}
+        self.assertNotIn("Loopback Only", by_name, "127.0.0.0/8 adapters must be filtered out")
+        self.assertIn("NordLynx", by_name, f"VPN adapter missing from {[i.name for i in interfaces]}")
+        self.assertIn("Ethernet", by_name, f"adapter missing from {[i.name for i in interfaces]}")
+
+        self.assertEqual(by_name["NordLynx"].ip, "10.5.0.2", "NordLynx: wrong IPv4 selected")
+        self.assertTrue(by_name["NordLynx"].is_up, "NordLynx: isup=True must map to is_up=True")
+        self.assertTrue(by_name["NordLynx"].is_vpn, "NordLynx: a VPN adapter name must be flagged")
+
+        self.assertEqual(
+            by_name["Ethernet"].ip, "192.168.1.50",
+            "Ethernet: the first AF_INET address wins, AF_INET6 must be skipped",
+        )
+        self.assertFalse(by_name["Ethernet"].is_up, "Ethernet: isup=False must map to is_up=False")
+        self.assertFalse(by_name["Ethernet"].is_vpn, "Ethernet: a plain adapter is not a VPN")
+
         for iface in interfaces:
-            self.assertIsInstance(iface, NetworkInterfaceInfo)
-            self.assertTrue(len(iface.name) > 0)
-            self.assertIsInstance(iface.is_up, bool)
+            self.assertIsInstance(iface, NetworkInterfaceInfo, f"{iface.name}: wrong type")
+            self.assertTrue(len(iface.name) > 0, f"{iface.name}: name must not be empty")
+            self.assertIsInstance(iface.is_up, bool, f"{iface.name}: is_up must be a bool")
+
+        # The same invariants must hold against the machine actually running the
+        # suite; this loop is a smoke check, so an empty host is legitimate here.
+        for iface in get_available_interfaces():
+            self.assertIsInstance(iface, NetworkInterfaceInfo, f"{iface.name}: wrong type on host")
+            self.assertTrue(len(iface.name) > 0, f"{iface.name}: name must not be empty on host")
+            self.assertIsInstance(iface.is_up, bool, f"{iface.name}: is_up must be a bool on host")
 
     def test_is_interface_active(self):
         # Default route is always active
@@ -131,11 +195,9 @@ class TestHTTPEngineVPN(unittest.TestCase):
 
     def setUp(self):
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.db.open()
         self.engine = HTTPEngine(self.db)
-
-    def tearDown(self):
-        self.db.close()
 
     def test_request_kwargs_with_proxy(self):
         config = NetworkConfig(
@@ -157,20 +219,78 @@ class TestHTTPEngineVPN(unittest.TestCase):
 
 
 class TestTorrentEngineVPN(unittest.TestCase):
+    """Interface binding / proxy / kill switch, verified against a fake session.
+
+    A real `lt.session` binds ``0.0.0.0:6881`` on the machine running the suite and
+    ``TorrentEngine.start()`` mkdirs the user's real ``~/.my-idm/fastresume``.
+    The whole libtorrent surface is therefore replaced, and the assertions read
+    the settings dict the engine hands to ``session.apply_settings`` — which is
+    precisely the contract under test.
+    """
 
     def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.fastresume_dir = Path(self.tmp_dir.name) / "fastresume"
+        self.fastresume_dir.mkdir(parents=True, exist_ok=True)
+
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.db.open()
+
+        lt_patcher = patch("my_idm.torrent_engine.lt")
+        self.addCleanup(lt_patcher.stop)
+        self.mock_lt = lt_patcher.start()
+
+        has_patcher = patch("my_idm.torrent_engine._HAS_LIBTORRENT", True)
+        self.addCleanup(has_patcher.stop)
+        has_patcher.start()
+
+        fr_patcher = patch("my_idm.torrent_engine.FASTRESUME_DIR", self.fastresume_dir)
+        self.addCleanup(fr_patcher.stop)
+        fr_patcher.start()
+
         self.engine = TorrentEngine(self.db)
+        self.addCleanup(self.engine.stop)
+        # Registered after engine.stop, so LIFO order clears the handles first and
+        # stop() does not spend two seconds draining alerts for a fake handle.
+        self.addCleanup(self._discard_handles)
+
+        # `get_settings()` must hand back a real dict, because the engine writes
+        # into it and then passes the same object to `apply_settings`.
+        self.mock_session = self.mock_lt.session.return_value
+        self.mock_session.get_settings.return_value = {}
         self.engine.start()
 
-    def tearDown(self):
-        self.engine.stop()
-        self.db.close()
+    def _discard_handles(self):
+        self.engine._handles.clear()
+
+    def _applied_settings(self):
+        """The settings dict the engine most recently handed to the fake session."""
+        self.assertIsNotNone(
+            self.mock_session.apply_settings.call_args,
+            "engine never called session.apply_settings (settings were rejected)",
+        )
+        return self.mock_session.apply_settings.call_args[0][0]
 
     def test_apply_network_config_to_libtorrent(self):
-        if not self.engine.available:
-            self.skipTest("libtorrent not available")
+        self.assertTrue(
+            self.engine.available,
+            "engine must report libtorrent available while _HAS_LIBTORRENT is patched on",
+        )
+        self.mock_session.get_settings.assert_called()
+
+        # With nothing bound, the session must fall back to the wildcard bind and
+        # no forced proxy.
+        initial = self._applied_settings()
+        self.assertEqual(
+            initial["listen_interfaces"], "0.0.0.0:6881,[::]:6881",
+            "unbound configuration must listen on the wildcard interfaces",
+        )
+        self.assertEqual(initial["outgoing_interfaces"], "", "unbound configuration must not pin outgoing traffic")
+        self.assertFalse(initial["force_proxy"], "no proxy must be forced when none is configured")
+
+        self.mock_session.apply_settings.reset_mock()
 
         config = NetworkConfig(
             interface_name="VPN Adapter",
@@ -182,17 +302,25 @@ class TestTorrentEngineVPN(unittest.TestCase):
         )
         self.engine.apply_network_config(config)
 
-        # Check session settings
-        sett = self.engine._session.get_settings()
-        self.assertIn("192.168.1.50", sett["listen_interfaces"])
-        self.assertEqual(sett["outgoing_interfaces"], "192.168.1.50")
-        self.assertEqual(sett["proxy_hostname"], "proxy.test.com")
-        self.assertEqual(sett["proxy_port"], 1080)
-        self.assertTrue(sett["force_proxy"])
+        sett = self._applied_settings()
+        self.assertIn("192.168.1.50", sett["listen_interfaces"], "the bound IPv4 must be used for listening")
+        self.assertEqual(
+            sett["listen_interfaces"], "192.168.1.50:6881",
+            "listening must be pinned to the bound IP on the torrent port",
+        )
+        self.assertEqual(sett["outgoing_interfaces"], "192.168.1.50", "outgoing traffic must be pinned too")
+        self.assertEqual(sett["proxy_hostname"], "proxy.test.com", "proxy host not applied")
+        self.assertEqual(sett["proxy_port"], 1080, "proxy port not applied")
+        self.assertEqual(
+            sett["proxy_type"], self.mock_lt.proxy_type_t.socks5,
+            "an unauthenticated socks5 proxy must use the plain socks5 proxy type",
+        )
+        self.assertTrue(sett["force_proxy"], "a configured proxy must be forced")
+        self.assertTrue(sett["proxy_peer_connections"], "peer connections must go through the proxy")
+        self.assertTrue(sett["proxy_tracker_connections"], "tracker connections must go through the proxy")
 
     def test_killswitch_blocks_torrent_when_down(self):
-        if not self.engine.available:
-            self.skipTest("libtorrent not available")
+        self.assertTrue(self.engine.available, "kill switch test needs a libtorrent-capable engine")
 
         config = NetworkConfig(
             interface_name="DisconnectedVPN",
@@ -213,21 +341,80 @@ class TestTorrentEngineVPN(unittest.TestCase):
             save_path="C:/Downloads",
             download_type="torrent",
         )
-        res = self.engine.add_torrent(entry)
+        self.db.add_download(entry)
+
+        with patch("my_idm.torrent_engine.is_interface_active", return_value=False) as mock_active:
+            res = self.engine.add_torrent(entry)
+
         self.assertFalse(res, "Torrent must be blocked when killswitch is active and VPN is down")
-        self.assertTrue(any("Kill switch active" in err for _, _, err in statuses))
+        self.assertTrue(
+            any("Kill switch active" in err for _, _, err in statuses),
+            f"a kill-switch block must be reported through the status callback; got {statuses}",
+        )
+        mock_active.assert_called_once_with("DisconnectedVPN", "10.99.99.99")
+        self.mock_session.add_torrent.assert_not_called()
+        self.assertNotIn(entry.id, self.engine._handles, "a blocked torrent must not be tracked as a handle")
+        self.assertEqual(
+            self.db.get_download(entry.id).status, "error",
+            "a blocked torrent must be marked as errored in the database",
+        )
+
+    def test_killswitch_allows_torrent_when_interface_is_up(self):
+        """The kill switch must gate on liveness, not block unconditionally."""
+        config = NetworkConfig(
+            interface_name="LiveVPN",
+            interface_ip="10.99.99.99",
+            kill_switch=True,
+        )
+        self.engine.apply_network_config(config)
+
+        entry = DownloadEntry(
+            id="t-2",
+            url="magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=test",
+            save_path="C:/Downloads",
+            download_type="torrent",
+        )
+        self.db.add_download(entry)
+
+        info_hash = "0123456789abcdef0123456789abcdef01234567"
+        params = MagicMock()
+        del params.info_hashes
+        params.info_hash = info_hash
+        params.name = None  # keeps `original_name` out of the persisted metadata
+        self.mock_lt.parse_magnet_uri.return_value = params
+
+        handle = MagicMock()
+        del handle.info_hashes
+        handle.is_valid.return_value = True
+        handle.info_hash.return_value = info_hash
+        handle.status.return_value.has_metadata = False
+        self.mock_session.add_torrent.return_value = handle
+
+        with patch("my_idm.torrent_engine.is_interface_active", return_value=True) as mock_active:
+            res = self.engine.add_torrent(entry)
+
+        self.assertTrue(res, "an up VPN must not block the torrent")
+        mock_active.assert_called_once_with("LiveVPN", "10.99.99.99")
+        self.mock_session.add_torrent.assert_called_once_with(params)
+        self.assertIn(entry.id, self.engine._handles, "an accepted torrent must be tracked as a handle")
+        self.assertEqual(
+            self.db.get_download(entry.id).torrent_info_hash, info_hash,
+            "the info hash read back from the handle must be persisted",
+        )
+        self.assertNotEqual(
+            self.db.get_download(entry.id).status, "error",
+            "an accepted torrent must not be marked errored",
+        )
 
 
 class TestManagerVPNIntegration(unittest.TestCase):
 
     def setUp(self):
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.db.open()
         self.manager = DownloadManager(self.db)
-
-    def tearDown(self):
-        self.manager.stop()
-        self.db.close()
+        self.addCleanup(self.manager.stop)
 
     def test_manager_network_config_signal(self):
         received = []
@@ -276,10 +463,23 @@ class TestManagerVPNIntegration(unittest.TestCase):
 class TestNetworkSettingsDialog(unittest.TestCase):
 
     def setUp(self):
-        pass
+        self.dialogs = []
 
     def tearDown(self):
-        pass
+        # A dialog that is not closed on a failing assertion stays alive for the
+        # rest of the session holding its widgets and its connections.
+        while self.dialogs:
+            dlg = self.dialogs.pop()
+            try:
+                dlg.close()
+                dlg.deleteLater()
+            except Exception:
+                pass
+
+    def _make_dialog(self, cfg):
+        dlg = NetworkSettingsDialog(cfg)
+        self.dialogs.append(dlg)
+        return dlg
 
     def test_dialog_loads_and_updates_config(self):
         cfg = NetworkConfig(
@@ -291,7 +491,7 @@ class TestNetworkSettingsDialog(unittest.TestCase):
             proxy_host="127.0.0.1",
             proxy_port=1080,
         )
-        dlg = NetworkSettingsDialog(cfg)
+        dlg = self._make_dialog(cfg)
         self.assertEqual(dlg._proxy_host_edit.text(), "127.0.0.1")
         self.assertEqual(dlg._proxy_port_spin.value(), 1080)
         self.assertTrue(dlg._proxy_enable_cb.isChecked())
@@ -304,7 +504,6 @@ class TestNetworkSettingsDialog(unittest.TestCase):
         updated = dlg.config
         self.assertEqual(updated.proxy_host, "192.168.1.100")
         self.assertEqual(updated.proxy_port, 9050)
-        dlg.close()
 
 
 if __name__ == "__main__":

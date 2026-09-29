@@ -1,14 +1,15 @@
 """Consolidated unit tests for Tor: service discovery, lifecycle, routing, UI indicators, progress bar, and seamless pause/resume."""
 
-import os
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
 from unittest.mock import MagicMock, patch
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QCoreApplication, QEventLoop, QSettings
 from PySide6.QtWidgets import QApplication
 
 from my_idm.config import TorConfig
@@ -21,19 +22,44 @@ from my_idm.tor_service import TorServiceManager, find_tor_executable
 
 app = QApplication.instance() or QApplication([])
 
+# Upper bound for any cross-thread hand-off in this module. Generous enough for a
+# loaded CI box, small enough that a genuine hang fails fast instead of stalling
+# the whole session.
+THREAD_TIMEOUT = 10.0
+
+
+def pump_until(predicate, timeout=THREAD_TIMEOUT):
+    """Pump the Qt event loop until *predicate* holds; return whether it did.
+
+    ``QCoreApplication.processEvents(flags, maxtime)`` blocks until an event
+    arrives or the slice expires, so this waits on the event queue instead of
+    spinning at 100 Hz and starving the very thread it is waiting for.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return False
+        QCoreApplication.processEvents(QEventLoop.AllEvents, min(remaining_ms, 100))
+    return True
+
 
 class TestTorDiscovery(unittest.TestCase):
     """Test find_tor_executable resolution."""
 
+    def setUp(self):
+        # A TemporaryDirectory keeps the fixture inside one tree that the
+        # framework removes, instead of leaving a named temp file behind if the
+        # test raises between creation and cleanup.
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+
     def test_custom_valid_path(self):
-        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
-            temp_exe = f.name
-        try:
-            found = find_tor_executable(temp_exe)
-            self.assertEqual(found, str(Path(temp_exe).resolve()))
-        finally:
-            if os.path.exists(temp_exe):
-                os.unlink(temp_exe)
+        temp_exe = Path(self.tmp_dir.name) / "tor.exe"
+        temp_exe.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.assertTrue(temp_exe.is_file(), "fixture executable was not created")
+        found = find_tor_executable(str(temp_exe))
+        self.assertEqual(found, str(temp_exe.resolve()))
 
     def test_nonexistent_custom_path_fallback(self):
         with patch("shutil.which", return_value=None):
@@ -58,21 +84,37 @@ class TestTorServiceLifecycle(unittest.TestCase):
         self.cfg = TorConfig(proxy_host="127.0.0.1", proxy_port=9050)
         self.service = TorServiceManager(self.cfg, data_dir=self.data_dir)
 
+        # `TorServiceManager.stop()` terminates a PID it recorded itself, using
+        # `subprocess.run(["taskkill", "/F", "/T", "/PID", pid])` on Windows and
+        # `os.kill(pid, 15)` elsewhere. These tests fake the spawned process, so
+        # those PIDs are fictional and must never be resolved against the host's
+        # real process table. Patch both for the whole test — including tearDown,
+        # which calls stop() — rather than relying on every test to remember.
+        run_patcher = patch("subprocess.run")
+        self.addCleanup(run_patcher.stop)
+        self.mock_run = run_patcher.start()
+
+        kill_patcher = patch("os.kill")
+        self.addCleanup(kill_patcher.stop)
+        self.mock_kill = kill_patcher.start()
+
     def tearDown(self):
-        self.service.stop()
-        self.tmp_dir.cleanup()
+        try:
+            self.service.stop()
+        finally:
+            self.tmp_dir.cleanup()
 
     @patch("my_idm.tor_service.is_tor_reachable", return_value=True)
     def test_start_already_running(self, mock_reachable):
         success, msg = self.service.start()
-        self.assertTrue(success)
+        self.assertTrue(success, "a reachable Tor on the configured port is a successful start")
         self.assertIn("existing Tor service", msg)
 
     @patch("my_idm.tor_service.is_tor_reachable", return_value=False)
     @patch("my_idm.tor_service.find_tor_executable", return_value=None)
     def test_start_binary_not_found(self, mock_find, mock_reachable):
         success, msg = self.service.start()
-        self.assertFalse(success)
+        self.assertFalse(success, "a missing tor.exe must not report success")
         self.assertIn("could not be found", msg)
 
     @patch("my_idm.tor_service.find_tor_executable", return_value="C:\\Tools\\tor.exe")
@@ -85,20 +127,51 @@ class TestTorServiceLifecycle(unittest.TestCase):
         mock_popen.return_value = proc
 
         success, msg = self.service.start()
-        self.assertTrue(success)
+        self.assertTrue(success, "spawned Tor must report success once the SOCKS port answers")
         self.assertIn("started and connected", msg)
-        self.assertTrue(self.service.is_spawned)
+        self.assertTrue(self.service.is_spawned, "is_spawned must be True for a live process we launched")
+        self.assertEqual(mock_popen.call_count, 1, "Tor must be spawned exactly once")
+        argv = mock_popen.call_args[0][0]
+        self.assertEqual(argv[0], "C:\\Tools\\tor.exe", "the discovered executable must be argv[0]")
+        self.assertIn("--SocksPort", argv)
+        self.assertIn("9050", argv)
+
+        # tearDown calls stop() anyway; doing it here turns the faked PID into an
+        # assertion about the termination contract instead of a silent risk.
+        self.service.stop()
+        self.assertTrue(
+            self.mock_run.called or self.mock_kill.called,
+            "stop() must terminate the PID it spawned",
+        )
+        if self.mock_run.called:
+            argv = self.mock_run.call_args[0][0]
+            self.assertEqual(argv[0], "taskkill")
+            self.assertIn("/F", argv)
+            self.assertIn("/T", argv)
+            self.assertEqual(argv[argv.index("/PID") + 1], "1234")
+        else:
+            self.assertEqual(self.mock_kill.call_args[0][0], 1234)
+        proc.terminate.assert_called_once()
+        self.assertFalse(self.service.is_spawned, "is_spawned must be False once stopped")
+        self.assertFalse(
+            (self.data_dir / "tor.pid").exists(),
+            "stop() must remove the pid file it wrote",
+        )
 
     @patch("my_idm.tor_service.is_tor_reachable", return_value=True)
     @patch("subprocess.run")
     def test_external_tor_not_terminated_on_stop(self, mock_run, mock_reachable):
         """When Tor was already running before start(), stop() must NOT kill external process."""
         success, _ = self.service.start()
-        self.assertTrue(success)
-        self.assertFalse(self.service.is_spawned)
+        self.assertTrue(success, "connecting to an already-running Tor is a success")
+        self.assertFalse(self.service.is_spawned, "an adopted external service is not 'spawned'")
 
         self.service.stop()
         mock_run.assert_not_called()
+        self.assertFalse(
+            self.mock_run.called,
+            "no PID may be terminated when Tor was never spawned by us",
+        )
 
     @patch("subprocess.run")
     def test_stale_pid_file_ignored_when_not_spawned(self, mock_run):
@@ -110,6 +183,10 @@ class TestTorServiceLifecycle(unittest.TestCase):
         self.assertFalse(self.service.is_spawned)
         self.service.stop()
         mock_run.assert_not_called()
+        self.assertFalse(
+            self.mock_run.called,
+            "a stale pid file must not authorise killing a process we did not spawn",
+        )
 
     @patch("my_idm.tor_service.find_tor_executable", return_value="C:\\Tools\\tor.exe")
     @patch("my_idm.tor_service.is_tor_reachable", side_effect=[False, False])
@@ -122,7 +199,7 @@ class TestTorServiceLifecycle(unittest.TestCase):
         mock_popen.return_value = proc
 
         success, msg = self.service.start()
-        self.assertFalse(success)
+        self.assertFalse(success, "a Tor that dies on a bound port must not report success")
         self.assertIn("already in use by another application or Tor instance", msg)
         self.assertIn("Port 9050", msg)
 
@@ -137,7 +214,7 @@ class TestTorServiceLifecycle(unittest.TestCase):
         mock_popen.return_value = proc
 
         success, msg = self.service.start()
-        self.assertFalse(success)
+        self.assertFalse(success, "a Tor that dies on a locked data dir must not report success")
         self.assertIn("already using the data directory", msg)
 
     @patch("my_idm.tor_service.is_tor_reachable")
@@ -149,7 +226,7 @@ class TestTorServiceLifecycle(unittest.TestCase):
         mock_reachable.side_effect = reachable_check
 
         success, msg = self.service.start()
-        self.assertFalse(success)
+        self.assertFalse(success, "no executable means no Tor to connect to")
         self.assertIn("Tor Browser was detected actively running on port 9150", msg)
 
 
@@ -183,7 +260,7 @@ class TestTorStartupAndExitGating(unittest.TestCase):
             settings.endGroup()
 
             cfg = TorConfig.load(settings)
-            self.assertTrue(cfg.enabled)
+            self.assertTrue(cfg.enabled, "auto_start=True must keep the saved enabled flag")
             self.assertTrue(cfg.auto_start_at_startup)
         finally:
             Path(tmp.name).unlink(missing_ok=True)
@@ -194,9 +271,12 @@ class TestPerDownloadTorRouting(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.db.open()
         self.mgr = DownloadManager(self.db)
+        self.addCleanup(self.mgr.stop)
         self.model = DownloadTableModel()
         self.model.set_tor_availability_provider(self.mgr.tor_available)
         self.entry = DownloadEntry(
@@ -212,11 +292,6 @@ class TestPerDownloadTorRouting(unittest.TestCase):
         )
         self.db.add_download(self.entry)
         self.model.load_entries(self.db.get_all_downloads())
-
-    def tearDown(self):
-        self.mgr.stop()
-        self.db.close()
-        self.tmp.cleanup()
 
     def _enable_tor(self):
         """Patch Tor as reachable so enabling a per-download route is permitted."""
@@ -261,58 +336,101 @@ class TestPerDownloadTorRouting(unittest.TestCase):
         """tor_available() must not touch the network.
 
         Probing inline blocked for the socket timeout (1 s on Windows), which
-        froze the GUI on every context-menu open and every row repaint.
+        froze the GUI on every context-menu open and every row repaint. The
+        contract is that it is a *pure* read of the cached flag, so assert that
+        directly instead of timing a loop that never did any I/O anyway.
         """
-        import time
-
-        with patch.object(self.mgr.tor_service, "is_running", return_value=True):
-            start = time.perf_counter()
-            for _ in range(500):
-                self.mgr.tor_available()
-            elapsed = time.perf_counter() - start
-        self.assertLess(elapsed, 0.2, "tor_available() must be a cached read")
+        with patch("my_idm.manager.is_tor_reachable") as mock_probe:
+            self.mgr._tor_available_cache = True
+            self.assertTrue(self.mgr.tor_available(), "a cached True flag must be returned verbatim")
+            self.mgr._tor_available_cache = False
+            self.assertFalse(self.mgr.tor_available(), "a cached False flag must be returned verbatim")
+        mock_probe.assert_not_called()
 
     def test_refresh_tor_availability_probes_in_background(self):
         """A probe runs off-thread and updates the cache when it lands."""
-        import time
+        probed = threading.Event()
+        calls = []
 
-        with patch("my_idm.manager.is_tor_reachable", return_value=True):
-            self.assertTrue(self.mgr.refresh_tor_availability())
-            deadline = time.time() + 5
-            while time.time() < deadline and not self.mgr.tor_available():
-                app.processEvents()
-                time.sleep(0.01)
-        self.assertTrue(self.mgr.tor_available())
+        def fake_probe(host, port, timeout=0.4):
+            calls.append((host, port, timeout))
+            probed.set()
+            return True
+
+        with patch("my_idm.manager.is_tor_reachable", side_effect=fake_probe):
+            self.assertTrue(
+                self.mgr.refresh_tor_availability(),
+                "refresh_tor_availability must report that it scheduled a probe",
+            )
+            self.assertTrue(probed.wait(timeout=THREAD_TIMEOUT), "tor probe thread never ran")
+            # The probe thread hands the result back over a queued signal, so the
+            # cache can only be updated once the GUI thread drains the event queue.
+            self.assertTrue(
+                pump_until(lambda: len(calls) == 1 and not self.mgr._tor_probe_in_flight),
+                f"probe result never reached the GUI thread; calls={calls}",
+            )
+
+        self.assertTrue(self.mgr.tor_available(), "a successful probe must publish True")
+        self.assertEqual(len(calls), 1, f"exactly one probe expected, got {calls}")
+        self.assertEqual(
+            calls[0][0], self.mgr.tor_config.proxy_host,
+            "the probe must target the configured Tor host",
+        )
+        self.assertEqual(
+            calls[0][1], self.mgr.tor_config.proxy_port,
+            "the probe must target the configured Tor port",
+        )
 
     def test_refresh_publishes_changes_only_once(self):
-        import time
-
         seen = []
+        calls = []
         self.mgr.tor_availability_changed.connect(lambda live: seen.append(live))
-        with patch("my_idm.manager.is_tor_reachable", return_value=True):
-            self.mgr.refresh_tor_availability()
-            deadline = time.time() + 5
-            while time.time() < deadline and not self.mgr.tor_available():
-                app.processEvents()
-                time.sleep(0.01)
-        # A repeated probe with the same result must not re-emit.
-        with patch("my_idm.manager.is_tor_reachable", return_value=True):
-            self.mgr.refresh_tor_availability()
-            for _ in range(40):
-                app.processEvents()
-                time.sleep(0.01)
+
+        def fake_probe(host, port, timeout=0.4):
+            calls.append((host, port, timeout))
+            return True
+
+        # `_tor_probe_in_flight` is cleared by the slot that applies the result, so
+        # a False value means the probe has already been applied on this thread.
+        def landed(count):
+            return len(calls) == count and not self.mgr._tor_probe_in_flight
+
+        with patch("my_idm.manager.is_tor_reachable", side_effect=fake_probe):
+            self.assertTrue(self.mgr.refresh_tor_availability(), "first refresh must schedule a probe")
+            self.assertTrue(
+                pump_until(lambda: landed(1)),
+                f"first probe never landed; calls={calls}",
+            )
+            # A repeated probe with the same result must not re-emit.
+            self.assertTrue(self.mgr.refresh_tor_availability(), "second refresh must schedule a probe")
+            self.assertTrue(
+                pump_until(lambda: landed(2)),
+                f"second probe never landed; calls={calls}",
+            )
+
+        self.assertTrue(self.mgr.tor_available(), "the cache must hold the last probe result")
+        self.assertEqual(len(calls), 2, f"exactly two probes expected, got {calls}")
         self.assertEqual(seen, [True], f"expected exactly one change, got {seen}")
 
     def test_probe_failure_leaves_cache_false(self):
-        import time
+        calls = []
 
-        self.assertFalse(self.mgr.tor_available())
-        with patch("my_idm.manager.is_tor_reachable", side_effect=OSError("boom")):
-            self.mgr.refresh_tor_availability()
-            for _ in range(40):
-                app.processEvents()
-                time.sleep(0.01)
-        self.assertFalse(self.mgr.tor_available())
+        def failing_probe(host, port, timeout=0.4):
+            calls.append((host, port, timeout))
+            raise OSError("boom")
+
+        self.assertFalse(self.mgr.tor_available(), "the cache must start empty")
+        with patch("my_idm.manager.is_tor_reachable", side_effect=failing_probe):
+            self.assertTrue(
+                self.mgr.refresh_tor_availability(),
+                "a raising probe must still be reported as scheduled",
+            )
+            self.assertTrue(
+                pump_until(lambda: len(calls) == 1 and not self.mgr._tor_probe_in_flight),
+                f"failing probe never reported back; calls={calls}",
+            )
+        self.assertFalse(self.mgr.tor_available(), "a probe that raised must leave the cache False")
+        self.assertEqual(len(calls), 1, f"a failed probe must not be retried silently; calls={calls}")
 
     # -- badge ---------------------------------------------------------------
 
@@ -517,15 +635,46 @@ class TestTorToggleAndProgress(unittest.TestCase):
 
     def setUp(self):
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.db.open()
         self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
+
+        # `MainWindow.__init__` fires an immediate Tor probe and arms a 4 s
+        # repeating one. Keep the probe off the host's real sockets for the whole
+        # test (including teardown, which closes the window) by patching before
+        # the window exists.
+        probe = patch("my_idm.manager.is_tor_reachable", return_value=True)
+        self.addCleanup(probe.stop)
+        self.mock_probe = probe.start()
+
         self.win = MainWindow(self.manager)
+        self.addCleanup(self._close_window, self.win)
         self.win.show()
 
     def tearDown(self):
-        self.win.close()
-        self.manager.stop()
-        self.db.close()
+        # The 4 s availability timer is parented to the window, so it survives
+        # `close()` when the close event is intercepted for close-to-tray.
+        timer = getattr(self.win, "_tor_availability_timer", None)
+        if timer is not None:
+            timer.stop()
+
+    @staticmethod
+    def _close_window(win):
+        """Actually close the window.
+
+        `MainWindow.closeEvent` ignores the event and hides the window whenever
+        `close_to_tray` / `enable_system_tray` are on, which is the default, so
+        `_force_exit` has to be set first or the widget (and its child timer)
+        stays alive for the rest of the session.
+        """
+        timer = getattr(win, "_tor_availability_timer", None)
+        if timer is not None:
+            timer.stop()
+        win._force_exit = True
+        win.close()
+        win.deleteLater()
+        QApplication.processEvents()
 
     def test_pause_and_resume_downloads_around_tor_toggle(self):
         """Active downloads are paused before Tor start/stop and resumed after."""
@@ -538,13 +687,16 @@ class TestTorToggleAndProgress(unittest.TestCase):
 
         paused_order = []
         resumed_order = []
+        statuses = []
+        self.manager.tor_status_changed.connect(lambda state, msg: statuses.append((state, msg)))
 
         with patch.object(self.manager, "pause_download", side_effect=lambda did: paused_order.append(did)), \
              patch.object(self.manager, "resume_download", side_effect=lambda did: resumed_order.append(did)), \
              patch.object(self.manager._tor_service, "start", return_value=(True, "Connected")):
 
             success, msg = self.manager.toggle_tor(True)
-            self.assertTrue(success)
+            self.assertTrue(success, "a successful Tor start must make toggle_tor succeed")
+            self.assertEqual(msg, "Connected", "toggle_tor must surface the service's own message")
 
             self.assertIn("d1", paused_order)
             self.assertIn("d2", paused_order)
@@ -554,6 +706,12 @@ class TestTorToggleAndProgress(unittest.TestCase):
             self.assertIn("d2", resumed_order)
             self.assertNotIn("d3", resumed_order)
 
+        self.assertTrue(self.manager.tor_config.enabled, "Tor config must be enabled after a successful toggle")
+        self.assertIn(
+            ("connected", "Connected"), statuses,
+            f"the 'connected' status must be published to the UI; got {statuses}",
+        )
+
     def test_resume_downloads_when_tor_start_fails(self):
         """Active downloads are resumed under direct routing if Tor start fails."""
         e1 = DownloadEntry(id="d1", url="http://example.com/1.zip", filename="1.zip", save_path="/tmp", status="downloading")
@@ -561,48 +719,60 @@ class TestTorToggleAndProgress(unittest.TestCase):
 
         paused_order = []
         resumed_order = []
+        statuses = []
+        self.manager.tor_status_changed.connect(lambda state, msg: statuses.append((state, msg)))
 
         with patch.object(self.manager, "pause_download", side_effect=lambda did: paused_order.append(did)), \
              patch.object(self.manager, "resume_download", side_effect=lambda did: resumed_order.append(did)), \
              patch.object(self.manager._tor_service, "start", return_value=(False, "Failed to connect")):
 
             success, msg = self.manager.toggle_tor(True)
-            self.assertFalse(success)
+            self.assertFalse(success, "a failed Tor start must not report success")
+            self.assertEqual(msg, "Failed to connect", "the failure reason must reach the caller")
             self.assertIn("d1", paused_order)
             self.assertIn("d1", resumed_order)
 
+        self.assertFalse(
+            self.manager.tor_config.enabled,
+            "a failed Tor start must leave routing disabled so downloads use direct connections",
+        )
+        self.assertIn(
+            ("error", "Failed to connect"), statuses,
+            f"the failure must be published to the UI; got {statuses}",
+        )
+
     def test_tor_progressbar_and_green_style(self):
         """Toolbar and footer buttons show progress bar during toggle and turn green when ON."""
-        self.assertFalse(self.win._tor_toolbar_progress.isVisible())
-        self.assertFalse(self.win._tor_footer_progress.isVisible())
+        self.assertFalse(self.win._tor_toolbar_progress.isVisible(), "no spinner before any Tor status")
+        self.assertFalse(self.win._tor_footer_progress.isVisible(), "no spinner before any Tor status")
 
         # Connecting state
         self.win._on_tor_status_changed("connecting", "Starting Tor...")
-        self.assertTrue(self.win._tor_toolbar_progress.isVisible())
-        self.assertTrue(self.win._tor_footer_progress.isVisible())
+        self.assertTrue(self.win._tor_toolbar_progress.isVisible(), "toolbar spinner must show while connecting")
+        self.assertTrue(self.win._tor_footer_progress.isVisible(), "footer spinner must show while connecting")
         self.assertIn("Connecting", self.win._tor_status_btn.text())
         self.assertIn("Connecting", self.win._act_tor.text())
 
         # Connected state
         self.manager.tor_config.enabled = True
         self.win._on_tor_status_changed("connected", "Tor connected")
-        self.assertFalse(self.win._tor_toolbar_progress.isVisible())
-        self.assertFalse(self.win._tor_footer_progress.isVisible())
+        self.assertFalse(self.win._tor_toolbar_progress.isVisible(), "toolbar spinner must stop when connected")
+        self.assertFalse(self.win._tor_footer_progress.isVisible(), "footer spinner must stop when connected")
         self.assertIn("#50fa7b", self.win._tor_status_btn.styleSheet())
         self.assertIn("#50fa7b", self.win._tor_toolbar_btn.styleSheet())
 
         # Disconnecting state
         self.win._on_tor_status_changed("disconnecting", "Stopping Tor...")
-        self.assertTrue(self.win._tor_toolbar_progress.isVisible())
-        self.assertTrue(self.win._tor_footer_progress.isVisible())
+        self.assertTrue(self.win._tor_toolbar_progress.isVisible(), "toolbar spinner must show while disconnecting")
+        self.assertTrue(self.win._tor_footer_progress.isVisible(), "footer spinner must show while disconnecting")
         self.assertIn("Disconnecting", self.win._tor_status_btn.text())
         self.assertIn("Disconnecting", self.win._act_tor.text())
 
         # Disconnected state
         self.manager.tor_config.enabled = False
         self.win._on_tor_status_changed("disconnected", "Tor deactivated")
-        self.assertFalse(self.win._tor_toolbar_progress.isVisible())
-        self.assertFalse(self.win._tor_footer_progress.isVisible())
+        self.assertFalse(self.win._tor_toolbar_progress.isVisible(), "toolbar spinner must stop when disconnected")
+        self.assertFalse(self.win._tor_footer_progress.isVisible(), "footer spinner must stop when disconnected")
         self.assertNotIn("#50fa7b", self.win._tor_status_btn.styleSheet())
         self.assertNotIn("#50fa7b", self.win._tor_toolbar_btn.styleSheet())
 
@@ -613,9 +783,8 @@ class TestTorSettingsDialogDetection(unittest.TestCase):
     def setUp(self):
         from my_idm.settings_dialog import SettingsDialog
         self.dialog = SettingsDialog()
-
-    def tearDown(self):
-        self.dialog.close()
+        self.addCleanup(self.dialog.close)
+        self.addCleanup(self.dialog.deleteLater)
 
     @patch("my_idm.settings_dialog.is_tor_reachable")
     def test_detects_tor_browser_on_port_9150(self, mock_reachable):
@@ -625,6 +794,10 @@ class TestTorSettingsDialogDetection(unittest.TestCase):
 
         self.dialog._on_test_tor()
         self.assertIn("Tor Browser is active on port 9150", self.dialog._tor_test_status_lbl.text())
+        self.assertIn(
+            9050, mock_reachable.call_args_list[0][0],
+            "the configured port must be probed before the alternative one",
+        )
 
     @patch("my_idm.settings_dialog.is_tor_reachable")
     def test_detects_tor_service_on_port_9050(self, mock_reachable):

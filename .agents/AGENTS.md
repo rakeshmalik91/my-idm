@@ -41,23 +41,48 @@ The canonical architecture documentation is organized under [`docs/architecture/
 
 1. **Commit Convention**: Follow standard conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
 2. **Testing**: Always run `python -m pytest` and ensure all unit tests pass before committing.
-   - The full suite is green: `767 passed, 1 skipped`.
-   - The clipboard-dependent tests (`test_copy_multiple_urls_to_clipboard`,
-     `test_browser_extension_urls_copyable`, `test_edge_url_copying_and_links`) are occasionally
-     flaky when the whole suite shares one QClipboard. Re-run before investigating; they pass in
-     isolation.
-   - `TestManagerYouTubeIntegration::test_delete_during_download_releases_lock` fails roughly
-     1 run in 4 under full-suite load with `OperationalError` from `Database.update_status`.
-     Cause: `DownloadManager.stop()` stops the Qt timers but cannot cancel one already
-     executing, so a background write can reach a test-torn-down database. It passes in
-     isolation. This is a production-code shutdown race, not a test bug - do not paper over it
-     with sleeps; fix `stop()` to join in-flight timer work if you address it.
+   - The full suite is green: `945 passed, 1 skipped`. The single skip is the opt-in real
+     Windows Defender scan (`MYIDM_RUN_AV_TESTS`).
+   - **The suite is hermetic by construction, enforced in `tests/conftest.py`.** Autouse
+     fixtures fail the run if anything escapes the sandbox, so a violation is a bug to fix,
+     not something to work around:
+     - non-loopback TCP or DNS is refused (`block_non_loopback_network`),
+     - destructive `subprocess` commands (`taskkill`, `del`, `rd`) are refused and recorded
+       (`block_destructive_subprocess`); violations are reported at session teardown so a
+       production `except Exception` cannot hide them,
+     - `my_idm.database.DB_PATH` is redirected to a temp file, so a `Database()` with no
+       argument (e.g. `SettingsDialog._get_db()`) can never open the user's live database,
+     - the system clipboard is snapshotted, cleared, and restored per test.
+     `ALLOW_DESTRUCTIVE_SUBPROCESS` is the only opt-out, and a test that sets it must say why.
+   - **Never use the real OS clipboard in a test.** `QClipboard.setText` is a silent no-op when
+     the clipboard is transiently locked, which is what made
+     `test_copy_multiple_urls_to_clipboard` flaky. Patch the single accessor production uses
+     (`monkeypatch.setattr(QApplication, "clipboard", staticmethod(lambda: fake))` and assert
+     the exact expected string) instead of retry loops.
+   - **Never use `time.sleep`, a busy-wait, or a wall-clock budget as synchronisation.** Use a
+     `threading.Event` the test controls, `QSignalSpy`, or a bounded pump-until-predicate helper.
+     The only sleeps allowed are inside a Qt event-loop pump, where the predicate - not the sleep -
+     is the synchronisation.
+   - **No test may touch the real filesystem outside its temp dir.** This includes
+     `~/.my-idm`, `~/Downloads`, the repo tree (a `.xpi` once landed in
+     `browser_extension/`), and the real Recycle Bin. `test_security.py` gates the one genuine
+     AV integration test behind `MYIDM_RUN_AV_TESTS`.
+   - `Database` serialises its shared connection behind a reentrant lock
+     (`_LockedConnection`), and a closed connection degrades to inert empty results. Do not
+     remove either: without the lock, concurrent `update_progress` from two threads **segfaults
+     the interpreter** (see `TestDatabaseThreadSafety` in `tests/test_database.py`). The
+     documented `test_delete_during_download_releases_lock` shutdown race is fixed on two sides -
+     `DownloadManager._await_timer_slots()` joins in-flight timer work, and the connection lock
+     covers the rest - so that flake should stay gone. If it reappears, find the real cause; do
+     not re-introduce a sleep.
    - The AnimePahe settings buttons are **intentionally silent on success** - the button label and
      the footer badge already show the new state, and only failures raise a dialog. Do not
      "fix" this by adding a success alert.
    - Prefer deterministic tests. Mocking `libtorrent` handles and driving `TorrentEngine.poll_all()`
-     with fakes crashes the interpreter (it reaches into libtorrent internals); test the pure helpers
-     instead, and use real `TorrentConfig` / `GeneralConfig` objects rather than `MagicMock` where the
+     with bare `MagicMock()` handles silently disables the status path: `get_status()` raises
+     `TypeError` on `ti.total_size() > 0` and swallows it, so the test passes without the code
+     under test ever running. Use the explicit `FakeStatus` / `FakeHandle` shape instead.
+     Also use real `TorrentConfig` / `GeneralConfig` objects rather than `MagicMock` where the
      engine compares their values against ints.
 3. **Threading Architecture**:
    - Qt GUI runs on the main thread.

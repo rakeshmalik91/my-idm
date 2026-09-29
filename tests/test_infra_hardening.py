@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
 from my_idm.database import Database, DownloadEntry
@@ -41,27 +42,45 @@ class TestKeyboardShortcuts(unittest.TestCase):
     }
 
     def setUp(self):
+        from my_idm.notifications import unregister_notification_handler
         from my_idm.main_window import MainWindow
         from my_idm.manager import DownloadManager
 
+        self.addCleanup(unregister_notification_handler)
         self.db = Database(":memory:")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.mgr = DownloadManager(self.db)
+        self.addCleanup(self.mgr.stop)
         self.win = MainWindow(self.mgr)
+        self.addCleanup(self._destroy_window, self.win)
 
-    def tearDown(self):
-        from my_idm.notifications import unregister_notification_handler
-        unregister_notification_handler()
-        self.win.close()
-        self.mgr.stop()
-        self.db.close()
+    @staticmethod
+    def _destroy_window(win):
+        """Actually destroy the window, not just hide it.
+
+        ``MainWindow.closeEvent`` ignores the close event and hides the window
+        whenever ``close_to_tray`` / ``enable_system_tray`` are on (both default
+        True), so a bare ``win.close()`` leaves the window, its 1 Hz
+        ``_details_timer``, its 4 s ``_tor_availability_timer`` and its tray icon
+        alive for the rest of the session.
+        """
+        timer = getattr(win, "_tor_availability_timer", None)
+        if timer is not None:
+            timer.stop()
+        win._force_exit = True
+        win.close()
+        win.deleteLater()
+        QApplication.processEvents()
 
     def _shortcuts(self):
         out = {}
-        for action in self.win.findChildren(type(self.win._act_add)):
+        # Match QAction explicitly: findChildren(type(win._act_add)) would silently
+        # stop covering any action declared through a different QAction subclass.
+        for action in self.win.findChildren(QAction):
             key = action.shortcut().toString()
             if key:
-                out[action.text().replace("…", "").replace("\u2026", "")] = key
+                out[action.text().replace("…", "").replace("…", "")] = key
         return out
 
     def test_documented_shortcuts_are_registered(self):
@@ -72,7 +91,7 @@ class TestKeyboardShortcuts(unittest.TestCase):
     def test_shortcut_sequences_are_unique(self):
         seen = {}
         duplicates = []
-        for action in self.win.findChildren(type(self.win._act_add)):
+        for action in self.win.findChildren(QAction):
             key = action.shortcut().toString()
             if not key:
                 continue
@@ -80,6 +99,7 @@ class TestKeyboardShortcuts(unittest.TestCase):
                 duplicates.append((key, seen[key], action.text()))
             seen[key] = action.text()
         self.assertEqual(duplicates, [], f"duplicate shortcuts: {duplicates}")
+
 
     def test_delete_and_space_shortcuts_exist(self):
         keys = set(self._shortcuts().values())
@@ -117,8 +137,18 @@ class TestDatabaseQueries(unittest.TestCase):
         self.assertEqual(self.db.get_download("r1").retry_count, 2)
 
     def test_increment_retry_on_unknown_id_is_safe(self):
-        # Must not raise; the value is unspecified for a missing row.
+        # Must not raise, must not invent a row, and must not touch the counter
+        # of any existing download.
+        self._add(id="keepme")
+        before = self.db.get_download("keepme").retry_count
         self.db.increment_retry("nope")
+        self.assertIsNone(self.db.get_download("nope"), "no row may be created")
+        self.assertEqual(self.db.get_download("keepme").retry_count, before)
+        self.assertEqual(
+            [e.id for e in self.db.get_all_downloads()],
+            ["keepme"],
+            "a retry on a missing id must not resurrect deleted rows",
+        )
 
     def test_queue_order_is_monotonic(self):
         first = self.db.get_next_queue_order()
@@ -143,12 +173,37 @@ class TestDatabaseQueries(unittest.TestCase):
         self.assertEqual((before[1], before[0]), after)
 
     def test_find_by_info_hash_is_an_exact_match(self):
-        self._add(id="t1", torrent_info_hash="ABCDEF0123", download_type="torrent")
-        self.assertIsNotNone(self.db.find_by_info_hash("ABCDEF0123"))
-        self.assertIsNone(self.db.find_by_info_hash("abcdef0123"),
-                          "the lookup is case-sensitive SQL equality")
+        """A canonically lowercase info hash is the form that must round-trip.
+
+        Torrent info hashes are canonically lowercase hex (libtorrent's
+        ``info_hash()`` is lowercase), so this is the case production depends on
+        for de-duplication.
+        """
+        self._add(id="t1", torrent_info_hash="abcdef0123", download_type="torrent")
+        found = self.db.find_by_info_hash("abcdef0123")
+        self.assertIsNotNone(found)
+        self.assertEqual(found.id, "t1")
+        self.assertEqual(found.torrent_info_hash, "abcdef0123")
         self.assertIsNone(self.db.find_by_info_hash(""))
         self.assertIsNone(self.db.find_by_info_hash(None))
+
+    def test_find_by_info_hash_is_case_sensitive_known_limitation(self):
+        """Documents a real defect rather than blessing it.
+
+        ``Database.find_by_info_hash`` compares the raw hex with SQL equality
+        (database.py:407-413), so a stored UPPERCASE hash is never found by its
+        lowercase spelling and the torrent is silently re-added as a duplicate.
+        Fixing this requires normalising on write *and* on lookup; until then
+        this test records the limitation so it is impossible to miss.
+        """
+        self._add(id="t1", torrent_info_hash="ABCDEF0123", download_type="torrent")
+        self.assertIsNotNone(self.db.find_by_info_hash("ABCDEF0123"))
+        self.assertIsNone(
+            self.db.find_by_info_hash("abcdef0123"),
+            "KNOWN LIMITATION: find_by_info_hash is case-sensitive SQL equality, "
+            "so an uppercase stored hash is invisible to the canonical lowercase "
+            "spelling and the torrent gets re-added as a duplicate",
+        )
 
     def test_recent_save_paths_are_deduplicated(self):
         self._add(id="p1", save_path="/a", file_path="/a/f1.zip")
@@ -158,9 +213,42 @@ class TestDatabaseQueries(unittest.TestCase):
         self.assertEqual(sorted(paths), ["/a", "/b"], "duplicates must collapse")
 
     def test_recent_save_paths_respects_the_limit(self):
+        # Explicit, ascending added_at values so the expected order is derived
+        # from the contract (MAX(added_at) DESC), not from insertion timing.
         for i in range(6):
-            self._add(id=f"p{i}", save_path=f"/p{i}", file_path=f"/p{i}/f.zip")
-        self.assertLessEqual(len(self.db.get_recent_save_paths(limit=3)), 3)
+            self._add(
+                id=f"p{i}",
+                save_path=f"/p{i}",
+                file_path=f"/p{i}/f.zip",
+                added_at=f"2026-01-0{i + 1}T00:00:00+00:00",
+            )
+        self.assertEqual(
+            self.db.get_recent_save_paths(limit=3),
+            ["/p5", "/p4", "/p3"],
+            "limit=3 must return exactly the 3 newest paths, newest first",
+        )
+        self.assertEqual(len(self.db.get_recent_save_paths(limit=3)), 3)
+        self.assertEqual(
+            self.db.get_recent_save_paths(limit=2),
+            ["/p5", "/p4"],
+            "the limit is exact, not a lower bound",
+        )
+        self.assertEqual(self.db.get_recent_save_paths(limit=0), [])
+
+    def test_recent_save_paths_orders_by_latest_use_not_first_use(self):
+        """A path reused later must outrank a path only ever seen earlier."""
+        self._add(id="a1", save_path="/a", file_path="/a/f.zip",
+                  added_at="2026-01-01T00:00:00+00:00")
+        self._add(id="b1", save_path="/b", file_path="/b/f.zip",
+                  added_at="2026-02-01T00:00:00+00:00")
+        # A second download into /a is what pushes /a ahead of /b.
+        self._add(id="a2", save_path="/a", file_path="/a/g.zip",
+                  added_at="2026-03-01T00:00:00+00:00")
+        self.assertEqual(
+            self.db.get_recent_save_paths(),
+            ["/a", "/b"],
+            "MAX(added_at) per save_path must drive the ordering",
+        )
 
     def test_preferences_window_size_round_trip(self):
         self.db.save_preferences_window_size(123, 456)
@@ -223,7 +311,10 @@ class TestDatabaseQueries(unittest.TestCase):
         for status in ("completed", "downloading"):
             self._add(id=f"c-{status}", status="error", error_message="boom")
             self.db.update_status(f"c-{status}", status)
-            self.assertEqual(self.db.get_download(f"c-{status}").error_message, "")
+            self.assertEqual(
+                self.db.get_download(f"c-{status}").error_message, "",
+                f"status={status} must clear the error",
+            )
 
         self._add(id="c-queued", status="error", error_message="boom")
         self.db.update_status("c-queued", "queued")
@@ -318,8 +409,10 @@ class TestTorrentEngineWrappers(unittest.TestCase):
         from my_idm.torrent_engine import TorrentEngine
 
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.db = Database(Path(self.tmp.name) / "t.db")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.db.add_download(
             DownloadEntry(
                 id="t1", url="magnet:?xt=urn:btih:abc", filename="a.torrent",
@@ -330,30 +423,55 @@ class TestTorrentEngineWrappers(unittest.TestCase):
         )
         self.engine = TorrentEngine(self.db)
 
-    def tearDown(self):
-        self.db.close()
-        self.tmp.cleanup()
+    def _snapshot(self, download_id="t1"):
+        entry = self.db.get_download(download_id)
+        return (
+            entry.id, entry.status, entry.save_path, entry.file_path,
+            entry.total_size, entry.downloaded_size, entry.retry_count,
+            dict(entry.metadata),
+        )
 
     def test_remove_drops_the_handle_and_fastresume(self):
         """remove() detaches from libtorrent; the DB row is the manager's job."""
         self.engine._handles["t1"] = MagicMock()
+        before = self._snapshot()
         self.engine.remove("t1", delete_files=False)
         self.assertNotIn("t1", self.engine._handles, "handle must be released")
         # The row is deliberately left for DownloadManager.delete_download().
-        self.assertIsNotNone(self.db.get_download("t1"))
+        after = self._snapshot()
+        self.assertIsNotNone(after[0])
+        self.assertEqual(after, before, "remove() must not rewrite the DB row")
 
     def test_remove_unknown_id_is_safe(self):
+        before = self._snapshot("t1")
         self.engine.remove("does-not-exist", delete_files=False)
+        self.assertNotIn("does-not-exist", self.engine._handles)
+        self.assertEqual(
+            self._snapshot("t1"), before,
+            "removing an unknown id must leave every other row untouched",
+        )
 
     def test_recheck_without_a_handle_does_not_raise(self):
+        before = self._snapshot()
         self.engine.recheck("t1")
-        self.assertIsNotNone(self.db.get_download("t1"))
+        self.assertEqual(
+            self._snapshot(), before,
+            "recheck() with no live handle must not flip the row to 'checking'",
+        )
+        self.assertEqual(
+            self.db.get_download("t1").status, "paused",
+            "the status may only be advanced once libtorrent owns a handle",
+        )
 
     def test_force_start_returns_false_without_a_handle(self):
+        before = self._snapshot()
         self.assertFalse(self.engine.force_start("t1"))
+        self.assertEqual(self._snapshot(), before, "no handle means no state change")
 
     def test_force_start_unknown_id_is_safe(self):
+        before = self._snapshot("t1")
         self.assertFalse(self.engine.force_start("nope"))
+        self.assertEqual(self._snapshot("t1"), before)
 
     def test_set_torrent_bandwidth_allocation_persists(self):
         self.engine.set_torrent_bandwidth_allocation("t1", "high")
@@ -362,26 +480,92 @@ class TestTorrentEngineWrappers(unittest.TestCase):
         )
 
     def test_move_storage_records_the_new_location_on_success(self):
+        """Without a live handle the move must not report success.
+
+        ``TorrentEngine.move_storage`` only forwards to the libtorrent handle
+        and returns ``None`` unconditionally; the DB record is written by
+        ``DownloadManager.move_download`` after the on-disk move succeeds. So
+        with no handle the honest assertion is "nothing happened", not a
+        two-branch tautology that is true either way.
+        """
         target = Path(self.tmp.name) / "moved"
         target.mkdir()
+        before = self._snapshot()
+        self.assertNotIn("t1", self.engine._handles, "precondition: no live handle")
         moved = self.engine.move_storage("t1", str(target))
-        if moved:
-            self.assertIn("moved", self.db.get_download("t1").file_path)
-        else:
-            # Without a live handle the move cannot complete, but the entry must
-            # survive rather than be corrupted.
-            self.assertIsNotNone(self.db.get_download("t1"))
+        self.assertFalse(
+            moved, "no handle -> move must not report success (got %r)" % (moved,)
+        )
+        self.assertEqual(
+            self._snapshot(), before,
+            "the DB row must survive a move that could not be performed",
+        )
+
+    def test_move_storage_with_handle_forwards_the_new_path(self):
+        """With a live handle the new path reaches libtorrent verbatim."""
+        target = Path(self.tmp.name) / "moved"
+        target.mkdir()
+        handle = MagicMock()
+        self.engine._handles["t1"] = handle
+        before = self._snapshot()
+        self.engine.move_storage("t1", str(target))
+        handle.move_storage.assert_called_once_with(str(target))
+        self.assertEqual(
+            self._snapshot(), before,
+            "move_storage only talks to libtorrent; the DB row is the manager's job",
+        )
+
+    def test_move_storage_swallows_a_failing_handle(self):
+        """A libtorrent error is logged, never raised, and never touches the DB."""
+        target = Path(self.tmp.name) / "moved"
+        target.mkdir()
+        handle = MagicMock()
+        handle.move_storage.side_effect = RuntimeError("libtorrent said no")
+        self.engine._handles["t1"] = handle
+        before = self._snapshot()
+        try:
+            self.engine.move_storage("t1", str(target))
+        except RuntimeError as exc:  # pragma: no cover - the point of the test
+            self.fail(f"move_storage must swallow engine errors, got {exc!r}")
+        handle.move_storage.assert_called_once_with(str(target))
+        self.assertEqual(self._snapshot(), before)
 
     def test_set_session_limits_without_a_session_is_safe(self):
+        before = self._snapshot()
         self.engine.set_session_limits(10, 5)
+        # No libtorrent session, but the NetworkConfig mirror is still updated.
+        net_cfg = self.engine._network_config
+        if net_cfg is None:
+            self.assertIsNone(
+                self.engine._session,
+                "with no session configured there is nothing to rate-limit",
+            )
+        else:
+            self.assertEqual(net_cfg.download_limit, 10)
+            self.assertEqual(net_cfg.upload_limit, 5)
+        self.assertEqual(self._snapshot(), before, "session limits are not per-download")
+
+    def test_set_session_limits_mirrors_into_network_config(self):
+        from my_idm.network import NetworkConfig
+
+        self.engine._network_config = NetworkConfig()
+        self.engine.set_session_limits(1024, 512)
+        self.assertEqual(self.engine._network_config.download_limit, 1024)
+        self.assertEqual(self.engine._network_config.upload_limit, 512)
 
     def test_is_torrent_tor_routed_defaults_false(self):
         self.assertFalse(self.engine.is_torrent_tor_routed("t1"))
+        self.assertFalse(self.engine.is_torrent_tor_routed("does-not-exist"))
 
     def test_set_torrent_tor_route_persists(self):
         self.engine.set_torrent_tor_route("t1", True)
         self.assertTrue(self.engine.is_torrent_tor_routed("t1"))
         self.assertTrue(self.db.get_download("t1").metadata.get("route_through_tor"))
+        # Setting the same value again is a no-op, not a redundant write.
+        self.engine.set_torrent_tor_route("t1", True)
+        self.assertTrue(self.db.get_download("t1").metadata.get("route_through_tor"))
+        self.engine.set_torrent_tor_route("t1", False)
+        self.assertFalse(self.engine.is_torrent_tor_routed("t1"))
 
 
 if __name__ == "__main__":

@@ -3,17 +3,20 @@
 import os
 import sys
 import tempfile
+import threading
+import time
+import unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import unittest
-from unittest.mock import patch
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from my_idm.database import Database, DownloadEntry
 from my_idm.manager import DownloadManager
 from my_idm.security import (
+    KNOWN_THREAT_CATEGORIES,
     SecurityConfig,
     check_url_safety,
     find_windows_defender_path,
@@ -23,6 +26,36 @@ from my_idm.security import (
 from my_idm.security_dialog import SecuritySettingsDialog
 
 app = QApplication.instance() or QApplication([])
+
+# Running the real Windows Defender binary is opt-in. MpCmdRun.exe races
+# real-time protection, takes up to 90 s, and fails under AppLocker, a sandbox,
+# or a machine with no Defender subscription. Because scan_file() is FAIL-OPEN
+# (security.py:358-364 returns True on any exception or unknown exit code) a
+# green run of such a test proves nothing about the threat path at all.
+RUN_REAL_AV_TESTS = os.environ.get("MYIDM_RUN_AV_TESTS", "") == "1"
+
+
+def _defender_config(**kw):
+    """A config pointed at a scanner that is guaranteed to exist."""
+    base = dict(scan_after_download=True, scanner_type="defender")
+    base.update(kw)
+    return SecurityConfig(**base)
+
+
+def _pump_until(event, timeout=15.0):
+    """Block until *event* is set, pumping the Qt loop while we wait.
+
+    ``DownloadManager.scan_download_file`` finishes on a plain ``threading``
+    thread, so ``status_changed`` is delivered as a *queued* connection and only
+    lands once the event loop runs again. Sleeping instead would both race the
+    thread and never observe the signal.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if event.wait(0.02):
+            return True
+        QApplication.processEvents()
+    return event.is_set()
 
 
 class TestSecurityConfig(unittest.TestCase):
@@ -107,16 +140,52 @@ class TestPreDownloadSafetyChecks(unittest.TestCase):
 
 
 class TestPostDownloadAntivirusScanning(unittest.TestCase):
+    """scan_file / quarantine_or_delete_file, with the scanner fully mocked.
+
+    Nothing here may reach a real AV engine or a real Recycle Bin. The only
+    tests that talk to Windows Defender are gated behind MYIDM_RUN_AV_TESTS=1.
+    """
+
+    def _temp_file(self, suffix=".txt", content=b"mock payload"):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        path = Path(tmpdir.name) / f"sample{suffix}"
+        path.write_bytes(content)
+        self.assertTrue(path.exists())
+        return path
 
     def test_windows_defender_detection(self):
         path = find_windows_defender_path()
-        if os.name == "nt":
-            self.assertIsNotNone(path, "Windows Defender MpCmdRun.exe should be present on Windows")
-            self.assertTrue(os.path.isfile(path))
+        if os.name != "nt":
+            self.skipTest("Windows-only lookup")
+        if not path:
+            # On a host without Defender this must be a *visible* skip, never a
+            # silently passing assertion (the original had no `else` branch, so
+            # the whole test passed vacuously on POSIX).
+            self.skipTest(
+                "Windows Defender MpCmdRun.exe is not present on this machine; "
+                "scan_file() will short-circuit to "
+                "'Windows Defender scanner not found; skipped scan.'"
+            )
+        self.assertIsNotNone(path, "Windows Defender MpCmdRun.exe should be present on Windows")
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(path.lower().endswith("mpcmdrun.exe"), path)
+
+    def test_scan_file_is_skipped_when_no_scanner_is_installed(self):
+        """The missing-scanner short-circuit is a documented no-op, not a clean bill of health."""
+        path = self._temp_file()
+        with patch("my_idm.security.find_windows_defender_path", return_value=None):
+            is_clean, report = scan_file(str(path), _defender_config())
+        self.assertTrue(is_clean)
+        self.assertEqual(report, "Windows Defender scanner not found; skipped scan.")
 
     def test_scan_file_clean_with_defender(self):
-        path = find_windows_defender_path()
-        if not path:
+        if not RUN_REAL_AV_TESTS:
+            self.skipTest(
+                "Runs the real MpCmdRun.exe (up to 90 s, races real-time "
+                "protection, fail-open). Set MYIDM_RUN_AV_TESTS=1 to opt in."
+            )
+        if not find_windows_defender_path():
             self.skipTest("Windows Defender not available on this system")
 
         with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w") as f:
@@ -124,7 +193,7 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
             temp_path = f.name
 
         try:
-            cfg = SecurityConfig(scan_after_download=True, scanner_type="defender")
+            cfg = _defender_config()
             is_clean, report = scan_file(temp_path, cfg)
             self.assertTrue(is_clean, f"Expected clean verdict, got: {report}")
             self.assertIn("Clean", report)
@@ -132,36 +201,191 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_scan_file_clean_when_defender_reports_no_threats(self):
+        """Deterministic stand-in for the real binary: exit code 0 means clean."""
+        path = self._temp_file()
+        with patch("my_idm.security.find_windows_defender_path", return_value=r"C:\fake\MpCmdRun.exe"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "Scan completed."
+            mock_run.return_value.stderr = ""
+            is_clean, report = scan_file(str(path), _defender_config())
+
+        self.assertTrue(is_clean, report)
+        self.assertIn("Clean", report)
+        argv = mock_run.call_args.args[0]
+        self.assertEqual(argv[0], r"C:\fake\MpCmdRun.exe")
+        self.assertEqual(
+            argv[1:],
+            ["-Scan", "-ScanType", "3", "-File", str(path.resolve()), "-DisableRemediation"],
+            "the exact MpCmdRun argument vector is part of the contract",
+        )
+        self.assertEqual(mock_run.call_args.kwargs.get("timeout"), 90)
+
+    def test_scan_file_flags_an_unexcluded_threat(self):
+        path = self._temp_file(suffix=".exe")
+        with patch("my_idm.security.find_windows_defender_path", return_value=r"C:\fake\MpCmdRun.exe"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 2
+            mock_run.return_value.stdout = "Threat detected: Trojan:Win32/Wacatac found in file."
+            mock_run.return_value.stderr = ""
+            # Narrow the exclusions so nothing matches; the default list contains
+            # "PUA"/"Adware"/"Riskware" and would otherwise silently allow things.
+            cfg = _defender_config(ignored_threat_categories=["HackTool"])
+            self.assertEqual(
+                cfg.get_effective_threat_exclusions(), ["HackTool"],
+                "precondition: only HackTool is excluded",
+            )
+            is_clean, report = scan_file(str(path), cfg)
+
+        self.assertFalse(is_clean, "an unexcluded threat must not be reported clean")
+        self.assertIn("Trojan:Win32/Wacatac", report)
+        self.assertIn("Threat detected by Windows Defender", report)
+        mock_run.assert_called_once()
+
     def test_scan_file_disabled(self):
         cfg = SecurityConfig(scan_after_download=False)
-        is_clean, report = scan_file("some_dummy_file.zip", cfg)
+        with patch("subprocess.run", side_effect=AssertionError("a disabled scan must not spawn a scanner")):
+            is_clean, report = scan_file("some_dummy_file.zip", cfg)
         self.assertTrue(is_clean)
         self.assertIn("disabled", report.lower())
 
+    def test_scan_file_missing_target_is_reported_not_scanned(self):
+        cfg = _defender_config()
+        with patch("subprocess.run", side_effect=AssertionError("nothing to scan")):
+            is_clean, report = scan_file(str(Path(self._temp_file()).parent / "nope.bin"), cfg)
+        self.assertTrue(is_clean)
+        self.assertIn("does not exist on disk", report)
+
+    def test_scan_file_custom_scanner_substitutes_the_file_placeholder(self):
+        path = self._temp_file()
+        scanner = Path(path.parent) / "fake_clamscan.exe"
+        scanner.write_bytes(b"MZ")
+        cfg = SecurityConfig(
+            scan_after_download=True,
+            scanner_type="custom",
+            custom_scanner_path=str(scanner),
+            custom_scanner_args='--bell "%file%"',
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = ""
+            mock_run.return_value.stderr = ""
+            is_clean, report = scan_file(str(path), cfg)
+
+        self.assertTrue(is_clean, report)
+        self.assertIn("Clean", report)
+        cmd = mock_run.call_args.args[0]
+        self.assertTrue(cmd.startswith(f'"{scanner}" '), cmd)
+        self.assertIn(f'--bell "{path.resolve()}"', cmd)
+        self.assertNotIn("%file%", cmd)
+        self.assertNotIn("%f ", cmd)
+
+    def test_scan_file_custom_scanner_missing_executable_is_reported(self):
+        path = self._temp_file()
+        cfg = SecurityConfig(
+            scan_after_download=True,
+            scanner_type="custom",
+            custom_scanner_path=r"C:\definitely\not\here\clamscan.exe",
+        )
+        with patch("subprocess.run", side_effect=AssertionError("no scanner to run")):
+            is_clean, report = scan_file(str(path), cfg)
+        self.assertTrue(is_clean)
+        self.assertIn("not found", report)
+
     def test_quarantine_or_delete_file(self):
+        """The real recycle-bin tiers are disabled; the permanent delete is the only path.
+
+        ``quarantine_or_delete_file`` unlinks/rmtree's directly, so the test has
+        to prove that is what happened rather than leaving a real file sitting in
+        the developer's Recycle Bin and asserting only "it is gone".
+        """
         with tempfile.NamedTemporaryFile(suffix=".bin", delete=False, mode="wb") as f:
             f.write(b"Mock infected data")
             temp_path = f.name
 
         self.assertTrue(os.path.exists(temp_path))
-        res = quarantine_or_delete_file(temp_path)
+        import shutil as _shutil
+
+        real_rmtree = _shutil.rmtree
+        real_unlink = Path.unlink
+        unlinked = []
+        rmtree_calls = []
+
+        def spy_unlink(self, *a, **k):
+            unlinked.append(str(self))
+            return real_unlink(self, *a, **k)
+
+        def spy_rmtree(path, *a, **k):
+            rmtree_calls.append(str(path))
+            return real_rmtree(path, *a, **k)
+
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=AssertionError("no trash in tests")):
+            mock_qfile.moveToTrash.return_value = False
+            with patch.object(Path, "unlink", spy_unlink), \
+                 patch.object(_shutil, "rmtree", spy_rmtree):
+                res = quarantine_or_delete_file(temp_path)
+
+        self.assertTrue(res, "quarantine_or_delete_file must report success")
+        self.assertFalse(os.path.exists(temp_path), "the file must be gone")
+        self.assertEqual(unlinked, [temp_path], "the file must be unlinked, not trashed")
+        self.assertEqual(rmtree_calls, [], "rmtree is for directories only")
+        mock_qfile.moveToTrash.assert_not_called()
+
+    def test_quarantine_or_delete_directory_uses_rmtree(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        victim = Path(tmpdir.name) / "infected_dir"
+        victim.mkdir()
+        (victim / "payload.bin").write_bytes(b"x" * 16)
+        import shutil as _shutil
+
+        real_rmtree = _shutil.rmtree
+        real_unlink = Path.unlink
+        rmtree_calls = []
+        unlinked = []
+
+        def spy_rmtree(path, *a, **k):
+            rmtree_calls.append(str(path))
+            return real_rmtree(path, *a, **k)
+
+        def spy_unlink(self, *a, **k):
+            unlinked.append(str(self))
+            return real_unlink(self, *a, **k)
+
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=AssertionError("no trash in tests")):
+            mock_qfile.moveToTrash.return_value = False
+            with patch.object(Path, "unlink", spy_unlink), \
+                 patch.object(_shutil, "rmtree", spy_rmtree):
+                res = quarantine_or_delete_file(str(victim))
+
         self.assertTrue(res)
-        self.assertFalse(os.path.exists(temp_path))
+        self.assertFalse(victim.exists())
+        self.assertEqual(rmtree_calls, [str(victim)])
+        self.assertEqual(unlinked, [])
+
+    def test_quarantine_or_delete_missing_file_reports_failure(self):
+        missing = str(Path(tempfile.gettempdir()) / "definitely_not_here_9f3a.bin")
+        self.assertFalse(os.path.exists(missing))
+        self.assertFalse(
+            quarantine_or_delete_file(missing),
+            "nothing was deleted, so nothing may be reported as quarantined",
+        )
 
 
 class TestManagerSecurityIntegration(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
         self.db = Database(Path(self.tmp_dir.name) / "test.db")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
         self.manager.set_security_config(SecurityConfig())
-
-    def tearDown(self):
-        self.manager.stop()
-        self.db.close()
-        self.tmp_dir.cleanup()
 
     def test_manager_security_config_update(self):
         new_cfg = SecurityConfig(
@@ -188,32 +412,236 @@ class TestManagerSecurityIntegration(unittest.TestCase):
         # Dangerous double extension
         did = self.manager.add_download("https://example.com/document.doc.exe")
         self.assertIsNone(did, "Strict mode must block dangerous double extension")
+        self.assertEqual(
+            self.db.get_all_downloads(), [],
+            "a blocked URL must not leave a row behind",
+        )
 
     def test_antivirus_preserves_incomplete_status(self):
-        """Scanning an incomplete file does not mark it completed."""
+        """A clean scan of a *completed* but partial file must not keep it completed.
+
+        ``DownloadManager.scan_download_file`` restarts the entry as "scanning",
+        then picks the restore target. For a row whose status is "paused" the
+        ``target_status == "completed"`` branch is dead code, so the entry is
+        built as a "completed" row with downloaded_size < total_size: that is the
+        only input that reaches manager.py:2976, where a partial file is
+        downgraded to "paused" instead of being falsely marked complete.
+
+        ``Database._row_to_entry`` (database.py:545-549) silently raises
+        downloaded_size to total_size for any completed/seeding row, so the
+        manager is fed the partial entry directly; see
+        ``test_completed_partial_row_is_healed_on_read`` for the proof that the
+        guard is currently unreachable through the DB alone.
+        """
         test_file = Path(self.tmp_dir.name) / "incomplete.bin"
         test_file.write_bytes(b"partial content")
 
-        entry = DownloadEntry(
-            id="d1",
-            url="https://example.com/incomplete.bin",
-            filename="incomplete.bin",
-            file_path=str(test_file),
-            save_path=self.tmp_dir.name,
-            total_size=1000000,
-            downloaded_size=len(b"partial content"),
-            status="paused",
+        self.db.add_download(
+            DownloadEntry(
+                id="d1",
+                url="https://example.com/incomplete.bin",
+                filename="incomplete.bin",
+                file_path=str(test_file),
+                save_path=self.tmp_dir.name,
+                total_size=1000,
+                downloaded_size=10,
+                status="completed",
+            )
         )
-        self.db.add_download(entry)
+        self.assertEqual(self.db.get_download("d1").status, "completed")
+
+        partial = self.db.get_download("d1")
+        partial.total_size = 1000
+        partial.downloaded_size = 10
+        real_get_download = self.manager._db.get_download
+        self.manager._db.get_download = (
+            lambda did: partial if did == "d1" else real_get_download(did)
+        )
+
+        def restore():
+            self.manager._db.get_download = real_get_download
+
+        self.addCleanup(restore)
+
+        settled = threading.Event()
+        emitted = []
+
+        def _on_status(download_id, status, error=""):
+            emitted.append((download_id, status))
+            if status != "scanning":
+                settled.set()
+
+        self.manager.status_changed.connect(_on_status)
+        self.addCleanup(self.manager.status_changed.disconnect, _on_status)
+
+        scan_calls = []
+
+        def fake_scan(path, config):
+            scan_calls.append(path)
+            return True, "Clean file"
+
+        stored_path = real_get_download("d1").file_path
+        self.assertEqual(stored_path, str(test_file).replace("\\", "/"))
+
+        with patch("my_idm.manager.scan_file", side_effect=fake_scan):
+            self.manager.scan_download_file("d1")
+            # Wait for the fire-and-forget scan thread instead of sleeping past
+            # it: a slow thread would otherwise touch a torn-down sqlite handle.
+            self.assertTrue(
+                _pump_until(settled, 15.0),
+                f"scan thread never finished a status transition (saw {emitted!r})",
+            )
+
+        self.assertEqual(scan_calls, [stored_path], "the real file path must be scanned")
+        statuses = [s for _, s in emitted]
+        self.assertEqual(
+            statuses, ["scanning", "paused"],
+            "an incomplete file must come back as paused, never completed",
+        )
+        restore()  # the stub would otherwise shadow the real row on the next read
+        updated = self.db.get_download("d1")
+        self.assertEqual(updated.status, "paused")
+        self.assertNotEqual(updated.status, "completed")
+        self.assertTrue(updated.metadata.get("antivirus_scanned"))
+        self.assertEqual(updated.metadata.get("antivirus_report"), "Clean file")
+        self.assertNotIn("threat_detected", updated.metadata)
+
+    def test_completed_partial_row_is_healed_on_read(self):
+        """Documents why scan_download_file's partial-download guard is unreachable.
+
+        ``Database._row_to_entry`` raises ``downloaded_size`` to ``total_size``
+        for completed/seeding rows *in memory* (the stored value is untouched),
+        so the manager can never observe a completed row with
+        ``downloaded_size < total_size`` and the guard at manager.py:2976 never
+        fires through the database. Pinned so the interaction is visible.
+        """
+        self.db.add_download(
+            DownloadEntry(
+                id="heal",
+                url="https://example.com/heal.bin",
+                filename="heal.bin",
+                file_path=str(Path(self.tmp_dir.name) / "heal.bin"),
+                save_path=self.tmp_dir.name,
+                total_size=1000,
+                downloaded_size=10,
+                status="completed",
+            )
+        )
+        read = self.db.get_download("heal")
+        self.assertEqual(read.downloaded_size, 1000, "the read heals the byte count")
+        self.assertEqual(read.progress, 100.0)
+        row = self.db._conn.execute(
+            "SELECT downloaded_size FROM downloads WHERE id = 'heal'"
+        ).fetchone()
+        self.assertEqual(
+            row["downloaded_size"], 10,
+            "the heal is in-memory only; the stored row keeps the real byte count",
+        )
+
+    def test_antivirus_keeps_a_fully_downloaded_entry_completed(self):
+        """The other side of the same guard: a complete file stays completed."""
+        test_file = Path(self.tmp_dir.name) / "complete.bin"
+        test_file.write_bytes(b"0123456789")
+
+        self.db.add_download(
+            DownloadEntry(
+                id="d2",
+                url="https://example.com/complete.bin",
+                filename="complete.bin",
+                file_path=str(test_file),
+                save_path=self.tmp_dir.name,
+                total_size=10,
+                downloaded_size=10,
+                status="completed",
+            )
+        )
+
+        settled = threading.Event()
+        statuses = []
+
+        def _on_status(download_id, status, error=""):
+            statuses.append(status)
+            if status != "scanning":
+                settled.set()
+
+        self.manager.status_changed.connect(_on_status)
+        self.addCleanup(self.manager.status_changed.disconnect, _on_status)
 
         with patch("my_idm.manager.scan_file", return_value=(True, "Clean file")):
-            self.manager.scan_download_file("d1")
-            import time
-            time.sleep(0.3)
+            self.manager.scan_download_file("d2")
+            self.assertTrue(
+                _pump_until(settled, 15.0),
+                f"scan thread never finished a status transition (saw {statuses!r})",
+            )
 
-            updated = self.db.get_download("d1")
-            self.assertEqual(updated.status, "paused")
-            self.assertNotEqual(updated.status, "completed")
+        self.assertEqual(statuses, ["scanning", "completed"])
+        self.assertEqual(self.db.get_download("d2").status, "completed")
+
+    def test_antivirus_marks_threat_detected_and_deletes(self):
+        """A dirty scan with action_on_threat='delete' quarantines the file."""
+        test_file = Path(self.tmp_dir.name) / "infected.bin"
+        test_file.write_bytes(b"eicar-ish")
+        self.manager.set_security_config(SecurityConfig(action_on_threat="delete"))
+        self.db.add_download(
+            DownloadEntry(
+                id="d3",
+                url="https://example.com/infected.bin",
+                filename="infected.bin",
+                file_path=str(test_file),
+                save_path=self.tmp_dir.name,
+                total_size=10,
+                downloaded_size=10,
+                status="completed",
+            )
+        )
+
+        settled = threading.Event()
+        threats = []
+        statuses = []
+
+        def _on_status(download_id, status, error=""):
+            statuses.append(status)
+            if status != "scanning":
+                settled.set()
+
+        def _on_threat(download_id, report):
+            threats.append((download_id, report))
+            settled.set()
+
+        self.manager.status_changed.connect(_on_status)
+        self.manager.threat_detected.connect(_on_threat)
+        self.addCleanup(self.manager.status_changed.disconnect, _on_status)
+        self.addCleanup(self.manager.threat_detected.disconnect, _on_threat)
+
+        stored_path = self.db.get_download("d3").file_path
+        with patch("my_idm.manager.scan_file", return_value=(False, "Threat: Trojan:Win32/Wacatac")), \
+             patch("my_idm.manager.quarantine_or_delete_file") as mock_quarantine:
+            self.manager.scan_download_file("d3")
+            self.assertTrue(
+                _pump_until(settled, 15.0),
+                f"scan thread never reported a threat (saw {statuses!r})",
+            )
+
+        mock_quarantine.assert_called_once_with(stored_path)
+        self.assertEqual(statuses, ["scanning", "threat_detected"])
+        self.assertEqual(len(threats), 1, "the threat signal must fire exactly once")
+        self.assertIn("Trojan:Win32/Wacatac", threats[0][1])
+        self.assertIn(
+            "Infected file deleted", threats[0][1],
+            "the threat signal must say the file was deleted",
+        )
+        updated = self.db.get_download("d3")
+        self.assertEqual(updated.status, "threat_detected")
+        self.assertTrue(updated.metadata.get("threat_detected"))
+        # NOTE: the metadata keeps the *un*-suffixed report. scan_download_file
+        # writes meta["antivirus_report"] before appending "(Infected file
+        # deleted)" to the local `report`, so the stored text and the emitted
+        # text disagree. Pinned as-is; see the report (production oddity).
+        self.assertEqual(updated.metadata.get("antivirus_report"), "Threat: Trojan:Win32/Wacatac")
+
+    def test_scan_download_file_on_unknown_id_is_safe(self):
+        with patch("my_idm.manager.scan_file", side_effect=AssertionError("no file to scan")):
+            self.manager.scan_download_file("no-such-id")
 
 
 class TestSecuritySettingsDialog(unittest.TestCase):
@@ -271,60 +699,106 @@ class TestSecuritySettingsDialog(unittest.TestCase):
 
 class TestThreatExclusionAndScanTiming(unittest.TestCase):
 
+    FAKE_DEFENDER = r"C:\fake\MpCmdRun.exe"
+
+    def setUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.path = Path(self.tmp_dir.name) / "mock.exe"
+        self.path.write_bytes(b"mock binary")
+        self.addCleanup(self.path.unlink, missing_ok=True)
+
+    def _scanner(self, returncode, stdout, stderr=""):
+        """A patched MpCmdRun that is guaranteed to be found.
+
+        ``find_windows_defender_path`` is NOT patched in the original tests, so
+        on a host without Defender ``scan_file`` short-circuited at
+        security.py:321-324 and returned
+        "Windows Defender scanner not found; skipped scan." -- the exclusion
+        assertions then either failed confusingly or passed vacuously.
+        """
+        fake_run = unittest.mock.MagicMock()
+        fake_run.return_value.returncode = returncode
+        fake_run.return_value.stdout = stdout
+        fake_run.return_value.stderr = stderr
+        return patch("my_idm.security.find_windows_defender_path", return_value=self.FAKE_DEFENDER), patch("subprocess.run", fake_run)
+
     def test_threat_exclusion_silently_allows_matched_threat(self):
-        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
-            f.write(b"mock binary")
-            temp_path = f.name
-
-        try:
-            cfg = SecurityConfig(
-                scan_after_download=True,
-                scanner_type="defender",
-                ignored_threat_categories=["HackTool", "CrackTool"],
+        find_patch, run_patch = self._scanner(
+            2, "Threat detected: HackTool:Win32/AutoKMS found in file."
+        )
+        with find_patch, run_patch as mock_run:
+            cfg = _defender_config(ignored_threat_categories=["HackTool", "CrackTool"])
+            self.assertEqual(
+                cfg.get_effective_threat_exclusions(), ["HackTool", "CrackTool"],
+                "precondition: only the two named categories are excluded",
             )
-            # Mock subprocess.run simulating Defender detecting HackTool:Win32/AutoKMS
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value.returncode = 2
-                mock_run.return_value.stdout = "Threat detected: HackTool:Win32/AutoKMS found in file."
-                mock_run.return_value.stderr = ""
+            is_clean, report = scan_file(str(self.path), cfg)
 
-                is_clean, report = scan_file(temp_path, cfg)
-                self.assertTrue(is_clean, "Threat matching ignored_threat_categories should be allowed as clean")
-                self.assertIn("Allowed (matched exclusion 'HackTool')", report)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        self.assertTrue(is_clean, "Threat matching ignored_threat_categories should be allowed as clean")
+        self.assertIn("Allowed (matched exclusion 'HackTool')", report)
+        argv = mock_run.call_args.args[0]
+        self.assertEqual(argv[0], self.FAKE_DEFENDER, "the scanner must actually have been invoked")
+
+    def test_threat_exclusion_is_order_independent_across_categories(self):
+        find_patch, run_patch = self._scanner(
+            2, "Threat detected: CrackTool:W32/KeyGen found in file."
+        )
+        with find_patch, run_patch:
+            cfg = _defender_config(ignored_threat_categories=["HackTool", "CrackTool"])
+            is_clean, report = scan_file(str(self.path), cfg)
+        self.assertTrue(is_clean, report)
+        self.assertIn("Allowed (matched exclusion 'CrackTool')", report)
 
     def test_threat_not_excluded_is_flagged(self):
-        with tempfile.NamedTemporaryFile(suffix=".exe", delete=False) as f:
-            f.write(b"mock binary")
-            temp_path = f.name
-
-        try:
-            cfg = SecurityConfig(
-                scan_after_download=True,
-                scanner_type="defender",
-                ignored_threat_categories=["HackTool"],
+        find_patch, run_patch = self._scanner(
+            2, "Threat detected: Trojan:Win32/Wacatac found in file."
+        )
+        with find_patch, run_patch:
+            cfg = _defender_config(ignored_threat_categories=["HackTool"])
+            # The default list still carries PUA/Adware/Riskware, so the test only
+            # exercises the Trojan path because the config narrows it to HackTool.
+            self.assertEqual(
+                cfg.get_effective_threat_exclusions(), ["HackTool"],
+                "the exclusion list must actually be narrowed for this assertion "
+                "to mean anything",
             )
-            # Mock subprocess.run simulating Trojan:Win32/Wacatac
-            with patch("subprocess.run") as mock_run:
-                mock_run.return_value.returncode = 2
-                mock_run.return_value.stdout = "Threat detected: Trojan:Win32/Wacatac found in file."
-                mock_run.return_value.stderr = ""
+            is_clean, report = scan_file(str(self.path), cfg)
 
-                is_clean, report = scan_file(temp_path, cfg)
-                self.assertFalse(is_clean, "Threat not matching exclusions must be flagged")
-                self.assertIn("Trojan:Win32/Wacatac", report)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        self.assertFalse(is_clean, "Threat not matching exclusions must be flagged")
+        self.assertIn("Trojan:Win32/Wacatac", report)
+        self.assertNotIn("Allowed", report)
+
+    def test_default_exclusions_would_have_allowed_pua(self):
+        """Why the narrowing above is load-bearing: the default list is broad."""
+        cfg = _defender_config()
+        self.assertEqual(
+            cfg.get_effective_threat_exclusions(), KNOWN_THREAT_CATEGORIES
+        )
+        find_patch, run_patch = self._scanner(2, "PUA:Win32/Bundler found in file.")
+        with find_patch, run_patch:
+            is_clean, report = scan_file(str(self.path), cfg)
+        self.assertTrue(is_clean, report)
+        self.assertIn("Allowed (matched exclusion 'PUA')", report)
+
+    def test_custom_pattern_exclusion_is_honoured(self):
+        find_patch, run_patch = self._scanner(
+            2, "Threat detected: Custom:Internal/Whatever found in file."
+        )
+        with find_patch, run_patch:
+            cfg = _defender_config(
+                ignored_threat_categories=["HackTool"],
+                ignored_threat_patterns="Internal/Whatever, Another",
+            )
+            is_clean, report = scan_file(str(self.path), cfg)
+        self.assertTrue(is_clean, report)
+        self.assertIn("Allowed (matched exclusion 'Internal/Whatever')", report)
 
     def test_manual_only_scan_timing_skips_auto_scan(self):
-        tmp_dir = tempfile.TemporaryDirectory()
         db = None
         mgr = None
         try:
-            db = Database(Path(tmp_dir.name) / "test.db")
+            db = Database(Path(self.tmp_dir.name) / "test.db")
             db.open()
             mgr = DownloadManager(db)
             cfg = SecurityConfig(
@@ -337,8 +811,8 @@ class TestThreatExclusionAndScanTiming(unittest.TestCase):
                 id="test-dl",
                 url="https://example.com/test.bin",
                 filename="test.bin",
-                file_path=str(Path(tmp_dir.name) / "test.bin"),
-                save_path=tmp_dir.name,
+                file_path=str(Path(self.tmp_dir.name) / "test.bin"),
+                save_path=self.tmp_dir.name,
                 total_size=100,
                 downloaded_size=100,
                 status="downloading",
@@ -347,17 +821,21 @@ class TestThreatExclusionAndScanTiming(unittest.TestCase):
 
             emitted_statuses = []
             mgr.status_changed.connect(lambda did, st, err: emitted_statuses.append((did, st)))
+            self.addCleanup(mgr.status_changed.disconnect)
 
             with patch.object(mgr, "_handle_completed_scan") as mock_scan:
                 mgr._on_http_status("test-dl", "completed", "")
                 mock_scan.assert_not_called()
                 self.assertIn(("test-dl", "completed"), emitted_statuses)
+                self.assertEqual(
+                    emitted_statuses.count(("test-dl", "completed")), 1,
+                    "exactly one completion transition, and none of it scanned",
+                )
         finally:
             if mgr:
                 mgr.stop()
             if db:
                 db.close()
-            tmp_dir.cleanup()
 
 
 if __name__ == "__main__":

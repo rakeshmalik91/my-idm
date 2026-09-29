@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 from PySide6.QtWidgets import QApplication
 
+import my_idm.config as config_module
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.download_model import DownloadTableModel, Col
 from my_idm.manager import DownloadManager
@@ -16,19 +18,138 @@ from my_idm.manager import DownloadManager
 app = QApplication.instance() or QApplication([])
 
 
+class _FakeTorrentStatus:
+    """A ``lt.torrent_status`` stand-in with real, comparable values.
+
+    A bare ``MagicMock`` cannot be used here: ``get_status()`` wraps its body in a
+    broad ``except Exception`` that returns ``None``, and ``poll_all()`` skips every
+    handle whose status is falsy. The rename branch under test would then never
+    run and the test would pass for the wrong reason.
+    """
+
+    def __init__(self, state=3, has_metadata=True, total_size=1000, done=400):
+        self.state = state
+        self.has_metadata = has_metadata
+        self.total_wanted = total_size
+        self.total_wanted_done = done
+        self.total_done = done
+        self.progress = (done / total_size) if total_size else 0.0
+        self.download_rate = 1024
+        self.upload_rate = 0
+        self.num_seeds = 2
+        self.num_peers = 1
+        self.num_complete = 4
+        self.list_seeds = 3
+        self.num_incomplete = 2
+        self.list_peers = 1
+        self.all_time_upload = 0
+        self.all_time_download = 0
+        self.last_seen_complete = 0
+        self.paused = False
+
+
+class _FakeTorrentInfo:
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
+
+    def total_size(self):
+        return 1000
+
+
+class _FakeTorrentHandle:
+    """Only the surface ``get_status()`` / ``poll_all()`` actually touches."""
+
+    def __init__(self, info_name):
+        self._info = _FakeTorrentInfo(info_name) if info_name else None
+        self.paused_calls = 0
+
+    def status(self):
+        return _FakeTorrentStatus()
+
+    def torrent_file(self):
+        return None
+
+    def get_torrent_info(self):
+        return self._info
+
+    def pause(self):
+        self.paused_calls += 1
+
+    def is_valid(self):
+        return True
+
+    def save_resume_data(self):
+        return None
+
+
 class TestManagerLifecycle(unittest.TestCase):
 
     def setUp(self):
+        # addCleanup is LIFO, so registering in this order tears the fixture down
+        # in the reverse: temp dir last, once nothing still needs it.
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
         self.db_path = Path(self.tmp_dir.name) / "test.db"
         self.db = Database(self.db_path)
         self.db.open()
+        self.addCleanup(self.db.close)
         self.manager = DownloadManager(self.db)
+        # Registered immediately after construction: DownloadManager owns four
+        # QTimers, an HTTPEngine, a TorrentEngine, a BrowserServer and a
+        # TorServiceManager whose data_dir is the user's ~/.my-idm/tor_data.
+        self.addCleanup(self.manager.stop)
+        self._block_config_persistence()
+        self._isolate_backlog_scanner()
 
-    def tearDown(self):
-        self.manager.stop()
-        self.db.close()
-        self.tmp_dir.cleanup()
+    # -- hermeticity guards (autouse for this whole class) ------------------
+
+    def _block_config_persistence(self):
+        """Stop every ``set_*_config`` call in this file from writing real settings.
+
+        Each config dataclass's ``save()`` builds ``QSettings("MyIDM", "My-IDM")``
+        when called with no argument, which on Windows resolves to the registry.
+        ``test_periodic_backlog_polling_timer_and_tick`` therefore persisted
+        ``backlog_poll_enabled=True, backlog_poll_interval=30`` and
+        ``test_startup_resumes_seeding_torrents_when_configured`` persisted
+        ``resume_seeding_on_startup=False`` -- flipping a real user preference on
+        every test run, for good. The guard is applied to every config class the
+        module exposes so a class added later is covered too.
+        """
+        patched = []
+        for name in dir(config_module):
+            obj = getattr(config_module, name)
+            if not isinstance(obj, type) or not callable(getattr(obj, "save", None)):
+                continue
+            patcher = patch.object(obj, "save", lambda self, *a, **k: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            patched.append(name)
+        self.assertTrue(
+            patched,
+            "the config-persistence guard patched nothing; no config class "
+            "in my_idm.config exposes save()",
+        )
+
+    def _isolate_backlog_scanner(self):
+        """Point the backlog scanner at an empty dir and disarm its timer.
+
+        ``_apply_backlog_timer_config()`` runs from ``DownloadManager.__init__``,
+        so ``_backlog_timer`` is armed on *every* manager, even one whose
+        ``start()`` was never called. A tick reaches the real
+        ``process_backlogs()``, which scans ``Path.cwd()``, ``~/.my-idm`` and
+        ``Path.home()`` and TRUNCATES every ``backlog.txt`` it finds
+        (``clear_backlog_after_load`` defaults to True). This repository has a
+        ``backlog.txt``, so a stray tick is a data-loss event on the user's
+        machine -- and, while the scan is in flight, the 5 s
+        ``stop()`` timer-slot bound is spent waiting for it.
+        """
+        empty = Path(self.tmp_dir.name) / "empty_backlog_root"
+        empty.mkdir(parents=True, exist_ok=True)
+        self.manager._general_config.backlog_locations = [str(empty)]
+        self.manager._backlog_timer.stop()
 
     # -- Startup and shutdown ------------------------------------------------
 
@@ -61,11 +182,40 @@ class TestManagerLifecycle(unittest.TestCase):
         )
         self.db.add_download(entry)
 
+        observed = {}
+
+        async def fake_download(cancel_evt):
+            """Mirror _run_download's cooperative polling of the cancel event.
+
+            The previous version used ``asyncio.sleep(10)``, which the cancel
+            event cannot interrupt: ``HTTPEngine.stop()`` awaits the task with
+            ``asyncio.wait_for(task, timeout=3.0)`` and so burned the full 3 real
+            seconds on every single run before falling through to ``task.cancel()``.
+            """
+            while not cancel_evt.is_set():
+                await asyncio.sleep(0.01)
+            observed["cancel_seen"] = True
+
         async def run_test():
-            self.manager._http._tasks["dl-active-1"] = asyncio.create_task(asyncio.sleep(10))
+            cancel_evt = asyncio.Event()
+            self.manager._http._cancel_events["dl-active-1"] = cancel_evt
+            self.manager._http._tasks["dl-active-1"] = asyncio.create_task(fake_download(cancel_evt))
             await self.manager._http.stop()
 
+        started = time.monotonic()
         asyncio.run(run_test())
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(
+            observed.get("cancel_seen"),
+            "stop() must set the cancel event the running transfer watches",
+        )
+        self.assertLess(
+            elapsed, 1.0,
+            f"stop() must release a cooperative transfer at once, took {elapsed:.2f}s "
+            "(a 3.0s wait_for timeout was hit instead of the cancel event)",
+        )
+        self.assertNotIn("dl-active-1", self.manager._http._tasks)
         updated = self.db.get_download("dl-active-1")
         self.assertEqual(updated.status, "queued")
 
@@ -143,11 +293,14 @@ class TestManagerLifecycle(unittest.TestCase):
         self.manager.queue_order_changed.connect(lambda: signals.append(True))
 
         self.manager.move_queue_up("d2")
-        self.assertTrue(len(signals) > 0)
+        # Exactly one emit: a duplicate would make every view rebuild twice, and
+        # "at least one" would not notice a regression that emits on every call.
+        self.assertEqual(signals, [True])
         self.assertEqual(self.db.get_download("d2").queue_order, 1)
         self.assertEqual(self.db.get_download("d1").queue_order, 2)
 
         self.manager.move_queue_down("d2")
+        self.assertEqual(signals, [True, True])
         self.assertEqual(self.db.get_download("d2").queue_order, 2)
         self.assertEqual(self.db.get_download("d1").queue_order, 1)
 
@@ -264,14 +417,31 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertEqual(updated.status, "completed")
 
     def test_recheck_resets_file_not_found(self):
-        """Rechecking a download that had file_not_found status resets it."""
+        """Rechecking a download that had file_not_found status resets it.
+
+        The old assertion was `assertNotEqual(status, "file_not_found")`, which
+        also accepts None, "" and "banana". The exact post-recheck contract is
+        asserted instead, along with the signals the UI reacts to.
+        """
         e = DownloadEntry(id="d1", url="http://example.com/f1.zip", filename="f1.zip", save_path="/tmp", status="file_not_found")
         self.db.add_download(e)
 
-        with patch.object(self.manager, "resume_download"):
-            self.manager.recheck_download("d1")
+        status_events = []
+        self.manager.status_changed.connect(lambda did, st, err: status_events.append((did, st, err)))
 
-        self.assertNotEqual(self.db.get_download("d1").status, "file_not_found")
+        with patch.object(self.manager, "resume_download") as mock_resume:
+            self.manager.recheck_download("d1")
+            # A recheck inspects the file; it must never kick off a second
+            # transfer of its own.
+            mock_resume.assert_not_called()
+
+        updated = self.db.get_download("d1")
+        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.downloaded_size, 0)
+        self.assertEqual(
+            status_events, [("d1", "queued", "File not found")],
+            "the UI must be told why the entry was reset",
+        )
 
     def test_recheck_file_not_found_model_progress_resets(self):
         """Model in-memory entry reflects 0 progress after recheck of missing file."""
@@ -395,6 +565,44 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertEqual(self.manager._detect_type("https://example.com/ubuntu-22.04.iso"), "http")
         self.assertEqual(self.manager._detect_type("magnet:?xt=urn:btih:1234567890"), "torrent")
 
+    def test_detect_type_local_torrent_file_on_disk(self):
+        """A .torrent path that really exists is a torrent; a missing one is not.
+
+        ``_detect_type`` guards its local-file branch with ``os.path.isfile(url)``,
+        which the URL-only test above never reaches, so that branch was untested.
+        """
+        real = Path(self.tmp_dir.name) / "ubuntu-22.04.iso.torrent"
+        real.write_bytes(b"d8:announce4:teste")
+        self.assertTrue(real.is_file())
+
+        self.assertEqual(
+            self.manager._detect_type(str(real)),
+            "torrent",
+            "an existing local .torrent file must be detected as a torrent",
+        )
+
+        missing = str(Path(self.tmp_dir.name) / "nope.torrent")
+        self.assertFalse(Path(missing).exists())
+        self.assertEqual(
+            self.manager._detect_type(missing),
+            "http",
+            "a non-existent .torrent path has no scheme and no file, so it is http",
+        )
+
+    def test_add_download_of_local_torrent_file_uses_file_stem(self):
+        """The local .torrent path is also what `add_download` derives the name from."""
+        real = Path(self.tmp_dir.name) / "Frieren.S01E01.torrent"
+        real.write_bytes(b"d8:announce4:teste")
+
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            download_id = self.manager.add_download(str(real), save_path=self.tmp_dir.name)
+
+        self.assertIsNotNone(download_id)
+        mock_start.assert_called_once()
+        entry = mock_start.call_args[0][0]
+        self.assertEqual(entry.download_type, "torrent")
+        self.assertEqual(entry.filename, "Frieren.S01E01")
+
     # -- Backlog parsing, download locations, auto-clearing & discovery --------
 
     def test_parse_backlog_entry_syntax(self):
@@ -494,18 +702,19 @@ https://example.com/item2.zip
         self.assertEqual(bf.read_text(encoding="utf-8"), "")
 
     def test_load_backlog_preserves_failed_lines(self):
+        """A line that cannot be queued stays in the file; a queued one is removed."""
         self.manager._general_config.clear_backlog_after_load = True
         bf = Path(self.tmp_dir.name) / "partial_backlog.txt"
-        # Security policy blocks dangerous urls if block_dangerous_urls is True
-        from my_idm.security import SecurityConfig
-        self.manager._security_config = SecurityConfig(block_dangerous_urls=True)
 
         bf.write_text(
             "https://example.com/good.zip\nhttp://malware.testing.example.com/evil.exe\n",
             encoding="utf-8",
         )
 
-        # Mock add_download to fail for evil.exe
+        # Simulate add_download failing for evil.exe. (The old test also set
+        # `block_dangerous_urls=True`, which had no effect at all here because
+        # add_download was mocked -- the real blocking policy is exercised
+        # separately by test_dangerous_url_blocked_below.)
         orig_add = self.manager.add_download
 
         def mock_add(url, **kwargs):
@@ -521,6 +730,57 @@ https://example.com/item2.zip
         remaining = bf.read_text(encoding="utf-8")
         self.assertIn("evil.exe", remaining)
         self.assertNotIn("good.zip", remaining)
+
+    def test_dangerous_url_blocked_by_security_config(self):
+        """A blocked URL is refused by the real add_download, with nothing queued."""
+        from my_idm.security import SecurityConfig
+
+        self.manager._security_config = SecurityConfig(block_dangerous_urls=True)
+        self.assertTrue(self.manager._security_config.block_dangerous_urls)
+
+        dangerous = "http://malware.testing.example.com/payload.exe"
+
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            result = self.manager.add_download(dangerous, save_path=self.tmp_dir.name)
+
+        self.assertIsNone(result, "a dangerous URL must not produce a download id")
+        mock_start.assert_not_called()
+        self.assertIsNone(
+            self.db.find_by_url(dangerous),
+            "a blocked URL must never reach the database",
+        )
+
+        # A safe URL through the same policy is still accepted, so the assertion
+        # above is about the policy and not about add_download being broken.
+        with patch.object(self.manager, "_start_entry"):
+            safe_id = self.manager.add_download(
+                "https://example.com/safe.zip", save_path=self.tmp_dir.name
+            )
+        self.assertIsNotNone(safe_id)
+
+    def test_add_download_returns_none_when_adding_raises(self):
+        """load_backlog treats an exception from add_download as a failed line."""
+        self.manager._general_config.clear_backlog_after_load = True
+        bf = Path(self.tmp_dir.name) / "raising_backlog.txt"
+        bf.write_text(
+            "https://example.com/raises.zip\nhttps://example.com/ok.zip\n",
+            encoding="utf-8",
+        )
+
+        orig_add = self.manager.add_download
+
+        def raising_add(url, **kwargs):
+            if "raises.zip" in url:
+                raise RuntimeError("simulated engine failure")
+            return orig_add(url, **kwargs)
+
+        with patch.object(self.manager, "add_download", side_effect=raising_add):
+            added = self.manager.load_backlog(str(bf))
+
+        self.assertEqual(added, 1)
+        remaining = bf.read_text(encoding="utf-8")
+        self.assertIn("raises.zip", remaining, "the line that raised must be kept")
+        self.assertNotIn("ok.zip", remaining, "the line that succeeded must be cleared")
 
     def test_load_backlog_no_clear_when_disabled(self):
         self.manager._general_config.clear_backlog_after_load = False
@@ -550,18 +810,92 @@ https://example.com/item2.zip
 
     def test_periodic_backlog_polling_timer_and_tick(self):
         from my_idm.config import GeneralConfig
+        from my_idm.utils import normalize_path
+
         # Check default timer interval is 60_000 ms (60 seconds)
         self.assertEqual(self.manager._backlog_timer.interval(), 60_000)
 
-        # Updating general config updates timer interval
+        # set_general_config() REPLACES the whole config object, so the empty
+        # backlog root installed by _isolate_backlog_scanner has to travel with
+        # the new one. Without it, a tick would scan Path.cwd() and Path.home().
+        isolated_root = Path(self.tmp_dir.name) / "tick_backlog_root"
+        isolated_root.mkdir(parents=True, exist_ok=True)
         new_cfg = GeneralConfig(backlog_poll_interval=30, backlog_poll_enabled=True)
-        self.manager.set_general_config(new_cfg)
-        self.assertEqual(self.manager._backlog_timer.interval(), 30_000)
+        new_cfg.backlog_locations = [str(isolated_root)]
 
-        # Test tick handler calls process_backlogs
-        with patch.object(self.manager, "process_backlogs", return_value=3) as mock_proc:
+        # process_backlogs is stubbed for the whole call, not just the tick: it is
+        # the real scanner that truncates backlog.txt, and set_general_config
+        # re-arms the timer that reaches it. _process_queue is stubbed because it
+        # is an unrelated side effect that would otherwise start queued entries.
+        with patch.object(self.manager, "process_backlogs", return_value=0) as mock_proc, \
+             patch.object(self.manager, "_process_queue") as mock_queue:
+            self.manager.set_general_config(new_cfg)
+
+            # Updating general config updates timer interval
+            self.assertEqual(self.manager._backlog_timer.interval(), 30_000)
+            self.assertEqual(
+                self.manager._general_config.get_effective_backlog_locations(),
+                [normalize_path(str(isolated_root))],
+                "set_general_config must not restore the real cwd/home scan roots",
+            )
+            mock_proc.assert_not_called()
+            mock_queue.assert_called_once_with()
+
+            # Test tick handler calls process_backlogs
+            mock_proc.return_value = 3
             self.manager._on_backlog_timer_tick()
-            mock_proc.assert_called_once()
+            mock_proc.assert_called_once_with()
+
+    def test_backlog_timer_is_not_armed_before_start(self):
+        """Regression guard for the data-loss hazard: no tick can fire pre-start.
+
+        `_apply_backlog_timer_config()` runs from `DownloadManager.__init__`, so
+        `_backlog_timer` is configured on every manager. It is only *started* for
+        a manager whose asyncio thread is alive, which is what keeps a tick from
+        reaching the real `process_backlogs()` scanner in tests that never call
+        `start()`. If that invariant is ever broken, the scanner truncates the
+        user's `backlog.txt`.
+        """
+        from my_idm.config import GeneralConfig
+
+        isolated_root = Path(self.tmp_dir.name) / "armed_backlog_root"
+        isolated_root.mkdir(parents=True, exist_ok=True)
+        cfg = GeneralConfig(backlog_poll_interval=1, backlog_poll_enabled=True)
+        cfg.backlog_locations = [str(isolated_root)]
+
+        with patch.object(self.manager, "process_backlogs", return_value=0) as mock_proc:
+            self.manager.set_general_config(cfg)
+            self.assertEqual(self.manager._backlog_timer.interval(), 1_000)
+            self.assertFalse(
+                self.manager._backlog_timer.isActive(),
+                "the backlog poll timer must stay disarmed until start() runs the "
+                "asyncio loop, otherwise it scans the user's home directory",
+            )
+            mock_proc.assert_not_called()
+
+    def test_config_changes_never_reach_real_qsettings(self):
+        """The class-level guard really does stop every config save from persisting.
+
+        Without this, `set_general_config` / `set_torrent_config` /
+        `set_security_config` wrote the developer's real preferences from a test
+        run (config.py's `save()` builds `QSettings("MyIDM", "My-IDM")`, which on
+        Windows is the registry).
+        """
+        from my_idm.config import GeneralConfig, TorrentConfig
+        from my_idm.security import SecurityConfig
+
+        with patch.object(config_module, "QSettings") as mock_qsettings:
+            self.manager.set_general_config(GeneralConfig(default_segments=17))
+            self.manager.set_torrent_config(TorrentConfig(resume_seeding_on_startup=False))
+            self.manager.set_security_config(SecurityConfig(block_dangerous_urls=True))
+
+        mock_qsettings.assert_not_called()
+
+        # ...and the values are still applied in memory, i.e. the guard does not
+        # turn set_*_config into a no-op.
+        self.assertEqual(self.manager.general_config.default_segments, 17)
+        self.assertFalse(self.manager.torrent_config.resume_seeding_on_startup)
+        self.assertTrue(self.manager._security_config.block_dangerous_urls)
 
     def test_parse_backlog_entry_custom_filename_and_headers(self):
         from my_idm.manager import parse_backlog_entry
@@ -615,30 +949,102 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertTrue(entry.metadata.get("explicit_filename"))
 
     def test_explicit_filename_preserved_over_website_headers(self):
-        """HTTPEngine must preserve explicit_filename rather than overwriting with website header filename."""
+        """A torrent rename must not overwrite a user-set explicit filename.
+
+        Driven through the REAL `TorrentEngine.poll_all()`, where the decision
+        lives (torrent_engine.py): a website-generated name coming back from
+        `get_torrent_info().name()` replaces `entry.filename` only when the entry
+        is not flagged `explicit_filename`. The previous version of this test
+        re-implemented that `if` inside the test body and asserted on its own
+        local variable, so no production code ran at all.
+        """
         entry = DownloadEntry(
             id="test-explicit-fn",
-            url="https://vault-99.owocdn.top/stream/ep1",
+            url="magnet:?xt=urn:btih:aaaa1111bbbb2222cccc3333dddd4444eeee5555",
             filename="Custom_Frieren_01.mp4",
             save_path=self.tmp_dir.name,
-            status="queued",
-            download_type="http",
-            metadata_json='{"explicit_filename": true}',
+            status="downloading",
+            download_type="torrent",
+            total_size=1000,
+            downloaded_size=400,
         )
         self.db.add_download(entry)
 
-        # Probe discovered a different website generated filename (e.g. from Content-Disposition)
-        website_filename = "AnimePahe_Frieren_-_01_720p.mp4"
-        meta = entry.metadata
-        has_explicit_fn = meta.get("explicit_filename", False)
-        self.assertTrue(has_explicit_fn)
+        # The rename guard: the flag the manager sets for a user-supplied name.
+        entry.metadata["explicit_filename"] = True
+        self.db.update_download(entry)
 
-        if has_explicit_fn and entry.filename:
-            candidate = entry.filename
-        else:
-            candidate = website_filename
+        engine = self.manager._torrent
+        # has_metadata=True is what makes get_status() read the name at all;
+        # state 3 == "downloading", so poll_all() stays off the seeding branch
+        # (which needs seeding_after_complete and is covered elsewhere).
+        engine._running = True
+        engine._session = object()
+        engine._handles[entry.id] = _FakeTorrentHandle("AnimePahe_Frieren_-_01_720p.mp4")
+        engine._torrent_config.seeding_after_complete = False
+        for name in ("get_torrent_files", "get_torrent_trackers", "get_torrent_peers"):
+            setattr(engine, name, lambda *a, **k: [])
 
-        self.assertEqual(candidate, "Custom_Frieren_01.mp4")
+        resolved = []
+        engine._filename_cb = lambda did, name: resolved.append((did, name))
+
+        engine.poll_all()
+
+        after = self.db.get_download(entry.id)
+        self.assertEqual(
+            after.filename, "Custom_Frieren_01.mp4",
+            "poll_all() must not overwrite an explicit filename with the "
+            f"website-reported name; got {after.filename!r}",
+        )
+        self.assertEqual(resolved, [], "no rename callback may fire for an explicit name")
+        # NOTE: `original_name` records the *website* name, not the pre-rename
+        # name, even when the rename is refused. `rename_download()` uses the same
+        # key for the opposite meaning (the name before a user rename), so the
+        # two producers disagree about what the field means. Asserted as-is.
+        self.assertEqual(after.metadata.get("original_name"), "AnimePahe_Frieren_-_01_720p.mp4")
+        # The status path really ran (a bare MagicMock handle would make
+        # get_status() return None and skip all of this silently).
+        self.assertEqual(after.downloaded_size, 400)
+
+    def test_website_filename_applied_when_no_explicit_filename(self):
+        """The negative control: without the flag, the website name does take over.
+
+        Without this, the test above would also pass if the rename branch were
+        deleted outright.
+        """
+        entry = DownloadEntry(
+            id="test-implicit-fn",
+            url="magnet:?xt=urn:btih:cccc1111dddd2222eeee3333ffff4444aaaa5555",
+            filename="temp_name",
+            save_path=self.tmp_dir.name,
+            status="downloading",
+            download_type="torrent",
+            total_size=1000,
+            downloaded_size=400,
+        )
+        self.db.add_download(entry)
+        self.assertFalse(entry.metadata.get("explicit_filename"))
+
+        engine = self.manager._torrent
+        engine._running = True
+        engine._session = object()
+        engine._handles[entry.id] = _FakeTorrentHandle("AnimePahe_Frieren_-_01_720p.mp4")
+        engine._torrent_config.seeding_after_complete = False
+        for name in ("get_torrent_files", "get_torrent_trackers", "get_torrent_peers"):
+            setattr(engine, name, lambda *a, **k: [])
+
+        resolved = []
+        engine._filename_cb = lambda did, name: resolved.append((did, name))
+
+        engine.poll_all()
+
+        after = self.db.get_download(entry.id)
+        self.assertEqual(after.filename, "AnimePahe_Frieren_-_01_720p.mp4")
+        self.assertEqual(after.metadata.get("original_name"), "AnimePahe_Frieren_-_01_720p.mp4")
+        self.assertEqual(
+            resolved, [(entry.id, "AnimePahe_Frieren_-_01_720p.mp4")],
+            "the rename callback must fire exactly once for an implicit name",
+        )
 
     def test_rename_download_http_completed_file_on_disk(self):
         """Renaming a completed HTTP download renames disk file and updates DB entry."""
@@ -826,32 +1232,60 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
 
     def test_retry_queue_respects_exponential_backoff_window(self):
         """The retry queue should only restart downloads whose backoff window has elapsed."""
-        import time
-        # Entry in future backoff window
-        future_entry = DownloadEntry(
-            id="d_future_retry",
-            url="https://example.com/future.zip",
-            filename="future.zip",
+        # The manager reads the wall clock through `my_idm.manager.time.time()`.
+        # `manager.time` *is* the stdlib `time` module, so the only honest way to
+        # freeze it is to patch the attribute and restore it; the test therefore
+        # pins absolute values instead of `time.time() +/- 300` margins, which
+        # would silently drift into the "elapsed" case on a slow machine.
+        frozen_now = 1_800_000_000.0
+        with patch.object(time, "time", return_value=frozen_now):
+            # Entry in future backoff window
+            future_entry = DownloadEntry(
+                id="d_future_retry",
+                url="https://example.com/future.zip",
+                filename="future.zip",
+                save_path="C:/Downloads",
+                status="queued",
+                retry_count=2,
+                max_retries=5,
+            )
+            future_entry.metadata["next_retry_at"] = frozen_now + 300
+            self.db.add_download(future_entry)
+
+            with patch.object(self.manager, "_start_entry") as mock_start:
+                self.manager._process_retry_queue()
+                mock_start.assert_not_called()
+
+            # A window that has just elapsed by one second must start the retry;
+            # the old test used `now - 5`, which is the same idea.
+            future_entry.metadata["next_retry_at"] = frozen_now - 1
+            self.db.update_download(future_entry)
+
+            with patch.object(self.manager, "_start_entry") as mock_start:
+                self.manager._process_retry_queue()
+                mock_start.assert_called_once()
+                self.assertEqual(mock_start.call_args[0][0].id, "d_future_retry")
+
+    def test_retry_queue_starts_entry_with_no_backoff_record(self):
+        """A retried download with no next_retry_at is eligible immediately."""
+        frozen_now = 1_800_000_000.0
+        entry = DownloadEntry(
+            id="d_no_backoff",
+            url="https://example.com/nobackoff.zip",
+            filename="nobackoff.zip",
             save_path="C:/Downloads",
             status="queued",
-            retry_count=2,
+            retry_count=1,
             max_retries=5,
         )
-        future_entry.metadata["next_retry_at"] = time.time() + 300
-        self.db.add_download(future_entry)
+        self.db.add_download(entry)
 
-        with patch.object(self.manager, "_start_entry") as mock_start:
+        with patch.object(time, "time", return_value=frozen_now), \
+             patch.object(self.manager, "_start_entry") as mock_start:
             self.manager._process_retry_queue()
-            mock_start.assert_not_called()
 
-        # Update next_retry_at to past
-        future_entry.metadata["next_retry_at"] = time.time() - 5
-        self.db.update_download(future_entry)
-
-        with patch.object(self.manager, "_start_entry") as mock_start:
-            self.manager._process_retry_queue()
-            mock_start.assert_called_once()
-            self.assertEqual(mock_start.call_args[0][0].id, "d_future_retry")
+        mock_start.assert_called_once()
+        self.assertEqual(mock_start.call_args[0][0].id, "d_no_backoff")
 
     def test_completed_download_recheck_single_stream_reads_disk_size(self):
         """Recheck of single-stream HTTP download with no segment records reads disk file size."""
@@ -1015,6 +1449,10 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         with patch.object(self.manager._torrent, "add_torrent") as mock_add2:
             self.manager.start()
             mock_add2.assert_not_called()
+
+        # The in-memory config really flipped; only persistence is blocked
+        # (see _block_config_persistence).
+        self.assertFalse(self.manager.torrent_config.resume_seeding_on_startup)
 
     def test_pause_and_stop_at_completed_are_no_ops(self):
         """Pause and stop on a completed download are no-ops and preserve completed state."""

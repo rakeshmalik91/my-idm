@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -71,6 +72,39 @@ def _mock_ydl_module(info):
     ydl_instance.extract_info.return_value = info
     module.YoutubeDL.return_value = ydl_instance
     return module, ydl_instance
+
+
+@contextmanager
+def _injected_ytdlp_download_error():
+    """Pin the ``yt_dlp.utils.DownloadError`` branch of the abort hook.
+
+    ``start_native_download``'s worker does a bare
+    ``from yt_dlp.utils import DownloadError`` inside a try/except, so the class
+    it aborts the download with depends on whether yt-dlp happens to be
+    installed on the host. Injecting a stand-in makes the test exercise the
+    same branch everywhere; the distinct message it formats proves the
+    injection (and not a real yt-dlp) is what raised.
+
+    Yields the class the worker's import actually resolved to, or ``None`` if
+    the import machinery bypassed ``sys.modules`` and fell back to
+    ``YouTubeToolError``.
+    """
+    import types
+
+    class _InjectedDownloadError(Exception):
+        def __str__(self):
+            return "Download cancelled by user. [injected DownloadError]"
+
+    package = types.ModuleType("yt_dlp")
+    utils = types.ModuleType("yt_dlp.utils")
+    utils.DownloadError = _InjectedDownloadError
+    package.utils = utils
+    with patch.dict(sys.modules, {"yt_dlp": package, "yt_dlp.utils": utils}):
+        try:
+            from yt_dlp.utils import DownloadError as resolved  # noqa: PLC0415
+        except Exception:  # pragma: no cover - only under an import hook
+            resolved = None
+        yield resolved
 
 
 class TestURLDetection(unittest.TestCase):
@@ -746,12 +780,32 @@ class TestNativeDownload(unittest.TestCase):
         self.assertIn("Unsupported URL", captured.get("error", ""))
 
     def test_cancellation_aborts_download(self):
+        """Cancelling must unwind the worker, deterministically.
+
+        ``start_native_download`` starts the thread and returns, and the worker
+        only observes the cancel flag from *inside* the yt-dlp progress hook. A
+        fake that fires the hook once and returns can win the race against
+        ``cancel["cancel"] = True``, in which case the download simply completes
+        and no error is ever reported. The fake below keeps pumping the hook
+        until the abort raises, and the test waits for the hook to be live
+        before it sets the flag.
+        """
         module = MagicMock()
         ydl_instance = MagicMock()
         ydl_instance.__enter__.return_value = ydl_instance
 
+        in_hook = threading.Event()
+        release = threading.Event()
+        attempts = {"n": 0}
+        self.addCleanup(release.set)
+
         def _download(_urls):
-            ydl_instance.add_progress_hook.call_args[0][0]({"status": "downloading"})
+            hook = ydl_instance.add_progress_hook.call_args[0][0]
+            in_hook.set()
+            while not release.is_set():
+                attempts["n"] += 1
+                hook({"status": "downloading"})
+                release.wait(0.01)
             return 0
 
         ydl_instance.download.side_effect = _download
@@ -760,17 +814,98 @@ class TestNativeDownload(unittest.TestCase):
         captured = {}
         done = threading.Event()
 
-        with patch.object(yt, "_import_ytdlp", return_value=module):
+        with patch.object(yt, "_import_ytdlp", return_value=module), \
+             _injected_ytdlp_download_error() as abort_cls:
             thread, cancel = yt.start_native_download(
                 "https://x", "/out", "best", ExternalToolsConfig(ytdlp_ffmpeg_path=""),
-                done_cb=lambda p: done.set(),
+                done_cb=lambda p: (captured.__setitem__("path", p), done.set()),
                 error_cb=lambda m: (captured.__setitem__("error", m), done.set()),
             )
+            self.assertTrue(
+                in_hook.wait(timeout=5),
+                "the worker never reached the yt-dlp progress hook; nothing to abort",
+            )
             cancel["cancel"] = True
-            self.assertTrue(done.wait(timeout=10))
+            # Deliberately do NOT release the loop: the next hook call must
+            # observe the flag and raise. `release` is only the escape hatch a
+            # failing assert falls back to.
+            self.assertTrue(
+                done.wait(timeout=10),
+                f"the worker neither completed nor reported an error after "
+                f"cancel (attempts={attempts['n']}, captured={captured!r})",
+            )
             thread.join(timeout=5)
 
-        self.assertIn("cancelled", captured.get("error", "").lower())
+        self.assertFalse(
+            thread.is_alive(),
+            f"the worker thread outlived the cancel (captured={captured!r})",
+        )
+        self.assertNotIn("path", captured, "a cancelled download must not report success")
+        # The abort must raise whichever of the two production exception classes
+        # the worker's `from yt_dlp.utils import DownloadError` resolved to.
+        expected = (
+            "Download cancelled by user. [injected DownloadError]"
+            if abort_cls is not None
+            else "Download cancelled by user."
+        )
+        self.assertEqual(
+            captured.get("error"), expected,
+            f"abort produced an unexpected message (DownloadError branch active: "
+            f"{abort_cls is not None}); captured={captured!r} after "
+            f"{attempts['n']} progress-hook attempts",
+        )
+
+    def test_cancellation_aborts_when_ytdlp_not_installed(self):
+        """Without yt-dlp there is no ``DownloadError``; the abort falls back.
+
+        ``start_native_download``'s worker does a bare
+        ``from yt_dlp.utils import DownloadError`` inside a try/except, so the
+        exception type it aborts with depends on whether yt-dlp is installed on
+        the host. Blocking the import pins the fallback branch so both are
+        covered on every machine.
+        """
+        module = MagicMock()
+        ydl_instance = MagicMock()
+        ydl_instance.__enter__.return_value = ydl_instance
+
+        in_hook = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def _download(_urls):
+            hook = ydl_instance.add_progress_hook.call_args[0][0]
+            in_hook.set()
+            while not release.is_set():
+                hook({"status": "downloading"})
+                release.wait(0.01)
+            return 0
+
+        ydl_instance.download.side_effect = _download
+        module.YoutubeDL.return_value = ydl_instance
+
+        captured = {}
+        done = threading.Event()
+
+        with patch.object(yt, "_import_ytdlp", return_value=module), \
+             patch.dict(sys.modules, {"yt_dlp": None, "yt_dlp.utils": None}):
+            thread, cancel = yt.start_native_download(
+                "https://x", "/out", "best", ExternalToolsConfig(ytdlp_ffmpeg_path=""),
+                done_cb=lambda p: (captured.__setitem__("path", p), done.set()),
+                error_cb=lambda m: (captured.__setitem__("error", m), done.set()),
+            )
+            self.assertTrue(in_hook.wait(timeout=5), "worker never reached the progress hook")
+            cancel["cancel"] = True
+            self.assertTrue(
+                done.wait(timeout=10),
+                f"the worker neither completed nor errored after cancel: {captured!r}",
+            )
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive(), f"worker outlived the cancel: {captured!r}")
+        self.assertEqual(
+            captured.get("error"), "Download cancelled by user.",
+            f"expected the YouTubeToolError fallback message, got {captured!r}",
+        )
 
     def test_missing_ytdlp_raises_before_thread_start(self):
         with patch.object(yt, "_import_ytdlp", side_effect=yt.YouTubeToolError("nope", kind="not_installed")):

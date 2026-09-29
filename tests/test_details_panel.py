@@ -1,6 +1,7 @@
 """Unit tests for the bottom details panel and sub-tabs (Overview, Files, Peers, Trackers, Segments)."""
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -26,17 +27,67 @@ from my_idm.manager import DownloadManager
 app = QApplication.instance() or QApplication([])
 
 
+def destroy_window(win):
+    """Actually close and destroy a ``MainWindow``.
+
+    ``MainWindow.closeEvent`` ignores the close event and merely hides the
+    window whenever ``close_to_tray`` / ``enable_system_tray`` are on (both
+    default True), so a bare ``win.close()`` leaves the window alive for the
+    rest of the session -- together with its 1 Hz ``_details_timer``, its 4 s
+    ``_tor_availability_timer`` (which opens a real socket probe), the panel's
+    250 ms ``_log_timer`` and 300 ms ``_browser_monitor_timer`` (which poll
+    ``~/.my-idm/logs/animepahe_console.log``), and its tray icon. ``_force_exit``
+    short-circuits the intercept; the call then also runs ``manager.stop()``,
+    which is idempotent.
+    """
+    for name in ("_tor_availability_timer", "_details_timer"):
+        timer = getattr(win, name, None)
+        if timer is not None:
+            timer.stop()
+    stop_panel_timers(getattr(win, "_details_panel", None))
+    win._force_exit = True
+    win.close()
+    win.deleteLater()
+    QApplication.processEvents()
+
+
+def stop_panel_timers(panel):
+    """Silence a DetailsPanel's periodic timers and drop it from the event loop."""
+    if panel is None:
+        return
+    for name in ("_log_timer", "_browser_monitor_timer"):
+        timer = getattr(panel, name, None)
+        if timer is not None:
+            timer.stop()
+    panel.deleteLater()
+    QApplication.processEvents()
+
+
 class TestDetailsPanel(unittest.TestCase):
 
     def setUp(self):
+        # Registered with addCleanup (LIFO) so a failing assert cannot leak a
+        # window, six QTimers, a manager thread, or an open sqlite handle.
         self.db = Database(":memory:")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
         self.win = MainWindow(self.manager)
+        self.addCleanup(destroy_window, self.win)
+        self.addCleanup(stop_panel_timers, self.win._details_panel)
+        # Per-test scratch directory; the three console-retention tests used
+        # tempfile.mkdtemp() with no cleanup, leaking a directory into %TEMP%
+        # on every single run.
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
+        self.tmp_path = Path(self.tmp_dir.name)
 
-    def tearDown(self):
-        self.win.close()
-        self.db.close()
+    def _build(self, entry, manager=None):
+        """Persist *entry* and mirror it into the window's model."""
+        self.db.add_download(entry)
+        self.win._model.add_entry(entry)
+        return entry
 
     def test_details_panel_splitter_integration(self):
         """MainWindow central widget should be a vertical QSplitter with table and details panel."""
@@ -267,20 +318,33 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(panel._table_trackers.item(0, 1).text(), "udp://tracker.opentrackr.org:1337/announce")
 
     def test_details_panel_files_tree_double_click_opens_file(self):
-        """Double-clicking a file in the Files tree opens it via os.startfile."""
+        """Double-clicking an existing file in the Files tree opens it via os.startfile.
+
+        A REAL file on a REAL temp directory is used. The old version patched
+        ``pathlib.Path.exists`` process-wide, which -- because
+        ``my_idm.details_panel.Path`` *is* ``pathlib.Path`` -- made every
+        existence check in the interpreter (tempfile, importlib, Qt's resource
+        loader, the manager, every later test module) return True for the
+        duration and neutralised the very line under test
+        (details_panel.py:1597).
+        """
+        target_dir = self.tmp_path / "Downloads"
+        target_dir.mkdir()
+        real_file = target_dir / "file.zip"
+        real_file.write_bytes(b"payload" * 32)
+
         entry = DownloadEntry(
             id="test-dbl-1",
             url="https://example.com/file.zip",
             filename="file.zip",
-            save_path="C:/Downloads",
-            file_path="C:/Downloads/file.zip",
+            save_path=str(target_dir),
+            file_path=str(real_file),
             total_size=1048576,
             downloaded_size=1048576,
             status="completed",
             download_type="http",
         )
-        self.db.add_download(entry)
-        self.win._model.add_entry(entry)
+        self._build(entry)
 
         # Mock get_download_files to return file list
         mock_files = [
@@ -298,13 +362,66 @@ class TestDetailsPanel(unittest.TestCase):
 
         panel = self.win._details_panel
         panel.set_download_id("test-dbl-1")
+        self.assertTrue(real_file.exists(), "precondition: the file really exists on disk")
 
-        # Mock os.startfile and Path.exists
         with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile, \
-                unittest.mock.patch("my_idm.details_panel.Path.exists", return_value=True):
+             unittest.mock.patch.object(self.manager, "mark_file_not_found") as mock_missing:
             file_item = panel._tree_files.topLevelItem(0)
             panel._on_tree_item_double_clicked(file_item)
-            mock_startfile.assert_called_once_with(str(Path("C:/Downloads") / "file.zip"))
+            mock_startfile.assert_called_once_with(str(real_file))
+            mock_missing.assert_not_called()
+        self.assertTrue(real_file.exists(), "opening must not delete anything")
+
+    def test_details_panel_files_tree_double_click_marks_missing_file(self):
+        """The untested other half: a file that is genuinely gone is flagged.
+
+        details_panel.py:1599-1600 routes a vanished file to
+        ``mark_file_not_found`` instead of launching it. The file is created and
+        then really removed, so no existence check has to be faked.
+        """
+        target_dir = self.tmp_path / "Downloads"
+        target_dir.mkdir()
+        real_file = target_dir / "vanished.zip"
+        real_file.write_bytes(b"here for now")
+        self.assertTrue(real_file.exists())
+
+        entry = DownloadEntry(
+            id="test-dbl-gone",
+            url="https://example.com/vanished.zip",
+            filename="vanished.zip",
+            save_path=str(target_dir),
+            file_path=str(real_file),
+            total_size=1048576,
+            downloaded_size=1048576,
+            status="completed",
+            download_type="http",
+        )
+        self._build(entry)
+
+        self.manager.get_download_files = MagicMock(return_value=[
+            {
+                "index": 0,
+                "path": "vanished.zip",
+                "size": 1048576,
+                "downloaded": 1048576,
+                "progress": 1.0,
+                "priority": 4,
+                "status": "completed",
+            },
+        ])
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-dbl-gone")
+        file_item = panel._tree_files.topLevelItem(0)
+
+        real_file.unlink()
+        self.assertFalse(real_file.exists(), "precondition: the file is really gone")
+
+        with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile, \
+             unittest.mock.patch.object(self.manager, "mark_file_not_found") as mock_missing:
+            panel._on_tree_item_double_clicked(file_item)
+            mock_startfile.assert_not_called()
+            mock_missing.assert_called_once_with("test-dbl-gone")
 
     def test_details_panel_files_tree_double_click_folder_ignored(self):
         """Double-clicking a folder in the Files tree does nothing."""
@@ -463,18 +580,35 @@ class TestDetailsPanel(unittest.TestCase):
         self.win._model.add_entry(tor_entry)
 
         panel = self.win._details_panel
-        panel.setVisible(True)
+        # The window must really be shown: MainWindow._on_progress_updated
+        # gates the refresh on `not self._details_panel.isHidden()`, and the
+        # old test only worked because setVisible() happens to clear the
+        # explicit-hide flag on a never-shown window.
+        self.win.show()
+        QApplication.processEvents()
+        self.assertTrue(panel.isVisible(), "the panel must be visible for the refresh to run")
         panel.set_download_id("live-tor-1")
+        QApplication.processEvents()
 
         # Simulate live progress update signal from manager
         self.win._on_progress_updated(
             "live-tor-1", 5000, 10000, 1048576.0, 5.0, seeds=9, peers=25, upload_speed=262144.0
         )
 
-        # Overview should now display updated speeds, seeds and peers
-        self.assertIn("9 seeds, 25 peers connected", panel._ov_swarm.text())
-        self.assertIn("1.0 MiB/s", panel._ov_speed.text())
-        self.assertIn("256.0 KiB/s", panel._ov_speed.text())
+        # Overview should now display updated speeds, seeds and peers.
+        # The FULL label is asserted: separate assertIn() calls are
+        # order-independent, so a swapped down/up label would have passed.
+        self.assertEqual(panel._ov_swarm.text(), "9 seeds, 25 peers connected")
+        self.assertEqual(
+            panel._ov_speed.text(), "↓ 1.0 MiB/s   |   ↑ 256.0 KiB/s",
+            "download speed must come first, upload second, with the same separator",
+        )
+        # The refresh must have reached the model too, not just the label.
+        model_entry = self.win._model.get_entry_by_id("live-tor-1")
+        self.assertEqual(model_entry.downloaded_size, 5000)
+        self.assertEqual(model_entry.seeds, 9)
+        self.assertEqual(model_entry.peers, 25)
+        self.assertEqual(model_entry.upload_speed, 262144.0)
 
     def test_details_panel_swarm_totals_display(self):
         """Overview swarm and peers status labels reflect swarm totals when available."""
@@ -581,7 +715,10 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertTrue(state.get("details_visible"))
         self.assertEqual(state.get("details_state", {}).get("current_tab"), 1)
 
-        # Launch a second window to verify restoration
+        # Launch a second window to verify restoration.
+        # destroy_window (not close) so the extra window and its timers really
+        # go away; a plain close() only hides it, because close-to-tray is on by
+        # default, and it would survive for the rest of the session.
         win2 = MainWindow(self.manager)
         win2.show()
         try:
@@ -615,9 +752,10 @@ class TestDetailsPanel(unittest.TestCase):
                 self.assertEqual(win3._splitter.sizes()[1], 320)
                 self.assertEqual(win3._details_panel._tabs.currentIndex(), 1)
             finally:
-                win3.close()
+                destroy_window(win3)
         finally:
-            win2.close()
+            destroy_window(win2)
+
 
 
     def test_details_panel_displays_persisted_file_hierarchy_and_progress_when_offline(self):
@@ -816,7 +954,7 @@ class TestDetailsPanel(unittest.TestCase):
             filename="TestTrashAccepted",
             download_type="torrent",
             status="downloading",
-            save_path="C:/Downloads/TestTrashAccepted",
+            save_path=str(self.tmp_path),
             metadata_json='''{
                 "files": [
                     {
@@ -839,13 +977,26 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_download_id("test-trash-prompt-2")
         item = panel._file_item_map[0]
 
+        # No pathlib.Path.exists patch: `my_idm.details_panel.Path` IS
+        # `pathlib.Path`, so patching it process-wide made every existence check
+        # in the interpreter return True. A real file is created instead, so the
+        # real `f_disk_path.exists()` gate at details_panel.py:1509 decides.
+        disk_path = Path(self.tmp_path) / "TestTrashAccepted" / "data.bin"
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        disk_path.write_bytes(b"x" * 2500)
+        self.assertTrue(disk_path.exists())
+
+        is_downloaded, resolved = panel._is_file_downloaded(item)
+        self.assertTrue(is_downloaded, "a file on disk plus 2500 bytes is downloaded")
+        self.assertEqual(resolved, disk_path)
+
         with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as mock_q, \
              unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash, \
-             unittest.mock.patch("pathlib.Path.exists", return_value=True), \
              unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
             item.setCheckState(0, Qt.CheckState.Unchecked)
             mock_q.assert_called_once()
             mock_trash.assert_called_once()
+            mock_trash.assert_called_with(disk_path)
             mock_set_prio.assert_called_with("test-trash-prompt-2", 0, 0)
             self.assertEqual(item.text(4), "Skipped")
 
@@ -857,7 +1008,7 @@ class TestDetailsPanel(unittest.TestCase):
             filename="TestTrashCombo",
             download_type="torrent",
             status="downloading",
-            save_path="C:/Downloads/TestTrashCombo",
+            save_path=str(self.tmp_path),
             metadata_json='''{
                 "files": [
                     {
@@ -890,15 +1041,86 @@ class TestDetailsPanel(unittest.TestCase):
             self.assertNotEqual(combo.currentText(), "Don't Download")
 
         # 2. User accepts prompt -> file is trashed and priority set to 0
+        disk_path = Path(self.tmp_path) / "TestTrashCombo" / "video.mp4"
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        disk_path.write_bytes(b"x" * 10000)
+        self.assertTrue(disk_path.exists())
         with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as mock_q2, \
              unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash2, \
-             unittest.mock.patch("pathlib.Path.exists", return_value=True), \
              unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
             combo.setCurrentText("Don't Download")
             mock_q2.assert_called_once()
-            mock_trash2.assert_called_once()
+            mock_trash2.assert_called_once_with(disk_path)
             mock_set_prio.assert_called_with("test-trash-combo-1", 0, 0)
             self.assertEqual(item.text(4), "Skipped")
+            self.assertEqual(combo.currentText(), "Don't Download")
+            self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked)
+
+    def test_priority_reset_does_not_persist_to_the_items_user_role_data(self):
+        """Documents a real defect: the per-item priority reset is thrown away.
+
+        ``_on_file_priority_combo_changed`` mutates
+        ``item.data(0, UserRole)["data"]["priority"]`` in place
+        (details_panel.py:1635-1636), but ``QVariant`` -> Python conversion
+        hands back a *fresh* dict on every ``item.data()`` call, so the write
+        never reaches the item. The visible state (combo label, status column,
+        check state) is correct, which is why this has gone unnoticed: a later
+        rebuild of the tree restores the stale priority. Pinned as-is; see the
+        report.
+        """
+        tor_entry = DownloadEntry(
+            id="test-prio-reset",
+            url="magnet:?xt=urn:btih:12345678112233445566778899aabbccddeeff",
+            filename="PrioReset",
+            download_type="torrent",
+            status="downloading",
+            save_path=str(self.tmp_path),
+            metadata_json='''{
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "PrioReset/data.bin",
+                        "size": 500,
+                        "downloaded": 500,
+                        "progress": 1.0,
+                        "priority": 4,
+                        "status": "completed"
+                    }
+                ]
+            }''',
+        )
+        self._build(tor_entry)
+
+        panel = self.win._details_panel
+        panel.set_download_id("test-prio-reset")
+        item = panel._file_item_map[0]
+        combo = panel._tree_files.itemWidget(item, 3)
+        disk_path = Path(self.tmp_path) / "PrioReset" / "data.bin"
+        disk_path.parent.mkdir(parents=True, exist_ok=True)
+        disk_path.write_bytes(b"x" * 500)
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes), \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash"), \
+             unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
+            combo.setCurrentText("Don't Download")
+
+        mock_set_prio.assert_called_once_with("test-prio-reset", 0, 0)
+        self.assertEqual(item.text(4), "Skipped")
+        self.assertEqual(combo.currentText(), "Don't Download")
+        # KNOWN DEFECT: the in-place write is lost, so the item still reports 4.
+        self.assertEqual(
+            item.data(0, Qt.ItemDataRole.UserRole)["data"]["priority"], 4,
+            "KNOWN DEFECT: the priority reset never reaches the item because "
+            "QVariant -> Python hands back a fresh dict on every data() call",
+        )
+        # A full rebuild therefore resurrects the stale priority.
+        panel.set_download_id("test-prio-reset")
+        rebuilt = panel._file_item_map[0]
+        self.assertEqual(
+            panel._tree_files.itemWidget(rebuilt, 3).currentText(),
+            "Medium (50%)",
+            "the stale priority is restored on rebuild, confirming the write was lost",
+        )
 
     def test_multi_selection_dont_download_single_confirmation(self):
         """Setting multiple files to Don't Download via selection triggers exactly ONE prompt."""
@@ -908,7 +1130,7 @@ class TestDetailsPanel(unittest.TestCase):
             filename="TestTrashMulti",
             download_type="torrent",
             status="downloading",
-            save_path="C:/Downloads/TestTrashMulti",
+            save_path=str(self.tmp_path),
             metadata_json='''{
                 "files": [
                     {
@@ -940,14 +1162,33 @@ class TestDetailsPanel(unittest.TestCase):
         item0 = panel._file_item_map[0]
         item1 = panel._file_item_map[1]
 
+        expected = [
+            Path(self.tmp_path) / "TestTrashMulti" / "file1.bin",
+            Path(self.tmp_path) / "TestTrashMulti" / "file2.bin",
+        ]
+        for index, path in enumerate(expected, start=1):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"x" * (1000 * index))
+            self.assertTrue(path.exists(), f"precondition: {path} must exist")
+
         with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as mock_q, \
              unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash, \
-             unittest.mock.patch("pathlib.Path.exists", return_value=True), \
              unittest.mock.patch.object(self.manager, "set_torrent_file_priority") as mock_set_prio:
             panel._set_items_priority([item0, item1], 0)
             mock_q.assert_called_once()
             self.assertEqual(mock_trash.call_count, 2)
+            self.assertEqual(
+                sorted(c.args[0] for c in mock_trash.call_args_list), sorted(expected),
+                "both selected files are trashed, and only those",
+            )
             self.assertEqual(mock_set_prio.call_count, 2)
+            self.assertEqual(
+                sorted(c.args for c in mock_set_prio.call_args_list),
+                [("test-trash-multi-1", 0, 0), ("test-trash-multi-1", 1, 0)],
+                "one priority write per selected file, both set to 0",
+            )
+            self.assertEqual(item0.text(4), "Skipped")
+            self.assertEqual(item1.text(4), "Skipped")
 
     def test_details_panel_overview_displays_filename(self):
         """DetailsPanel Overview tab displays filename in _ov_filename."""
@@ -986,80 +1227,92 @@ class TestDetailsPanel(unittest.TestCase):
 
     def test_animepahe_console_tab_and_live_log_streaming(self):
         """DetailsPanel AnimePahe console tab actively streams logs, handles filtering and clear."""
-        import tempfile
         from my_idm.config import ExternalToolsConfig
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            log_file = Path(tmpdir) / "console_log.txt"
-            log_file.write_text("Line 1: Initializing animepahe scraper...\n", encoding="utf-8")
+        tmpdir = str(self.tmp_path)
+        log_file = self.tmp_path / "console_log.txt"
+        log_file.write_text("Line 1: Initializing animepahe scraper...\n", encoding="utf-8")
 
-            cfg = ExternalToolsConfig(animepahe_repo_path=tmpdir)
-            self.manager._external_tools_config = cfg
+        cfg = ExternalToolsConfig(animepahe_repo_path=tmpdir)
+        self.manager._external_tools_config = cfg
 
-            panel = self.win._details_panel
+        panel = self.win._details_panel
+        # The 250 ms _log_timer fires _poll_console_log() -- the very method
+        # these assertions drive by hand -- so any event-loop pump from another
+        # test module could let a stray tick land between an action and the
+        # assertion. Stop it before touching the file.
+        self.addCleanup(panel._log_timer.stop)
+        self.addCleanup(panel._browser_monitor_timer.stop)
+        self.addCleanup(panel.deleteLater)
 
-            # Side tabs on left side for Details & Console
-            self.assertEqual(panel._side_tabs.count(), 2)
-            self.assertIn("Details", panel._side_tabs.tabText(0))
-            self.assertIn("Console", panel._side_tabs.tabText(1))
+        # Side tabs on left side for Details & Console
+        self.assertEqual(panel._side_tabs.count(), 2)
+        self.assertIn("Details", panel._side_tabs.tabText(0))
+        self.assertIn("Console", panel._side_tabs.tabText(1))
 
-            # Details tabs are strictly download tabs (Overview, Files, Peers, Trackers, Segments)
-            self.assertEqual(panel._tabs.count(), 5)
-            self.assertEqual(panel._tabs.indexOf(panel._tab_console), -1)
+        # Details tabs are strictly download tabs (Overview, Files, Peers, Trackers, Segments)
+        self.assertEqual(panel._tabs.count(), 5)
+        self.assertEqual(panel._tabs.indexOf(panel._tab_console), -1)
 
-            # Initially in details mode
-            self.assertEqual(panel.current_mode(), "details")
-            self.assertFalse(panel.is_animepahe_console_active())
+        # Initially in details mode
+        self.assertEqual(panel.current_mode(), "details")
+        self.assertFalse(panel.is_animepahe_console_active())
 
-            # Show animepahe console
-            panel.show_animepahe_console()
-            self.assertEqual(panel.current_mode(), "console")
-            self.assertTrue(panel.is_animepahe_console_active())
-            self.assertEqual(panel._side_tabs.currentIndex(), 1)
+        # Show animepahe console
+        panel.show_animepahe_console()
+        self.assertEqual(panel.current_mode(), "console")
+        self.assertTrue(panel.is_animepahe_console_active())
+        self.assertEqual(panel._side_tabs.currentIndex(), 1)
+        self.assertTrue(
+            panel._log_timer.isActive(),
+            "opening the console must start the live-tail timer",
+        )
+        panel._log_timer.stop()
+        self.assertFalse(panel._log_timer.isActive(), "and it must be stoppable again")
 
-            # Check header
-            self.assertEqual(panel._lbl_icon.text(), "🎬")
-            self.assertEqual(panel._lbl_title.text(), "AnimePahe CLI Scraper Console")
+        # Check header
+        self.assertEqual(panel._lbl_icon.text(), "🎬")
+        self.assertEqual(panel._lbl_title.text(), "AnimePahe CLI Scraper Console")
 
-            # Check initial log loaded
-            panel._poll_console_log()
-            self.assertIn("Line 1: Initializing animepahe scraper...", panel._console_visible_text())
+        # Check initial log loaded
+        panel._poll_console_log()
+        self.assertIn("Line 1: Initializing animepahe scraper...", panel._console_visible_text())
 
-            # Append new lines to simulate real-time active output
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write("Line 2: Checking episode 5...\n")
-                f.write("Line 3: Found magnet link, forwarding to backlog.\n")
+        # Append new lines to simulate real-time active output
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write("Line 2: Checking episode 5...\n")
+            f.write("Line 3: Found magnet link, forwarding to backlog.\n")
 
-            panel._poll_console_log()
-            text = panel._console_visible_text()
-            self.assertIn("Line 2: Checking episode 5...", text)
-            self.assertIn("Line 3: Found magnet link", text)
+        panel._poll_console_log()
+        text = panel._console_visible_text()
+        self.assertIn("Line 2: Checking episode 5...", text)
+        self.assertIn("Line 3: Found magnet link", text)
 
-            # Test filter
-            panel._console_filter_edit.setText("magnet")
-            filtered = panel._console_visible_text()
-            self.assertIn("Line 3: Found magnet link", filtered)
-            self.assertNotIn("Line 2: Checking episode 5...", filtered)
+        # Test filter
+        panel._console_filter_edit.setText("magnet")
+        filtered = panel._console_visible_text()
+        self.assertIn("Line 3: Found magnet link", filtered)
+        self.assertNotIn("Line 2: Checking episode 5...", filtered)
 
-            # Clear filter
-            panel._console_filter_edit.setText("")
-            self.assertIn("Line 2: Checking episode 5...", panel._console_visible_text())
+        # Clear filter
+        panel._console_filter_edit.setText("")
+        self.assertIn("Line 2: Checking episode 5...", panel._console_visible_text())
 
-            # Test clear button
-            panel._console_clear_btn.click()
-            self.assertEqual(panel._console_visible_text(), "")
+        # Test clear button
+        panel._console_clear_btn.click()
+        self.assertEqual(panel._console_visible_text(), "")
 
-            # Test wrap toggle
-            panel._console_wrap_cb.setChecked(True)
-            self.assertEqual(
-                panel._console_text.lineWrapMode(),
-                QPlainTextEdit.LineWrapMode.WidgetWidth,
-            )
-            panel._console_wrap_cb.setChecked(False)
-            self.assertEqual(
-                panel._console_text.lineWrapMode(),
-                QPlainTextEdit.LineWrapMode.NoWrap,
-            )
+        # Test wrap toggle
+        panel._console_wrap_cb.setChecked(True)
+        self.assertEqual(
+            panel._console_text.lineWrapMode(),
+            QPlainTextEdit.LineWrapMode.WidgetWidth,
+        )
+        panel._console_wrap_cb.setChecked(False)
+        self.assertEqual(
+            panel._console_text.lineWrapMode(),
+            QPlainTextEdit.LineWrapMode.NoWrap,
+        )
 
     @staticmethod
     def _session_banner(ts, cmd="py scraper.py"):
@@ -1074,10 +1327,17 @@ class TestDetailsPanel(unittest.TestCase):
     def _reset_console(self):
         panel = self.win._details_panel
         panel.show_animepahe_console()
+        # show_animepahe_console() arms the 250 ms _log_timer, which calls the
+        # same _poll_console_log() these tests drive by hand. Stop it so a stray
+        # tick from any processEvents() pump cannot rewrite the session list
+        # between an action and its assertion.
+        panel._log_timer.stop()
+        self.assertFalse(panel._log_timer.isActive())
         panel._raw_log_lines.clear()
         panel._console_text.clear()
         panel._console_session_tabs.set_sessions([])
         panel._console_filter_edit.setText("")
+        self.addCleanup(panel._log_timer.stop)
         return panel
 
     def test_animepahe_console_lists_one_side_tab_per_session(self):
@@ -1195,6 +1455,36 @@ class TestDetailsPanel(unittest.TestCase):
 
     # -- console log retention ------------------------------------------
 
+    def _retention_panel(self, log_text: str, *, scraper_running: bool, name="console_log.txt"):
+        """Build a standalone panel over a real log file in the per-test temp dir.
+
+        The 250 ms ``_log_timer`` is stopped immediately: it calls the same
+        ``_poll_console_log()`` the test drives by hand, and
+        ``_prune_console_log`` truncates the very file whose ``st_size`` is
+        asserted, so a stray tick from any ``processEvents()`` pump could land
+        between the prune and the assertion.
+        """
+        from my_idm.config import ExternalToolsConfig
+
+        log_path = self.tmp_path / name
+        log_path.write_text(log_text, encoding="utf-8")
+
+        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
+        mgr = MagicMock()
+        mgr.external_tools_config = cfg
+        mgr.is_animepahe_running.return_value = scraper_running
+        cfg.get_console_log_path = MagicMock(return_value=log_path)
+        cfg.get_debug_log_path = MagicMock(return_value=log_path)
+
+        panel = DetailsPanel(mgr)
+        self.addCleanup(panel._log_timer.stop)
+        self.addCleanup(panel._browser_monitor_timer.stop)
+        self.addCleanup(panel.deleteLater)
+        panel.show_animepahe_console()
+        panel._log_timer.stop()
+        self.assertFalse(panel._log_timer.isActive())
+        return panel, log_path
+
     def test_console_log_keeps_only_the_last_three_days(self):
         """Only sessions inside the retention window survive a prune."""
         from datetime import datetime, timedelta, timezone
@@ -1217,28 +1507,13 @@ class TestDetailsPanel(unittest.TestCase):
             + banner(just_outside) + "EDGE-LINE\n"
             + banner(recent) + "RECENT-LINE\n"
         )
+        self.assertEqual(DetailsPanel.CONSOLE_LOG_RETENTION_DAYS, 3)
 
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import MagicMock
-        from my_idm.config import ExternalToolsConfig
-
-        tmpdir = tempfile.mkdtemp()
-        log_path = Path(tmpdir) / "console_log.txt"
-        log_path.write_text(log_text, encoding="utf-8")
-
-        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
-        mgr = MagicMock()
-        mgr.external_tools_config = cfg
-        mgr.is_animepahe_running.return_value = False
-        cfg.get_console_log_path = MagicMock(return_value=log_path)
-        cfg.get_debug_log_path = MagicMock(return_value=log_path)
-
-        panel = DetailsPanel(mgr)
-        panel.show_animepahe_console()
+        panel, log_path = self._retention_panel(log_text, scraper_running=False)
         panel._poll_console_log()
         self.assertEqual(panel._console_session_tabs.count(), 3)
 
+        size_before = log_path.stat().st_size
         panel._prune_console_log()
 
         body = "".join(panel._raw_log_lines)
@@ -1253,16 +1528,25 @@ class TestDetailsPanel(unittest.TestCase):
         on_disk = log_path.read_text(encoding="utf-8")
         self.assertIn("RECENT-LINE", on_disk)
         self.assertNotIn("OLD-LINE", on_disk)
+        self.assertNotIn("EDGE-LINE", on_disk)
+        self.assertEqual(
+            on_disk, "".join(panel._raw_log_lines),
+            "the compacted file must hold exactly the rebuilt in-memory log",
+        )
+        self.assertTrue(on_disk.endswith("\n"), "the rebuild always ends with a newline")
+        self.assertLess(
+            log_path.stat().st_size, size_before,
+            "the on-disk file must shrink after two sessions are dropped",
+        )
         self.assertLess(log_path.stat().st_size, len(log_text))
+        # A second prune is a no-op: nothing is left outside the window.
+        panel._prune_console_log()
+        self.assertEqual(log_path.read_text(encoding="utf-8"), on_disk)
 
     def test_console_log_prune_keeps_undated_preamble(self):
         """Output before any banner is kept rather than dropped on a guess."""
         rule = "=" * 55
         from datetime import datetime, timedelta, timezone
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import MagicMock
-        from my_idm.config import ExternalToolsConfig
 
         now = datetime.now(timezone.utc)
         recent = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1271,33 +1555,25 @@ class TestDetailsPanel(unittest.TestCase):
             f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {recent}\n"
             f"  Command: py scraper.py\n{rule}\n\nRECENT\n"
         )
-        tmpdir = tempfile.mkdtemp()
-        log_path = Path(tmpdir) / "console_log.txt"
-        log_path.write_text(log_text, encoding="utf-8")
 
-        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
-        mgr = MagicMock()
-        mgr.external_tools_config = cfg
-        mgr.is_animepahe_running.return_value = False
-        cfg.get_console_log_path = MagicMock(return_value=log_path)
-        cfg.get_debug_log_path = MagicMock(return_value=log_path)
-
-        panel = DetailsPanel(mgr)
-        panel.show_animepahe_console()
+        panel, log_path = self._retention_panel(log_text, scraper_running=False)
         panel._poll_console_log()
         panel._prune_console_log()
 
         body = "".join(panel._raw_log_lines)
         self.assertIn("preamble line before any banner", body)
         self.assertIn("RECENT", body)
+        # The undated preamble must survive the on-disk compaction too.
+        on_disk = log_path.read_text(encoding="utf-8")
+        self.assertIn("preamble line before any banner", on_disk)
+        self.assertIn("RECENT", on_disk)
+        # The undated preamble is itself listed as a (non-dated) session, so the
+        # dated run plus the preamble make two tabs.
+        self.assertEqual(panel._console_session_tabs.count(), 2)
 
     def test_console_log_not_rewritten_while_scraper_runs(self):
         """The scraper holds the log open, so pruning must not touch the file."""
         from datetime import datetime, timedelta, timezone
-        import tempfile
-        from pathlib import Path
-        from unittest.mock import MagicMock
-        from my_idm.config import ExternalToolsConfig
 
         rule = "=" * 55
         now = datetime.now(timezone.utc)
@@ -1309,26 +1585,22 @@ class TestDetailsPanel(unittest.TestCase):
             f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {recent}\n"
             f"  Command: py x.py\n{rule}\n\nNEW\n"
         )
-        tmpdir = tempfile.mkdtemp()
-        log_path = Path(tmpdir) / "console_log.txt"
-        log_path.write_text(log_text, encoding="utf-8")
 
-        cfg = ExternalToolsConfig(ytdlp_ffmpeg_path="")
-        mgr = MagicMock()
-        mgr.external_tools_config = cfg
-        mgr.is_animepahe_running.return_value = True
-        cfg.get_console_log_path = MagicMock(return_value=log_path)
-        cfg.get_debug_log_path = MagicMock(return_value=log_path)
-
-        panel = DetailsPanel(mgr)
-        panel.show_animepahe_console()
+        panel, log_path = self._retention_panel(log_text, scraper_running=True)
         panel._poll_console_log()
+        size_before = log_path.stat().st_size
         panel._prune_console_log()
 
         # In-memory view is pruned...
-        self.assertNotIn("OLD", "".join(panel._raw_log_lines))
+        body = "".join(panel._raw_log_lines)
+        self.assertNotIn("OLD", body)
+        self.assertIn("NEW", body)
         # ...but the file the running scraper owns is left untouched.
-        self.assertIn("OLD", log_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            log_path.read_text(encoding="utf-8"), log_text,
+            "the on-disk log must be byte-for-byte unchanged while the scraper runs",
+        )
+        self.assertEqual(log_path.stat().st_size, size_before)
 
     def test_animepahe_console_status_change_reflection(self):
         """AnimePahe status change reflects on console tab badges and action button."""
@@ -1384,15 +1656,38 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertTrue(req_signal_fired)
         self.assertIn("Active", panel._browser_status_lbl.text())
 
-        # 4. Test float / detach toggle
-        panel._browser_container._chrome_hwnd = mock_hwnd
-        panel._on_toggle_float_browser()
-        self.assertTrue(panel._is_browser_floating)
-        self.assertIn("Embed", panel._btn_float_browser.text())
+        # 4. Test float / detach toggle, driven through the REAL state machine.
+        # The old test poked `panel._browser_container._chrome_hwnd` directly,
+        # so the production attach path was never exercised and the toggle only
+        # ever saw a hand-forged handle. IsWindow is stubbed to False so the
+        # Win32 branch is deterministic and cannot touch an unrelated top-level
+        # window that happens to own this fake hwnd.
+        with unittest.mock.patch("ctypes.windll.user32.IsWindow", return_value=False):
+            self.assertFalse(
+                panel.is_browser_attached(),
+                "precondition: the mocked attach_window must not claim attachment",
+            )
+            self.assertFalse(panel._is_browser_floating, "attaching must not float it")
 
-        panel._on_toggle_float_browser()
-        self.assertFalse(panel._is_browser_floating)
-        self.assertIn("Detach", panel._btn_float_browser.text())
+            panel._browser_container.attach_window(mock_hwnd)
+            self.assertTrue(
+                panel.is_browser_attached(),
+                "attach_window must register the handle even when IsWindow is False",
+            )
+            self.assertEqual(panel._browser_container.chrome_hwnd, mock_hwnd)
+
+            panel._on_toggle_float_browser()
+            self.assertTrue(panel._is_browser_floating)
+            self.assertIn("Embed", panel._btn_float_browser.text())
+
+            panel._on_toggle_float_browser()
+            self.assertFalse(panel._is_browser_floating)
+            self.assertIn("Detach", panel._btn_float_browser.text())
+            self.assertTrue(
+                panel.is_browser_attached(),
+                "re-embedding must keep the handle so the browser stays usable",
+            )
+            self.assertEqual(panel._browser_container.chrome_hwnd, mock_hwnd)
 
         # 5. Hide browser tab on challenge completion
         panel.hide_browser_tab()
@@ -1400,6 +1695,21 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertFalse(panel.is_browser_tab_active())
         self.assertEqual(panel._console_subtabs.currentIndex(), 0)
         self.assertIn("Idle", panel._browser_status_lbl.text())
+
+    def test_toggle_float_browser_is_a_noop_without_an_attached_handle(self):
+        """Floating an unattached browser must not flip the state machine."""
+        panel = self.win._details_panel
+        self.assertFalse(panel.is_browser_attached())
+        self.assertFalse(panel._is_browser_floating)
+        panel._on_toggle_float_browser()
+        self.assertFalse(
+            panel._is_browser_floating,
+            "there is no HWND to float, so the button must do nothing",
+        )
+        self.assertIn(
+            "Detach Window", panel._btn_float_browser.text(),
+            "the button label must not change when the toggle was a no-op",
+        )
 
 
 if __name__ == "__main__":

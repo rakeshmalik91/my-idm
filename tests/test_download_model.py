@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import QApplication, QTableView
 
 from my_idm.database import Database, DownloadEntry
@@ -137,7 +138,16 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(up, 600.0)
 
     def test_name_column_icon_decoration(self):
-        """Name column returns appropriate QIcon for DecorationRole."""
+        """Name column returns the exact QIcon the extension/type rules select.
+
+        Asserting only ``is not None`` would still pass if the torrent branch
+        were deleted and both rows returned the same icon, so the cacheKey of
+        each icon is compared against the icon production is contractually
+        required to build (``_get_icon("🎬")`` for .mp4, ``_get_icon("🧲")`` for
+        a torrent).
+        """
+        from my_idm.download_model import _get_icon
+
         entry_http = DownloadEntry(id="h1", filename="video.mp4", download_type="http", status="downloading")
         entry_torrent = DownloadEntry(id="t1", filename="linux.iso", download_type="torrent", status="downloading")
         self.model.load_entries([entry_http, entry_torrent])
@@ -145,8 +155,51 @@ class TestDownloadModel(unittest.TestCase):
         icon_http = self.model.data(self.model.index(0, Col.NAME), Qt.ItemDataRole.DecorationRole)
         icon_torrent = self.model.data(self.model.index(1, Col.NAME), Qt.ItemDataRole.DecorationRole)
 
-        self.assertIsNotNone(icon_http)
-        self.assertIsNotNone(icon_torrent)
+        for label, icon in (("http", icon_http), ("torrent", icon_torrent)):
+            self.assertIsInstance(icon, QIcon, f"{label} row must return a QIcon, got {type(icon)!r}")
+            self.assertFalse(icon.isNull(), f"{label} row icon must actually have content")
+
+        self.assertEqual(
+            icon_http.cacheKey(), _get_icon("🎬").cacheKey(),
+            ".mp4 over HTTP must use the 🎬 icon",
+        )
+        self.assertEqual(
+            icon_torrent.cacheKey(), _get_icon("🧲").cacheKey(),
+            "a torrent must use the 🧲 icon regardless of its filename extension",
+        )
+        self.assertNotEqual(
+            icon_http.cacheKey(), icon_torrent.cacheKey(),
+            "the two rows must not collapse onto the same icon",
+        )
+        # The torrent icon wins over the .iso extension icon.
+        self.assertNotEqual(icon_torrent.cacheKey(), _get_icon("💿").cacheKey())
+
+    def test_name_column_icon_follows_the_extension(self):
+        """One case per icon branch, each pinned to its emoji."""
+        from my_idm.download_model import _get_icon
+
+        cases = {
+            "a.zip": "📦",
+            "a.mkv": "🎬",
+            "a.mp3": "🎵",
+            "a.iso": "💿",
+            "a.exe": "⚙️",
+            "a.pdf": "📄",
+            "a.png": "🖼️",
+            "a.unknown": "🌐",
+        }
+        for filename, emoji in cases.items():
+            with self.subTest(filename=filename):
+                model = DownloadTableModel()
+                model.load_entries([
+                    DownloadEntry(id="x", filename=filename, download_type="http", status="completed")
+                ])
+                icon = model.data(model.index(0, Col.NAME), Qt.ItemDataRole.DecorationRole)
+                self.assertIsInstance(icon, QIcon)
+                self.assertEqual(
+                    icon.cacheKey(), _get_icon(emoji).cacheKey(),
+                    f"{filename} must use the {emoji} icon",
+                )
 
     def test_continuous_queue_numbers_without_gaps(self):
         """Inactive items (completed, paused, error) show no order, only downloading items show continuous 1, 2, 3."""
@@ -414,13 +467,37 @@ class TestMainWindowSortingIntegration(unittest.TestCase):
     def setUp(self):
         self.db = Database(":memory:")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
         self.win = MainWindow(self.manager)
+        self.addCleanup(self._destroy_window, self.win)
 
-    def tearDown(self):
-        self.win.close()
-        self.manager.stop()
-        self.db.close()
+    @staticmethod
+    def _destroy_window(win):
+        """Actually close the window.
+
+        ``MainWindow.closeEvent`` ignores the event and hides the window
+        whenever ``close_to_tray`` / ``enable_system_tray`` are on (both default
+        True), so a bare ``win.close()`` leaves the window, its 1 Hz
+        ``_details_timer`` and its 4 s ``_tor_availability_timer`` alive for the
+        rest of the session. ``_force_exit`` short-circuits that path; it also
+        calls ``manager.stop()``, which is idempotent.
+        """
+        timer = getattr(win, "_tor_availability_timer", None)
+        if timer is not None:
+            timer.stop()
+        details = getattr(win, "_details_timer", None)
+        if details is not None:
+            details.stop()
+        panel = getattr(win, "_details_panel", None)
+        if panel is not None:
+            panel._log_timer.stop()
+            panel._browser_monitor_timer.stop()
+        win._force_exit = True
+        win.close()
+        win.deleteLater()
+        QApplication.processEvents()
 
     def test_main_window_has_sorting_enabled(self):
         """MainWindow table has sorting enabled with Added DESC default."""
@@ -442,13 +519,19 @@ class TestMainWindowSortingIntegration(unittest.TestCase):
         for date_col in Col.DATE_COLUMNS:
             self.win._sort_by_column(Col.NAME)
             self.win._sort_by_column(date_col)
-            self.assertEqual(header.sortIndicatorSection(), date_col)
-            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+            self.assertEqual(header.sortIndicatorSection(), date_col, f"column={date_col}")
+            self.assertEqual(
+                header.sortIndicatorOrder(), Qt.SortOrder.DescendingOrder,
+                f"column={date_col} must default to descending",
+            )
 
             # Invoking sort_by_column again on the same date column toggles to Ascending
             self.win._sort_by_column(date_col)
-            self.assertEqual(header.sortIndicatorSection(), date_col)
-            self.assertEqual(header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+            self.assertEqual(header.sortIndicatorSection(), date_col, f"column={date_col} (2nd)")
+            self.assertEqual(
+                header.sortIndicatorOrder(), Qt.SortOrder.AscendingOrder,
+                f"column={date_col} must toggle to ascending on the 2nd click",
+            )
 
     def test_main_window_header_section_clicked_date_columns_default_descending(self):
         """Clicking any date column header switches to it in descending order first, then toggles."""
@@ -574,12 +657,51 @@ class TestStoppedStatusDisplay(unittest.TestCase):
         self.assertIn("stopped", self._status_colors)
 
     def test_stopped_status_foreground_color(self):
-        """The foreground color for stopped status should match the color map."""
+        """The foreground color for stopped status must match the color map."""
+        from my_idm.download_model import _STATUS_COLORS
+
         entry = _make_entry("d_stopped_3", "file.zip", status="stopped")
         self.model.load_entries([entry])
         idx = self.model.index(0, Col.STATUS)
         fg = self.model.data(idx, Qt.ItemDataRole.ForegroundRole)
-        self.assertIsNotNone(fg)
+        self.assertIsInstance(fg, QColor, f"expected a QColor, got {type(fg)!r}")
+        expected = _STATUS_COLORS["stopped"]
+        self.assertEqual(
+            fg.name(), expected.name(),
+            "the model must return the exact colour _STATUS_COLORS declares",
+        )
+        self.assertTrue(fg.isValid(), "the status colour must be a parseable colour")
+        # A different status must not reuse the same colour, otherwise the check
+        # above would be meaningless.
+        other = _make_entry("d_stopped_4", "other.zip", status="completed")
+        self.model.load_entries([other])
+        other_fg = self.model.data(self.model.index(0, Col.STATUS), Qt.ItemDataRole.ForegroundRole)
+        self.assertNotEqual(other_fg.name(), fg.name())
+        self.assertEqual(
+            other_fg.name(), _STATUS_COLORS["completed"].name(),
+            "the lookup is per-status, not a single constant",
+        )
+
+    def test_every_status_colour_is_distinct_from_queued(self):
+        """The status colour map is a real mapping, not a constant."""
+        from my_idm.download_model import _STATUS_COLORS
+
+        model = DownloadTableModel()
+        names = {}
+        for status in _STATUS_COLORS:
+            model.load_entries([_make_entry(f"c-{status}", "f.zip", status=status)])
+            fg = model.data(model.index(0, Col.STATUS), Qt.ItemDataRole.ForegroundRole)
+            self.assertIsInstance(fg, QColor, status)
+            names[status] = fg.name()
+        # Everything the map declares must actually be reachable from the model.
+        self.assertEqual(
+            set(names), set(_STATUS_COLORS),
+            "every mapped status must return a colour from the model",
+        )
+        self.assertGreaterEqual(
+            len(set(names.values())), 4,
+            f"the status colours are nearly all identical: {names}",
+        )
 
 
 class TestTorrentSeedsPeersNonInt(unittest.TestCase):

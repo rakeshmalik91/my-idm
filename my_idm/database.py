@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sqlite3
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +28,229 @@ def _json_default(obj: Any) -> Any:
     if isinstance(obj, bytes):
         return obj.decode("utf-8", errors="replace")
     return str(obj)
+
+
+class _LockedCursor:
+    """Cursor proxy that re-acquires the connection lock while fetching.
+
+    `execute()` releases the lock as soon as the statement returns, but callers fetch
+    afterwards, so the fetch has to be guarded separately or a second thread can run a
+    statement between the two. Iteration is materialised eagerly, which is what every
+    caller in this module does anyway.
+    """
+
+    __slots__ = ("_cursor", "_lock")
+
+    def __init__(self, cursor: sqlite3.Cursor, lock: threading.RLock):
+        self._cursor = cursor
+        self._lock = lock
+
+    def fetchone(self):
+        with self._lock:
+            return self._cursor.fetchone()
+
+    def fetchall(self):
+        with self._lock:
+            return self._cursor.fetchall()
+
+    def fetchmany(self, size: Optional[int] = None):
+        with self._lock:
+            if size is None:
+                return self._cursor.fetchmany()
+            return self._cursor.fetchmany(size)
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    def __len__(self):
+        with self._lock:
+            return len(self._cursor.fetchall())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self._cursor.close()
+        return False
+
+    def __getattr__(self, name):
+        attr = getattr(self._cursor, name)
+        if not callable(attr):
+            return attr
+
+        @functools.wraps(attr)
+        def guarded(*args, **kwargs):
+            with self._lock:
+                return attr(*args, **kwargs)
+
+        return guarded
+
+
+class _ClosedCursor:
+    """Cursor returned once the connection has been closed.
+
+    Teardown races are unavoidable in this application: worker threads (`scan-*`,
+    `ytdlp-download`, the asyncio loop) can be one statement away from finishing when
+    the manager shuts the engine down. Before this existed, that late statement raised
+    ``sqlite3.ProgrammingError: Cannot operate on a closed database`` from a background
+    thread, which surfaced as random test failures and as stderr noise at exit. A closed
+    database now degrades to "no rows, no work" instead, which is the semantically
+    correct answer for a process that is on its way out.
+    """
+
+    __slots__ = ()
+
+    rowcount = -1
+    lastrowid = None
+    description = None
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def fetchmany(self, size=None):
+        return []
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def close(self):
+        return None
+
+    @property
+    def row_factory(self):
+        return None
+
+
+class _LockedConnection:
+    """Serialises every access to one SQLite connection shared by several threads.
+
+    ``open()`` deliberately uses ``check_same_thread=False`` because the Qt GUI thread
+    and the asyncio / yt-dlp / antivirus worker threads all share a single connection.
+    Python's sqlite3 module serialises at the C level, but it does *not* serialise the
+    Python-level transaction bookkeeping: one thread's ``execute()`` leaves an implicit
+    transaction open until its ``commit()``, and a second thread's ``execute()`` during
+    that window fails with
+
+        sqlite3.OperationalError: cannot start a transaction within a transaction
+
+    A ``close()`` racing an in-flight write raises the mirror-image
+    ``ProgrammingError: Cannot operate on a closed database``. Both are real, observed
+    failures, not theoretical ones.
+
+    The lock is reentrant so a single ``Database`` method may freely read and write on
+    one thread without deadlocking against itself, and so ``with self._conn:`` still
+    works.
+    """
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn: Optional[sqlite3.Connection] = conn
+        self._lock = threading.RLock()
+        self._closed = False
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    def shutdown(self):
+        """Close the connection, refusing every later statement."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
+    @property
+    def row_factory(self):
+        if self._closed or self._conn is None:
+            return None
+        return self._conn.row_factory
+
+    @row_factory.setter
+    def row_factory(self, value):
+        with self._lock:
+            if not self._closed and self._conn is not None:
+                self._conn.row_factory = value
+
+    def execute(self, *args, **kwargs):
+        with self._lock:
+            if self._closed or self._conn is None:
+                return _ClosedCursor()
+            return _LockedCursor(self._conn.execute(*args, **kwargs), self._lock)
+
+    def executemany(self, *args, **kwargs):
+        with self._lock:
+            if self._closed or self._conn is None:
+                return _ClosedCursor()
+            return _LockedCursor(self._conn.executemany(*args, **kwargs), self._lock)
+
+    def executescript(self, *args, **kwargs):
+        with self._lock:
+            if self._closed or self._conn is None:
+                return None
+            return self._conn.executescript(*args, **kwargs)
+
+    def commit(self):
+        with self._lock:
+            if self._closed or self._conn is None:
+                return None
+            return self._conn.commit()
+
+    def rollback(self):
+        with self._lock:
+            if self._closed or self._conn is None:
+                return None
+            return self._conn.rollback()
+
+    def close(self):
+        self.shutdown()
+
+    def __enter__(self):
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc_info):
+        try:
+            if self._closed or self._conn is None:
+                return False
+            # Preserve sqlite3's own transaction semantics (commit / rollback).
+            return self._conn.__exit__(*exc_info)
+        finally:
+            self._lock.release()
+
+    def __getattr__(self, name):
+        conn = self.__dict__.get("_conn")
+        if conn is None or self.__dict__.get("_closed"):
+            raise sqlite3.ProgrammingError(
+                "Cannot operate on a closed database."
+            )
+        attr = getattr(conn, name)
+        if not callable(attr):
+            return attr
+
+        @functools.wraps(attr)
+        def guarded(*args, **kwargs):
+            with self._lock:
+                if self._closed or self._conn is None:
+                    raise sqlite3.ProgrammingError(
+                        "Cannot operate on a closed database."
+                    )
+                return attr(*args, **kwargs)
+
+        return guarded
 
 
 # ---------------------------------------------------------------------------
@@ -183,16 +408,25 @@ class Database:
     # -- lifecycle -----------------------------------------------------------
 
     def open(self):
-        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        raw = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._conn: Any = _LockedConnection(raw)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._create_tables()
 
     def close(self):
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        # The shutdown connection object is kept in place rather than replaced with
+        # None: a worker thread that is one statement from finishing would otherwise hit
+        # `None.commit()` and raise AttributeError from a background thread during
+        # teardown. The closed proxy makes every later call inert instead.
+        if self._conn is not None:
+            self._conn.shutdown()
+
+    @property
+    def is_open(self) -> bool:
+        """True while the connection is usable."""
+        return self._conn is not None and not self._conn.is_closed
 
     def _create_tables(self):
         self._conn.executescript("""

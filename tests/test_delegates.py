@@ -35,15 +35,43 @@ class TestShortenPath(unittest.TestCase):
         self.assertNotEqual(out, "D:")
 
     def test_leaf_too_long_does_not_drop_to_drive(self):
+        # Pin the "leaf itself is too long" branch with an absolute pixel budget
+        # instead of a font-derived delta. The branch is only reachable when the
+        # widest candidate still overflows AND the "D:/…/" prefix leaves at least
+        # room for the ellipsis, so the preconditions are asserted explicitly:
+        # on a host without Segoe UI (or at a different DPI) a silent shift to
+        # the neighbouring branch would otherwise pass unnoticed.
         path = "D:/VeryLongFolderNameThatWillNotFit"
-        w = self._w(path) - 60
+        prefix_w = self._w("D:/…/")
+        ellipsis_w = self._w("…")
+        w = prefix_w + ellipsis_w + 1
+        self.assertLess(
+            w, self._w(path), "budget must be too narrow for the full path"
+        )
+        self.assertLess(
+            w,
+            self._w("D:/…/VeryLongFolderNameThatWillNotFit"),
+            "budget must be too narrow for the leaf-plus-ellipsis candidate",
+        )
         out = _shorten_path(path, w, self.fm)
         self.assertNotEqual(out, "D:", out)
         self.assertTrue(out.startswith("D:/…/"), out)
+        self.assertLessEqual(
+            self._w(out), w, "the elided leaf must still fit the budget"
+        )
+        self.assertIn("…", out)
 
     def test_very_narrow_shows_drive_ellipsis(self):
+        # The "very narrow" branch needs less room for the leaf than the
+        # ellipsis itself takes. The exact width of "D:/…" pins that; the old
+        # "+5" fitter inside the leaf-elision branch on a narrow font.
         path = "D:/Users/Name/Downloads/Movies"
-        w = self._w("D:/…") + 5
+        w = self._w("D:/…")
+        self.assertLess(
+            w - self._w("D:/…/"),
+            self._w("…"),
+            "no room may be left for the elided leaf",
+        )
         out = _shorten_path(path, w, self.fm)
         self.assertEqual(out, "D:/…", out)
 

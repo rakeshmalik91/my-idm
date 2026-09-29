@@ -1,17 +1,26 @@
 """Unit tests for utility functions and filename resolution."""
 
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PySide6.QtWidgets import QApplication
 
+from my_idm.config import GeneralConfig
 from my_idm.database import Database
 from my_idm.download_model import Col, DownloadTableModel
 from my_idm.http_engine import HTTPEngine
 from my_idm.manager import DownloadManager
-from my_idm.utils import extract_source_domain, get_unique_filename, send_to_trash
+from my_idm.utils import (
+    extract_source_domain,
+    get_unique_filename,
+    sanitize_filename,
+    send_to_trash,
+    split_extension,
+)
 
 app = QApplication.instance() or QApplication([])
 
@@ -50,13 +59,25 @@ class TestFilenameResolution(unittest.TestCase):
     """Tests for URL, magnet, HTTP header Content-Disposition filename extraction."""
 
     def setUp(self):
+        # get_unique_filename() probes the real filesystem, so the manager must
+        # never resolve against the user's ~/Downloads: a machine that already
+        # has "ubuntu-24.04-desktop-amd64.iso" there would make add_download()
+        # auto-number to "... (1).iso".
+        self.save_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.save_dir.cleanup)
+
         self.db = Database(":memory:")
         self.db.open()
-        self.manager = DownloadManager(self.db)
+        self.addCleanup(self.db.close)
 
-    def tearDown(self):
-        self.manager.stop()
-        self.db.close()
+        self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
+        self.manager.set_general_config(
+            GeneralConfig(
+                default_save_path=self.save_dir.name,
+                remember_last_save_path=False,
+            )
+        )
 
     def test_extract_filename_from_http_url_on_add(self):
         """HTTP URLs with filenames in the path immediately resolve filename on add."""
@@ -67,6 +88,10 @@ class TestFilenameResolution(unittest.TestCase):
         self.assertIsNotNone(entry)
         self.assertEqual(entry.filename, "ubuntu-24.04-desktop-amd64.iso")
         self.assertTrue(entry.file_path.endswith("ubuntu-24.04-desktop-amd64.iso"))
+        # The save path is the per-test temp dir, not the user's ~/Downloads.
+        self.assertEqual(
+            entry.save_path, self.save_dir.name.replace("\\", "/")
+        )
 
     def test_extract_filename_from_magnet_dn_on_add(self):
         """Magnet links with &dn= parameter immediately resolve filename on add."""
@@ -76,6 +101,7 @@ class TestFilenameResolution(unittest.TestCase):
 
         self.assertIsNotNone(entry)
         self.assertEqual(entry.filename, "Blender 4.2.0")
+        self.assertTrue(entry.file_path.endswith("Blender+4.2.0") or entry.file_path.endswith("Blender 4.2.0"))
 
     def test_extract_filename_from_headers_standard(self):
         """Content-Disposition standard filename parsing."""
@@ -212,38 +238,263 @@ class TestToInt(unittest.TestCase):
         self.assertEqual(to_int(object()), 0)
 
 
+class TestSanitizeFilename(unittest.TestCase):
+    """sanitize_filename's stem-truncation, extension-preservation, and fallback rules.
+
+    The module caps the stem at ``_MAX_FILENAME_STEM`` (150) characters; the
+    original coverage only checked the 255-character ``max_length`` ceiling, so
+    the real truncation rule was never pinned.
+    """
+
+    def test_short_extension_is_split_off(self):
+        self.assertEqual(split_extension("movie.mkv"), ("movie", "mkv"))
+        self.assertEqual(split_extension("archive.tar.gz"), ("archive.tar", "gz"))
+        self.assertEqual(split_extension("no_extension"), ("no_extension", ""))
+
+    def test_long_dotted_tail_is_not_an_extension(self):
+        # "Arr. by J. Halvorsen [PIANO COVER]" must not be cut at the last dot.
+        name = "Arr. by J. Halvorsen [PIANO COVER]"
+        stem, ext = split_extension(name)
+        self.assertEqual(stem, name)
+        self.assertEqual(ext, "")
+        self.assertEqual(sanitize_filename(name), name)
+
+    def test_stem_is_truncated_to_the_module_cap_preserving_extension(self):
+        from my_idm.utils import _MAX_FILENAME_STEM
+
+        long_name = "a" * (_MAX_FILENAME_STEM + 50) + ".mkv"
+        out = sanitize_filename(long_name)
+        stem, ext = split_extension(out)
+        self.assertEqual(ext, "mkv", "the extension must survive truncation")
+        self.assertLessEqual(
+            len(stem), _MAX_FILENAME_STEM, f"stem must be capped at {_MAX_FILENAME_STEM}"
+        )
+        self.assertTrue(out.endswith(".mkv"))
+        self.assertLess(len(out), len(long_name))
+
+    def test_max_length_below_the_cap_tightens_the_stem(self):
+        out = sanitize_filename("b" * 200 + ".pdf", max_length=40)
+        stem, ext = split_extension(out)
+        self.assertEqual(ext, "pdf")
+        # max_stem = max(1, min(150, max_length - (len(ext) + 1))) = 40 - 4 = 36
+        self.assertEqual(len(stem), 36, out)
+        self.assertEqual(len(out), 40, "max_length is the whole name, extension included")
+        self.assertTrue(out.endswith(".pdf"))
+
+    def test_max_length_counts_the_extension(self):
+        out = sanitize_filename("c" * 200 + ".tar.gz", max_length=30)
+        self.assertTrue(out.endswith(".gz"))
+        # extension "gz" + the joining dot => 30 - 3 = 27 stem characters
+        self.assertEqual(len(out), 30, out)
+
+    def test_default_fallback_for_empty_and_unusable_names(self):
+        self.assertEqual(sanitize_filename(""), "download")
+        self.assertEqual(sanitize_filename("   "), "download")
+        self.assertEqual(sanitize_filename("..."), "download")
+        self.assertEqual(sanitize_filename("", fallback="fallback.bin"), "fallback.bin")
+        self.assertEqual(sanitize_filename("...", fallback="fallback.bin"), "fallback.bin")
+        # NOTE: a name made *entirely* of illegal characters is not empty after
+        # substitution, so it becomes "_______" rather than the fallback. Pinned
+        # so the behaviour is visible; see the report (production oddity).
+        self.assertEqual(sanitize_filename("<>:\"|?*"), "_" * 7)
+
+    def test_reserved_device_names_are_escaped(self):
+        self.assertEqual(sanitize_filename("con.txt"), "_con.txt")
+        self.assertEqual(sanitize_filename("LPT1.log"), "_LPT1.log")
+
+    def test_illegal_characters_and_whitespace_are_collapsed(self):
+        self.assertEqual(
+            sanitize_filename("a<b>c:d.e|f?g*h.txt"), "a_b_c_d.e_f_g_h.txt"
+        )
+        self.assertEqual(
+            sanitize_filename("  spaced    out   name.zip "), "spaced out name.zip"
+        )
+
+    def test_max_length_of_one_still_yields_a_usable_name(self):
+        out = sanitize_filename("extremelylongname.zip", max_length=1)
+        self.assertTrue(out)
+        self.assertEqual(len(out.rpartition(".")[0]), 1, out)
+        self.assertTrue(out.endswith(".zip"))
+
+
 class TestSendToTrash(unittest.TestCase):
-    """Tests for send_to_trash utility moving files and folders to trash."""
+    """send_to_trash's three-tier fallback, each tier asserted individually.
+
+    ``send_to_trash`` tries ``QFile.moveToTrash`` first, then the ``send2trash``
+    package, then falls back to *permanent* deletion. All three end with "the
+    path no longer exists", so asserting only on that makes them
+    indistinguishable and leaves the developer's Recycle Bin full of test
+    files. Each test below neutralises the higher-priority tiers and asserts
+    which one actually ran; nothing ever reaches a real trash can.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.trash_bin = Path(self.tmp.name) / "fake_recycle_bin"
+        self.trash_bin.mkdir()
+        # Any attempt to fall through to permanent deletion is a test bug, so
+        # the higher tiers replace it with an explicit, loud failure instead.
+        self.permanent_delete = []
+
+    def _make_file(self, name="sample_to_trash.txt"):
+        target = Path(self.tmp.name) / name
+        target.write_text("Hello Trash")
+        self.assertTrue(target.exists())
+        return target
+
+    def _make_dir(self, name="folder_to_trash"):
+        target = Path(self.tmp.name) / name
+        target.mkdir()
+        (target / "nested_file.bin").write_bytes(b"content" * 20)
+        self.assertTrue(target.exists())
+        return target
+
+    @staticmethod
+    def _blocking_unlink(moved):
+        def _unlink(self, *a, **k):
+            moved.append(str(self))
+            raise AssertionError(f"permanent delete reached for {self}")
+
+        return _unlink
+
+    # -- tier 1: Qt's native recycle bin ---------------------------------
 
     def test_send_file_to_trash(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            test_file = Path(tmpdir) / "sample_to_trash.txt"
-            test_file.write_text("Hello Trash")
-            self.assertTrue(test_file.exists())
+        """Tier 1: the file reaches Qt's native recycle bin and is never deleted.
 
-            result = send_to_trash(test_file)
-            self.assertTrue(result)
-            self.assertFalse(test_file.exists())
+        Strictly stronger than the previous version, which called the real
+        ``QFile.moveToTrash`` (polluting the developer's Recycle Bin) and only
+        asserted ``not exists()`` -- which the other two tiers also satisfy.
+        """
+        target = self._make_file()
+        escaped = []
+
+        def fake_move_to_trash(path):
+            # Simulate Qt really recycling the file.
+            Path(path).rename(self.trash_bin / Path(path).name)
+            return True
+
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=AssertionError("tier 2 must not run")), \
+             patch.object(Path, "unlink", self._blocking_unlink(escaped)), \
+             patch.object(shutil, "rmtree", side_effect=AssertionError("permanent delete reached")):
+            mock_qfile.moveToTrash.side_effect = fake_move_to_trash
+            result = send_to_trash(target)
+
+        self.assertTrue(result, "send_to_trash must report success")
+        self.assertFalse(target.exists(), "the file must be gone from its original path")
+        self.assertTrue(
+            (self.trash_bin / target.name).exists(),
+            "the file must have landed in the (fake) recycle bin, not been deleted",
+        )
+        self.assertEqual(escaped, [], "no permanent delete may run")
+        self.assertGreaterEqual(
+            mock_qfile.moveToTrash.call_count, 1, "the Qt tier must be attempted"
+        )
+        self.assertEqual(mock_qfile.moveToTrash.call_args_list[0].args[0], str(target))
 
     def test_send_directory_to_trash(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            sub_dir = Path(tmpdir) / "folder_to_trash"
-            sub_dir.mkdir()
-            (sub_dir / "nested_file.bin").write_bytes(b"content" * 20)
-            self.assertTrue(sub_dir.exists())
+        """Tier 1 for a directory: recycled, never rmtree'd."""
+        target = self._make_dir()
+        escaped = []
 
-            result = send_to_trash(sub_dir)
-            self.assertTrue(result)
-            self.assertFalse(sub_dir.exists())
+        def fake_move_to_trash(path):
+            Path(path).rename(self.trash_bin / Path(path).name)
+            return True
+
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=AssertionError("tier 2 must not run")), \
+             patch.object(Path, "unlink", self._blocking_unlink(escaped)), \
+             patch.object(shutil, "rmtree", side_effect=AssertionError("permanent delete reached")):
+            mock_qfile.moveToTrash.side_effect = fake_move_to_trash
+            result = send_to_trash(target)
+
+        self.assertTrue(result, "send_to_trash must report success")
+        self.assertFalse(target.exists())
+        self.assertTrue((self.trash_bin / target.name).is_dir())
+        self.assertEqual(escaped, [], "no permanent delete may run")
+        self.assertGreaterEqual(mock_qfile.moveToTrash.call_count, 1)
+
+    # -- tier 2: the send2trash package ----------------------------------
+
+    def test_send_file_falls_back_to_send2trash_when_qt_declines(self):
+        target = self._make_file()
+        escaped = []
+
+        def fake_send2trash(path):
+            Path(path).rename(self.trash_bin / Path(path).name)
+
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=fake_send2trash) as mock_s2t, \
+             patch.object(Path, "unlink", self._blocking_unlink(escaped)), \
+             patch.object(shutil, "rmtree", side_effect=AssertionError("permanent delete reached")):
+            mock_qfile.moveToTrash.return_value = False
+            result = send_to_trash(target)
+
+        self.assertTrue(result, "send_to_trash must report success")
+        self.assertFalse(target.exists())
+        self.assertTrue((self.trash_bin / target.name).exists())
+        self.assertEqual(escaped, [], "no permanent delete may run")
+        # Qt is tried with both the native and backslash-separated spelling
+        # before falling through.
+        self.assertEqual(mock_qfile.moveToTrash.call_count, 2, mock_qfile.moveToTrash.call_args_list)
+        mock_s2t.assert_called_once_with(str(target))
+
+    # -- tier 3: permanent deletion --------------------------------------
+
+    def test_send_file_permanently_deletes_when_both_trash_tiers_fail(self):
+        target = self._make_file()
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=OSError("no trash available")) as mock_s2t:
+            mock_qfile.moveToTrash.return_value = False
+            result = send_to_trash(target)
+
+        self.assertTrue(result, "send_to_trash must report success once the file is gone")
+        self.assertFalse(target.exists(), "the permanent-delete tier must have unlinked it")
+        self.assertFalse(
+            (self.trash_bin / target.name).exists(),
+            "nothing may reach a recycle bin on this path",
+        )
+        self.assertEqual(mock_qfile.moveToTrash.call_count, 2)
+        mock_s2t.assert_called_once_with(str(target))
+
+    def test_send_directory_permanently_deletes_when_both_trash_tiers_fail(self):
+        target = self._make_dir()
+        real_rmtree = shutil.rmtree
+        calls = []
+
+        def spy_rmtree(path, *a, **k):
+            calls.append(str(path))
+            return real_rmtree(path, *a, **k)
+
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=OSError("no trash available")), \
+             patch.object(shutil, "rmtree", side_effect=spy_rmtree):
+            mock_qfile.moveToTrash.return_value = False
+            result = send_to_trash(target)
+
+        self.assertTrue(result, "send_to_trash must report success once the tree is gone")
+        self.assertFalse(target.exists(), "the permanent-delete tier must have rmtree'd it")
+        self.assertEqual(calls, [str(target)], "rmtree, not unlink, is the directory path")
+        self.assertEqual(mock_qfile.moveToTrash.call_count, 2)
+
+    # -- short-circuits ---------------------------------------------------
 
     def test_send_nonexistent_path_returns_true(self):
-        non_existent = Path(tempfile.gettempdir()) / "non_existent_never_existed_123.bin"
+        non_existent = Path(self.tmp.name) / "non_existent_never_existed_123.bin"
         self.assertFalse(non_existent.exists())
-        self.assertTrue(send_to_trash(non_existent))
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=AssertionError("nothing to trash")):
+            self.assertTrue(send_to_trash(non_existent))
+        mock_qfile.moveToTrash.assert_not_called()
 
     def test_send_empty_path_returns_false(self):
-        self.assertFalse(send_to_trash(""))
-        self.assertFalse(send_to_trash(None))
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=AssertionError("nothing to trash")):
+            self.assertFalse(send_to_trash(""))
+            self.assertFalse(send_to_trash(None))
+        mock_qfile.moveToTrash.assert_not_called()
 
 
 if __name__ == "__main__":

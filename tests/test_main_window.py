@@ -2,14 +2,17 @@
 
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHeaderView,
     QLabel,
     QSizePolicy,
@@ -25,21 +28,277 @@ from my_idm.manager import DownloadManager
 app = QApplication.instance() or QApplication([])
 
 
-class TestMainWindowToolbar(unittest.TestCase):
-    """Tests for toolbar actions, simplified buttons, and footer status."""
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+# Every key `MainWindow._save_ui_state_to_db()` writes into QSettings. The legacy
+# fallback in `_restore_ui_state_from_db()` reads them straight back for any
+# window built while the DB has no stored state, so a single leaked key makes
+# every later test in this file order-dependent on the leftovers.
+_QSETTINGS_KEYS = (
+    "header_state",
+    "splitter_state",
+    "details_visible",
+    "details_height",
+    "details_tab",
+)
+
+
+class _FakeClipboard:
+    """In-memory ``QClipboard`` stand-in.
+
+    The Windows clipboard is asynchronous and process-global: a transient lock
+    by any other process makes ``QClipboard.setText`` a silent no-op, so reading
+    it back is a coin flip. ``test_copy_multiple_urls_to_clipboard`` failed for
+    exactly that reason on a clean run. Production reaches the clipboard only
+    through ``QGuiApplication.clipboard()`` (main_window.py:1689), so swapping
+    that single name in the module under test makes the test deterministic and
+    stops it clobbering the developer's clipboard.
+    """
+
+    def __init__(self):
+        self._text = ""
+        self._image = None
+        self.set_calls: list[str] = []
+        self.clear_calls = 0
+
+    def text(self, mode=None):
+        return self._text
+
+    def setText(self, text, mode=None):
+        self._text = text or ""
+        self.set_calls.append(self._text)
+
+    def clear(self, mode=None):
+        self.clear_calls += 1
+        self._text = ""
+        self._image = None
+
+    def image(self, mode=None):
+        return self._image
+
+    def setImage(self, image, mode=None):
+        self._image = image
+
+    def setPixmap(self, pixmap, mode=None):
+        self._image = pixmap
+
+    def pixmap(self, mode=None):
+        return self._image
+
+    def mimeData(self, formats=None):
+        return None
+
+    def supportsSelection(self):
+        return False
+
+    def ownsClipboard(self):
+        return False
+
+    def ownsSelection(self):
+        return False
+
+
+def install_fake_clipboard():
+    """Return (fake, patcher) for the module-level ``QGuiApplication`` name.
+
+    The module NAME is patched, not the attribute on the real Qt class. Patching
+    ``QGuiApplication.clipboard`` on the actual class would rebind it
+    process-wide for the whole session, and would also make the ``if clipboard:``
+    guard in ``_on_copy_url`` permanently true.
+    """
+    fake = _FakeClipboard()
+    patcher = patch(
+        "my_idm.main_window.QGuiApplication",
+        SimpleNamespace(clipboard=lambda: fake),
+    )
+    return fake, patcher
+
+
+def assert_clipboard(fake, expected: str, context: str) -> None:
+    """Assert the clipboard holds exactly ``expected``.
+
+    Deliberately not a "return the first non-empty value" helper: a stale value
+    from an earlier copy in the same test would satisfy that silently. The setText
+    log is included so a failure says what the code actually tried to copy.
+    """
+    actual = fake.text()
+    if actual != expected:
+        raise AssertionError(
+            f"clipboard mismatch for {context}: expected {expected!r}, got "
+            f"{actual!r}; setText call log: {fake.set_calls!r}"
+        )
+
+
+# Typographic punctuation that legitimately appears in an action label. U+2026 is
+# the "Move…" ellipsis, not a decorative glyph, so it is not evidence that an
+# action mixes icon and emoji styling.
+_LABEL_PUNCTUATION = frozenset("…")
+
+
+def decoration_chars(label: str) -> list[str]:
+    """Return the decorative (emoji / symbol) characters in a menu label."""
+    return [ch for ch in label if ord(ch) > 0x2000 and ch not in _LABEL_PUNCTUATION]
+
+
+def restore_qsettings():
+    """Remove every QSettings key this test file's windows can write.
+
+    A leaked key is not cosmetic: `_restore_ui_state_from_db` falls back to
+    reading these keys whenever the DB has no stored state, so a leftover from
+    one test silently configures the next one.
+    """
+    settings = QSettings("MyIDM", "My-IDM")
+    for key in _QSETTINGS_KEYS:
+        settings.remove(key)
+    settings.sync()
+
+
+def _destroy_window(win):
+    """Actually destroy a MainWindow instead of merely hiding it.
+
+    ``MainWindow.closeEvent`` does ``event.ignore(); self.hide()`` whenever
+    ``close_to_tray`` / ``enable_system_tray`` are on (both default True), so a
+    bare ``win.close()`` is a no-op: the window survives, still parented to
+    nothing, carrying a live 1 Hz ``_details_timer`` and a 4 s
+    ``_tor_availability_timer`` that opens a real socket probe. Setting
+    ``_force_exit`` first routes closeEvent down the real teardown path
+    (stops both timers, saves UI state, stops the manager); ``deleteLater()``
+    plus one event-loop turn then destroys the C++ object.
+    """
+    try:
+        win._force_exit = True
+        win.close()
+    except Exception:
+        pass
+    win.deleteLater()
+    QApplication.processEvents()
+
+
+class _MainWindowTestCase(unittest.TestCase):
+    """Fixture base: a real DB + DownloadManager + MainWindow, all hard-destroyed.
+
+    Teardown is expressed entirely through ``addCleanup`` because unittest runs
+    ``tearDown()`` *before* the cleanups: a ``tearDown`` that closed the database
+    would leave ``_destroy_window`` -> ``closeEvent`` -> ``_save_ui_state_to_db``
+    writing to a closed handle. Cleanups are LIFO, so the order registered here
+    (temp/db, db, manager, qsettings, window) unwinds as window, qsettings,
+    manager, db, temp.
+    """
 
     def setUp(self):
         self.db = Database(":memory:")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.manager = DownloadManager(self.db)
-        self.win = MainWindow(self.manager)
+        # Registered immediately after construction: DownloadManager owns four
+        # QTimers, an HTTPEngine, a TorrentEngine, a BrowserServer and a
+        # TorServiceManager whose data_dir is the user's ~/.my-idm/tor_data.
+        self.addCleanup(self.manager.stop)
+        self.addCleanup(restore_qsettings)
+        self.win = self.new_window()
 
-    def tearDown(self):
-        from my_idm.notifications import unregister_notification_handler
-        unregister_notification_handler()
+    def new_window(self, manager=None, **kwargs) -> MainWindow:
+        """Build a MainWindow that is destroyed automatically at test end."""
+        win = MainWindow(manager if manager is not None else self.manager, **kwargs)
+        self.addCleanup(_destroy_window, win)
+        return win
+
+
+class TestMainWindowTeardownGuards(unittest.TestCase):
+    """One-off guards on the teardown machinery itself.
+
+    Deliberately NOT a `_MainWindowTestCase` subclass: pytest collects a
+    `unittest.TestCase` base once per concrete subclass, which would run these
+    twice over and prove nothing extra.
+    """
+
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.db.open()
+        self.addCleanup(self.db.close)
+        self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
+        self.addCleanup(restore_qsettings)
+        self.win = MainWindow(self.manager)
+        self.addCleanup(_destroy_window, self.win)
+
+    def test_saved_ui_state_keys_are_all_removed_by_the_cleanup(self):
+        """Every QSettings key `_save_ui_state_to_db` writes is cleared at teardown.
+
+        The teardown used to remove only `header_state`, so `splitter_state`,
+        `details_visible`, `details_height` and `details_tab` leaked and were then
+        read back by the legacy fallback in `_restore_ui_state_from_db` for every
+        later window built on an empty DB. This asserts the full set is covered.
+        """
+        settings = QSettings("MyIDM", "My-IDM")
+        try:
+            self.win._save_ui_state_to_db()
+            written = {key for key in _QSETTINGS_KEYS if settings.contains(key)}
+            self.assertEqual(
+                written, set(_QSETTINGS_KEYS),
+                "_save_ui_state_to_db must write exactly the keys the cleanup knows "
+                f"about; wrote {sorted(written)}",
+            )
+            # Run the cleanup body now to prove it clears all of them.
+            restore_qsettings()
+            left = {key for key in _QSETTINGS_KEYS if settings.contains(key)}
+            self.assertEqual(left, set(), f"QSettings keys leaked: {sorted(left)}")
+        finally:
+            restore_qsettings()
+
+    def test_bare_close_is_a_no_op_and_force_exit_is_not(self):
+        """Regression guard for the teardown helper itself.
+
+        `MainWindow.closeEvent` does `event.ignore(); self.hide()` while
+        close-to-tray is on, so a bare `close()` leaves a fully live window with
+        its 1 Hz `_details_timer` and 4 s `_tor_availability_timer` still running.
+        These assertions pin the difference the cleanup depends on.
+        """
+        cfg = self.manager.general_config
+        self.assertTrue(cfg.enable_system_tray and cfg.close_to_tray,
+                        "the no-op-close precondition must hold for this guard")
+
+        self.win.show()
+        QApplication.processEvents()
+        self.assertTrue(self.win._details_timer.isActive())
+        self.assertTrue(self.win._tor_availability_timer.isActive())
+
+        # A bare close only hides: the details timer survives, which is the leak.
         self.win.close()
-        self.manager.stop()
-        self.db.close()
+        QApplication.processEvents()
+        self.assertTrue(self.win.isHidden(), "close-to-tray must ignore a bare close")
+        self.assertTrue(
+            self.win._details_timer.isActive(),
+            "a bare close leaves the 1 Hz details timer running (the leak this "
+            "helper exists to prevent)",
+        )
+        self.assertFalse(
+            self.win._tor_availability_timer.isActive(),
+            "closeEvent does stop the Tor probe timer even on the close-to-tray path",
+        )
+
+        # _force_exit routes closeEvent down the real teardown path.
+        self.win._force_exit = True
+        self.win.close()
+        QApplication.processEvents()
+        self.assertFalse(
+            self.win._details_timer.isActive(),
+            "_force_exit must stop the details timer via closeEvent",
+        )
+
+
+
+class TestMainWindowToolbar(_MainWindowTestCase):
+    """Tests for toolbar actions, simplified buttons, and footer status."""
+
+    def setUp(self):
+        super().setUp()
+        from my_idm.notifications import unregister_notification_handler
+        # Registered first => runs last, so a window teardown cannot re-register
+        # the handler after it has been cleared.
+        self.addCleanup(unregister_notification_handler)
 
     def test_merged_add_button_on_toolbar(self):
         """Toolbar should have a single merged Add Download button."""
@@ -215,21 +474,8 @@ class TestMainWindowToolbar(unittest.TestCase):
         self.assertTrue(self.win._animepahe_console_btn.isVisible())
 
 
-class TestMainWindowTableAndInteractions(unittest.TestCase):
+class TestMainWindowTableAndInteractions(_MainWindowTestCase):
     """Tests for table view, interactive resizing, geometry persistence, and actions."""
-
-    def setUp(self):
-        self.db = Database(":memory:")
-        self.db.open()
-        self.manager = DownloadManager(self.db)
-        self.win = MainWindow(self.manager)
-
-    def tearDown(self):
-        self.win.close()
-        self.manager.stop()
-        self.db.close()
-        settings = QSettings("MyIDM", "My-IDM")
-        settings.remove("header_state")
 
     def test_all_columns_are_interactive_resizable(self):
         """Every column in the table must have ResizeMode.Interactive so users can drag borders."""
@@ -283,12 +529,9 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         settings = QSettings("MyIDM", "My-IDM")
         settings.setValue("header_state", header.saveState())
 
-        win2 = MainWindow(self.manager)
-        try:
-            self.assertEqual(win2._table.columnWidth(Col.NAME), 380)
-            self.assertTrue(win2._table.horizontalHeader().sectionsMovable())
-        finally:
-            win2.close()
+        win2 = self.new_window()
+        self.assertEqual(win2._table.columnWidth(Col.NAME), 380)
+        self.assertTrue(win2._table.horizontalHeader().sectionsMovable())
 
     def test_column_ordering_by_dragging_and_persistence(self):
         """Columns are movable by dragging and their reordered visual positions persist."""
@@ -300,16 +543,15 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         with patch.object(self.win, "_save_ui_state_to_db", wraps=self.win._save_ui_state_to_db) as mock_save:
             header.moveSection(Col.NAME, 3)
             self.assertEqual(header.visualIndex(Col.NAME), 3)
-            mock_save.assert_called()
+            # Exactly one persist per move; "called at least once" would not notice
+            # a regression that re-saves the whole state on every sectionMoved.
+            mock_save.assert_called_once()
 
         # When creating a second window, the moved visual index is restored
-        win2 = MainWindow(self.manager)
-        try:
-            header2 = win2._table.horizontalHeader()
-            self.assertTrue(header2.sectionsMovable())
-            self.assertEqual(header2.visualIndex(Col.NAME), 3)
-        finally:
-            win2.close()
+        win2 = self.new_window()
+        header2 = win2._table.horizontalHeader()
+        self.assertTrue(header2.sectionsMovable())
+        self.assertEqual(header2.visualIndex(Col.NAME), 3)
 
     def test_window_geometry_location_maximized_columns_in_db(self):
         """Window size, location, maximized state, and column lengths are persisted and restored via DB."""
@@ -330,23 +572,81 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         self.assertEqual(db_state["column_widths"][str(Col.NAME)], 360)
         self.assertEqual(db_state["column_widths"][str(Col.SIZE)], 130)
 
-        win2 = MainWindow(self.manager)
-        try:
-            self.assertEqual(win2.width(), 1280)
-            self.assertEqual(win2.height(), 720)
-            self.assertEqual(win2.x(), 150)
-            self.assertEqual(win2.y(), 120)
-            self.assertEqual(win2._table.columnWidth(Col.NAME), 360)
-            self.assertEqual(win2._table.columnWidth(Col.SIZE), 130)
-        finally:
-            win2.close()
+        win2 = self.new_window()
+        self.assertEqual(win2.width(), 1280)
+        self.assertEqual(win2.height(), 720)
+        self.assertEqual(win2.x(), 150)
+        self.assertEqual(win2.y(), 120)
+        self.assertEqual(win2._table.columnWidth(Col.NAME), 360)
+        self.assertEqual(win2._table.columnWidth(Col.SIZE), 130)
 
     def test_double_click_calls_open_file(self):
-        """Double clicking table view triggers file open."""
+        """Double clicking a real data row triggers file open.
+
+        The model used to be empty, so ``index(0, 0)`` was an invalid index and
+        the call short-circuited through the section-header branch in
+        ``_on_table_double_clicked`` (main_window.py:1542) -- which then returned
+        early, so ``_on_open_file`` was never actually reached for a data row.
+        """
+        entry = DownloadEntry(
+            id="dbl-1",
+            url="https://example.com/dbl.zip",
+            filename="dbl.zip",
+            save_path=tempfile.gettempdir(),
+            status="completed",
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        self.assertEqual(self.win._model.rowCount(), 1)
+        self.assertFalse(self.win._model.is_section_header_row(0))
+
         with patch.object(self.win, "_on_open_file") as mock_open:
-            index = self.win._model.index(0, 0)
+            index = self.win._model.index(0, Col.NAME)
             self.win._on_table_double_clicked(index)
-            mock_open.assert_called_once()
+            mock_open.assert_called_once_with()
+
+    def test_double_click_on_section_header_toggles_collapse_and_does_not_open(self):
+        """Double clicking a section header row collapses it and never opens a file."""
+        e_active = DownloadEntry(
+            id="sec-dbl-active",
+            url="https://example.com/active.zip",
+            filename="active.zip",
+            status="downloading",
+        )
+        e_inact = DownloadEntry(
+            id="sec-dbl-inact",
+            url="https://example.com/done.zip",
+            filename="done.zip",
+            status="completed",
+        )
+        self.db.add_download(e_active)
+        self.db.add_download(e_inact)
+        self.win._load_history()
+
+        self.win._act_segregated_view.setChecked(True)
+        QApplication.processEvents()
+
+        header_rows = self.win._model.get_section_header_row_indices()
+        self.assertTrue(header_rows, "segregated view must expose section header rows")
+        first_header = header_rows[0]
+        self.assertTrue(self.win._model.is_section_header_row(first_header))
+        self.assertEqual(set(self.win._model._collapsed_sections), set())
+
+        with patch.object(self.win, "_on_open_file") as mock_open:
+            self.win._on_table_double_clicked(self.win._model.index(first_header, 0))
+            mock_open.assert_not_called()
+
+        self.assertIn(
+            "active", self.win._model._collapsed_sections,
+            "double clicking a section header must toggle the section",
+        )
+        self.assertTrue(self.db.get_ui_state("segregated_active_collapsed"))
+
+        # A second double click expands it again.
+        with patch.object(self.win, "_on_open_file") as mock_open:
+            self.win._on_table_double_clicked(self.win._model.index(first_header, 0))
+            mock_open.assert_not_called()
+        self.assertNotIn("active", self.win._model._collapsed_sections)
 
     def test_open_file_missing_triggers_file_not_found(self):
         """Opening a missing file should mark status as file_not_found."""
@@ -367,10 +667,7 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         self.assertEqual(self.db.get_download("d1").status, "file_not_found")
 
     def test_copy_url_to_clipboard(self):
-        """MainWindow._on_copy_url successfully copies URL/magnet without error."""
-        cb = QGuiApplication.clipboard()
-        orig = cb.text() if cb else ""
-
+        """MainWindow._on_copy_url copies the selected magnet link verbatim."""
         entry = DownloadEntry(
             id="test_copy",
             url="magnet:?xt=urn:btih:fedcba9876543210&dn=real_movie",
@@ -381,13 +678,76 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         )
         self.db.add_download(entry)
         self.win._load_history()
+        self.win._table.selectRow(0)
 
-        mock_cb = unittest.mock.MagicMock()
-        with unittest.mock.patch("my_idm.main_window.QGuiApplication.clipboard", return_value=mock_cb):
-            self.win._table.selectRow(0)
+        fake, patcher = install_fake_clipboard()
+        with patcher:
             self.win._on_copy_url()
-            mock_cb.setText.assert_called_with(entry.url)
-            self.assertIn("Copied Magnet link", self.win._status_label.text())
+
+        assert_clipboard(fake, entry.url, "_on_copy_url (single magnet)")
+        self.assertEqual(fake.set_calls, [entry.url], "exactly one setText, no retry")
+        self.assertIn("Copied Magnet link", self.win._status_label.text())
+
+    def test_copy_url_reports_plain_url_kind(self):
+        """A non-magnet URL is reported as a URL, not as a magnet link."""
+        entry = DownloadEntry(
+            id="test_copy_url_kind",
+            url="https://example.com/plain.zip",
+            filename="plain.zip",
+            status="completed",
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        self.win._table.selectRow(0)
+
+        fake, patcher = install_fake_clipboard()
+        with patcher:
+            self.win._on_copy_url()
+
+        assert_clipboard(fake, entry.url, "_on_copy_url (single http url)")
+        self.assertIn("Copied URL to clipboard", self.win._status_label.text())
+
+    def test_copy_url_survives_a_none_clipboard(self):
+        """`if clipboard:` guards a real platform answer: QApplication.clipboard() can be None.
+
+        With a MagicMock patched over the Qt class attribute the guard is always
+        truthy, so this branch used to be untestable. Patching the module name
+        (below) makes the None case reachable.
+        """
+        entry = DownloadEntry(
+            id="test_copy_none_cb",
+            url="https://example.com/nocb.zip",
+            filename="nocb.zip",
+            status="completed",
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        self.win._table.selectRow(0)
+        self.win._status_label.setText("sentinel")
+
+        with patch("my_idm.main_window.QGuiApplication",
+                   SimpleNamespace(clipboard=lambda: None)):
+            self.win._on_copy_url()  # must not raise
+
+        self.assertEqual(
+            self.win._status_label.text(), "sentinel",
+            "with no clipboard the handler must report nothing rather than claim a copy",
+        )
+
+    def test_copy_url_with_no_selection_copies_nothing(self):
+        """Nothing selected means no clipboard write and no status change."""
+        fake, patcher = install_fake_clipboard()
+        self.win._model.load_entries([
+            DownloadEntry(id="ns-1", url="https://example.com/ns.zip",
+                          filename="ns.zip", status="completed"),
+        ])
+        self.win._status_label.setText("sentinel")
+
+        with patcher:
+            self.win._on_copy_url()
+
+        self.assertEqual(fake.set_calls, [])
+        self.assertEqual(self.win._status_label.text(), "sentinel")
 
     def test_main_window_receives_filename_resolved(self):
         """MainWindow updates model when manager emits filename_resolved."""
@@ -422,7 +782,16 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
             mock_fs.assert_called_once_with("d-fs-1")
 
     def test_context_menu_actions_have_icons_and_clean_text(self):
-        """All context menu actions must have valid icons and clean text without leading emojis."""
+        """All context menu actions must have valid icons and free of decorative glyphs.
+
+        The old check was `act.text()[0].isalnum()`, which passes for a *trailing*
+        emoji (contradicting the test's own docstring) and raises IndexError on an
+        empty label. The same glyph test already used by
+        ``test_tray_add_download_matches_tray_indentation`` is applied instead:
+        any character above U+2000 is decoration, wherever it sits in the string.
+        The typographic ellipsis in "Move…" is punctuation, not decoration, so it
+        is allowed.
+        """
         context_actions = [
             self.win._act_resume,
             self.win._act_force_start,
@@ -438,10 +807,17 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
             self.win._act_delete,
         ]
         for act in context_actions:
-            self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' must have a valid QIcon")
+            label = act.text()
+            self.assertTrue(label, "a context menu action must have a non-empty label")
+            self.assertFalse(act.icon().isNull(), f"Action '{label}' must have a valid QIcon")
+            self.assertEqual(
+                decoration_chars(label), [],
+                f"Action '{label}' should have clean text with no leading or "
+                f"trailing emoji",
+            )
             self.assertTrue(
-                act.text()[0].isalnum(),
-                f"Action '{act.text()}' should have clean text without leading emoji",
+                label[0].isalnum(),
+                f"Action '{label}' should start with a letter or digit, not a glyph",
             )
 
 
@@ -527,10 +903,13 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
                 self.assertFalse(act.icon().isNull(), f"Action '{act.text()}' in Help menu must have an icon")
 
     def test_copy_multiple_urls_to_clipboard(self):
-        """MainWindow._on_copy_url with multiple selected rows copies URLs joined by newline."""
-        cb = QGuiApplication.clipboard()
-        orig = cb.text() if cb else ""
+        """MainWindow._on_copy_url with multiple selected rows copies URLs joined by newline.
 
+        This test used to read the real Windows clipboard back, which is why it
+        failed on a clean run: ``QClipboard.setText`` is a silent no-op while the
+        clipboard is transiently locked, so the read came back empty. It now
+        asserts the exact string the code asked to copy.
+        """
         e1 = DownloadEntry(
             id="test_copy_1",
             url="https://example.com/file1.zip",
@@ -546,17 +925,26 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         self.db.add_download(e1)
         self.db.add_download(e2)
         self.win._load_history()
+        self.win._table.selectAll()
+        self.assertEqual(len(self.win._selected_ids()), 2)
 
-        try:
-            self.win._table.selectAll()
+        fake, patcher = install_fake_clipboard()
+        with patcher:
             self.win._on_copy_url()
-            copied_lines = cb.text().splitlines()
-            self.assertEqual(set(copied_lines), {e1.url, e2.url})
-            self.assertEqual(len(copied_lines), 2)
-            self.assertIn("Copied 2 URLs/Magnets to clipboard", self.win._status_label.text())
-        finally:
-            if cb:
-                cb.setText(orig)
+
+        copied_lines = fake.text().splitlines()
+        self.assertEqual(len(copied_lines), 2, f"expected 2 lines, got {fake.set_calls!r}")
+        self.assertEqual(
+            set(copied_lines), {e1.url, e2.url},
+            f"clipboard must hold exactly the two selected URLs, got {fake.text()!r}",
+        )
+        # And the exact joined string, in the order the model reports the rows.
+        expected = "\n".join(
+            self.win._manager.get_entry(did).url for did in self.win._selected_ids()
+        )
+        assert_clipboard(fake, expected, "_on_copy_url (two selected rows)")
+        self.assertEqual(len(fake.set_calls), 1, "one setText, no clipboard retry loop")
+        self.assertIn("Copied 2 URLs/Magnets to clipboard", self.win._status_label.text())
 
     def test_rename_action_triggers_rename_download(self):
         """MainWindow._on_rename triggers manager.rename_download and updates model."""
@@ -610,7 +998,9 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
     def test_on_add_multiple_urls_queues_all(self):
         """MainWindow._on_add adds each URL from dlg.urls."""
         mock_dlg = MagicMock()
-        mock_dlg.exec.return_value = 1  # Accepted
+        # Both sides of the production comparison are now the real enum, so the
+        # test cannot pass just because 1 == 1 was hard-coded twice.
+        mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
         mock_dlg.urls = [
             "https://example.com/batch1.zip",
             "https://example.com/batch2.zip",
@@ -618,13 +1008,36 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
         mock_dlg.save_path = "D:/Downloads"
         mock_dlg.num_segments = 8
 
-        with patch("my_idm.main_window.AddDownloadDialog", return_value=mock_dlg) as mock_cls:
-            mock_cls.DialogCode.Accepted = 1
+        with patch("my_idm.main_window.AddDownloadDialog") as mock_cls:
+            mock_cls.return_value = mock_dlg
+            mock_cls.DialogCode = QDialog.DialogCode
             with patch.object(self.manager, "add_download") as mock_add:
                 self.win._on_add()
                 self.assertEqual(mock_add.call_count, 2)
                 mock_add.assert_any_call("https://example.com/batch1.zip", "D:/Downloads", 8)
                 mock_add.assert_any_call("https://example.com/batch2.zip", "D:/Downloads", 8)
+
+    def test_on_add_cancelled_queues_nothing(self):
+        """A rejected Add Download dialog must not queue a single URL.
+
+        The old test set `mock_dlg.exec.return_value = 1` *and*
+        `mock_cls.DialogCode.Accepted = 1`, so the "user cancelled" branch of
+        `if dlg.exec() != AddDownloadDialog.DialogCode.Accepted: return` was
+        never executed by any test in the suite.
+        """
+        mock_dlg = MagicMock()
+        mock_dlg.exec.return_value = QDialog.DialogCode.Rejected
+        mock_dlg.urls = ["https://example.com/should_not_appear.zip"]
+        mock_dlg.save_path = "D:/Downloads"
+        mock_dlg.num_segments = 8
+
+        with patch("my_idm.main_window.AddDownloadDialog") as mock_cls:
+            mock_cls.return_value = mock_dlg
+            mock_cls.DialogCode = QDialog.DialogCode
+            with patch.object(self.manager, "add_download") as mock_add:
+                self.win._on_add()
+                mock_add.assert_not_called()
+        self.assertIsNone(self.db.find_by_url("https://example.com/should_not_appear.zip"))
 
     def test_speed_label_left_click_opens_menu(self):
         """Left clicking the footer speed label should invoke _show_speed_context_menu."""
@@ -645,46 +1058,59 @@ class TestMainWindowTableAndInteractions(unittest.TestCase):
             mock_menu.assert_called_once_with(QPoint(5, 5))
 
 
-class TestHeaderViewAndFiltering(unittest.TestCase):
+class TestHeaderViewAndFiltering(_MainWindowTestCase):
     """Tests for FilterHeaderView, sort indicators, and multiselect filter popup."""
-
-    def setUp(self):
-        self.db = Database(":memory:")
-        self.db.open()
-        self.manager = DownloadManager(self.db)
-        self.win = MainWindow(self.manager)
-
-    def tearDown(self):
-        self.win.close()
-        self.manager.stop()
-        self.db.close()
 
     def test_row_selection_survives_status_change_with_segregated_view(self):
         """Regression: any status change deselected the row under the cursor.
 
         Segregated view rebuilds the model on every status change and a model
         reset drops the view's selection.
+
+        The entry used to be harvested from the database and the test skipped
+        itself with "no suitable entry" whenever the DB happened to be empty --
+        which it always was, so this regression test never ran. The fixture now
+        creates the entry it needs.
         """
+        entry = DownloadEntry(
+            id="seg-selection-1",
+            url="https://example.com/selection.zip",
+            filename="selection.zip",
+            save_path=tempfile.gettempdir(),
+            status="completed",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+
         self.win._model.set_segregated_view(True, mode="status")
         QApplication.processEvents()
 
-        entry = next(
-            (e for e in self.manager.db.get_all_downloads()
-             if e.status == "completed" and e.download_type != "torrent"),
-            None,
-        )
-        if entry is None:
-            self.skipTest("no suitable entry")
-
+        self.assertEqual(entry.status, "completed")
         row = self.win._model.row_for_id(entry.id)
-        self.assertIsNotNone(row)
+        self.assertIsNotNone(row, "the completed entry must be visible in segregated view")
         self.win._table.selectRow(row)
         QApplication.processEvents()
         self.assertIn(entry.id, self.win._selected_ids())
 
+        # Mirror production: the engine writes the DB, then the manager's
+        # status_changed handler updates the model. Doing only the model half
+        # (as this test used to) made `refresh_entry` hand the row a stale
+        # "completed" entry, so the status change under test never survived.
+        self.db.update_status(entry.id, "downloading")
         self.win._model.update_status(entry.id, "downloading", "")
         QApplication.processEvents()
+
+        moved_row = self.win._model.row_for_id(entry.id)
+        self.assertIsNotNone(moved_row, "the entry must still be visible after its status change")
+        self.assertEqual(
+            self.win._model.data(self.win._model.index(moved_row, Col.STATUS)),
+            "Downloading",
+            "the model must really have moved the row, or this proves nothing",
+        )
+
         fresh = self.manager.get_entry(entry.id)
+        self.assertEqual(fresh.status, "downloading")
         self.win._model.refresh_entry(entry.id, fresh)
         self.win._restore_selection(self.win._selected_ids() or [entry.id])
         QApplication.processEvents()
@@ -836,19 +1262,38 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         changes = []
         popup.filter_changed.connect(lambda col, keys: changes.append((col, keys)))
 
+        # The popup offers every known status, not just the three counted here.
+        all_keys = set(popup._checkboxes)
+        self.assertTrue({"downloading", "completed", "paused"} <= all_keys)
+
         # Initially all checked
-        for cb in popup._checkboxes.values():
-            self.assertTrue(cb.isChecked())
+        for name, cb in popup._checkboxes.items():
+            self.assertTrue(cb.isChecked(), f"status '{name}' must start checked")
+        self.assertEqual(changes, [], "building the popup must not emit a change")
 
         # Uncheck downloading
         popup._checkboxes["downloading"].setChecked(False)
-        self.assertTrue(len(changes) > 0)
-        last_col, last_keys = changes[-1]
-        self.assertEqual(last_col, Col.STATUS)
-        self.assertNotIn("downloading", last_keys)
+        # The exact value, not "at least one": a duplicate emit would rebuild the
+        # proxy twice and the old assertion could not see it.
+        self.assertEqual(
+            changes, [(Col.STATUS, all_keys - {"downloading"})],
+            "unchecking must publish exactly the remaining keys, once",
+        )
+        self.assertNotIn("downloading", changes[-1][1])
+
+        # Re-checking it puts every box back on, and the popup signals that with
+        # the same "None == unfiltered" value `_select_all()` uses -- so the
+        # emitted value is the real contract, not a full key set.
+        popup._checkboxes["downloading"].setChecked(True)
+        self.assertEqual(
+            changes[-1], (Col.STATUS, None),
+            "re-checking the last filtered box must clear the filter, not publish "
+            "an explicit full key set",
+        )
 
         # Select all
         popup._select_all()
+        self.assertEqual(len(changes), 3, "one emit per interaction, no duplicates")
         last_col, last_keys = changes[-1]
         self.assertIsNone(last_keys)  # None indicates all selected (unfiltered)
 
@@ -902,13 +1347,28 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         """A state saved when the table had fewer columns must not scramble order."""
         from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
 
+        # `_DEFAULT_TAIL_COLUMNS` is the five columns pinned to the tail, but only
+        # the three newest (LAST_SEEDED, SOURCE, SEEDING_STARTED_AT) were *appended*
+        # in the last upgrade: SOURCE_DOMAIN and FILE_NAME already existed and were
+        # merely moved to the tail. So the stale state describes
+        # `Col.COUNT - 3` columns, derived here rather than re-typed.
+        appended_columns = 3
+        legacy_count = Col.COUNT - appended_columns
+        self.assertEqual(legacy_count, 14, "the pre-append build had 14 columns")
+        self.assertEqual(len(_DEFAULT_TAIL_COLUMNS), 5)
+        for col in (Col.LAST_SEEDED, Col.SOURCE, Col.SEEDING_STARTED_AT):
+            self.assertGreaterEqual(
+                col, legacy_count,
+                f"{Col.HEADERS[col]} must be one of the appended columns",
+            )
+
         header = self.win._table.horizontalHeader()
-        # The user had dragged Size to position 1 on a 14-column build.
+        # The user had dragged Size to position 1 on that older build.
         header.moveSection(header.visualIndex(Col.SIZE), 1)
         legacy = {
-            "column_widths": {str(c): 120 for c in range(14)},
+            "column_widths": {str(c): 120 for c in range(legacy_count)},
             "header_state": bytes(header.saveState().toHex()).decode(),
-            "column_count": 14,
+            "column_count": legacy_count,
             "sort_column": Col.ADDED,
             "sort_order": 0,
         }
@@ -921,7 +1381,10 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertEqual(header.count(), Col.COUNT)
         # ...the tail is fully pinned...
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
-            self.assertEqual(header.visualIndex(col), Col.COUNT - len(_DEFAULT_TAIL_COLUMNS) + i)
+            self.assertEqual(
+                header.visualIndex(col), Col.COUNT - len(_DEFAULT_TAIL_COLUMNS) + i,
+                f"{Col.HEADERS[col]} must be pinned at its tail position",
+            )
         # ...and the user's own ordering of the older columns survives.
         self.assertEqual(Col.HEADERS[header.logicalIndex(1)], "Size")
 
@@ -971,7 +1434,14 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
 
     def test_new_column_indices_do_not_shift_existing_columns(self):
-        """Persisted column indices must keep pointing at the same columns."""
+        """Persisted column indices must keep pointing at the same columns.
+
+        The literal numbers are the regression guard (they are what an older
+        build wrote to the database), so they stay hard-coded; the derived
+        relationship is asserted alongside so the intent is also pinned.
+        """
+        from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
+
         self.assertEqual(Col.LAST_SEEDED, 14)
         self.assertEqual(Col.SOURCE, 15)
         self.assertEqual(Col.SEEDING_STARTED_AT, 16)
@@ -983,6 +1453,13 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         ):
             self.assertEqual(getattr(Col, name), value, name)
         self.assertEqual(Col.COUNT, 17)
+        # The three appended columns are exactly the ones newer than that
+        # 14-column build, contiguous and last.
+        self.assertEqual(Col.COUNT - 3, 14)
+        self.assertEqual(
+            [Col.LAST_SEEDED, Col.SOURCE, Col.SEEDING_STARTED_AT],
+            list(range(14, Col.COUNT)),
+        )
         self.assertEqual(Col.HEADERS[Col.LAST_SEEDED], "Last Seeded")
         self.assertEqual(Col.HEADERS[Col.SOURCE], "Source")
         self.assertEqual(Col.HEADERS[Col.SEEDING_STARTED_AT], "Seeding Started At")
@@ -1215,16 +1692,13 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertEqual(self.win._model.rowCount(), 7)
 
         # Create a new MainWindow with same db to verify next launch persistence
-        win2 = MainWindow(self.win._manager)
-        try:
-            self.assertTrue(win2._segregated_view_enabled)
-            self.assertEqual(win2._segregated_view_mode, "date")
-            self.assertTrue(win2._model.is_segregated_view())
-            self.assertEqual(win2._model.segregated_mode(), "date")
-            self.assertTrue(win2._model.is_section_collapsed("date_last_7_days"))
-            self.assertTrue(win2._model.is_section_collapsed("date_older"))
-        finally:
-            win2.close()
+        win2 = self.new_window(self.win._manager)
+        self.assertTrue(win2._segregated_view_enabled)
+        self.assertEqual(win2._segregated_view_mode, "date")
+        self.assertTrue(win2._model.is_segregated_view())
+        self.assertEqual(win2._model.segregated_mode(), "date")
+        self.assertTrue(win2._model.is_section_collapsed("date_last_7_days"))
+        self.assertTrue(win2._model.is_section_collapsed("date_older"))
 
     def test_tools_menu_animepahe_actions(self):
         """Tools menu contains actions to launch AnimePahe GUI and External Tools settings."""
@@ -1256,7 +1730,7 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.win._save_ui_state_to_db()
 
         for launch_idx in range(3):
-            next_win = MainWindow(self.manager)
+            next_win = self.new_window(self.manager)
             next_win.show()
             QApplication.processEvents()
 
@@ -1268,20 +1742,64 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
             )
             self.assertEqual(current_pos.x(), initial_x)
             next_win._save_ui_state_to_db()
-            next_win.close()
 
     def test_legacy_window_geometry_restore_does_not_shift(self):
         """Restoring legacy UI state dictionary (x, y, width, height) positions window accurately without shift."""
         legacy_state = {"x": 350, "y": 250, "width": 820, "height": 610}
         self.manager.save_ui_state(legacy_state)
 
-        next_win = MainWindow(self.manager)
+        next_win = self.new_window(self.manager)
         next_win.show()
         QApplication.processEvents()
 
         self.assertEqual(next_win.pos().x(), 350)
         self.assertEqual(next_win.pos().y(), 250)
-        next_win.close()
+        # MainWindow.setMinimumSize(1100, 600) clamps the restored 820 px width;
+        # the height is above the minimum and survives verbatim.
+        self.assertEqual(next_win.width(), 1100, "the restored width must be clamped to the minimum")
+        self.assertEqual(next_win.height(), 610)
+
+    def test_legacy_geometry_state_with_stale_column_count_heals_the_tail(self):
+        """A stale `column_count` makes the restore re-pin the appended columns.
+
+        The sibling geometry test above builds a state with no `column_count`, so
+        `main_window.py:2843` skips tail healing entirely and the only thing it
+        proved was the position. This state is the realistic upgrade case: an
+        older build wrote both the geometry and the older column count.
+        """
+        from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
+
+        # Only the three newest columns were appended; SOURCE_DOMAIN and
+        # FILE_NAME already existed and were merely pinned to the tail.
+        legacy_count = Col.COUNT - 3
+        self.assertEqual(legacy_count, 14)
+        header = self.win._table.horizontalHeader()
+        # Scramble the tail the way a pre-upgrade restoreState() would.
+        header.moveSection(header.visualIndex(Col.SEEDING_STARTED_AT), 0)
+        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), 0)
+
+        self.manager.save_ui_state({
+            "x": 350, "y": 250, "width": 820, "height": 610,
+            "column_widths": {str(c): 120 for c in range(legacy_count)},
+            "header_state": bytes(header.saveState().toHex()).decode(),
+            "column_count": legacy_count,
+            "sort_column": Col.ADDED,
+            "sort_order": 0,
+        })
+
+        healed = self.new_window(self.manager)
+        healed_header = healed._table.horizontalHeader()
+        self.assertEqual(healed.pos().x(), 350)
+        self.assertEqual(healed.pos().y(), 250)
+        self.assertEqual(
+            healed_header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1,
+            "the newest column must be re-pinned to the end after an upgrade",
+        )
+        for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
+            self.assertEqual(
+                healed_header.visualIndex(col), Col.COUNT - len(_DEFAULT_TAIL_COLUMNS) + i,
+                f"{Col.HEADERS[col]} must be re-pinned at its tail position",
+            )
 
     def test_about_dialog_contains_copyright(self):
         """About dialog displays the application information and copyright notice."""
@@ -1359,17 +1877,21 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
 
     def test_system_tray_setup_and_actions(self):
         """System tray icon and context menu actions are properly initialized."""
-        if self.win._tray_icon is not None:
-            self.assertEqual(self.win._tray_icon.toolTip(), "My-IDM — Download Manager")
-            menu = self.win._tray_icon.contextMenu()
-            self.assertIsNotNone(menu)
-            action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
-            self.assertTrue(any("Show" in t or "Hide" in t for t in action_texts))
-            self.assertTrue(any("Pause All" in t for t in action_texts))
-            self.assertTrue(any("Resume All" in t for t in action_texts))
-            self.assertTrue(any("Preferences" in t for t in action_texts))
-            self.assertTrue(any("Add Download" in t for t in action_texts))
-            self.assertTrue(any("Exit" in t for t in action_texts))
+        # Previously wrapped in `if self.win._tray_icon is not None:`, so on a
+        # headless host the whole body was skipped and the test reported PASS
+        # having asserted nothing. Its five siblings already skipTest correctly.
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        self.assertEqual(self.win._tray_icon.toolTip(), "My-IDM — Download Manager")
+        menu = self.win._tray_icon.contextMenu()
+        self.assertIsNotNone(menu)
+        action_texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertTrue(any("Show" in t or "Hide" in t for t in action_texts))
+        self.assertTrue(any("Pause All" in t for t in action_texts))
+        self.assertTrue(any("Resume All" in t for t in action_texts))
+        self.assertTrue(any("Preferences" in t for t in action_texts))
+        self.assertTrue(any("Add Download" in t for t in action_texts))
+        self.assertTrue(any("Exit" in t for t in action_texts))
 
     def test_system_tray_has_add_download_action(self):
         """Tray context menu exposes an Add Download entry."""
@@ -1457,16 +1979,59 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertTrue(self.win.isVisible())
 
     def test_minimize_to_tray(self):
-        """When minimize_to_tray is enabled, minimizing window hides it."""
-        from PySide6.QtGui import QWindowStateChangeEvent
+        """When minimize_to_tray is enabled, minimizing window hides it.
+
+        The old version hand-built a `QWindowStateChangeEvent` carrying
+        `WindowNoState` while the window was in fact Minimized, and then relied on
+        a single `processEvents()` to drain the `QTimer.singleShot(0, self.hide)`.
+        Whether one pass drains a zero-timer depends on Qt timer coalescing, and
+        the synthetic event proved nothing about how Qt really delivers it. Here
+        Qt delivers the event itself and the hide is awaited with a deadline.
+        """
         self.win._manager._general_config.enable_system_tray = True
         self.win._manager._general_config.minimize_to_tray = True
         self.win.show()
-        self.win.setWindowState(Qt.WindowState.WindowMinimized)
-        ev = QWindowStateChangeEvent(Qt.WindowState.WindowNoState)
-        self.win.changeEvent(ev)
         QApplication.processEvents()
-        self.assertTrue(self.win.isHidden())
+        self.assertFalse(self.win.isHidden(), "the window must start visible for this test to mean anything")
+
+        self.win.setWindowState(Qt.WindowState.WindowMinimized)
+        QTest.qWait(50)
+
+        if not self.win.isMinimized():
+            # A platform that refuses a programmatic minimise would make this
+            # test vacuous; say so instead of reporting a meaningless PASS.
+            self.skipTest("the window manager did not honour a programmatic minimise")
+
+        deadline = time.monotonic() + 2.0
+        while not self.win.isHidden() and time.monotonic() < deadline:
+            QApplication.processEvents()
+            QTest.qWait(10)
+
+        self.assertTrue(
+            self.win.isHidden(),
+            "minimize_to_tray must hide the window within 2s of the real "
+            "WindowStateChange (QTimer.singleShot(0, self.hide) never ran)",
+        )
+
+    def test_restore_normal_is_not_hidden_when_minimize_to_tray_disabled(self):
+        """Negative control: without minimize_to_tray, minimising must not hide.
+
+        Without this, the test above would also pass if `changeEvent` hid the
+        window unconditionally.
+        """
+        self.win._manager._general_config.enable_system_tray = True
+        self.win._manager._general_config.minimize_to_tray = False
+        self.win.show()
+        QApplication.processEvents()
+
+        self.win.setWindowState(Qt.WindowState.WindowMinimized)
+        QTest.qWait(50)
+        QApplication.processEvents()
+
+        self.assertFalse(
+            self.win.isHidden(),
+            "with minimize_to_tray off the window must stay visible when minimised",
+        )
 
     def test_close_to_tray_and_exit_app(self):
         """Closing window when close_to_tray is enabled hides window; _exit_app completely closes."""
@@ -1483,10 +2048,26 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.assertTrue(self.win.isHidden())
         self.assertTrue(self.win._close_to_tray_notified)
 
-        # _exit_app should set _force_exit and execute closeEvent even while hidden
-        self.win._exit_app()
+        # _exit_app should set _force_exit and execute closeEvent even while hidden.
+        #
+        # The two assertions above the quit check only re-read flags the method
+        # had just assigned, so they prove nothing on their own. `QApplication` is
+        # one instance shared by every module in the session, and the real
+        # `_exit_app()` ends in `app.quit()`; calling that for real would take the
+        # process-wide event loop down for every later test. The app is therefore
+        # swapped for a recorder inside the module under test, which makes the
+        # quit observable instead of destructive.
+        with patch("my_idm.main_window.QApplication") as mock_app_cls:
+            self.win._exit_app()
+            mock_app_cls.instance.assert_called()
+            mock_app_cls.instance.return_value.quit.assert_called_once_with()
+
         self.assertTrue(self.win._force_exit)
         self.assertTrue(getattr(self.win, "_is_closing", False))
+        # The force-exit path really did run closeEvent to completion, which
+        # stops the live child timers a hidden close-to-tray window would leak.
+        self.assertTrue(self.win._details_timer.isActive() is False,
+                        "the force-exit path must stop the 1 Hz details timer")
 
     def test_tray_resume_all_downloads(self):
         """_on_resume_all_downloads triggers manager.resume_all_downloads and updates status label."""

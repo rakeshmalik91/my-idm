@@ -388,8 +388,10 @@ class TestLastSeededStamping(unittest.TestCase):
         from my_idm.torrent_engine import TorrentEngine
 
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
         self.db = Database(Path(self.tmp_dir.name) / "test.db")
         self.db.open()
+        self.addCleanup(self.db.close)
         self.entry = self.db.add_download(
             DownloadEntry(
                 id="t1", url="magnet:?xt=urn:btih:abc", filename="show.torrent",
@@ -404,53 +406,33 @@ class TestLastSeededStamping(unittest.TestCase):
         self.te = TorrentEngine(self.db)
         self.te._running = True
         self.te._session = MagicMock()
-        self.te._handles["t1"] = MagicMock()
+        self.te._handles["t1"] = self._fake_handle()
+        # Real config objects, not mocks: _apply_seeding_limit_to_handle() and
+        # poll_all() compare these values against ints, which a bare MagicMock
+        # cannot satisfy.
+        from my_idm.config import GeneralConfig, TorrentConfig
 
-    def tearDown(self):
-        self.db.close()
-        self.tmp_dir.cleanup()
+        self.te._torrent_config = TorrentConfig()
+        self.te._torrent_config.seeding_after_complete = True
+        self.te._general_config = GeneralConfig()
+        self.te.get_torrent_files = lambda *a, **k: []
+        self.te.get_torrent_trackers = lambda *a, **k: []
+        self.te.get_torrent_peers = lambda *a, **k: []
 
-    def test_seed_fills_last_seeded(self):
-        self.assertEqual(self.db.get_download("t1").last_seeded_at, "")
-        self.assertTrue(self.te.start_seeding("t1"))
-        self.assertTrue(self.db.get_download("t1").last_seeded_at)
+    @staticmethod
+    def _fake_handle(state=None):
+        """A handle whose ``status()`` is a real object with real numbers.
 
-    def test_repeat_seed_updates_timestamp(self):
-        self.te.start_seeding("t1")
-        first = self.db.get_download("t1").last_seeded_at
-        self.assertTrue(first)
-
-        self.te.start_seeding("t1")
-        second = self.db.get_download("t1").last_seeded_at
-        self.assertGreaterEqual(second, first)
-
-    def test_pause_then_seed_updates_timestamp(self):
-        """The reported sequence: pause, seed, pause, seed."""
-        import time
-        seen = []
-        for _ in range(2):
-            self.te.start_seeding("t1")
-            seen.append(self.db.get_download("t1").last_seeded_at)
-            self.assertTrue(seen[-1])
-            time.sleep(0.01)
-            entry = self.db.get_download("t1")
-            entry.status = "paused"
-            self.db.update_download(entry)
-            self.db.update_status("t1", "paused")
-        self.te.start_seeding("t1")
-        seen.append(self.db.get_download("t1").last_seeded_at)
-        for earlier, later in zip(seen, seen[1:]):
-            self.assertGreaterEqual(later, earlier)
-        self.assertEqual(len(seen), 3)
-
-    def test_completion_transition_stamps_last_seeded(self):
-        """Reaching the seeding state must stamp even without start_seeding."""
-        from datetime import datetime, timezone
+        A bare ``MagicMock()`` silently disables the whole status path:
+        ``get_status`` sees a truthy ``has_metadata``, calls
+        ``torrent_file()`` which is another mock, and ``ti.total_size() > 0``
+        raises ``TypeError`` on a mock. ``get_status`` swallows it and returns
+        ``None``, so ``start_seeding``'s ``cur_status`` is always ``{}`` and
+        ``seeding_baseline_upload`` is never exercised. ``torrent_file`` and
+        ``get_torrent_info`` are pinned to ``None`` so the metadata branch is
+        skipped deterministically.
+        """
         from unittest.mock import MagicMock
-
-        entry = self.db.get_download("t1")
-        entry.status = "downloading"
-        self.db.update_download(entry)
 
         class Status:
             total_wanted = 1000
@@ -467,37 +449,104 @@ class TestLastSeededStamping(unittest.TestCase):
             progress = 1.0
             has_metadata = True
             state = 5  # _STATE_NAMES[5] == "seeding"
-            all_time_upload = 0
-            all_time_download = 0
+            all_time_upload = 4096
+            all_time_download = 8192
             last_seen_complete = 0
 
         handle = MagicMock()
-        handle.status.return_value = Status()
-        # get_status() calls torrent_file().total_size() when metadata is present;
-        # a bare MagicMock would not compare against 0.
+        handle.status.return_value = state() if state is not None else Status()
         handle.torrent_file.return_value = None
         handle.get_torrent_info.return_value = None
-        self.te._handles["t1"] = handle
-        # Real config objects, not mocks: poll_all() and
-        # _apply_seeding_limit_to_handle() compare these values against ints,
-        # which a bare MagicMock cannot satisfy. Seeding-after-complete must be
-        # on, otherwise the engine correctly targets "completed" and no seeding
-        # event has occurred to record.
-        from my_idm.config import GeneralConfig, TorrentConfig
+        handle.is_valid.return_value = True
+        return handle
 
-        self.te._torrent_config = TorrentConfig()
-        self.te._torrent_config.seeding_after_complete = True
-        self.te._general_config = GeneralConfig()
-        self.te.get_torrent_files = lambda *a, **k: []
-        self.te.get_torrent_trackers = lambda *a, **k: []
-        self.te.get_torrent_peers = lambda *a, **k: []
+    def test_seed_fills_last_seeded(self):
+        self.assertEqual(self.db.get_download("t1").last_seeded_at, "")
+        self.assertTrue(self.te.start_seeding("t1"))
+        stamped = self.db.get_download("t1")
+        self.assertTrue(stamped.last_seeded_at)
+        self.assertEqual(
+            stamped.last_seeded_at, stamped.seeding_started_at,
+            "the column and the legacy metadata key must agree",
+        )
+        self.assertEqual(stamped.metadata.get("seeding_since"), stamped.last_seeded_at)
+        self.assertTrue(stamped.metadata.get("manual_seeding"))
+        self.assertEqual(stamped.status, "seeding")
 
+    def test_start_seeding_uses_the_status_path_for_the_upload_baseline(self):
+        """Proves the status path really ran (CRITICAL 2).
+
+        With a working handle, ``get_status`` returns a real dict and
+        ``start_seeding`` records ``total_upload`` as the baseline. With the old
+        bare mock the status lookup returned None and the baseline silently fell
+        back to 0.
+        """
+        self.assertTrue(self.te.start_seeding("t1"))
+        entry = self.db.get_download("t1")
+        self.assertEqual(
+            entry.metadata.get("seeding_baseline_upload"), 4096,
+            "the baseline must come from get_status()['total_upload'] "
+            "(all_time_upload=4096), not the 0 fallback of a swallowed TypeError",
+        )
+        self.te._handles["t1"].status.assert_called()
+
+    def test_start_seeding_baseline_falls_back_when_status_is_unavailable(self):
+        """The documented fallback when libtorrent has no status for the handle."""
+        self.te._handles["t1"].status.side_effect = RuntimeError("no status")
+        self.assertTrue(self.te.start_seeding("t1"))
+        entry = self.db.get_download("t1")
+        self.assertEqual(entry.metadata.get("seeding_baseline_upload"), 0)
+        self.assertTrue(entry.last_seeded_at, "the timestamp is stamped regardless")
+
+    def test_repeat_seed_updates_timestamp(self):
+        self.te.start_seeding("t1")
+        first = self.db.get_download("t1").last_seeded_at
+        self.assertTrue(first)
+
+        self.te.start_seeding("t1")
+        second = self.db.get_download("t1").last_seeded_at
+        self.assertGreaterEqual(second, first)
+
+    def test_pause_then_seed_updates_timestamp(self):
+        """The reported sequence: pause, seed, pause, seed."""
+        seen = []
+        for _ in range(2):
+            self.te.start_seeding("t1")
+            seen.append(self.db.get_download("t1").last_seeded_at)
+            self.assertTrue(seen[-1])
+            # No time.sleep here: mark_seeding_started uses
+            # datetime.now(timezone.utc).isoformat(), whose resolution is
+            # microseconds, so a 10 ms sleep was ~10000x more than needed and
+            # unpredictable anyway (Windows timer granularity is ~15.6 ms).
+            entry = self.db.get_download("t1")
+            entry.status = "paused"
+            self.db.update_download(entry)
+            self.db.update_status("t1", "paused")
+        self.te.start_seeding("t1")
+        seen.append(self.db.get_download("t1").last_seeded_at)
+        for earlier, later in zip(seen, seen[1:]):
+            self.assertGreaterEqual(later, earlier)
+        self.assertEqual(len(seen), 3)
+
+    def test_completion_transition_stamps_last_seeded(self):
+        """Reaching the seeding state must stamp even without start_seeding."""
+        entry = self.db.get_download("t1")
+        entry.status = "downloading"
+        self.db.update_download(entry)
+
+        # The class-level handle already has a real status object with
+        # state=5 ("seeding"), so poll_all() sees the completion transition.
         self.te.poll_all()
 
         after = self.db.get_download("t1")
         self.assertTrue(after.last_seeded_at, "completion into seeding must stamp")
         self.assertTrue(after.metadata.get("seeding_since"))
-        _ = datetime.now(timezone.utc)  # sanity: clock available
+        self.assertEqual(
+            after.metadata.get("seeding_since"), after.last_seeded_at,
+            "the column and the legacy metadata key must stay in step",
+        )
+        self.assertEqual(after.status, "seeding")
+        self.te._handles["t1"].status.assert_called()
 
     def test_poll_backstop_never_regresses_a_newer_stamp(self):
         """libtorrent's last_seen_complete must not overwrite a manual seed time."""

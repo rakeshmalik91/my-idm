@@ -1,17 +1,21 @@
 """Unit tests for External Tools (AnimePahe scraper integration, CLI/GUI launch, and logs)."""
 
+import asyncio
+import contextlib
 import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from PySide6.QtCore import QSettings
+from PySide6.QtCore import QCoreApplication, QEventLoop, QSettings
 from PySide6.QtWidgets import QApplication
 
-from my_idm.config import ExternalToolsConfig
+from my_idm.config import ExternalToolsConfig, GeneralConfig
 from my_idm.database import Database
 from my_idm.external_tools import (
     launch_animepahe_cli,
@@ -23,6 +27,27 @@ from my_idm.manager import DownloadManager
 from my_idm.utils import normalize_path
 
 app = QApplication.instance() or QApplication(sys.argv)
+
+# Upper bound for any cross-thread hand-off in this module. Generous enough for a
+# loaded CI box, small enough that a genuine hang fails fast instead of stalling
+# the whole session.
+THREAD_TIMEOUT = 10.0
+
+
+def pump_until(predicate, timeout=THREAD_TIMEOUT):
+    """Pump the Qt event loop until *predicate* holds; return whether it did.
+
+    ``QCoreApplication.processEvents(flags, maxtime)`` blocks until an event
+    arrives or the slice expires, so this waits on the event queue instead of
+    spinning at 100 Hz and starving the very thread it is waiting for.
+    """
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            return False
+        QCoreApplication.processEvents(QEventLoop.AllEvents, min(remaining_ms, 100))
+    return True
 
 
 class TestExternalTools(unittest.TestCase):
@@ -106,20 +131,38 @@ class TestExternalTools(unittest.TestCase):
 
         with patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_open:
             ok, msg = open_file_in_default_app(target_file, create_if_missing=True)
-            self.assertTrue(ok)
+            self.assertTrue(ok, f"opening a created placeholder should succeed, got: {msg}")
             self.assertTrue(target_file.is_file())
+            self.assertIn("test_log.txt", msg, "the message must name the file that was opened")
             mock_open.assert_called_once()
+            url = mock_open.call_args[0][0]
+            self.assertTrue(
+                url.toLocalFile().endswith("test_log.txt"),
+                f"the opened URL must point at the placeholder, got {url.toLocalFile()}",
+            )
 
     def test_open_folder_in_default_app(self):
         target_folder = Path(self.tmp_dir.name) / "subfolder"
         target_folder.mkdir(parents=True, exist_ok=True)
 
-        with patch("os.startfile", return_value=None) as mock_startfile:
+        # Both platform branches are stubbed: on POSIX the code takes the
+        # QDesktopServices path, which is otherwise free to hand the URI to a real
+        # desktop file manager.
+        with patch("os.startfile", return_value=None) as mock_startfile, \
+             patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
             ok, msg = open_file_in_default_app(target_folder)
-            self.assertTrue(ok)
+            self.assertTrue(ok, f"opening an existing folder should succeed, got: {msg}")
             self.assertIn("subfolder", msg)
             if sys.platform == "win32":
                 mock_startfile.assert_called_once()
+                self.assertEqual(
+                    os.fspath(mock_startfile.call_args[0][0]), str(target_folder.resolve()),
+                    "the folder passed to startfile must be the resolved one",
+                )
+                mock_openurl.assert_not_called()
+            else:
+                mock_openurl.assert_called_once()
+                self.assertEqual(mock_startfile.call_count, 0)
 
     def test_show_in_folder(self):
         folder = Path(self.tmp_dir.name) / "ext_test"
@@ -128,18 +171,43 @@ class TestExternalTools(unittest.TestCase):
         sample_file.write_text("dummy")
 
         # Test highlighting file
-        with patch("subprocess.Popen") as mock_popen, patch("os.startfile") as mock_startfile:
+        with patch("subprocess.Popen") as mock_popen, \
+             patch("os.startfile") as mock_startfile, \
+             patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
             ok, msg = show_in_folder(sample_file)
-            self.assertTrue(ok)
+            self.assertTrue(ok, f"revealing a file should succeed, got: {msg}")
+            self.assertIn("my-idm-firefox.xpi", msg, "the message must name the revealed entry")
             if sys.platform == "win32":
                 mock_popen.assert_called_once()
+                argv = mock_popen.call_args[0][0]
+                self.assertEqual(argv[0], "explorer", "a file must be revealed with explorer /select")
+                self.assertIn(f"/select,{sample_file.resolve()}", argv)
+                mock_startfile.assert_not_called()
+                mock_openurl.assert_not_called()
+            else:
+                mock_openurl.assert_called_once()
+                self.assertEqual(mock_popen.call_count, 0)
+                self.assertEqual(mock_startfile.call_count, 0)
 
         # Test opening folder
-        with patch("os.startfile") as mock_startfile:
+        with patch("subprocess.Popen") as mock_popen, \
+             patch("os.startfile") as mock_startfile, \
+             patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
             ok, msg = show_in_folder(folder)
-            self.assertTrue(ok)
+            self.assertTrue(ok, f"opening a folder should succeed, got: {msg}")
+            self.assertIn("ext_test", msg, "the message must name the folder that was opened")
             if sys.platform == "win32":
                 mock_startfile.assert_called_once()
+                self.assertEqual(
+                    os.fspath(mock_startfile.call_args[0][0]), str(folder.resolve()),
+                    "a directory must be opened with startfile, not explorer /select",
+                )
+                mock_popen.assert_not_called()
+                mock_openurl.assert_not_called()
+            else:
+                mock_openurl.assert_called_once()
+                self.assertEqual(mock_startfile.call_count, 0)
+                self.assertEqual(mock_popen.call_count, 0)
 
     def test_launch_animepahe_cli_with_url_and_episodes(self):
         cfg = ExternalToolsConfig(animepahe_repo_path=str(self.repo_dir))
@@ -157,6 +225,7 @@ class TestExternalTools(unittest.TestCase):
             )
             self.assertTrue(ok)
             self.assertIn("PID: 8888", msg)
+            self.assertIs(proc, mock_proc, "the launched process must be handed back to the caller")
 
             mock_popen.assert_called_once()
             cmd = mock_popen.call_args[0][0]
@@ -180,6 +249,8 @@ class TestExternalTools(unittest.TestCase):
             animepahe_last_episodes="1-3",
         )
         dialog = SettingsDialog(external_tools_config=cfg, initial_tab=5)
+        self.addCleanup(dialog.close)
+        self.addCleanup(dialog.deleteLater)
 
         # Verify fields populated
         self.assertEqual(dialog._animepahe_url_edit.text(), "https://animepahe.ru/anime/test")
@@ -194,33 +265,114 @@ class TestExternalTools(unittest.TestCase):
             self.assertEqual(kwargs.get("episodes"), "1-3")
             mock_info.assert_called_once()
 
-        dialog.close()
-
 
 class TestManagerExternalToolsLifecycle(unittest.TestCase):
     """Test DownloadManager startup launch and termination of external tools."""
 
     def setUp(self):
+        # An empty, private backlog directory: the real process_backlogs() scans
+        # cwd, ~/.my-idm and the home directory and, with
+        # clear_backlog_after_load on by default, *truncates* any backlog.txt it
+        # finds there.
+        self.backlog_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.backlog_dir.cleanup)
+
         self.db = Database(":memory:")
+        self.addCleanup(self.db.close)
         self.db.open()
         self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
 
-    def tearDown(self):
-        self.manager.stop()
-        self.db.close()
+        # `DownloadManager.__init__` connects `process_backlogs_requested` to the
+        # *bound method* it resolved at construction time, so
+        # `patch.object(manager, "process_backlogs")` is inert: emitting the signal
+        # still ran the real implementation. Patching the class rebinds what the
+        # existing connection resolves to, and the temp backlog directory means
+        # even an unmocked call could not reach the user's files.
+        for name in ("process_backlogs", "load_backlog"):
+            patcher = patch.object(DownloadManager, name, return_value=0)
+            self.addCleanup(patcher.stop)
+            setattr(self, f"mock_{name}", patcher.start())
+
+        locations = patch.object(
+            GeneralConfig,
+            "get_effective_backlog_locations",
+            return_value=[self.backlog_dir.name],
+        )
+        self.addCleanup(locations.stop)
+        locations.start()
+
+    @contextlib.contextmanager
+    def _patched_start_collaborators(self):
+        """Run the real ``DownloadManager.start()`` with its heavy work stubbed."""
+        manager = self.manager
+
+        def run_loop():
+            # The loop body is the only reason a coroutine scheduled with
+            # run_coroutine_threadsafe() ever resolves, so the stub still runs
+            # (and stop() later shuts down) the loop — it just does nothing else.
+            asyncio.set_event_loop(manager._loop)
+            manager._loop.run_forever()
+
+        patches = {
+            "run_loop": patch.object(manager, "_run_loop", side_effect=run_loop),
+            "http_start": patch.object(manager._http, "start", new=AsyncMock()),
+            "http_stop": patch.object(manager._http, "stop", new=AsyncMock()),
+            "torrent_start": patch.object(manager._torrent, "start"),
+            "torrent_stop": patch.object(manager._torrent, "stop"),
+            "toggle_tor": patch.object(manager, "toggle_tor", return_value=(True, "Connected")),
+            "refresh_tor_availability": patch.object(manager, "refresh_tor_availability", return_value=True),
+            "resume_download": patch.object(manager, "resume_download"),
+            "browser_start": patch.object(manager._browser_server, "start", new=AsyncMock()),
+            "browser_stop": patch.object(manager._browser_server, "stop", new=AsyncMock()),
+            "start_animepahe_scraper": patch.object(DownloadManager, "start_animepahe_scraper"),
+        }
+        with contextlib.ExitStack() as stack:
+            yield {name: stack.enter_context(p) for name, p in patches.items()}
 
     def test_startup_launches_animepahe_if_enabled(self):
+        """`DownloadManager.start()` must honour animepahe_launch_on_startup.
+
+        This drives the real entry point. The previous version re-implemented the
+        `if cfg.animepahe_launch_on_startup:` branch inside the test body and then
+        asserted on the mock it had just called, so it could not fail.
+        """
         cfg = ExternalToolsConfig(
             animepahe_repo_path="/mock/repo",
             animepahe_launch_on_startup=True,
         )
         self.manager.set_external_tools_config(cfg)
 
-        with patch.object(self.manager, "start_animepahe_scraper") as mock_start:
-            # Re-run start check
-            if self.manager._external_tools_config.animepahe_launch_on_startup:
-                self.manager.start_animepahe_scraper()
-            mock_start.assert_called_once()
+        with self._patched_start_collaborators() as mocks:
+            self.manager.start()
+
+        mocks["start_animepahe_scraper"].assert_called_once()
+
+    def test_startup_does_not_launch_animepahe_when_disabled(self):
+        """The same entry point must NOT launch the scraper when it is switched off."""
+        cfg = ExternalToolsConfig(
+            animepahe_repo_path="/mock/repo",
+            animepahe_launch_on_startup=False,
+        )
+        self.manager.set_external_tools_config(cfg)
+
+        with self._patched_start_collaborators() as mocks:
+            self.manager.start()
+
+        mocks["start_animepahe_scraper"].assert_not_called()
+
+    def test_startup_passes_configured_args_to_the_scraper(self):
+        """start() must launch the scraper with no extra arguments."""
+        cfg = ExternalToolsConfig(
+            animepahe_repo_path="/mock/repo",
+            animepahe_launch_on_startup=True,
+        )
+        self.manager.set_external_tools_config(cfg)
+
+        with self._patched_start_collaborators() as mocks:
+            self.manager.start()
+
+        mocks["start_animepahe_scraper"].assert_called_once_with()
 
     def test_manager_periodic_timer_configuration(self):
         """DownloadManager starts or stops the periodic AnimePahe timer based on config."""
@@ -253,6 +405,15 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             self.manager._on_animepahe_timer_tick()
             mock_start.assert_called_once()
 
+    def test_manager_periodic_timer_tick_is_inert_when_disabled(self):
+        """The negative half of the previous test: no config, no launch."""
+        cfg = ExternalToolsConfig(animepahe_periodic_run=False)
+        self.manager.set_external_tools_config(cfg)
+
+        with patch.object(self.manager, "start_animepahe_scraper") as mock_start:
+            self.manager._on_animepahe_timer_tick()
+            mock_start.assert_not_called()
+
     def test_stop_terminates_running_process(self):
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None  # Process is running
@@ -263,11 +424,11 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
         self.assertIsNone(self.manager._animepahe_process)
 
     def test_start_and_stop_animepahe_scraper(self):
-        import threading
         status_updates = []
         self.manager.animepahe_status_changed.connect(status_updates.append)
 
         stop_event = threading.Event()
+        self.addCleanup(stop_event.set)
         mock_proc = MagicMock()
         mock_proc.poll.side_effect = lambda: 0 if stop_event.is_set() else None
         mock_proc.wait.side_effect = stop_event.wait
@@ -275,7 +436,7 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
 
         with patch("my_idm.manager.launch_animepahe_cli", return_value=(True, "Started PID: 1234", mock_proc)):
             ok, msg = self.manager.start_animepahe_scraper()
-            self.assertTrue(ok)
+            self.assertTrue(ok, f"the first launch should succeed, got: {msg}")
             self.assertTrue(self.manager.is_animepahe_running())
             self.assertIn(True, status_updates)
 
@@ -283,10 +444,11 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             ok2, msg2 = self.manager.start_animepahe_scraper()
             self.assertTrue(ok2)
             self.assertIn("queued", msg2.lower())
+            self.assertEqual(self.manager.get_animepahe_queue_length(), 1, "the second request must be queued")
 
             # Stop scraper
             ok_stop, msg_stop = self.manager.stop_animepahe_scraper()
-            self.assertTrue(ok_stop)
+            self.assertTrue(ok_stop, msg_stop)
             self.assertFalse(self.manager.is_animepahe_running())
             self.assertIn(False, status_updates)
             mock_proc.terminate.assert_called_once()
@@ -309,6 +471,11 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
                 lang="en",
             )
             self.assertTrue(ok)
+            self.assertIn("PID: 7777", msg, "the launch message must carry the process id back")
+            self.assertIs(
+                self.manager.animepahe_process, mock_proc,
+                "the launched process must become the tracked process",
+            )
             mock_launch.assert_called_once()
             kwargs = mock_launch.call_args.kwargs
             self.assertEqual(kwargs.get("url"), "https://animepahe.ru/anime/1234")
@@ -317,63 +484,82 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             self.assertEqual(kwargs.get("lang"), "en")
 
     def test_manager_animepahe_monitor_polls_backlog_on_completion(self):
-        import time
-        from PySide6.QtWidgets import QApplication
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
-        mock_proc.wait.return_value = 0
+        waited = threading.Event()
 
-        with patch("my_idm.manager.launch_animepahe_cli", return_value=(True, "Started", mock_proc)), \
-             patch.object(self.manager, "process_backlogs") as mock_poll:
+        def wait_side_effect(*args, **kwargs):
+            waited.set()
+            return 0
+
+        mock_proc.wait.side_effect = wait_side_effect
+
+        with patch("my_idm.manager.launch_animepahe_cli", return_value=(True, "Started", mock_proc)):
             ok, msg = self.manager.start_animepahe_scraper()
-            self.assertTrue(ok)
-            # Give daemon thread a brief moment to run wait() and trigger process_backlogs()
-            time.sleep(0.2)
-            # Process Qt events to allow QTimer.singleShot to execute
-            for _ in range(5):
-                QApplication.processEvents()
-                time.sleep(0.01)
-            mock_poll.assert_called_once()
-            self.assertFalse(self.manager.is_animepahe_running())
+            self.assertTrue(ok, f"the scraper should have started, got: {msg}")
+            self.assertTrue(
+                waited.wait(timeout=THREAD_TIMEOUT),
+                "the animepahe-monitor thread never reached proc.wait()",
+            )
+            # process_backlogs_requested is a queued signal, so the GUI thread has
+            # to drain the event queue before the connected slot can run.
+            self.assertTrue(
+                pump_until(
+                    lambda: self.mock_process_backlogs.called
+                    and not self.manager.is_animepahe_running()
+                ),
+                "the monitor never dispatched process_backlogs to the GUI thread",
+            )
+        self.mock_process_backlogs.assert_called_once()
+        self.assertEqual(
+            self.manager.get_animepahe_queue_length(), 0,
+            "a plain launch must not leave anything queued",
+        )
+        self.assertFalse(self.manager.is_animepahe_running())
 
     def test_manager_animepahe_queue_sequential_execution(self):
-        import time
         queue_events = []
         self.manager.animepahe_queue_changed.connect(queue_events.append)
 
-        # Mock process 1
-        proc1 = MagicMock()
-        proc1.poll.return_value = None
-        proc1_finished = False
-        def proc1_wait():
-            while not proc1_finished:
-                time.sleep(0.01)
-            return 0
-        proc1.wait.side_effect = proc1_wait
+        proc1_done = threading.Event()
+        proc2_done = threading.Event()
+        proc1_parked = threading.Event()
+        proc2_parked = threading.Event()
+        # Registered up front so a failed assertion can never leave a monitor
+        # thread parked in wait() for the rest of the session.
+        self.addCleanup(proc1_done.set)
+        self.addCleanup(proc2_done.set)
 
-        # Mock process 2
-        proc2 = MagicMock()
-        proc2.poll.return_value = None
-        proc2_finished = False
-        def proc2_wait():
-            while not proc2_finished:
-                time.sleep(0.01)
-            return 0
-        proc2.wait.side_effect = proc2_wait
+        def make_proc(done, parked):
+            proc = MagicMock()
+            proc.poll.return_value = None
+
+            def wait_side_effect(*args, **kwargs):
+                parked.set()
+                done.wait(timeout=THREAD_TIMEOUT)
+                return 0
+
+            proc.wait.side_effect = wait_side_effect
+            return proc
+
+        proc1 = make_proc(proc1_done, proc1_parked)
+        proc2 = make_proc(proc2_done, proc2_parked)
 
         launched_args = []
+
         def mock_launch(cfg, **kwargs):
             launched_args.append(kwargs)
-            if len(launched_args) == 1:
-                return True, "Started PID: 101", proc1
-            else:
-                return True, "Started PID: 102", proc2
+            return True, f"Started PID: {100 + len(launched_args)}", [proc1, proc2][len(launched_args) - 1]
 
         with patch("my_idm.manager.launch_animepahe_cli", side_effect=mock_launch):
             # 1. Start task 1
             ok1, msg1 = self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/series1")
-            self.assertTrue(ok1)
-            self.assertEqual(len(launched_args), 1)
+            self.assertTrue(ok1, msg1)
+            self.assertTrue(
+                proc1_parked.wait(timeout=THREAD_TIMEOUT),
+                "the monitor thread never began waiting on process 1",
+            )
+            self.assertEqual(len(launched_args), 1, "the first request must launch, not queue")
             self.assertEqual(launched_args[0].get("url"), "https://animepahe.ru/anime/series1")
             self.assertEqual(self.manager.get_animepahe_queue_length(), 0)
 
@@ -389,45 +575,66 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
             self.assertEqual(len(q_items), 1)
             self.assertEqual(q_items[0]["url"], "https://animepahe.ru/anime/series2")
             self.assertEqual(q_items[0]["episodes"], "1-5")
+            self.assertEqual(
+                len(launched_args), 1,
+                "a queued task must not be launched before the running one finishes",
+            )
 
             # 3. Complete task 1 -> triggers execution of task 2
             proc1.poll.return_value = 0
-            proc1_finished = True
-            time.sleep(0.08)
-            from PySide6.QtCore import QCoreApplication
-            QCoreApplication.processEvents()
-
-            self.assertEqual(len(launched_args), 2)
+            proc1_done.set()
+            self.assertTrue(
+                pump_until(lambda: len(launched_args) == 2 and proc2_parked.is_set()),
+                f"queued task 2 was never launched after task 1 finished; launched={launched_args}",
+            )
+            self.assertEqual(len(launched_args), 2, "exactly one follow-up task must launch")
             self.assertEqual(launched_args[1].get("url"), "https://animepahe.ru/anime/series2")
             self.assertEqual(launched_args[1].get("episodes"), "1-5")
             self.assertEqual(self.manager.get_animepahe_queue_length(), 0)
 
             # 4. Complete task 2 -> finishes queue
             proc2.poll.return_value = 0
-            proc2_finished = True
-            time.sleep(0.08)
-            QCoreApplication.processEvents()
-
+            proc2_done.set()
+            self.assertTrue(
+                pump_until(lambda: not self.manager.is_animepahe_running()),
+                "the queue never drained after the last task finished",
+            )
             self.assertFalse(self.manager.is_animepahe_running())
+            self.assertEqual(self.manager.get_animepahe_queue_length(), 0)
+            self.assertIn(0, queue_events, "the UI must be told the queue drained")
 
     def test_manager_stop_animepahe_clears_queue(self):
-        import time
         proc = MagicMock()
         proc.poll.return_value = None
-        # Make wait() block briefly so monitor thread doesn't process queue instantly
-        def slow_wait():
-            time.sleep(0.1)
+
+        # Park the monitor thread until the test releases it, so the queue cannot
+        # drain itself before stop() is exercised. `release` is registered as a
+        # cleanup first, so a failed assertion cannot strand the daemon thread.
+        monitor_parked = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def wait_side_effect(*args, **kwargs):
+            monitor_parked.set()
+            release.wait(timeout=THREAD_TIMEOUT)
             return 0
-        proc.wait.side_effect = slow_wait
+
+        proc.wait.side_effect = wait_side_effect
 
         with patch("my_idm.manager.launch_animepahe_cli", return_value=(True, "Started", proc)):
-            self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/1")
-            self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/2")
-            self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/3")
+            ok1, msg1 = self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/1")
+            self.assertTrue(ok1, msg1)
+            ok2, _ = self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/2")
+            ok3, _ = self.manager.start_animepahe_scraper(url="https://animepahe.ru/anime/3")
+            self.assertTrue(ok2 and ok3, "the 2nd and 3rd requests should be accepted as queued tasks")
+            self.assertTrue(
+                monitor_parked.wait(timeout=THREAD_TIMEOUT),
+                "the animepahe-monitor thread never reached proc.wait()",
+            )
             self.assertEqual(self.manager.get_animepahe_queue_length(), 2)
 
             ok, msg = self.manager.stop_animepahe_scraper()
-            self.assertTrue(ok)
+            self.assertTrue(ok, msg)
             self.assertIn("cleared 2 queued tasks", msg)
             self.assertEqual(self.manager.get_animepahe_queue_length(), 0)
             self.assertFalse(self.manager.is_animepahe_running())
@@ -437,19 +644,29 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
 class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp_dir.cleanup)
         self.repo_dir = Path(self.tmp_dir.name) / "animepahe"
         self.repo_dir.mkdir(parents=True, exist_ok=True)
         (self.repo_dir / "animepahe_download.py").write_text("# mock", encoding="utf-8")
+        # `_on_save()` makedirs whatever the save-path field holds, falling back to
+        # the real `~/Downloads` when the field is empty, so point it at a
+        # directory that is ours to create.
+        self.save_dir = Path(self.tmp_dir.name) / "downloads"
 
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+    def _make_dialog(self, cfg, **kwargs):
+        from my_idm.settings_dialog import SettingsDialog
+
+        dialog = SettingsDialog(external_tools_config=cfg, **kwargs)
+        self.addCleanup(dialog.close)
+        self.addCleanup(dialog.deleteLater)
+        dialog._save_path_edit.setText(str(self.save_dir))
+        return dialog
 
     def test_url_normalization_and_validation(self):
-        from my_idm.settings_dialog import SettingsDialog
         from PySide6.QtWidgets import QMessageBox
 
         cfg = ExternalToolsConfig(animepahe_repo_path=str(self.repo_dir))
-        dialog = SettingsDialog(external_tools_config=cfg, initial_tab=5)
+        dialog = self._make_dialog(cfg, initial_tab=5)
 
         # 1. Test invalid episode format triggers warning
         dialog._animepahe_url_edit.setText("https://animepahe.ru/anime/1234")
@@ -499,10 +716,7 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         dialog._on_animepahe_queue_changed(0)
         self.assertTrue(dialog._animepahe_queue_lbl.isHidden())
 
-        dialog.close()
-
     def test_settings_dialog_queues_download_when_scraper_active(self):
-        from my_idm.settings_dialog import SettingsDialog
         from PySide6.QtWidgets import QMessageBox
 
         mock_mgr = MagicMock()
@@ -511,7 +725,7 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         mock_mgr.start_animepahe_scraper.return_value = (True, "AnimePahe task queued at position #2 for 'https://animepahe.ru/anime/5678'.")
 
         cfg = ExternalToolsConfig(animepahe_repo_path=str(self.repo_dir))
-        dialog = SettingsDialog(external_tools_config=cfg, manager=mock_mgr, initial_tab=5)
+        dialog = self._make_dialog(cfg, manager=mock_mgr, initial_tab=5)
 
         dialog._animepahe_url_edit.setText("https://animepahe.ru/anime/5678")
         dialog._animepahe_episodes_edit.setText("1-10")
@@ -526,8 +740,6 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
             )
             mock_info.assert_called_once()
             self.assertEqual(mock_info.call_args[0][1], "AnimePahe Download Queued")
-
-        dialog.close()
 
     def test_external_tools_config_periodic_settings(self):
         """ExternalToolsConfig supports periodic scraper run toggle and interval."""
@@ -556,13 +768,12 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
 
     def test_settings_dialog_periodic_scraper_controls(self):
         """SettingsDialog loads and persists periodic scraper checkbox and interval spinbox."""
-        from my_idm.settings_dialog import SettingsDialog
         cfg = ExternalToolsConfig(
             animepahe_repo_path=str(self.repo_dir),
             animepahe_periodic_run=True,
             animepahe_interval_hours=8,
         )
-        dialog = SettingsDialog(external_tools_config=cfg, initial_tab=5)
+        dialog = self._make_dialog(cfg, initial_tab=5)
         self.assertTrue(dialog._animepahe_periodic_cb.isChecked())
         self.assertEqual(dialog._animepahe_interval_spin.value(), 8)
         self.assertTrue(dialog._animepahe_interval_spin.isEnabled())
@@ -572,10 +783,21 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         dialog._animepahe_interval_spin.setValue(10)
         dialog._on_save()
 
+        self.assertTrue(
+            self.save_dir.is_dir(),
+            "_on_save() must create the directory it was pointed at",
+        )
+        self.assertFalse(
+            (Path.home() / "Downloads").resolve() == self.save_dir.resolve(),
+            "the save path under test must not be the real ~/Downloads",
+        )
         saved_cfg = dialog.external_tools_config
         self.assertFalse(saved_cfg.animepahe_periodic_run)
         self.assertEqual(saved_cfg.animepahe_interval_hours, 10)
-        dialog.close()
+        self.assertEqual(
+            normalize_path(dialog._general_cfg.default_save_path), normalize_path(str(self.save_dir)),
+            "the configured default save path must be the one shown in the dialog",
+        )
 
 
 class TestExternalToolsConfigYtdlp(unittest.TestCase):
@@ -583,9 +805,7 @@ class TestExternalToolsConfigYtdlp(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-
-    def tearDown(self):
-        self.tmp_dir.cleanup()
+        self.addCleanup(self.tmp_dir.cleanup)
 
     def test_ytdlp_default_fields(self):
         cfg = ExternalToolsConfig()
@@ -749,22 +969,65 @@ class TestExternalToolsConfigYtdlp(unittest.TestCase):
         cfg = ExternalToolsConfig(
             ytdlp_path=str(fake_ytdlp), ytdlp_ffmpeg_path=str(fake_ffmpeg)
         )
-        self.assertEqual(
-            os.path.normcase(cfg.get_effective_ytdlp_path()),
-            os.path.normcase(normalize_path(str(fake_ytdlp))),
-        )
-        self.assertEqual(
-            os.path.normcase(cfg.get_effective_ffmpeg_path()),
-            os.path.normcase(normalize_path(str(fake_ffmpeg))),
-        )
+        with patch("shutil.which", return_value=None) as mock_which:
+            self.assertEqual(
+                os.path.normcase(cfg.get_effective_ytdlp_path()),
+                os.path.normcase(normalize_path(str(fake_ytdlp))),
+            )
+            self.assertEqual(
+                os.path.normcase(cfg.get_effective_ffmpeg_path()),
+                os.path.normcase(normalize_path(str(fake_ffmpeg))),
+            )
+        mock_which.assert_not_called()
+        # ^ an existing configured path is used verbatim; PATH is not consulted.
 
-        # Nonexistent configured paths must not be returned
+        # Nonexistent configured paths must not be returned. The old assertion
+        # only checked the value differed from the configured one, which a real
+        # globally-installed yt-dlp would also satisfy, so pin the exact fallback
+        # and the name that is looked up.
+        system_ytdlp = str(bin_dir / "system" / "yt-dlp")
+        system_ffmpeg = str(bin_dir / "system" / "ffmpeg")
+        on_path = {"yt-dlp": system_ytdlp, "ffmpeg": system_ffmpeg}
+
         missing = ExternalToolsConfig(
             ytdlp_path=str(bin_dir / "does-not-exist"),
             ytdlp_ffmpeg_path=str(bin_dir / "nope"),
         )
-        self.assertNotEqual(missing.get_effective_ytdlp_path(), str(bin_dir / "does-not-exist"))
-        self.assertNotEqual(missing.get_effective_ffmpeg_path(), str(bin_dir / "nope"))
+        with patch("shutil.which", side_effect=lambda name, *a, **k: on_path.get(name)) as mock_which:
+            self.assertEqual(
+                os.path.normcase(missing.get_effective_ytdlp_path()),
+                os.path.normcase(system_ytdlp),
+                "a missing configured yt-dlp must fall back to the PATH lookup",
+            )
+            self.assertEqual(
+                os.path.normcase(missing.get_effective_ffmpeg_path()),
+                os.path.normcase(system_ffmpeg),
+                "a missing configured ffmpeg must fall back to the PATH lookup",
+            )
+            self.assertEqual(
+                mock_which.call_args_list[0][0][0], "yt-dlp",
+                "the POSIX name must be looked up first",
+            )
+            self.assertIn(
+                call("ffmpeg"), mock_which.call_args_list,
+                "ffmpeg must be looked up by its own name",
+            )
+
+        # With nothing configured and nothing on PATH, the resolver must say so
+        # rather than inventing a path.
+        with patch("shutil.which", return_value=None) as mock_which:
+            self.assertEqual(
+                missing.get_effective_ytdlp_path(), "",
+                "no configured path and no PATH hit must resolve to an empty string",
+            )
+            self.assertEqual(
+                missing.get_effective_ffmpeg_path(), "",
+                "no configured path and no PATH hit must resolve to an empty string",
+            )
+            self.assertIn(
+                call("yt-dlp.exe"), mock_which.call_args_list,
+                "the Windows executable name must be tried as a second chance",
+            )
 
 
 if __name__ == "__main__":
