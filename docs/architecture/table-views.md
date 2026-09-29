@@ -83,7 +83,6 @@ while preserving the user's own ordering of the older columns. Once the state is
 current count, custom ordering is respected as-is.
 
 ### `Source` Derivation
-
 Resolved at display time from `metadata_json` rather than stored in its own column, so existing rows
 classify immediately with no migration or backfill (`resolve_download_source()` in
 `download_model.py`):
@@ -266,10 +265,26 @@ self.changePersistentIndexList(old_indexes, new_indexes)
 ```
 This ensures active row selections and focus rectangles are preserved seamlessly across sorting cycles.
 
-### 3. Status & Type Filtering
-`DownloadTableModel.set_status_filter(allowed)` and `set_type_filter(allowed)` enable real-time view filtering without database round-trips:
+### 3. Status, Type & Size Filtering
+`DownloadTableModel.set_status_filter(allowed)`, `set_type_filter(allowed)` and
+`set_size_filter(allowed)` enable real-time view filtering without database round-trips:
 - Filtering is evaluated dynamically in `_matches_filter(entry)`.
 - When filtering changes, `_reapply_filter()` regenerates active entries, recalculates section counts, and refreshes the table.
+- Each filter collapses to "no filter" once every option is selected, so a fully-ticked popup
+  restores the unfiltered list.
+- `clear_filters()` resets the header filters only; it deliberately leaves the toolbar
+  search query alone so clearing a status filter cannot wipe what the user is typing.
+
+### 4. Toolbar Quick Search
+The toolbar search box (`MainWindow._search_edit`, styled `QLineEdit#toolbar_search`) filters
+the table by free text via `set_search_query()`:
+- Matching is case-insensitive against the filename, the original name, the URL, and the
+  extracted source domain, so `example5` finds `https://example5.com/file.zip`.
+- It composes with the header filters — `_matches_filter()` evaluates the search first and then
+  the type/size/status filters, so all must agree for a row to stay visible.
+- `is_filtered()` reports the search as a filter too, which keeps the "filters active"
+  indicator honest.
+- Empty input is a no-op, so clearing the box restores the previous view without a rebuild.
 
 ---
 
@@ -293,7 +308,6 @@ When any download row is selected, `DetailsPanel` (`my_idm/details_panel.py`) po
 - Columns: `Tier`, `URL`, `Status`, `Peers`, `Seeds`, `Scrapes`.
 - Shows live tracker response statuses, fail counts, and next announce timers.
 
-### 4. Segments Table (`SegmentsTableWidget`)
-- Multi-segment HTTP transfer diagnostics.
+### 4. Segments Table (`SegmentsTableWidget`)- Multi-segment HTTP transfer diagnostics.
 - Columns: `Segment #`, `Byte Range`, `Downloaded`, `Progress`, `Speed`, `Status`.
 - Displays individual segment worker threads, range offsets, and chunk progress bars.

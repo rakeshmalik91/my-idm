@@ -541,8 +541,11 @@ QMainWindow (MainWindow)
   │     ├── View (📋 Details Panel [F4], Select All, Sort By)
   │     ├── Tools (Preferences, VPN & Network Settings, Antivirus & Security Settings)
   │     └── Help (About)
-  ├── QToolBar
-  │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [📄 Open File][📁 Open Folder] | [📋 Details Panel][⚙️ Preferences]
+    ├── QToolBar
+    │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [📄 Open File][📁 Open Folder] | [📋 Details Panel]
+    │         └── ──── expanding gap ──── [🔍 Search downloads…] [⚙️ Preferences]
+    │             (the gap is `toolbar_gap`, an Expanding spacer, so the search box
+    │              and Settings stay pinned to the right end at any window width)
   ├── QSplitter (central widget, vertical orientation)
   │     ├── QTableView (top pane)
   │     │     ├── Model: DownloadTableModel

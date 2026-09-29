@@ -141,6 +141,25 @@ QToolBar::separator {{
     margin: 4px 6px;
 }}
 
+/* Toolbar quick-search: sits in the gap before the Preferences button. */
+QLineEdit#toolbar_search {{
+    background-color: {Colors.BG_DARK};
+    border: 1px solid {Colors.BORDER};
+    border-radius: 13px;
+    padding: 2px 12px;
+    color: {Colors.TEXT};
+    selection-background-color: {Colors.ACCENT};
+    selection-color: {Colors.TEXT};
+}}
+
+QLineEdit#toolbar_search:focus {{
+    border-color: {Colors.ACCENT};
+}}
+
+QLineEdit#toolbar_search::placeholder {{
+    color: {Colors.TEXT_DIM};
+}}
+
 QToolButton {{
     background-color: transparent;
     border: 1px solid transparent;

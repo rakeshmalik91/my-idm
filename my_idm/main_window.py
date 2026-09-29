@@ -746,6 +746,30 @@ class MainWindow(QMainWindow):
 
         toolbar.addWidget(self._tor_toolbar_container)
         toolbar.addSeparator()
+
+        # Expanding gap between the action groups and the search box.
+        self._toolbar_gap = QWidget()
+        self._toolbar_gap.setObjectName("toolbar_gap")
+        self._toolbar_gap.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        self._toolbar_gap.setFixedHeight(1)
+        toolbar.addWidget(self._toolbar_gap)
+
+        # Quick search over the visible downloads.
+        self._search_edit = QLineEdit()
+        self._search_edit.setObjectName("toolbar_search")
+        self._search_edit.setPlaceholderText("Search downloads…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setToolTip(
+            "Filter downloads by name, original name, URL, or domain"
+        )
+        self._search_edit.setMinimumWidth(160)
+        self._search_edit.setMaximumWidth(320)
+        self._search_edit.setFixedHeight(26)
+        self._search_edit.textChanged.connect(self._on_search_changed)
+        toolbar.addWidget(self._search_edit)
+
         toolbar.addAction(self._act_preferences)
 
         # Show only icons without text for playback and action buttons
@@ -765,12 +789,8 @@ class MainWindow(QMainWindow):
             if isinstance(btn, QToolButton):
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
-        # Expanding spacer pushes subsequent controls to the right
-        spacer = QWidget()
-        spacer.setObjectName("toolbar_spacer")
-        spacer.setStyleSheet("background: transparent;")
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        toolbar.addWidget(spacer)
+        # The expanding gap added before the search box already absorbs the
+        # slack, keeping the search and Preferences pinned to the right end.
 
         self.addToolBar(toolbar)
 
@@ -2365,6 +2385,17 @@ class MainWindow(QMainWindow):
             )
         else:
             self._on_tor_status_changed("connected" if checked else "disconnected", msg)
+
+    def _on_search_changed(self, text: str) -> None:
+        """Filter the table from the toolbar search box."""
+        self._model.set_search_query(text)
+        self._update_count_label()
+        self._update_speed_label()
+        self._apply_table_spans()
+
+    def _clear_search(self) -> None:
+        if self._search_edit.text():
+            self._search_edit.clear()
 
     def _on_tor_availability_changed(self, available: bool):
         """Tor came up or went down: refresh rows that display a Tor route."""

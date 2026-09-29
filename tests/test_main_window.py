@@ -8,7 +8,14 @@ from unittest.mock import patch, MagicMock
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QHeaderView, QLabel, QToolBar, QToolButton
+from PySide6.QtWidgets import (
+    QApplication,
+    QHeaderView,
+    QLabel,
+    QSizePolicy,
+    QToolBar,
+    QToolButton,
+)
 
 from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import Col
@@ -690,6 +697,74 @@ class TestHeaderViewAndFiltering(unittest.TestCase):
         self.win._restore_selection([])
         self.win._restore_selection(["missing-id"])
         self.assertEqual(self.win._selected_ids(), [])
+
+    def test_toolbar_search_box_is_present_and_filters(self):
+        """The toolbar search box filters rows by name, URL, or domain."""
+        self.win._model.load_entries([
+            DownloadEntry(id="a", url="https://alpha.com/one.zip", filename="one.zip",
+                          save_path=".", file_path="./one.zip", status="completed"),
+            DownloadEntry(id="b", url="https://beta.com/two.zip", filename="two.zip",
+                          save_path=".", file_path="./two.zip", status="completed"),
+        ])
+        self.assertEqual(self.win._model.rowCount(), 2)
+
+        self.win._search_edit.setText("one")
+        self.assertEqual(self.win._model.rowCount(), 1)
+        self.assertEqual(self.win._model.search_query(), "one")
+        self.assertTrue(self.win._model.is_searching())
+
+        self.win._search_edit.setText("beta")
+        self.assertEqual(self.win._model.rowCount(), 1)
+
+        self.win._search_edit.setText("nothing-matches")
+        self.assertEqual(self.win._model.rowCount(), 0)
+
+        self.win._search_edit.clear()
+        self.assertEqual(self.win._model.rowCount(), 2)
+        self.assertFalse(self.win._model.is_searching())
+
+    def test_toolbar_search_is_case_insensitive(self):
+        self.win._model.load_entries([
+            DownloadEntry(id="a", url="https://x.com/Movie.mkv", filename="Movie.mkv",
+                          save_path=".", file_path="./Movie.mkv", status="completed"),
+        ])
+        self.win._search_edit.setText("movie")
+        self.assertEqual(self.win._model.rowCount(), 1)
+        self.win._search_edit.clear()
+
+    def test_search_does_not_block_header_filter_clear(self):
+        """Clearing the header filters must not wipe what the user is typing."""
+        self.win._model.load_entries([
+            DownloadEntry(id="a", url="https://x.com/a.zip", filename="a.zip",
+                          save_path=".", file_path="./a.zip", status="completed"),
+        ])
+        self.win._search_edit.setText("a")
+        self.win._model.set_status_filter({"completed"})
+        self.win._model.clear_filters()
+        self.assertEqual(self.win._model.search_query(), "a")
+        self.win._search_edit.clear()
+
+    def test_preferences_is_the_last_toolbar_control(self):
+        actions = self.win._toolbar.actions()
+        self.assertTrue(actions, "toolbar has no actions")
+        self.assertIs(actions[-1], self.win._act_preferences)
+
+    def test_toolbar_search_precedes_preferences(self):
+        """The search box sits in the gap before the Settings button."""
+        names = []
+        for action in self.win._toolbar.actions():
+            widget = self.win._toolbar.widgetForAction(action)
+            if widget is not None:
+                names.append(widget.objectName())
+        self.assertIn("toolbar_search", names)
+        self.assertIn("toolbar_gap", names)
+        self.assertLess(names.index("toolbar_gap"), names.index("toolbar_search"))
+
+    def test_toolbar_gap_expands(self):
+        self.assertEqual(
+            self.win._toolbar_gap.sizePolicy().horizontalPolicy(),
+            QSizePolicy.Policy.Expanding,
+        )
 
     def test_header_sort_indicator_and_painting(self):
         header = self.win._header_view

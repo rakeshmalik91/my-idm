@@ -322,6 +322,7 @@ class DownloadTableModel(QAbstractTableModel):
         self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
         self._tor_config: Optional[TorConfig] = None
         self._tor_available_provider = None
+        self._search_query: str = ""
         self._status_filter: Optional[set[str]] = None
         self._type_filter: Optional[set[str]] = None
         self._size_filter: Optional[set[str]] = None
@@ -412,7 +413,23 @@ class DownloadTableModel(QAbstractTableModel):
 
     _to_int = staticmethod(to_int)
 
+    def _matches_search(self, entry: DownloadEntry) -> bool:
+        """True when *entry* matches the quick-search query, or there is none."""
+        query = self._search_query
+        if not query:
+            return True
+        if query in (getattr(entry, "original_name", "") or "").lower():
+            return True
+        if query in (entry.filename or "").lower():
+            return True
+        if query in (entry.url or "").lower():
+            return True
+        domain = extract_source_domain(entry.url)
+        return bool(domain) and query in domain.lower()
+
     def _matches_filter(self, entry: DownloadEntry) -> bool:
+        if not self._matches_search(entry):
+            return False
         if self._type_filter is not None:
             dtype = entry.download_type or "http"
             if dtype not in self._type_filter:
@@ -501,7 +518,22 @@ class DownloadTableModel(QAbstractTableModel):
             self._status_filter is not None
             or self._type_filter is not None
             or self._size_filter is not None
+            or bool(self._search_query)
         )
+
+    def search_query(self) -> str:
+        return self._search_query
+
+    def is_searching(self) -> bool:
+        return bool(self._search_query)
+
+    def set_search_query(self, query: str) -> None:
+        """Filter rows by a free-text query (name, original name, URL, domain)."""
+        normalized = (query or "").strip().lower()
+        if normalized == self._search_query:
+            return
+        self._search_query = normalized
+        self._reapply_filter()
 
     def is_status_filtered(self) -> bool:
         return self._status_filter is not None
@@ -540,6 +572,7 @@ class DownloadTableModel(QAbstractTableModel):
         self._reapply_filter()
 
     def clear_filters(self):
+        """Clear the header filters. The search box is cleared separately."""
         if self._status_filter is None and self._type_filter is None and self._size_filter is None:
             return
         self._status_filter = None
