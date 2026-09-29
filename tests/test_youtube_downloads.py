@@ -697,6 +697,115 @@ class TestManagerYouTubeIntegration(unittest.TestCase):
         never.set()
 
 
+async def _no_sleep(_delay):
+    return None
+
+
+class TestSegmentStatusReporting(unittest.TestCase):
+    """Regression: segments showed 'Pending' while bytes were arriving.
+
+    ``SegmentEntry.status`` was only ever set to 'completed' or 'error', so the
+    details panel's Segments tab read 'Pending' for the whole download even
+    though the byte counters and progress bars moved. The panel reads the live
+    in-memory ``SegmentEntry``, so database-only updates were not enough either.
+    """
+
+    def setUp(self):
+        from my_idm.database import Database, DownloadEntry, SegmentEntry
+        from my_idm.http_engine import HTTPEngine
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(":memory:")
+        self.db.open()
+        self.db.add_download(
+            DownloadEntry(
+                id="d1", url="https://example.com/big.bin", filename="big.bin",
+                save_path=self.tmp.name, file_path=f"{self.tmp.name}/big.bin",
+                total_size=3000, downloaded_size=0, status="downloading",
+                num_segments=3,
+            )
+        )
+        self.db.add_segments(
+            [
+                SegmentEntry(
+                    id=f"d1-seg{i}", download_id="d1", index=i,
+                    start_byte=i * 1000, end_byte=(i + 1) * 1000 - 1,
+                    status="pending",
+                )
+                for i in range(3)
+            ]
+        )
+        self.engine = HTTPEngine(self.db)
+        self.engine._tor_config = None
+        self.engine._network_config = None
+        self.engine._session = MagicMock()
+        self.updates = []
+        real_update = self.db.update_segment
+
+        def spy(segment_id, downloaded, status=None):
+            self.updates.append((segment_id, status))
+            return real_update(segment_id, downloaded, status)
+
+        self.db.update_segment = spy
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def _run(self, seg, cancel=None):
+        import asyncio
+        return asyncio.run(
+            self.engine._download_one_segment(
+                self.db.get_download("d1"), seg, {seg.id: seg}, 0.0, 0,
+                cancel or asyncio.Event(),
+            )
+        )
+
+    def test_active_segment_is_marked_downloading_first(self):
+        """The first status write for a transferring segment must be 'downloading'."""
+        from my_idm import http_engine as he
+
+        seg = self.db.get_segments("d1")[0]
+        with patch.object(he.HTTPEngine, "_download_segment_curl",
+                          side_effect=OSError("boom")):
+            with patch("asyncio.sleep", new=_no_sleep):
+                with self.assertRaises(Exception):
+                    self._run(seg)
+        self.assertEqual(self.updates[0], ("d1-seg0", "downloading"))
+
+    def test_cancelled_segment_reports_paused_not_pending(self):
+        import asyncio
+        seg = self.db.get_segments("d1")[0]
+        seg.status = "downloading"
+        cancel = asyncio.Event()
+        cancel.set()
+        self._run(seg, cancel)
+        self.assertEqual(seg.status, "paused")
+        self.assertIn(("d1-seg0", "paused"), self.updates)
+        self.assertNotIn(("d1-seg0", "pending"), self.updates)
+
+    def test_finished_segment_completes_without_downloading(self):
+        seg = self.db.get_segments("d1")[0]
+        seg.downloaded_bytes = seg.end_byte - seg.start_byte + 1
+        self._run(seg)
+        self.assertEqual(seg.status, "completed")
+        self.assertIn(("d1-seg0", "completed"), self.updates)
+        self.assertNotIn(("d1-seg0", "downloading"), self.updates)
+
+    def test_in_memory_status_tracks_database(self):
+        """The panel reads the live object, so it must never go stale."""
+        from my_idm import http_engine as he
+
+        seg = self.db.get_segments("d1")[0]
+        with patch.object(he.HTTPEngine, "_download_segment_curl",
+                          side_effect=OSError("boom")):
+            with patch("asyncio.sleep", new=_no_sleep):
+                with self.assertRaises(Exception):
+                    self._run(seg)
+        stored = self.db.get_segments("d1")[0]
+        self.assertEqual(seg.status, stored.status)
+
+
 class TestPasteDetection(unittest.TestCase):
     """Add Download dialog auto-detects pasted YouTube URLs."""
 

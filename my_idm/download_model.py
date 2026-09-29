@@ -321,6 +321,7 @@ class DownloadTableModel(QAbstractTableModel):
         self._sort_column: int = Col.ADDED
         self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
         self._tor_config: Optional[TorConfig] = None
+        self._tor_available_provider = None
         self._status_filter: Optional[set[str]] = None
         self._type_filter: Optional[set[str]] = None
         self._size_filter: Optional[set[str]] = None
@@ -348,8 +349,34 @@ class DownloadTableModel(QAbstractTableModel):
                 ],
             )
 
+    def is_tor_routed_by_choice(self, entry: DownloadEntry) -> bool:
+        """True when this individual download is flagged to route through Tor."""
+        if entry is None:
+            return False
+        try:
+            return bool(entry.metadata.get("route_through_tor", False))
+        except Exception:
+            return False
+
     def is_tor_active_for(self, entry: DownloadEntry) -> bool:
-        """Return True if this download is actively transferring over Tor right now."""
+        """Return True if this download is actively transferring over Tor right now.
+
+        Two independent ways a row can be on Tor: the global Tor switch routing
+        its protocol, or the per-download flag. The flag is only honoured while a
+        Tor proxy is actually reachable, so a stale flag does not light up the
+        badge after Tor is stopped.
+        """
+        if entry is None:
+            return False
+        if self.is_tor_routed_by_choice(entry):
+            if not self._tor_available():
+                return False
+            if entry.download_type == "http":
+                return entry.status in ("downloading", "fetching_metadata", "stalled")
+            if entry.download_type == "torrent":
+                return entry.status in ("downloading", "seeding")
+            return False
+
         if not self._tor_config or not self._tor_config.enabled:
             return False
         if entry.download_type == "http":
@@ -357,6 +384,21 @@ class DownloadTableModel(QAbstractTableModel):
         if entry.download_type == "torrent":
             return entry.status in ("downloading", "seeding") and self._tor_config.route_torrent
         return False
+
+    def set_tor_availability_provider(self, provider) -> None:
+        """Inject a callable reporting whether a Tor proxy is live right now."""
+        self._tor_available_provider = provider
+
+    def tor_available(self) -> bool:
+        if self._tor_available_provider is None:
+            return False
+        try:
+            return bool(self._tor_available_provider())
+        except Exception:
+            return False
+
+    def _tor_available(self) -> bool:
+        return self.tor_available()
 
     @property
     def sort_column(self) -> int:
@@ -1214,9 +1256,19 @@ class DownloadTableModel(QAbstractTableModel):
 
         if role == Qt.ItemDataRole.ToolTipRole:
             is_tor = self.is_tor_active_for(entry)
+            socks = self._tor_config.socks5_url if self._tor_config else "Tor"
             tor_note = ""
-            if is_tor and self._tor_config:
-                tor_note = f"🧅 Active Tor Route: Routed via SOCKS5 proxy ({self._tor_config.socks5_url})"
+            if is_tor:
+                scope = (
+                    "this download" if self.is_tor_routed_by_choice(entry)
+                    else "all downloads"
+                )
+                tor_note = f"🧅 Active Tor Route: Routed via SOCKS5 proxy ({socks})\nApplies to: {scope}"
+            elif self.is_tor_routed_by_choice(entry):
+                tor_note = (
+                    "🧅 Tor routing is set for this download, but Tor is not "
+                    "running, so it is using the normal route."
+                )
 
             if col == Col.NAME:
                 type_tag = f"[{entry.download_type.upper()}] " if entry.download_type else ""

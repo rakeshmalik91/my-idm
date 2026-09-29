@@ -61,6 +61,29 @@ If Tor is not already running on your system, My-IDM automatically discovers you
 - Click the **`🧅 Tor: OFF`** button on the toolbar or select **Tools → 🧅 Tor**.
 - To view or edit settings, click the status bar Tor badge or select **Tools → 🧅 Tor Network Settings…**.
 
+### Routing an Individual Download Through Tor
+Right-click a row → **Route through Tor**. The item is **enabled only while a Tor
+SOCKS5 proxy is actually reachable**, and the tooltip says so when it is not.
+
+Availability is a **cached** value. `DownloadManager.tor_available()` performs no I/O; a
+background thread probes the SOCKS5 port every few seconds (and immediately after a Tor
+start/stop) and publishes the result through `tor_availability_changed`. This matters:
+the naive version — probing inline — blocked for the socket timeout, which is **1 s on
+Windows**, freezing the GUI on *every* context-menu open and on every row repaint. The
+tooltip reads: *"Unavailable: Tor is not running. Start Tor from Tools → Tor, or set its
+path in Tools → Tor Network Settings."*
+
+The per-download choice is stored as `metadata["route_through_tor"]`, so it survives restarts and
+needs no schema migration. While the download is transferring, its row shows the same 🧅 badge as
+globally-routed downloads, and the Name tooltip says the route applies to *this download* rather
+than *all downloads*. Toggling it on for an in-flight download restarts that download so the new
+route takes effect immediately; the general HTTP proxy is suppressed for it so the two paths
+cannot be applied at once.
+
+> **Torrent limitation:** libtorrent exposes proxy settings only at *session* scope, so a
+> per-torrent route is recorded but can only take effect the next time that torrent is added to a
+> session — it cannot re-route a live torrent in place. HTTP downloads route immediately.
+
 ### Configuring Tor Preferences
 In **Tools → ⚙️ Preferences…** → **🧅 Tor Network** tab:
 1. **Activation & Startup**:
@@ -108,13 +131,16 @@ My-IDM is engineered to operate seamlessly alongside external Tor instances or a
 | **Config** | [`my_idm.config.TorConfig`](file:///d:/Projects/my-idm/my_idm/config.py) | Manages host, port, routing flags, executable path, and QSettings persistence. |
 | **Discovery & Process** | [`my_idm.tor_service.TorServiceManager`](file:///d:/Projects/my-idm/my_idm/tor_service.py) | Auto-discovers `tor.exe`, starts hidden background process, monitors socket, and stops process on exit. |
 | **HTTP Routing** | [`my_idm.http_engine.HTTPEngine`](file:///d:/Projects/my-idm/my_idm/http_engine.py) | Connects through `aiohttp_socks.ProxyConnector.from_url(tor_socks_url)`. |
+| **Per-Download HTTP Route** | [`my_idm.http_engine.HTTPEngine._session_for_entry`](file:///d:/Projects/my-idm/my_idm/http_engine.py) | Returns a lazily created, dedicated SOCKS5 session for downloads flagged `route_through_tor`, leaving the main session untouched. Closed by `_close_tor_session()` on shutdown and session recreation. |
+| **Per-Download Torrent Flag** | [`my_idm.torrent_engine.TorrentEngine.set_torrent_tor_route`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Records the flag; applied at next session add, since libtorrent proxying is session-scoped. |
+| **Per-Download API** | [`my_idm.manager.DownloadManager.set_download_tor_route`](file:///d:/Projects/my-idm/my_idm/manager.py) | Validates Tor is reachable, persists `route_through_tor`, and restarts an in-flight download. `tor_available()` is a **cached read**; `refresh_tor_availability()` probes off-thread and emits `tor_availability_changed`. |
+| **Badge Logic** | [`my_idm.download_model.DownloadTableModel.is_tor_active_for`](file:///d:/Projects/my-idm/my_idm/download_model.py) | Honours both the global switch and the per-download flag; a flag is only shown as active while Tor is reachable. Availability is injected via `set_tor_availability_provider()`, which points at the manager's cached flag so painting never blocks. |
 | **Torrent Routing** | [`my_idm.torrent_engine.TorrentEngine.apply_tor_config`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Sets SOCKS5 proxy on `libtorrent` session with peer & tracker proxying. |
-| **UI Integration** | [`my_idm.main_window.MainWindow`](file:///d:/Projects/my-idm/my_idm/main_window.py) | Manages toolbar action, status bar badge, signal handling, and modal error alerting. |
+| **UI Integration** | [`my_idm.main_window.MainWindow`](file:///d:/Projects/my-idm/my_idm/main_window.py) | Manages toolbar action, status bar badge, signal handling, modal error alerting, and the per-row **Route through Tor** context-menu item (`_build_download_tor_action`). |
 
 ---
 
 ## Troubleshooting
-
 - **"Tor executable could not be found"**: If you have Tor Browser installed, ensure it is installed in standard locations (`C:\Program Files\Tor Browser\...`), or use the **Browse…** button in Settings to point to `tor.exe`.
 - **Port Conflict (Exit code 1 / Already in use)**: If port 9050 is already occupied by another service, change the port in Settings to `9150` or another free port.
 - **Connection Timeout**: If Tor starts but fails to connect within 15 seconds, verify that third-party antivirus or firewall software is not blocking local loopback connections on port 9050.

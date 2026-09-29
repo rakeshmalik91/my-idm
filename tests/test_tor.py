@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication
 from my_idm.config import TorConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import DownloadTableModel, Col
+from my_idm.http_engine import HTTPEngine
 from my_idm.manager import DownloadManager
 from my_idm.main_window import MainWindow
 from my_idm.tor_service import TorServiceManager, find_tor_executable
@@ -186,6 +187,260 @@ class TestTorStartupAndExitGating(unittest.TestCase):
             self.assertTrue(cfg.auto_start_at_startup)
         finally:
             Path(tmp.name).unlink(missing_ok=True)
+
+
+class TestPerDownloadTorRouting(unittest.TestCase):
+    """Per-download Tor routing: flag, availability gating, badge and HTTP session."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Database(":memory:")
+        self.db.open()
+        self.mgr = DownloadManager(self.db)
+        self.model = DownloadTableModel()
+        self.model.set_tor_availability_provider(self.mgr.tor_available)
+        self.entry = DownloadEntry(
+            id="t1",
+            filename="file.zip",
+            url="https://example.com/file.zip",
+            download_type="http",
+            save_path=".",
+            file_path="./file.zip",
+            total_size=1000,
+            downloaded_size=0,
+            status="downloading",
+        )
+        self.db.add_download(self.entry)
+        self.model.load_entries(self.db.get_all_downloads())
+
+    def tearDown(self):
+        self.mgr.stop()
+        self.db.close()
+        self.tmp.cleanup()
+
+    def _enable_tor(self):
+        """Patch Tor as reachable so enabling a per-download route is permitted."""
+        return patch.object(self.mgr, "tor_available", return_value=True)
+
+    # -- flag storage --------------------------------------------------------
+
+    def test_flag_defaults_false(self):
+        self.assertFalse(self.mgr.is_download_tor_routed("t1"))
+
+    def test_flag_round_trips_through_metadata(self):
+        with self._enable_tor():
+            ok, _ = self.mgr.set_download_tor_route("t1", True)
+        self.assertTrue(ok)
+        self.assertTrue(self.mgr.is_download_tor_routed("t1"))
+        self.assertTrue(self.db.get_download("t1").metadata.get("route_through_tor"))
+        with self._enable_tor():
+            self.mgr.set_download_tor_route("t1", False)
+        self.assertFalse(self.mgr.is_download_tor_routed("t1"))
+
+    def test_enabling_requires_live_tor(self):
+        with patch.object(self.mgr, "tor_available", return_value=False):
+            ok, msg = self.mgr.set_download_tor_route("t1", True)
+        self.assertFalse(ok)
+        self.assertIn("not running", msg.lower())
+        self.assertFalse(self.mgr.is_download_tor_routed("t1"))
+
+    def test_disabling_is_allowed_even_without_tor(self):
+        with patch.object(self.mgr, "tor_available", return_value=True):
+            self.mgr.set_download_tor_route("t1", True)
+        with patch.object(self.mgr, "tor_available", return_value=False):
+            ok, _ = self.mgr.set_download_tor_route("t1", False)
+        self.assertTrue(ok)
+        self.assertFalse(self.mgr.is_download_tor_routed("t1"))
+
+    def test_unknown_download_rejected(self):
+        ok, msg = self.mgr.set_download_tor_route("nope", True)
+        self.assertFalse(ok)
+        self.assertIn("not found", msg.lower())
+
+    def test_tor_available_is_cached_and_non_blocking(self):
+        """tor_available() must not touch the network.
+
+        Probing inline blocked for the socket timeout (1 s on Windows), which
+        froze the GUI on every context-menu open and every row repaint.
+        """
+        import time
+
+        with patch.object(self.mgr.tor_service, "is_running", return_value=True):
+            start = time.perf_counter()
+            for _ in range(500):
+                self.mgr.tor_available()
+            elapsed = time.perf_counter() - start
+        self.assertLess(elapsed, 0.2, "tor_available() must be a cached read")
+
+    def test_refresh_tor_availability_probes_in_background(self):
+        """A probe runs off-thread and updates the cache when it lands."""
+        import time
+
+        with patch("my_idm.manager.is_tor_reachable", return_value=True):
+            self.assertTrue(self.mgr.refresh_tor_availability())
+            deadline = time.time() + 5
+            while time.time() < deadline and not self.mgr.tor_available():
+                app.processEvents()
+                time.sleep(0.01)
+        self.assertTrue(self.mgr.tor_available())
+
+    def test_refresh_publishes_changes_only_once(self):
+        import time
+
+        seen = []
+        self.mgr.tor_availability_changed.connect(lambda live: seen.append(live))
+        with patch("my_idm.manager.is_tor_reachable", return_value=True):
+            self.mgr.refresh_tor_availability()
+            deadline = time.time() + 5
+            while time.time() < deadline and not self.mgr.tor_available():
+                app.processEvents()
+                time.sleep(0.01)
+        # A repeated probe with the same result must not re-emit.
+        with patch("my_idm.manager.is_tor_reachable", return_value=True):
+            self.mgr.refresh_tor_availability()
+            for _ in range(40):
+                app.processEvents()
+                time.sleep(0.01)
+        self.assertEqual(seen, [True], f"expected exactly one change, got {seen}")
+
+    def test_probe_failure_leaves_cache_false(self):
+        import time
+
+        self.assertFalse(self.mgr.tor_available())
+        with patch("my_idm.manager.is_tor_reachable", side_effect=OSError("boom")):
+            self.mgr.refresh_tor_availability()
+            for _ in range(40):
+                app.processEvents()
+                time.sleep(0.01)
+        self.assertFalse(self.mgr.tor_available())
+
+    # -- badge ---------------------------------------------------------------
+
+    def test_flag_alone_does_not_light_the_badge(self):
+        """A flag with Tor down must not claim an active Tor route."""
+        self.model.set_tor_availability_provider(lambda: False)
+        with self._enable_tor():
+            self.mgr.set_download_tor_route("t1", True)
+        entry = self.db.get_download("t1")
+        self.assertFalse(self.model.is_tor_active_for(entry))
+
+    def test_badge_lights_when_flagged_and_tor_running(self):
+        self.model.set_tor_availability_provider(lambda: True)
+        with self._enable_tor():
+            self.mgr.set_download_tor_route("t1", True)
+        entry = self.db.get_download("t1")
+        self.assertTrue(self.model.is_tor_routed_by_choice(entry))
+        # Enabling restarts an active download, so pin the status explicitly.
+        entry.status = "downloading"
+        self.assertTrue(self.model.is_tor_active_for(entry))
+
+    def test_badge_off_when_not_transferring(self):
+        self.model.set_tor_availability_provider(lambda: True)
+        with self._enable_tor():
+            self.mgr.set_download_tor_route("t1", True)
+        entry = self.db.get_download("t1")
+        entry.status = "paused"
+        self.assertFalse(self.model.is_tor_active_for(entry))
+
+    def test_badge_off_when_tor_stops(self):
+        self.model.set_tor_availability_provider(lambda: True)
+        with self._enable_tor():
+            self.mgr.set_download_tor_route("t1", True)
+        self.model.set_tor_availability_provider(lambda: False)
+        entry = self.db.get_download("t1")
+        self.assertFalse(self.model.is_tor_active_for(entry))
+
+    def test_global_tor_still_works_without_the_flag(self):
+        self.model.set_tor_availability_provider(lambda: True)
+        from my_idm.config import TorConfig as _TC
+        cfg = _TC(enabled=True, route_http=True, route_torrent=True)
+        self.model.set_tor_config(cfg)
+        entry = self.db.get_download("t1")
+        self.assertFalse(self.model.is_tor_routed_by_choice(entry))
+        self.assertTrue(self.model.is_tor_active_for(entry))
+
+    def test_availability_provider_failure_is_contained(self):
+        def boom():
+            raise RuntimeError("probe failed")
+        self.model.set_tor_availability_provider(boom)
+        self.assertFalse(self.model.tor_available())
+
+    def test_no_provider_means_unavailable(self):
+        self.model.set_tor_availability_provider(None)
+        self.assertFalse(self.model.tor_available())
+
+    # -- HTTP engine ---------------------------------------------------------
+
+    def test_http_engine_session_selection(self):
+        """A flagged download uses the Tor session; others use the default."""
+        from my_idm.http_engine import HTTPEngine
+        from my_idm.config import TorConfig
+
+        engine = HTTPEngine(self.db)
+        engine._session = object()
+        engine._tor_session = "TOR-SESSION"
+        engine._tor_config = TorConfig(enabled=True, route_http=True)
+
+        plain = self.db.get_download("t1")
+        self.assertFalse(engine._is_tor_routed(plain))
+
+        with patch.object(self.mgr, "tor_available", return_value=True):
+            self.mgr.set_download_tor_route("t1", True)
+        flagged = self.db.get_download("t1")
+        self.assertTrue(engine._is_tor_routed(flagged))
+
+    def test_tor_flagged_entry_skips_general_proxy(self):
+        """The general HTTP proxy must not also apply to a Tor-routed download."""
+        from my_idm.config import TorConfig
+        from my_idm.network import NetworkConfig
+
+        engine = HTTPEngine(self.db)
+        engine._tor_config = TorConfig(enabled=True, route_http=True)
+        engine._network_config = NetworkConfig(
+            proxy_enabled=True, proxy_host="p", proxy_port=1
+        )
+
+        with self._enable_tor():
+            self.mgr.set_download_tor_route("t1", True)
+        entry = self.db.get_download("t1")
+
+        kwargs = engine._request_kwargs({}, entry=entry, url=entry.url)
+        self.assertNotIn("proxy", kwargs)
+
+    def test_plain_entry_still_uses_general_proxy(self):
+        from my_idm.config import TorConfig
+        from my_idm.network import NetworkConfig
+
+        engine = HTTPEngine(self.db)
+        engine._tor_config = TorConfig(enabled=False)
+        engine._network_config = NetworkConfig(
+            proxy_enabled=True, proxy_host="p", proxy_port=1
+        )
+
+        entry = self.db.get_download("t1")
+        kwargs = engine._request_kwargs({}, entry=entry, url=entry.url)
+        self.assertIn("proxy", kwargs)
+        self.assertEqual(kwargs["proxy"], "http://p:1")
+
+    def test_engine_flag_setter_is_idempotent(self):
+        engine = self.mgr._http
+        engine.set_download_tor_route("t1", True)
+        first = self.db.get_download("t1").metadata_json
+        engine.set_download_tor_route("t1", True)
+        self.assertEqual(self.db.get_download("t1").metadata_json, first)
+
+    # -- torrent engine ------------------------------------------------------
+
+    def test_torrent_route_flag_recorded(self):
+        torrent = DownloadEntry(
+            id="tt1", filename="a.torrent", url="magnet:?xt=urn:btih:abc",
+            download_type="torrent", save_path=".", file_path="./a.torrent",
+            status="completed",
+        )
+        self.db.add_download(torrent)
+        self.mgr._torrent.set_torrent_tor_route("tt1", True)
+        self.assertTrue(self.mgr._torrent.is_torrent_tor_routed("tt1"))
+        self.assertTrue(self.db.get_download("tt1").metadata.get("route_through_tor"))
 
 
 class TestTorUIAndIndicator(unittest.TestCase):

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Union, Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from PySide6.QtCore import QObject, Signal, QTimer
+from PySide6.QtCore import QObject, Signal, QTimer, Slot
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry, _now_iso
 from my_idm.http_engine import HTTPEngine
@@ -336,6 +336,8 @@ class DownloadManager(QObject):
     threat_detected = Signal(str, str)       # download_id, report
     queue_order_changed = Signal()
     tor_status_changed = Signal(str, str)     # status ("connecting"|"connected"|"disconnecting"|"disconnected"|"error"), message
+    tor_availability_changed = Signal(bool)  # a Tor SOCKS5 endpoint is reachable
+    _tor_probe_result = Signal(bool)          # private: emitted from the probe thread
     bandwidth_limits_changed = Signal(int, int)  # download_limit, upload_limit
     external_tools_config_changed = Signal(object)  # ExternalToolsConfig
     animepahe_status_changed = Signal(bool)  # is_running
@@ -364,6 +366,12 @@ class DownloadManager(QObject):
         if not self._tor_config.auto_start_at_startup:
             self._tor_config.enabled = False
         self._tor_service = TorServiceManager(self._tor_config)
+        # Tor availability is probed on a background thread and cached. Probing
+        # inline blocks for the socket timeout (1 s on Windows), which froze the
+        # GUI on every context-menu open and on every row repaint.
+        self._tor_available_cache: bool = False
+        self._tor_probe_in_flight = False
+        self._tor_probe_result.connect(self._on_tor_probe_result)
         self._stopped = False
         self._starting_downloads: set[str] = set()
         self._ytdlp_jobs: dict[str, dict[str, Any]] = {}
@@ -1229,6 +1237,7 @@ class DownloadManager(QObject):
         # 3. Perform Tor service start / stop
         if target:
             success, msg = self._tor_service.start(timeout=15.0)
+            self.refresh_tor_availability()
             if not success:
                 self._tor_config.enabled = False
                 self.set_tor_config(self._tor_config)
@@ -1249,6 +1258,9 @@ class DownloadManager(QObject):
             self.set_tor_config(self._tor_config)
             self.tor_status_changed.emit("disconnected", "Tor deactivated")
             msg = "Tor deactivated"
+
+        # The endpoint state changed; re-probe so the cached flag is accurate.
+        self.refresh_tor_availability()
 
         # 4. Resume previously active downloads with the updated Tor routing
         if active_ids:
@@ -1290,6 +1302,100 @@ class DownloadManager(QObject):
         self._torrent.set_session_limits(download_limit, upload_limit)
         self._http.set_download_limit(download_limit)
         self.bandwidth_limits_changed.emit(download_limit, upload_limit)
+
+    # -- per-download Tor routing ---------------------------------------------
+
+    def tor_available(self) -> bool:
+        """True when a Tor SOCKS5 endpoint is reachable.
+
+        Returns the **cached** result and never performs I/O, so it is safe to
+        call from the GUI thread (row painting, context-menu construction). Use
+        :meth:`refresh_tor_availability` to update it.
+        """
+        return bool(self._tor_available_cache)
+
+    def refresh_tor_availability(self, timeout: float = 0.4) -> bool:
+        """Probe the Tor port on a daemon thread and publish the result.
+
+        Returns immediately; the cached value is updated when the probe lands.
+        Only one probe runs at a time, so a slow port cannot queue up threads.
+        """
+        if self._stopped or self._tor_probe_in_flight:
+            return False
+        self._tor_probe_in_flight = True
+        config = self._tor_config
+
+        def _probe() -> None:
+            live = False
+            try:
+                live = bool(is_tor_reachable(config.proxy_host, config.proxy_port, timeout=timeout))
+            except Exception as exc:
+                log.debug("Tor availability probe failed: %s", exc)
+            self._tor_probe_result.emit(live)
+
+        threading.Thread(target=_probe, name="tor-probe", daemon=True).start()
+        return True
+
+    @Slot(bool)
+    def _on_tor_probe_result(self, live: bool) -> None:
+        """GUI-thread slot applying a completed availability probe."""
+        self._tor_probe_in_flight = False
+        changed = live != self._tor_available_cache
+        self._tor_available_cache = live
+        if changed:
+            self.tor_availability_changed.emit(live)
+
+    def is_download_tor_routed(self, download_id: str) -> bool:
+        """True when this individual download is flagged to use Tor."""
+        entry = self._db.get_download(download_id)
+        if not entry or not entry.metadata:
+            return False
+        return bool(entry.metadata.get("route_through_tor", False))
+
+    def set_download_tor_route(self, download_id: str, enabled: bool) -> tuple[bool, str]:
+        """Route or unroute a single download through Tor.
+
+        Returns ``(ok, message)``. Enabling requires a live Tor proxy; the
+        download is restarted when it is already transferring so the new route
+        takes effect immediately.
+        """
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return False, "Download not found."
+
+        enabled = bool(enabled)
+        if enabled and not self.tor_available():
+            return False, (
+                "Tor is not running. Start Tor from Tools → Tor, or set its path in "
+                "Tools → Tor Network Settings, before routing a download through it."
+            )
+
+        was_active = entry.status in ("downloading", "fetching_metadata", "stalled", "seeding")
+        entry.metadata["route_through_tor"] = enabled
+        self._db.update_download(entry)
+        log.info("Per-download Tor route %s for %s", "enabled" if enabled else "disabled", download_id)
+
+        if not was_active:
+            if enabled:
+                self._apply_tor_route_to_engine(entry, True)
+            return True, f"Tor routing {'enabled' if enabled else 'disabled'} for this download."
+
+        # Re-route an in-flight download by restarting it on the new path.
+        try:
+            self.pause_download(download_id)
+            self._apply_tor_route_to_engine(entry, enabled)
+            self.resume_download(download_id)
+        except Exception as exc:
+            log.warning("Could not restart %s after Tor route change: %s", download_id, exc)
+            return False, f"Saved, but could not restart the download: {exc}"
+        return True, f"Tor routing {'enabled' if enabled else 'disabled'} for this download."
+
+    def _apply_tor_route_to_engine(self, entry: DownloadEntry, enabled: bool) -> None:
+        """Push a per-download Tor route change into the owning engine."""
+        if entry.download_type == "torrent":
+            self._torrent.set_torrent_tor_route(entry.id, enabled)
+        else:
+            self._http.set_download_tor_route(entry.id, enabled)
 
     def set_download_bandwidth_allocation(self, download_id: str, allocation: str):
         """Set bandwidth allocation ('low', 'medium', 'high', 'max') for a specific download."""

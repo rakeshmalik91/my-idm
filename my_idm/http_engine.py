@@ -66,6 +66,7 @@ class HTTPEngine:
         self._cancel_events: dict[str, asyncio.Event] = {}
         self._active_segments: dict[str, list[SegmentEntry]] = {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._tor_session: Optional[aiohttp.ClientSession] = None
         self._network_config: Optional[NetworkConfig] = None
         self._tor_config: Optional[TorConfig] = None
         self._progress_cb: Optional[ProgressCallback] = None
@@ -200,6 +201,7 @@ class HTTPEngine:
     async def _recreate_session(self):
         if self._session and not self._session.closed:
             await self._session.close()
+        await self._close_tor_session()
 
         connector = None
         # Check if Tor is enabled and routing HTTP downloads
@@ -235,6 +237,79 @@ class HTTPEngine:
             timeout=timeout,
             headers={"User-Agent": DEFAULT_USER_AGENT},
         )
+
+    # -- per-download Tor routing ---------------------------------------------
+
+    def _is_tor_routed(self, entry) -> bool:
+        """True when *entry* is individually flagged to use Tor."""
+        if entry is None:
+            return False
+        try:
+            return bool(entry.metadata.get("route_through_tor", False))
+        except Exception:
+            return False
+
+    def set_download_tor_route(self, download_id: str, enabled: bool) -> None:
+        """Flag or unflag a single download for Tor routing.
+
+        The route is applied when the download starts, so an in-flight download
+        must be restarted by the caller for it to take effect immediately.
+        """
+        entry = self._db.get_download(download_id) if self._db else None
+        if not entry:
+            return
+        if entry.metadata.get("route_through_tor", False) == bool(enabled):
+            return
+        entry.metadata["route_through_tor"] = bool(enabled)
+        self._db.update_download(entry)
+        log.info("HTTPEngine: download %s Tor route -> %s", download_id, enabled)
+
+    async def _get_tor_session(self):
+        """Lazily create (or reuse) the SOCKS5 session used for Tor-flagged downloads.
+
+        Kept separate from the main session so a single download can be routed
+        through Tor even when the global Tor switch is off, and so unflagged
+        downloads keep using the direct/general-proxy session.
+        """
+        if self._tor_session is not None and not self._tor_session.closed:
+            return self._tor_session
+        if not (self._tor_config and self._tor_config.enabled):
+            return None
+        try:
+            from aiohttp_socks import ProxyConnector
+            connector = ProxyConnector.from_url(self._tor_config.tor_socks_url)
+        except Exception as exc:
+            log.warning("Could not create per-download Tor connector: %s", exc)
+            return None
+        self._tor_session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(connect=CONNECT_TIMEOUT, sock_read=READ_TIMEOUT),
+            headers={"User-Agent": DEFAULT_USER_AGENT},
+        )
+        log.info("HTTPEngine per-download Tor session via %s", self._tor_config.tor_socks_url)
+        return self._tor_session
+
+    async def _close_tor_session(self) -> None:
+        if self._tor_session is not None and not self._tor_session.closed:
+            try:
+                await self._tor_session.close()
+            except Exception as exc:
+                log.debug("Error closing per-download Tor session: %s", exc)
+        self._tor_session = None
+
+    async def _session_for_entry(self, entry) -> aiohttp.ClientSession:
+        """Return the client session a request for *entry* must use."""
+        if self._is_tor_routed(entry):
+            tor_session = await self._get_tor_session()
+            if tor_session is not None:
+                return tor_session
+            log.warning(
+                "Download %s is flagged for Tor but no Tor session is available; "
+                "falling back to the default route",
+                getattr(entry, "id", "?"),
+            )
+        return self._session
+
 
     def _build_headers(
         self,
@@ -274,6 +349,7 @@ class HTTPEngine:
         )
         if (
             not tor_routing_http
+            and not self._is_tor_routed(entry)
             and self._network_config
             and self._network_config.proxy_enabled
             and self._network_config.proxy_url
@@ -297,6 +373,7 @@ class HTTPEngine:
         if self._session:
             await self._session.close()
             self._session = None
+        await self._close_tor_session()
 
     async def add(self, entry: DownloadEntry):
         """Start (or resume) an HTTP download."""
@@ -501,7 +578,8 @@ class HTTPEngine:
 
         # Standard aiohttp probe
         try:
-            async with self._session.head(
+            session = await self._session_for_entry(entry)
+            async with session.head(
                 url, allow_redirects=True, **req_kwargs
             ) as resp:
                 if resp.status == 200:
@@ -625,7 +703,8 @@ class HTTPEngine:
             file_path = Path(entry.file_path)
             async for chunk in resp.aiter_content():
                 if cancel_evt.is_set():
-                    self._db.update_segment(seg.id, seg.downloaded_bytes, "pending")
+                    seg.status = "paused"
+                    self._db.update_segment(seg.id, seg.downloaded_bytes, "paused")
                     return
 
                 with open(file_path, "r+b") as f:
@@ -652,6 +731,8 @@ class HTTPEngine:
                 entry.downloaded_size = total_dl
                 entry.speed = speed
                 entry.eta_seconds = eta
+                if seg.status != "downloading":
+                    seg.status = "downloading"
                 self._db.update_segment(seg.id, seg.downloaded_bytes, "downloading")
                 self._emit_progress(entry.id, total_dl, entry.total_size, speed, eta)
 
@@ -672,6 +753,11 @@ class HTTPEngine:
         max_retries = self._get_max_retries(entry)
         for attempt in range(max_retries):
             if cancel_evt.is_set():
+                # Interrupted before finishing: report it as paused rather than
+                # leaving the details panel claiming it is still pending.
+                if seg.status == "downloading":
+                    seg.status = "paused"
+                    self._db.update_segment(seg.id, seg.downloaded_bytes, "paused")
                 return
             try:
                 current_start = seg.start_byte + seg.downloaded_bytes
@@ -680,6 +766,15 @@ class HTTPEngine:
                     self._db.update_segment(seg.id, seg.downloaded_bytes,
                                             "completed")
                     return
+
+                # The segment is about to transfer. Without this the status stayed
+                # "pending" for the whole download and only flipped to "completed"
+                # at the very end, so the details panel looked frozen even though
+                # bytes were arriving.
+                if seg.status != "downloading":
+                    seg.status = "downloading"
+                    self._db.update_segment(seg.id, seg.downloaded_bytes,
+                                            "downloading")
 
                 headers = {
                     "Range": f"bytes={current_start}-{seg.end_byte}"
@@ -692,7 +787,8 @@ class HTTPEngine:
                     )
                     return
 
-                async with self._session.get(
+                session = await self._session_for_entry(entry)
+                async with session.get(
                     entry.url, **self._request_kwargs(headers, entry=entry, url=entry.url)
                 ) as resp:
                     if resp.status == 416:
@@ -717,8 +813,9 @@ class HTTPEngine:
                     async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
                         if cancel_evt.is_set():
                             # Save progress and exit
+                            seg.status = "paused"
                             self._db.update_segment(
-                                seg.id, seg.downloaded_bytes, "pending"
+                                seg.id, seg.downloaded_bytes, "paused"
                             )
                             return
 
@@ -765,8 +862,9 @@ class HTTPEngine:
             except _FallbackToSingle:
                 raise
             except asyncio.CancelledError:
+                seg.status = "paused"
                 self._db.update_segment(
-                    seg.id, seg.downloaded_bytes, "pending"
+                    seg.id, seg.downloaded_bytes, "paused"
                 )
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -777,6 +875,10 @@ class HTTPEngine:
                     "Segment %d attempt %d failed: %s — retrying in %.1fs",
                     seg.index, attempt + 1, exc, delay,
                 )
+                # In-memory too: the details panel reads the live SegmentEntry,
+                # so a DB-only update would leave the row showing a stale status.
+                if seg.status == "downloading":
+                    seg.status = "pending"
                 self._db.update_segment(
                     seg.id, seg.downloaded_bytes, "pending"
                 )
@@ -921,7 +1023,8 @@ class HTTPEngine:
                     )
                     return
 
-                async with self._session.get(
+                session = await self._session_for_entry(entry)
+                async with session.get(
                     entry.url, **self._request_kwargs(headers, entry=entry, url=entry.url)
                 ) as resp:
                     if resp.status == 403 and _HAS_CURL_CFFI and not use_curl:

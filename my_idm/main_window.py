@@ -410,6 +410,16 @@ class MainWindow(QMainWindow):
         header.sectionClicked.connect(self._on_header_section_clicked)
 
         self._model.set_tor_config(self._manager.tor_config)
+        # The model needs to know whether a Tor proxy is live so a per-download
+        # route is not shown as active when Tor is down. It reads the manager's
+        # *cached* flag, which is refreshed off the GUI thread.
+        self._model.set_tor_availability_provider(self._manager.tor_available)
+        self._manager.tor_availability_changed.connect(self._on_tor_availability_changed)
+        self._tor_availability_timer = QTimer(self)
+        self._tor_availability_timer.setInterval(4000)
+        self._tor_availability_timer.timeout.connect(self._manager.refresh_tor_availability)
+        self._tor_availability_timer.start()
+        self._manager.refresh_tor_availability()
         self._table.clicked.connect(self._on_table_clicked)
         self._table.doubleClicked.connect(self._on_table_double_clicked)
         self._model.modelReset.connect(self._apply_table_spans)
@@ -1784,12 +1794,65 @@ class MainWindow(QMainWindow):
             act.setChecked(curr_alloc == val)
             act.triggered.connect(lambda checked=False, a=val: self._on_set_bandwidth_allocation(a))
         menu.addSeparator()
+
+        # Per-download Tor routing. Built fresh on each invocation because the
+        # enabled/checked state is per-row and Tor can start or stop at any time.
+        menu.addAction(self._build_download_tor_action(entry))
+        menu.addSeparator()
         menu.addAction(self._act_open_file)
         menu.addAction(self._act_open_folder)
         menu.addSeparator()
         menu.addAction(self._act_delete_file)
         menu.addAction(self._act_delete)
         menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _build_download_tor_action(self, entry: Optional[DownloadEntry]) -> QAction:
+        """Build the per-download 'Route through Tor' menu item.
+
+        A fresh action is created per menu invocation because the checked state
+        is per-row and the enabled state depends on whether a Tor proxy is
+        reachable at this moment. The item is only enabled while Tor is running;
+        when it is not, the tooltip explains why rather than silently greying out.
+        """
+        available = self._manager.tor_available()
+        flagged = self._manager.is_download_tor_routed(entry.id) if entry else False
+
+        # An emoji glyph in the *label* would add width on top of the icon
+        # column and push this row out of alignment with the rest of the menu,
+        # so the onion goes in the icon slot like every other item here.
+        act = QAction(_create_emoji_icon("🧅"), "Route through Tor", self)
+        act.setCheckable(True)
+        act.setChecked(flagged)
+        act.setEnabled(available)
+        if available:
+            act.setToolTip(
+                "Route this download through the Tor SOCKS5 proxy.\n"
+                f"{'Applies to every download.' if self._manager.tor_config.enabled else 'Affects this download only.'}"
+            )
+        else:
+            act.setToolTip(
+                "Unavailable: Tor is not running.\n"
+                "Start Tor from Tools → Tor, or set its path in Tools → Tor Network Settings."
+            )
+        act.triggered.connect(
+            lambda checked=False, did=(entry.id if entry else ""): self._on_toggle_download_tor(did, checked)
+        )
+        return act
+
+    def _on_toggle_download_tor(self, download_id: str, enabled: bool):
+        """Route or unroute a single download through Tor."""
+        if not download_id:
+            return
+        ok, message = self._manager.set_download_tor_route(download_id, enabled)
+        if not ok:
+            QMessageBox.warning(self, "Tor Routing Unavailable", message)
+        elif message:
+            self._status_label.setText(message)
+        self._refresh_tor_routed_rows()
+
+    def _refresh_tor_routed_rows(self) -> None:
+        """Repaint rows so the Tor badge reflects a route change immediately."""
+        self._table.viewport().update()
 
     def _on_set_bandwidth_allocation(self, allocation: str):
         for did in self._selected_ids():
@@ -2302,6 +2365,13 @@ class MainWindow(QMainWindow):
             )
         else:
             self._on_tor_status_changed("connected" if checked else "disconnected", msg)
+
+    def _on_tor_availability_changed(self, available: bool):
+        """Tor came up or went down: refresh rows that display a Tor route."""
+        self._table.viewport().update()
+        if not self._details_panel.isHidden():
+            if getattr(self._details_panel, "current_download_id", None):
+                self._details_panel.refresh()
 
     def _on_tor_status_changed(self, state: str, message: str):
         if state == "connecting":
@@ -2838,6 +2908,9 @@ class MainWindow(QMainWindow):
             self._manager.set_window_visible(visible)
 
     def closeEvent(self, event):
+        timer = getattr(self, "_tor_availability_timer", None)
+        if timer is not None:
+            timer.stop()
         cfg = self._manager.general_config
         if not getattr(self, "_force_exit", False) and cfg.enable_system_tray and cfg.close_to_tray:
             event.ignore()

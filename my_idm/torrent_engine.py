@@ -466,6 +466,30 @@ class TorrentEngine:
         except Exception as exc:
             log.warning("Failed to apply session rate limits: %s", exc)
 
+    def set_torrent_tor_route(self, download_id: str, enabled: bool) -> None:
+        """Flag a torrent to use the Tor SOCKS5 proxy.
+
+        libtorrent exposes proxy settings only at session scope
+        (``lt.session_settings``), so the flag is recorded here and the torrent is
+        re-added to the session on its next start, which is when the Tor session
+        settings are applied. The flag is also honoured by
+        :meth:`is_torrent_tor_routed` for display purposes.
+        """
+        entry = self._db.get_download(download_id) if self._db else None
+        if not entry:
+            return
+        if bool(entry.metadata.get("route_through_tor", False)) == bool(enabled):
+            return
+        entry.metadata["route_through_tor"] = bool(enabled)
+        self._db.update_download(entry)
+        log.info("TorrentEngine: download %s Tor route -> %s", download_id, enabled)
+
+    def is_torrent_tor_routed(self, download_id: str) -> bool:
+        entry = self._db.get_download(download_id) if self._db else None
+        if not entry:
+            return False
+        return bool(entry.metadata.get("route_through_tor", False))
+
     def set_torrent_bandwidth_allocation(self, download_id: str, allocation: str):
         """Set allocation level ('low', 'medium', 'high', 'max') for a torrent."""
         entry = self._db.get_download(download_id)
