@@ -309,9 +309,16 @@ def robust_move_download_files(src: str | Path, dst: str | Path) -> tuple[bool, 
             if dst_f.exists() and dst_f.is_file():
                 try:
                     if dst_f.stat().st_size == src_f.stat().st_size:
-                        unlock_path(src_f)
-                        src_f.unlink()
-                        continue
+                        # Same length is not proof of the same content: a previous attempt
+                        # that died mid-copy can leave a target truncated to exactly the
+                        # source's length. Deleting the source on size alone would then
+                        # throw away the only good copy. Verify the bytes - sampled, so the
+                        # check stays O(1) on a multi-gigabyte file - and only skip the move
+                        # when the two really are the same file.
+                        if _same_file_content(src_f, dst_f):
+                            unlock_path(src_f)
+                            src_f.unlink()
+                            continue
                 except Exception:
                     pass
 
@@ -355,6 +362,32 @@ def robust_move_download_files(src: str | Path, dst: str | Path) -> tuple[bool, 
         return False, f"{len(failed_files)} file(s) failed to move: {err_details}"
 
     return True, ""
+
+
+def _same_file_content(a: Path, b: Path, sample: int = 1 << 20) -> bool:
+    """Cheap content check for two files of equal length.
+
+    Compares the first and last *sample* bytes rather than the whole file: the realistic
+    failure is a copy that was truncated or never finished, which changes the tail or leaves
+    a run of zeros, and a full read of a 4 GB payload on every resume attempt would be far
+    too expensive. Returns ``False`` on any I/O error so the caller falls back to a real
+    move rather than skipping one.
+    """
+    try:
+        size = a.stat().st_size
+        if size == 0:
+            return True
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            if fa.read(sample) != fb.read(sample):
+                return False
+            if size > sample:
+                fa.seek(-min(sample, size), 2)
+                fb.seek(-min(sample, size), 2)
+                if fa.read() != fb.read():
+                    return False
+        return True
+    except OSError:
+        return False
 
 
 def send_to_trash(file_path: str | Path) -> bool:

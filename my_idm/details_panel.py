@@ -1352,10 +1352,30 @@ class DetailsPanel(QWidget):
             return entry_status
         return "pending"
 
+    def _live_file_item(self, file_index):
+        """Return the tree item for *file_index*, or ``None`` if it no longer exists.
+
+        ``_file_item_map`` holds ``QTreeWidgetItem`` wrappers that were constructed with a
+        C++ parent, so PySide does not own them: when the tree is cleared - including while
+        the panel is being destroyed, which still emits ``itemSelectionChanged`` - the C++
+        objects are deleted and the wrappers dangle. Touching one raises ``RuntimeError``
+        from inside a Qt slot, which surfaces as a hard access violation rather than a
+        Python exception. Probing and pruning keeps teardown orderings harmless.
+        """
+        item = self._file_item_map.get(file_index)
+        if item is None:
+            return None
+        try:
+            item.data(0, Qt.ItemDataRole.UserRole)
+        except RuntimeError:
+            self._file_item_map.pop(file_index, None)
+            return None
+        return item
+
     def _update_file_values(self, files: list[dict], is_torrent: bool):
         for f in files:
             f_idx = f.get("index", 0)
-            item = self._file_item_map.get(f_idx)
+            item = self._live_file_item(f_idx)
             if not item:
                 continue
 
@@ -1766,16 +1786,16 @@ class DetailsPanel(QWidget):
     def _on_row_checkbox_toggled(self, row: int, checked: bool):
         if not self._download_id:
             return
-        if row in self._file_item_map:
-            item = self._file_item_map[row]
+        item = self._live_file_item(row)
+        if item is not None:
             item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
             self._on_tree_item_changed(item, 0)
 
     def _on_row_priority_changed(self, row: int):
         if not self._download_id:
             return
-        if row in self._file_item_map:
-            item = self._file_item_map[row]
+        item = self._live_file_item(row)
+        if item is not None:
             self._on_file_priority_combo_changed(item)
 
     def _on_file_checkbox_toggled(self, file_index: int, checked: bool, combo: Optional[QComboBox]):

@@ -335,35 +335,41 @@ class TestThreatExclusionEdges(unittest.TestCase):
         config = SecurityConfig(ignored_threat_patterns="a,,b")
         self.assertIsNone(_is_threat_excluded("zzz", config))
 
-    def test_an_explicitly_empty_category_list_falls_back_to_the_defaults_known_quirk(self):
-        """Documents a real gotcha rather than blessing it.
+    def test_an_explicitly_empty_category_list_means_exclude_nothing(self):
+        """Regression test: un-ticking every category must actually exclude nothing.
 
-        ``get_effective_threat_exclusions`` treats a falsy list the same as a blank one and
-        substitutes ``KNOWN_THREAT_CATEGORIES``. So a user who unticks *every* category in
-        the security dialog cannot express "exclude nothing" - the five defaults come
-        back. Only a patch or a sentinel value can disable exclusions entirely.
+        ``get_effective_threat_exclusions`` treated any falsy list as unset and substituted
+        the five defaults, so a user who removed every category in the security dialog
+        silently got them all back - and the dialog had no way to say "allow no threats".
+        ``None`` (never configured) still means the defaults; a list is honoured as written.
         """
         config = SecurityConfig(ignored_threat_categories=[])
+        self.assertEqual(config.get_effective_threat_exclusions(), [])
+        self.assertIsNone(
+            _is_threat_excluded("Threat: HackTool", config),
+            "with every category excluded, nothing may be silently allowed",
+        )
+        self.assertIsNone(_is_threat_excluded("PUA/Win.Gen", config))
+
+    def test_an_unset_category_list_falls_back_to_the_defaults(self):
+        config = SecurityConfig(ignored_threat_categories=None)
         self.assertEqual(
             config.get_effective_threat_exclusions(), list(KNOWN_THREAT_CATEGORIES)
         )
-        self.assertEqual(
-            _is_threat_excluded("Threat: HackTool", config), "HackTool",
-            "KNOWN QUIRK: clearing every exclusion in the UI silently restores the defaults",
-        )
 
-    def test_an_explicitly_empty_category_list_can_still_be_scoped_by_patterns(self):
-        """The documented workaround: narrow the categories, then name what is allowed."""
-        config = SecurityConfig(
-            ignored_threat_categories=["CrackTool"], ignored_threat_patterns="internal-keygen"
-        )
-        self.assertEqual(_is_threat_excluded("CrackTool hit", config), "CrackTool")
-        self.assertIsNone(_is_threat_excluded("HackTool hit", config))
-
-    def test_blank_categories_fall_back_to_the_defaults(self):
+    def test_a_blank_only_list_excludes_nothing_too(self):
+        """Blanks carry no category, so they cannot stand in for "unset"."""
         config = SecurityConfig(ignored_threat_categories=["", "   "])
+        self.assertEqual(config.get_effective_threat_exclusions(), [])
+
+    def test_an_explicit_list_still_narrows_the_defaults(self):
+        config = SecurityConfig(ignored_threat_categories=["CrackTool"])
         self.assertEqual(
-            config.get_effective_threat_exclusions(), list(KNOWN_THREAT_CATEGORIES)
+            _is_threat_excluded("CrackTool hit", config), "CrackTool"
+        )
+        self.assertIsNone(
+            _is_threat_excluded("HackTool hit", config),
+            "narrowing the list must not re-admit the other defaults",
         )
 
     def test_a_known_category_that_is_not_in_the_report_does_not_match(self):
@@ -406,12 +412,25 @@ class TestSecurityConfigPersistence(IsolatedSettingsTestCase):
         loaded = SecurityConfig.load(self.settings)
         self.assertEqual(loaded.ignored_threat_categories, ["One", "Two", "Three"])
 
-    def test_a_blank_exclusion_string_restores_the_defaults(self):
-        SecurityConfig().save(self.settings)
-        self.settings.setValue("Security/ignored_threat_categories", "   ")
+    def test_an_explicitly_empty_list_survives_a_save_load(self):
+        """The round trip that makes the choice stick across a restart."""
+        SecurityConfig(ignored_threat_categories=[]).save(self.settings)
         self.assertEqual(
-            SecurityConfig.load(self.settings).ignored_threat_categories,
+            self.settings.value("Security/ignored_threat_categories"), "",
+            "an empty exclusion list persists as an empty value",
+        )
+        self.assertEqual(
+            SecurityConfig.load(self.settings).get_effective_threat_exclusions(), [],
+            "a present-but-empty value means exclude nothing, not 'use the defaults'",
+        )
+
+    def test_a_missing_key_still_restores_the_defaults(self):
+        SecurityConfig().save(self.settings)
+        self.settings.remove("Security/ignored_threat_categories")
+        self.assertEqual(
+            SecurityConfig.load(self.settings).get_effective_threat_exclusions(),
             list(KNOWN_THREAT_CATEGORIES),
+            "a never-written key must fall back to the defaults",
         )
 
     def test_a_whitespace_only_custom_scanner_args_falls_back(self):
@@ -423,17 +442,19 @@ class TestSecurityConfigPersistence(IsolatedSettingsTestCase):
         config = SecurityConfig.from_dict({"ignored_threat_categories": "A,B"})
         self.assertEqual(config.ignored_threat_categories, ["A", "B"])
 
-    def test_from_dict_restores_the_defaults_for_an_empty_list(self):
+    def test_from_dict_with_an_empty_list_excludes_nothing(self):
         config = SecurityConfig.from_dict({"ignored_threat_categories": []})
-        self.assertEqual(config.ignored_threat_categories, list(KNOWN_THREAT_CATEGORIES))
+        self.assertEqual(config.get_effective_threat_exclusions(), [])
 
-    def test_from_dict_accepts_a_blank_string(self):
+    def test_from_dict_with_a_blank_string_excludes_nothing(self):
         config = SecurityConfig.from_dict({"ignored_threat_categories": " , "})
-        self.assertEqual(config.ignored_threat_categories, list(KNOWN_THREAT_CATEGORIES))
+        self.assertEqual(config.get_effective_threat_exclusions(), [])
 
     def test_from_dict_with_no_key_uses_the_defaults(self):
         config = SecurityConfig.from_dict({})
-        self.assertEqual(config.ignored_threat_categories, list(KNOWN_THREAT_CATEGORIES))
+        self.assertEqual(
+            config.get_effective_threat_exclusions(), list(KNOWN_THREAT_CATEGORIES)
+        )
 
     def test_the_default_scanner_args_reference_the_placeholder(self):
         self.assertIn("%file%", SecurityConfig().custom_scanner_args)
@@ -789,15 +810,8 @@ class TestDefenderDiscovery(unittest.TestCase):
             "the versioned Platform directory must win when no fixed path exists",
         )
 
-    def test_the_walk_is_first_match_wins_not_newest_version(self):
-        """The walk has no version ordering, so the OS listing decides which Defender is used.
-
-        ``os.walk`` yields directory entries in filesystem order, and the loop returns on
-        the first ``MpCmdRun.exe`` it sees. Whether that is the newest platform version is
-        left to NTFS enumeration order, so an old Defender build can win over a new one.
-        Sorting the version directories (or matching the version against the running OS) is
-        what would make this deterministic.
-        """
+    def test_the_newest_platform_build_wins(self):
+        """Defender must be chosen by version, not by filesystem enumeration order."""
         entries = [
             (r"C:\ProgramData\Platform\4.18.1", [], ["MpCmdRun.exe"]),
             (r"C:\ProgramData\Platform\4.20.2", [], ["MpCmdRun.exe"]),
@@ -807,11 +821,44 @@ class TestDefenderDiscovery(unittest.TestCase):
              patch.object(security.os.path, "isdir", return_value=True), \
              patch.object(security.os, "walk", return_value=entries):
             found = find_windows_defender_path()
+        self.assertIn("4.20.2", found.replace("\\", "/"))
+
+    def test_a_multi_digit_version_orders_numerically_not_lexically(self):
+        """Regression: "4.9.0" is newer than "4.18.1" but sorts before it as text."""
+        entries = [
+            (r"C:\ProgramData\Platform\4.18.1", [], ["MpCmdRun.exe"]),
+            (r"C:\ProgramData\Platform\4.9.0", [], ["MpCmdRun.exe"]),
+        ]
+        with patch.object(security.os.path, "isfile",
+                          side_effect=lambda p: "\\Platform" in p), \
+             patch.object(security.os.path, "isdir", return_value=True), \
+             patch.object(security.os, "walk", return_value=entries):
+            found = find_windows_defender_path()
         self.assertIn(
             "4.18.1", found.replace("\\", "/"),
-            "KNOWN QUIRK: the first MpCmdRun.exe in os.walk order wins, so the Defender "
-            "build is not chosen by version",
+            "versions must be compared component-wise as integers, not as strings",
         )
+
+    def test_a_single_candidate_still_wins(self):
+        entries = [(r"C:\ProgramData\Platform\4.20.2", [], ["MpCmdRun.exe"])]
+        with patch.object(security.os.path, "isfile",
+                          side_effect=lambda p: "\\Platform" in p), \
+             patch.object(security.os.path, "isdir", return_value=True), \
+             patch.object(security.os, "walk", return_value=entries):
+            self.assertIn("4.20.2", find_windows_defender_path())
+
+    def test_a_non_numeric_directory_name_does_not_break_the_search(self):
+        entries = [
+            (r"C:\ProgramData\Platform\Latest", [], ["MpCmdRun.exe"]),
+            (r"C:\ProgramData\Platform\4.20.2", [], ["MpCmdRun.exe"]),
+        ]
+        with patch.object(security.os.path, "isfile",
+                          side_effect=lambda p: "\\Platform" in p), \
+             patch.object(security.os.path, "isdir", return_value=True), \
+             patch.object(security.os, "walk", return_value=entries):
+            found = find_windows_defender_path()
+        self.assertIn("4.20.2", found.replace("\\", "/"),
+                      "a 'Latest' style directory must not outrank a real version")
 
     def test_a_failing_platform_walk_falls_back_to_path_lookup(self):
         with patch.object(security.os.path, "isfile", return_value=False), \
@@ -869,37 +916,49 @@ class TestQuarantine(unittest.TestCase):
     def test_a_missing_target_reports_failure(self):
         self.assertFalse(quarantine_or_delete_file(str(self.root / "never-existed")))
 
-    def test_an_empty_path_deletes_the_working_directory(self):
-        """Documents a severe real defect rather than blessing it.
+    def test_an_empty_path_is_refused_and_the_cwd_survives(self):
+        """Regression test: a blank path must never resolve to the working directory.
 
-        ``quarantine_or_delete_file`` does ``Path(file_path)`` with no guard, and
-        ``Path("")`` is ``Path(".")``. So an empty ``file_path`` - a download row whose path
-        never got resolved, a failed ``_pick_download_path()`` returning "", anything that
-        can hand the antivirus handler a blank string - makes the app
-        ``shutil.rmtree`` **the process's current working directory**, recursively, with no
-        prompt and no undo. On Windows the CWD is wherever the app was launched from.
+        ``quarantine_or_delete_file`` did ``Path(file_path)`` with no guard, and
+        ``Path("")`` is ``Path(".")`` - the process's *current working directory*. It then
+        ``shutil.rmtree``d it, so an empty ``file_path`` - an unresolved download row, a
+        failed path probe returning "", anything that can hand the antivirus handler a blank
+        string - made the app recursively delete its own launch directory with no prompt and
+        no undo. On Windows the CWD is wherever the app was started from.
 
-        The call returns ``False`` only because removing "." itself fails with a sharing
-        violation; everything inside it is already gone by then. Reproduced here inside the
-        temp dir, which is why the canary is checked rather than the return value.
-
-        Fix: reject a blank path (and resolve/skip "." ) before touching the filesystem.
+        The call returned ``False`` either way, because removing "." itself fails with a
+        sharing violation; everything *inside* it was already gone by then. The canary is
+        therefore the assertion, not the return value.
         """
         canary = self.root / "canary.txt"
         canary.write_text("x", encoding="utf-8")
         (self.root / "victim.bin").write_bytes(b"x")
 
-        quarantine_or_delete_file("")
+        self.assertFalse(quarantine_or_delete_file(""))
+        self.assertTrue(canary.exists(), "a blank path must not touch the working directory")
+        self.assertTrue((self.root / "victim.bin").exists())
 
-        self.assertFalse(
-            canary.exists(),
-            "KNOWN BUG: an empty file_path resolves to the CWD and rmtree's it - the whole "
-            "working directory is deleted",
-        )
-        self.assertFalse(
-            (self.root / "victim.bin").exists(),
-            "KNOWN BUG: every sibling file is deleted too, not just the named one",
-        )
+    def test_a_whitespace_only_path_is_refused(self):
+        canary = self.root / "canary.txt"
+        canary.write_text("x", encoding="utf-8")
+        self.assertFalse(quarantine_or_delete_file("   "))
+        self.assertTrue(canary.exists())
+
+    def test_a_current_directory_path_is_refused(self):
+        """"." and "./" name the CWD just as much as "" does."""
+        canary = self.root / "canary.txt"
+        canary.write_text("x", encoding="utf-8")
+        for path in (".", "./", str(self.root / "sub" / "..") if False else "."):
+            with self.subTest(path=path):
+                self.assertFalse(quarantine_or_delete_file(path))
+                self.assertTrue(canary.exists())
+
+    def test_a_real_file_still_gets_deleted(self):
+        """The guard must not have neutered the function it protects."""
+        target = self.root / "bad.bin"
+        target.write_bytes(b"x")
+        self.assertTrue(quarantine_or_delete_file(str(target)))
+        self.assertFalse(target.exists())
 
     def test_a_relative_path_is_resolved_against_the_working_directory(self):
         """A relative path must not escape into the CWD either."""
@@ -1311,21 +1370,16 @@ class TestChromeWindowMatching(unittest.TestCase):
         user32 = self._user32("Chrome_WidgetWin_1", 100, 50)
         self.assertIsNone(self._run(user32), "a 100x50 window is below the 200x150 floor")
 
-    def test_the_size_floor_is_exclusive(self):
-        """The predicate is ``w > 200 and h > 150``, so exactly 200x150 is *not* claimed."""
+    def test_the_size_floor_is_inclusive(self):
+        """Regression: the guard used ``>``, so exactly 200x150 - the documented
+        minimum - was silently skipped. A small-but-genuine window was never adopted."""
         user32 = self._user32("Chrome_WidgetWin_1", 200, 150)
-        self.assertIsNone(
-            self._run(user32),
-            "KNOWN QUIRK: the size guard uses strict >, so a 200x150 window - which the "
-            "comment treats as the boundary - is silently skipped",
-        )
-
-    def test_one_pixel_above_the_floor_is_claimed(self):
-        user32 = self._user32("Chrome_WidgetWin_1", 201, 151)
         self.assertEqual(self._run(user32), self.HWND)
 
-    def test_a_window_one_pixel_below_the_floor_is_not_claimed(self):
-        user32 = self._user32("Chrome_WidgetWin_1", 201, 150)
+    def test_one_pixel_below_the_floor_is_not_claimed(self):
+        user32 = self._user32("Chrome_WidgetWin_1", 199, 150)
+        self.assertIsNone(self._run(user32))
+        user32 = self._user32("Chrome_WidgetWin_1", 200, 149)
         self.assertIsNone(self._run(user32))
 
     def test_a_window_of_a_different_class_is_ignored(self):

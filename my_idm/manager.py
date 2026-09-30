@@ -1391,6 +1391,13 @@ class DownloadManager(QObject):
                 live = bool(is_tor_reachable(config.proxy_host, config.proxy_port, timeout=timeout))
             except Exception as exc:
                 log.debug("Tor availability probe failed: %s", exc)
+            # Drop the result if the manager was stopped while the socket call was in
+            # flight. Emitting here would deliver a queued signal into a MainWindow that
+            # is mid-close, and closeEvent calls processEvents() - re-entering a
+            # half-torn-down window from a worker thread is what crashed the app on quit.
+            if self._stopped:
+                log.debug("Tor probe result discarded: manager stopped")
+                return
             self._tor_probe_result.emit(live)
 
         threading.Thread(target=_probe, name="tor-probe", daemon=True).start()

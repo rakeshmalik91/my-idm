@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -1061,6 +1061,161 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
 class TestHeaderViewAndFiltering(_MainWindowTestCase):
     """Tests for FilterHeaderView, sort indicators, and multiselect filter popup."""
 
+    def test_multi_row_selection_survives_a_status_change(self):
+        """Regression: pausing N selected rows left only one of them selected.
+
+        ``_restore_selection`` re-selects every id, then calls
+        ``self._table.setCurrentIndex(first_index)``. ``QAbstractItemView.setCurrentIndex``
+        defaults to ``ClearAndSelect|Current``, so that last line wiped the whole selection
+        and left the one row it was given. With a single row selected the bug is invisible,
+        which is why the existing single-row regression test never caught it.
+
+        The fix passes ``NoUpdate``, which moves the current index without touching the
+        selection.
+
+        Driven through the real ``_on_status_changed`` so the whole path is covered: the
+        manager emits one status change *per* download, and each one re-enters this code,
+        so a partial fix would still converge to a single row.
+        """
+        ids = []
+        for index in range(4):
+            entry = DownloadEntry(
+                id=f"multi-sel-{index}",
+                url=f"https://example.com/multi{index}.zip",
+                filename=f"multi{index}.zip",
+                save_path=tempfile.gettempdir(),
+                status="downloading",
+                download_type="http",
+            )
+            self.db.add_download(entry)
+            ids.append(entry.id)
+        self.win._load_history()
+        QApplication.processEvents()
+
+        rows = [self.win._model.row_for_id(did) for did in ids]
+        for row in rows:
+            self.assertIsNotNone(row, "every entry must be visible before selecting")
+        sm = self.win._table.selectionModel()
+        # Standard multi-select idiom: seed one row, then extend.
+        sm.select(
+            self.win._model.index(rows[0], Col.STATUS),
+            QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        for row in rows[1:]:
+            sm.select(
+                self.win._model.index(row, Col.STATUS),
+                QItemSelectionModel.SelectionFlag.Select
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+        QApplication.processEvents()
+        self.assertEqual(len(self.win._selected_ids()), 4, "precondition: 4 rows selected")
+
+        # One status change, as the manager emits it for a single download.
+        self.win._on_status_changed(ids[0], "paused", "")
+        QApplication.processEvents()
+        self.assertEqual(
+            len(self.win._selected_ids()), 4,
+            "a status change must not collapse a multi-row selection down to one row",
+        )
+
+        # And the realistic case: every selected row changes status in turn.
+        for did in ids:
+            self.win._on_status_changed(did, "paused", "")
+        QApplication.processEvents()
+        self.assertEqual(
+            sorted(self.win._selected_ids()), sorted(ids),
+            "after every selected row changed status, all of them must still be selected",
+        )
+
+    def test_the_selection_highlight_spans_the_whole_row_not_just_column_one(self):
+        """Regression: the row highlight was painted only over the first column.
+
+        ``_restore_selection`` called ``sm.select(index, Select)`` and then
+        ``sm.select(index, Rows)``. A command carrying only ``Rows`` has no action flag
+        (Clear/Select/Deselect/Toggle), so Qt treated it as a no-op and only column 0 was
+        ever selected - the green bar covered roughly the first 45px of the row and the rest
+        stayed dark.
+
+        The download id *was* selected, so ``_selected_ids()`` returned all four and every
+        status action hit the right rows: the bug was purely visual, which is why asserting
+        on selected ids alone never caught it. This asserts the column count instead.
+        """
+        ids = []
+        for index in range(3):
+            entry = DownloadEntry(
+                id=f"row-span-{index}",
+                url=f"https://example.com/span{index}.zip",
+                filename=f"span{index}.zip",
+                save_path=tempfile.gettempdir(),
+                status="downloading",
+                download_type="http",
+            )
+            self.db.add_download(entry)
+            ids.append(entry.id)
+        self.win._model.set_segregated_view(True, mode="status")
+        self.win._load_history()
+        QApplication.processEvents()
+
+        sm = self.win._table.selectionModel()
+        rows = [self.win._model.row_for_id(did) for did in ids]
+        sm.select(
+            self.win._model.index(rows[0], Col.STATUS),
+            QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        for row in rows[1:]:
+            sm.select(
+                self.win._model.index(row, Col.STATUS),
+                QItemSelectionModel.SelectionFlag.Select
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
+        QApplication.processEvents()
+        column_count = self.win._model.columnCount()
+        self.assertGreater(column_count, 1, "the table must have several columns to be meaningful")
+
+        for did in ids:
+            self.win._on_status_changed(did, "paused", "")
+        QApplication.processEvents()
+
+        selected = sm.selectedIndexes()
+        for did in ids:
+            row = self.win._model.row_for_id(did)
+            with self.subTest(download=did):
+                self.assertIsNotNone(row, "the row must still be visible after the change")
+                self.assertEqual(
+                    sum(1 for index in selected if index.row() == row), column_count,
+                    "every column of a selected row must be selected, or the highlight is "
+                    "drawn over the first column only",
+                )
+
+    def test_a_single_row_status_change_still_sets_the_current_row(self):
+        """The current index must still move, so keyboard navigation keeps working."""
+        entry = DownloadEntry(
+            id="current-row-1",
+            url="https://example.com/current.zip",
+            filename="current.zip",
+            save_path=tempfile.gettempdir(),
+            status="downloading",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        QApplication.processEvents()
+
+        row = self.win._model.row_for_id(entry.id)
+        self.win._table.selectRow(row)
+        QApplication.processEvents()
+
+        self.win._on_status_changed(entry.id, "paused", "")
+        QApplication.processEvents()
+        self.assertEqual(
+            self.win._table.currentIndex().row(),
+            self.win._model.row_for_id(entry.id),
+            "the current row must follow the download across the status change",
+        )
+        self.assertIn(entry.id, self.win._selected_ids())
+
     def test_row_selection_survives_status_change_with_segregated_view(self):
         """Regression: any status change deselected the row under the cursor.
 
@@ -2099,6 +2254,8 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         """When download status becomes completed, notify_download_complete is called if enabled."""
         entry = DownloadEntry(id="done-1", url="http://example.com/done.mp4", filename="done.mp4", status="downloading")
         self.db.add_download(entry)
+        self.win._load_history()
+        QApplication.processEvents()
         self.win._manager._general_config.notify_on_completion = True
         with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
             self.win._on_status_changed("done-1", "completed", "")
@@ -2107,6 +2264,82 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             # Duplicate call should not re-notify
             mock_notify.reset_mock()
             self.win._on_status_changed("done-1", "completed", "")
+            mock_notify.assert_not_called()
+
+    def test_seeding_to_completed_does_not_notify(self):
+        """Regression: ending a seeding session re-announced a download that finished earlier.
+
+        A torrent that finishes downloading goes straight to "seeding", so that transition
+        is the completion the user should hear about. When the seeding session later ends -
+        time limit, ratio limit, or the user stopping it - the row becomes "completed" and
+        the old code fired the notification a second time for a payload that arrived long
+        ago.
+        """
+        entry = DownloadEntry(
+            id="seed-1", url="magnet:?xt=urn:btih:aa", filename="movie.mkv",
+            status="seeding", download_type="torrent", total_size=1000,
+            downloaded_size=1000,
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        QApplication.processEvents()
+        self.win._manager._general_config.notify_on_completion = True
+        with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
+            self.win._on_status_changed("seed-1", "completed", "")
+            mock_notify.assert_not_called()
+
+    def test_a_download_that_finishes_into_seeding_does_notify(self):
+        """The other half: "seeding" on arrival *is* the completion.
+
+        The old code only ever notified on "completed", so with the default
+        ``seeding_after_complete`` setting a torrent that finished never notified at all.
+        """
+        entry = DownloadEntry(
+            id="seed-2", url="magnet:?xt=urn:btih:bb", filename="show.mkv",
+            status="downloading", download_type="torrent", total_size=1000,
+            downloaded_size=400,
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        QApplication.processEvents()
+        self.win._manager._general_config.notify_on_completion = True
+        with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
+            self.win._on_status_changed("seed-2", "seeding", "")
+            mock_notify.assert_called_once_with("show.mkv")
+
+    def test_a_full_seeding_lifecycle_notifies_exactly_once(self):
+        """downloading -> seeding -> completed must produce exactly one notification."""
+        entry = DownloadEntry(
+            id="seed-3", url="magnet:?xt=urn:btih:cc", filename="ep.mkv",
+            status="downloading", download_type="torrent", total_size=1000,
+            downloaded_size=500,
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        QApplication.processEvents()
+        self.win._manager._general_config.notify_on_completion = True
+        with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
+            self.win._on_status_changed("seed-3", "seeding", "")
+            self.assertEqual(mock_notify.call_count, 1, "the payload arriving is news")
+            self.win._on_status_changed("seed-3", "completed", "")
+            self.assertEqual(mock_notify.call_count, 1, "ending the session is not news")
+            mock_notify.reset_mock()
+            # And a genuinely restarted download must be able to notify again.
+            self.win._on_status_changed("seed-3", "downloading", "")
+            self.win._on_status_changed("seed-3", "seeding", "")
+            mock_notify.assert_called_once_with("ep.mkv")
+
+    def test_no_notification_when_the_setting_is_off(self):
+        entry = DownloadEntry(
+            id="seed-4", url="magnet:?xt=urn:btih:dd", filename="off.mkv",
+            status="downloading", download_type="torrent", total_size=1000,
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        QApplication.processEvents()
+        self.win._manager._general_config.notify_on_completion = False
+        with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
+            self.win._on_status_changed("seed-4", "seeding", "")
             mock_notify.assert_not_called()
 
 

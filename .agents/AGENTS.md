@@ -41,7 +41,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 
 1. **Commit Convention**: Follow standard conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
 2. **Testing**: Always run `python -m pytest` and ensure all unit tests pass before committing.
-   - The full suite is green: `1665 passed, 1 skipped`. The single skip is the opt-in real
+   - The full suite is green: `1724 passed, 1 skipped`. The single skip is the opt-in real
      Windows Defender scan (`MYIDM_RUN_AV_TESTS`).
    - **The suite is hermetic by construction, enforced in `tests/conftest.py`.** Autouse
      fixtures fail the run if anything escapes the sandbox, so a violation is a bug to fix,

@@ -1295,12 +1295,30 @@ class MainWindow(QMainWindow):
             if row is None or row < 0:
                 continue
             index = self._model.index(row, 0)
-            sm.select(index, QItemSelectionModel.SelectionFlag.Select)
-            sm.select(index, QItemSelectionModel.SelectionFlag.Rows)
+            # Select|Rows in ONE call. A command carrying only `Rows` has no action flag
+            # (Clear/Select/Deselect/Toggle) and Qt treats it as a no-op, so calling
+            # select(index, Select) and then select(index, Rows) selected column 0 alone
+            # and the row highlight was drawn only over the first ~45px of the row. The id
+            # was still selected, so status actions hit the right downloads - only the
+            # paint was wrong, which is what made it look like a cosmetic glitch.
+            sm.select(
+                index,
+                QItemSelectionModel.SelectionFlag.Select
+                | QItemSelectionModel.SelectionFlag.Rows,
+            )
             if first_index is None:
                 first_index = index
         if first_index is not None:
-            self._table.setCurrentIndex(first_index)
+            # Move the current index through the selection model with NoUpdate.
+            # QAbstractItemView.setCurrentIndex() defaults to ClearAndSelect|Current, so
+            # the plain call wiped the selection it had just rebuilt and left one row
+            # selected - invisible with a single row selected, and the reason that pausing /
+            # resuming / seeding N selected downloads left exactly one of them selected, so
+            # the next action applied to the wrong row. (PySide6 does not expose
+            # setCurrentIndex's two-argument overload, hence going via the model.)
+            sm.setCurrentIndex(
+                first_index, QItemSelectionModel.SelectionFlag.NoUpdate
+            )
             self._table.scrollTo(first_index, QAbstractItemView.ScrollHint.EnsureVisible)
 
     def _first_selected_entry(self) -> Optional[DownloadEntry]:
@@ -1897,6 +1915,10 @@ class MainWindow(QMainWindow):
         # Segregated view rebuilds the model on every status change, and a model
         # reset drops the view's selection. Capture it first and put it back.
         selected = self._selected_ids()
+        # The manager's row is already updated by the time this slot runs, so the model's
+        # copy is the only place the *previous* status still exists.
+        previous_entry = self._model.get_entry_by_id(download_id)
+        previous_status = previous_entry.status if previous_entry is not None else None
         self._model.update_status(download_id, status, error_msg)
         # The engine writes more than the status: seeding timestamps, resolved
         # filenames and sizes all change alongside it, and the model holds its
@@ -1910,15 +1932,29 @@ class MainWindow(QMainWindow):
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 
-        if status == "completed":
-            if self._manager.general_config.notify_on_completion:
-                if download_id not in self._completed_notified:
-                    self._completed_notified.add(download_id)
-                    entry = self._manager.get_entry(download_id)
-                    fname = entry.filename if entry and entry.filename else download_id
-                    from my_idm.notifications import notify_download_complete
-                    notify_download_complete(fname)
-        elif status in ("downloading", "queued", "paused"):
+        # "seeding" is a completion: the payload arrived. "completed" arriving *from*
+        # "seeding" is not - the download finished when it started seeding and the user was
+        # told then. The old code only inspected the new status, so a seeding torrent that
+        # went straight to "seeding" on finishing never notified at all, and then notified a
+        # second time when its seeding session ended (time limit, ratio limit, or the user
+        # stopping it). Both halves were wrong, in opposite directions.
+        finished_now = status in ("completed", "seeding") and previous_status not in (
+            "completed", "seeding",
+        )
+        if finished_now:
+            if (
+                self._manager.general_config.notify_on_completion
+                and download_id not in self._completed_notified
+            ):
+                entry = self._manager.get_entry(download_id)
+                fname = entry.filename if entry and entry.filename else download_id
+                from my_idm.notifications import notify_download_complete
+                notify_download_complete(fname)
+            # Record it even when notifications are off or suppressed, so a later
+            # completed/seeding bounce cannot resurrect one.
+            self._completed_notified.add(download_id)
+        elif status in ("downloading", "queued", "paused", "stopped"):
+            # Work (re)started, so the next completion is news again.
             self._completed_notified.discard(download_id)
 
     def _on_filename_resolved(self, download_id: str, filename: str):
@@ -3003,20 +3039,30 @@ class MainWindow(QMainWindow):
         # Instantly hide main window
         self.hide()
 
+        app = QApplication.instance()
+
+        # Stop the manager BEFORE flushing pending events. processEvents() dispatches queued
+        # signals, and a worker thread (the Tor availability probe, the torrent monitor) can
+        # still be mid-call and about to emit into this window - re-entering a window that
+        # is half torn down is what crashed the app on quit.
+        try:
+            if exit_splash:
+                self._manager.stop(status_cb=exit_splash.set_message)
+            else:
+                self._manager.stop()
+        except Exception as exc:
+            log.warning("Error stopping manager during close: %s", exc)
+
         # Flush all pending window manager messages so main window vanishes immediately
         # and exit splash screen appears on screen with zero delay
-        app = QApplication.instance()
         if app:
             app.processEvents()
 
         try:
             if exit_splash:
-                self._manager.stop(status_cb=exit_splash.set_message)
                 exit_splash.set_message("Goodbye!", 100)
                 exit_splash.close()
                 if app:
                     app.processEvents()
-            else:
-                self._manager.stop()
         finally:
             super().closeEvent(event)

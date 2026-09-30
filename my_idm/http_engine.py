@@ -659,6 +659,9 @@ class HTTPEngine:
             s for s in segments if s.status != "completed"
         ]
         if not pending:
+            # All done: fall through to the same cleanup the gather path uses, so
+            # get_live_segments() cannot keep reporting a finished download as segmented.
+            self._active_segments.pop(download_id, None)
             return  # All segments done
 
         tasks = [
@@ -696,7 +699,13 @@ class HTTPEngine:
             if resp.status_code == 416:
                 raise _FallbackToSingle("416 Range Not Satisfiable")
             if resp.status_code not in (200, 206):
-                raise Exception(f"Unexpected status {resp.status_code} in curl segment download")
+                # aiohttp.ClientError, not a bare Exception: the retry ladder in
+                # _download_one_segment catches (aiohttp.ClientError, TimeoutError, OSError),
+                # so a plain Exception bypasses it entirely and the segment is abandoned
+                # still marked "downloading" in the details panel.
+                raise aiohttp.ClientError(
+                    f"Unexpected status {resp.status_code} in curl segment download"
+                )
             if resp.status_code == 200 and seg.index > 0:
                 raise _FallbackToSingle("Server returned 200 instead of 206")
 
@@ -751,6 +760,9 @@ class HTTPEngine:
         )
 
         max_retries = self._get_max_retries(entry)
+        # The most recent transport failure, carried into the terminal raise so the row's
+        # error_message names a cause rather than only a retry count.
+        last_error: BaseException | None = None
         for attempt in range(max_retries):
             if cancel_evt.is_set():
                 # Interrupted before finishing: report it as paused rather than
@@ -875,6 +887,10 @@ class HTTPEngine:
                     "Segment %d attempt %d failed: %s — retrying in %.1fs",
                     seg.index, attempt + 1, exc, delay,
                 )
+                # Remember the cause: the terminal raise below is what reaches the row's
+                # error_message, and without this the user is shown a retry count instead of
+                # a diagnosable reason.
+                last_error = exc
                 # In-memory too: the details panel reads the live SegmentEntry,
                 # so a DB-only update would leave the row showing a stale status.
                 if seg.status == "downloading":
@@ -889,6 +905,7 @@ class HTTPEngine:
         self._db.update_segment(seg.id, seg.downloaded_bytes, "error")
         raise Exception(
             f"Segment {seg.index} failed after {max_retries} retries"
+            + (f": {last_error}" if last_error is not None else "")
         )
 
     @staticmethod
@@ -1002,12 +1019,21 @@ class HTTPEngine:
         start_time = time.monotonic()
 
         max_single_retries = self._get_max_retries(entry)
+        # Set after a 416 proves the on-disk prefix is not a valid resume point. The retry
+        # loop recomputes `headers` from `file_path.stat().st_size` on every attempt, so
+        # popping the header alone was undone on the next pass and the same stale Range was
+        # re-sent until the ladder gave up.
+        force_restart = False
+        # See _download_one_segment: surfaced in the terminal raise below.
+        last_error: BaseException | None = None
         for attempt in range(max_single_retries):
             if cancel_evt.is_set():
                 return
             try:
                 # Refresh existing size on disk for accurate resume and headers on each attempt
-                existing_size = file_path.stat().st_size if file_path.exists() else 0
+                existing_size = 0 if force_restart else (
+                    file_path.stat().st_size if file_path.exists() else 0
+                )
                 headers = {}
                 if existing_size > 0:
                     headers["Range"] = f"bytes={existing_size}-"
@@ -1036,10 +1062,11 @@ class HTTPEngine:
                         if entry.total_size and existing_size >= entry.total_size:
                             entry.downloaded_size = entry.total_size
                             return
-                        # Or range is stale: restart from byte 0
+                        # Or the range is stale (the resource changed, or we hold a partial
+                        # file the server will not extend): restart the whole body.
+                        force_restart = True
                         existing_size = 0
                         start_downloaded = 0
-                        headers.pop("Range", None)
                         continue
                     if resp.status not in (200, 206):
                         raise aiohttp.ClientError(
@@ -1135,10 +1162,12 @@ class HTTPEngine:
                     "Single-stream attempt %d failed: %s — retrying in %.1fs",
                     attempt + 1, exc, delay,
                 )
+                last_error = exc
                 await asyncio.sleep(delay)
 
         raise Exception(
             f"Single-stream download failed after {max_single_retries} retries"
+            + (f": {last_error}" if last_error is not None else "")
         )
 
     # -- retry handling -------------------------------------------------------
@@ -1151,9 +1180,14 @@ class HTTPEngine:
 
         count = self._db.increment_retry(entry.id)
         if count < entry.max_retries:
-            delay = self._get_retry_delay(count - 1)
+            delay = self._general_config.get_retry_delay(count - 1)
             entry.metadata["next_retry_at"] = time.time() + delay
             entry.metadata["retry_delay"] = delay
+            # Carry the new count onto the in-memory entry. update_download writes every
+            # column, so the caller's stale retry_count would otherwise be written back over
+            # the increment - leaving the counter at 0 forever, which makes the exhaustion
+            # check below unreachable and re-queues a failing download indefinitely.
+            entry.retry_count = count
             self._db.update_download(entry)
             msg = (
                 f"Retrying in {int(delay)}s ({count}/{entry.max_retries}): {error_msg}"

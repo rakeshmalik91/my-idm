@@ -537,26 +537,50 @@ class TestSessionSettings(EngineTestCase):
             )
             self.assertEqual(self._applied()["proxy_type"], "http_pw")
 
-    def test_an_unrecognised_proxy_type_forces_the_proxy_without_setting_a_type(self):
-        """Documents a real gap rather than blessing it.
+    def test_an_unrecognised_proxy_type_is_ignored_rather_than_half_applied(self):
+        """A typo must disable the proxy, not force one libtorrent will not use.
 
-        ``proxy_type`` is only assigned inside the ``socks5``/``http`` branches, so a
-        typo like ``"SOCKS5 "`` or ``"https"`` still sets ``force_proxy=True`` and a proxy
-        host, while leaving ``proxy_type`` at whatever the previous apply left (or the
-        libtorrent default, i.e. none). The result is a forced proxy that silently does not
-        route. Validating the value, or an ``else: proxy_type = none`` branch, would fix it.
+        Regression test. ``proxy_type`` was only assigned inside the ``socks5``/``http``
+        branches, so any other value - a typo, ``"https"``, a trailing space - still set
+        ``force_proxy=True`` plus a proxy host, while ``proxy_type`` stayed at whatever the
+        previous apply had left (or the libtorrent default, i.e. none). The result was a
+        connection forced through a proxy that was never configured, failing silently. An
+        unknown value is now ignored, with a warning.
         """
-        self.engine.apply_network_config(
-            NetworkConfig(proxy_enabled=True, proxy_host="p", proxy_port=3128,
-                          proxy_type="https")
-        )
+        with patch.object(te_module.lt, "proxy_type_t",
+                          MagicMock(none="none", socks5="socks5", socks5_pw="socks5_pw",
+                                    http="http", http_pw="http_pw")):
+            self.engine.apply_network_config(
+                NetworkConfig(proxy_enabled=True, proxy_host="p", proxy_port=3128,
+                              proxy_type="https")
+            )
         settings = self._applied()
-        self.assertTrue(settings["force_proxy"])
-        self.assertNotIn(
-            "proxy_type", settings,
-            "KNOWN GAP: an unrecognised proxy_type forces the proxy without setting a type, "
-            "so the connection is forced through a proxy libtorrent will not use",
+        self.assertFalse(
+            settings["force_proxy"],
+            "an unrecognised proxy_type must not force a connection through a proxy that "
+            "was never configured",
         )
+        self.assertEqual(settings["proxy_type"], "none")
+        self.assertEqual(settings["proxy_hostname"], "")
+
+    def test_an_unrecognised_proxy_type_after_a_good_one_clears_the_previous_proxy(self):
+        """The stale value from the previous apply must not survive the bad one."""
+        with patch.object(te_module.lt, "proxy_type_t",
+                          MagicMock(none="none", socks5="socks5", socks5_pw="socks5_pw",
+                                    http="http", http_pw="http_pw")):
+            self.engine.apply_network_config(
+                NetworkConfig(proxy_enabled=True, proxy_host="good", proxy_port=1080,
+                              proxy_type="socks5")
+            )
+            self.assertEqual(self._applied()["proxy_type"], "socks5")
+            self.engine.apply_network_config(
+                NetworkConfig(proxy_enabled=True, proxy_host="bad", proxy_port=9999,
+                              proxy_type="SOCKS5 ")
+            )
+        settings = self._applied()
+        self.assertEqual(settings["proxy_type"], "none")
+        self.assertFalse(settings["force_proxy"])
+        self.assertNotEqual(settings["proxy_hostname"], "bad")
 
     def test_a_proxy_with_no_host_is_ignored(self):
         self.engine.apply_network_config(
@@ -767,45 +791,18 @@ class TestAddTorrentDispatch(EngineTestCase):
     def test_an_http_url_that_is_not_a_torrent_is_rejected_without_fetching(self):
         """A magnet or a local file is fine; a plain HTTP media URL must not be fetched.
 
-        KNOWN BUG - see :meth:`test_a_remote_torrent_url_raises_nameerror` below: the
-        extension check cannot currently run at all, because the module never imported
-        ``urlparse``. Until that is fixed this test passes only because the NameError
-        aborts the call, so the assertion is on the observable contract rather than on
-        which mechanism rejected it.
+        This doubles as the check that ``urlparse`` is genuinely imported: if it were not,
+        ``add_torrent`` would raise ``NameError`` instead of returning ``False`` and this
+        test would error rather than pass.
         """
         entry = self.add_torrent_entry(url="https://example.com/movie.mkv")
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen") as fetch:
+        with patch("urllib.request.urlopen") as fetch:
             self.assertFalse(self.engine.add_torrent(entry))
         fetch.assert_not_called()
 
-    def test_a_remote_torrent_url_raises_nameerror(self):
-        """Documents a real defect rather than blessing it.
-
-        ``add_torrent`` calls ``urlparse(url)`` at torrent_engine.py:651 to decide whether
-        an ``http(s)://`` source points at a ``.torrent`` file, but ``urlparse`` is never
-        imported - the module's imports are logging/os/shutil/time, datetime, pathlib and
-        typing only. Every remote ``.torrent`` URL therefore raises ``NameError`` from
-        inside ``add_torrent`` instead of downloading the metainfo, and the caller's
-        ``except Exception`` turns it into a silent "failed to add". Adding
-        ``from urllib.parse import urlparse`` restores the feature.
-        """
-        import my_idm.torrent_engine as module_under_test
-
-        self.assertNotIn(
-            "urlparse", vars(module_under_test),
-            "KNOWN BUG: torrent_engine uses urlparse() but never imports it, so every "
-            "remote .torrent URL fails with NameError",
-        )
-        entry = self.add_torrent_entry(url="https://example.com/a.torrent")
-        with self.assertRaises(NameError):
-            self.engine.add_torrent(entry)
-        self.assertEqual(self.session.added, [])
-
     def test_an_http_torrent_url_with_the_suffix_in_the_query_is_fetched(self):
         entry = self.add_torrent_entry(url="https://example.com/dl?id=x.torrent")
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen", side_effect=OSError("offline")) as fetch:
+        with patch("urllib.request.urlopen", side_effect=OSError("offline")) as fetch:
             self.assertFalse(self.engine.add_torrent(entry))
         fetch.assert_called_once(), (
             "a .torrent in the query string must be fetched; today the missing "
@@ -890,13 +887,20 @@ class TestAddTorrentDispatch(EngineTestCase):
     def test_a_remote_torrent_that_cannot_be_fetched_is_rejected(self):
         """With ``urlparse`` supplied, the fetch path runs and reports its own failure."""
         entry = self.add_torrent_entry(url="https://example.com/a.torrent")
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen", side_effect=OSError("offline")):
+        with patch("urllib.request.urlopen", side_effect=OSError("offline")):
             self.assertFalse(self.engine.add_torrent(entry))
         self.assertEqual(self.db.get_download("t1").status, "queued",
                          "a failed fetch must not leave the row in a partial state")
 
     def test_a_remote_torrent_is_cached_before_parsing(self):
+        """A remote ``.torrent`` must actually be downloaded, cached and parsed.
+
+        Regression test. ``add_torrent`` calls ``urlparse(url)`` to decide whether an
+        ``http(s)://`` source points at a ``.torrent`` file, but the module never imported
+        ``urlparse`` - so every remote ``.torrent`` raised ``NameError`` from inside
+        ``add_torrent``, and the caller's broad ``except Exception`` turned it into a silent
+        "failed to add". Remote torrents were simply unusable.
+        """
         entry = self.add_torrent_entry(url="https://example.com/a.torrent")
         info = MagicMock()
         info.info_hash.return_value = "dd" * 20
@@ -904,8 +908,7 @@ class TestAddTorrentDispatch(EngineTestCase):
         response = MagicMock()
         response.read.return_value = b"bencode-bytes"
         response.__enter__.return_value = response
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen", return_value=response), \
+        with patch("urllib.request.urlopen", return_value=response), \
              patch.object(te_module.lt, "torrent_info", return_value=info), \
              patch.object(te_module.lt, "add_torrent_params", return_value=MagicMock()):
             self.assertTrue(self.engine.add_torrent(entry))
@@ -920,8 +923,7 @@ class TestAddTorrentDispatch(EngineTestCase):
         response = MagicMock()
         response.read.return_value = b"bencode"
         response.__enter__.return_value = response
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen", return_value=response), \
+        with patch("urllib.request.urlopen", return_value=response), \
              patch.object(te_module.lt, "torrent_info", return_value=info), \
              patch.object(te_module.lt, "add_torrent_params", return_value=MagicMock()):
             self.engine.add_torrent(entry)
@@ -935,8 +937,7 @@ class TestAddTorrentDispatch(EngineTestCase):
         response = MagicMock()
         response.read.return_value = b"bencode"
         response.__enter__.return_value = response
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen", return_value=response) as fetch, \
+        with patch("urllib.request.urlopen", return_value=response) as fetch, \
              patch.object(te_module.lt, "torrent_info", return_value=info), \
              patch.object(te_module.lt, "add_torrent_params", return_value=MagicMock()):
             self.engine.add_torrent(entry)
@@ -948,8 +949,7 @@ class TestAddTorrentDispatch(EngineTestCase):
         response = MagicMock()
         response.read.return_value = b"not bencode"
         response.__enter__.return_value = response
-        with patch.object(te_module, "urlparse", _urlparse, create=True), \
-             patch("urllib.request.urlopen", return_value=response), \
+        with patch("urllib.request.urlopen", return_value=response), \
              patch.object(te_module.lt, "torrent_info", side_effect=ValueError("bad")):
             self.assertFalse(self.engine.add_torrent(entry))
 
@@ -973,21 +973,15 @@ class TestAddTorrentDispatch(EngineTestCase):
         self.assertIn(("pause",), self.engine._handles["t1"].calls)
 
     def test_a_metadata_less_handle_starts_in_fetching_metadata_and_stamps_the_timer(self):
-        """The engine *reports* fetching_metadata but the row never records it.
+        """The stored row must say ``fetching_metadata``, not just the callback.
 
-        KNOWN BUG: ``add_torrent`` calls ``update_status(id, "fetching_metadata")`` and then,
-        to arm the timeout timer, sets ``entry.fetching_metadata_since`` and calls
-        ``update_download(entry)``. ``update_download`` writes **every** column, including
-        ``status``, and ``entry`` is the caller's object whose ``status`` is still
-        ``"queued"`` - so the second write silently reverts the first.
-
-        Consequences for every magnet download: the row stays "Queued" in the UI, the
-        manager keeps re-queuing it against the concurrency limit, and
-        ``_check_fetching_metadata_timeout`` - which requires
-        ``entry.status == "fetching_metadata"`` - can never suspend a stuck magnet.
-
-        Fix: set ``entry.status = initial_status`` before ``update_download``, or have
-        ``update_download`` leave ``status`` to ``update_status``.
+        Regression test. ``add_torrent`` calls ``update_status(id, "fetching_metadata")`` and
+        then, to arm the watchdog, sets ``fetching_metadata_since`` and calls
+        ``update_download(entry)``. ``update_download`` writes *every* column and ``entry``
+        is the caller's object whose ``status`` is still ``"queued"``, so the second write
+        silently reverted the first: the table showed "Queued" forever and
+        ``_check_fetching_metadata_timeout`` - which requires that status - could never
+        suspend a stuck magnet. The status is now carried onto the entry first.
         """
         self.use_handle_factory(lambda: FakeHandle(has_metadata=False))
         entry = self.add_torrent_entry()
@@ -995,21 +989,12 @@ class TestAddTorrentDispatch(EngineTestCase):
         with patch.object(te_module.lt, "parse_magnet_uri", return_value=params):
             self.engine.add_torrent(entry)
         row = self.db.get_download("t1")
-        self.assertEqual(
-            self.status_trail()[-1], "fetching_metadata",
-            "the status callback does report fetching_metadata",
-        )
-        self.assertTrue(
-            row.fetching_metadata_since, "the timeout timer is armed in the database",
-        )
-        self.assertEqual(
-            row.status, "queued",
-            "KNOWN BUG: the follow-up update_download() writes the stale in-memory "
-            "status back over the fetching_metadata set moments earlier",
-        )
+        self.assertEqual(row.status, "fetching_metadata")
+        self.assertEqual(self.status_trail()[-1], "fetching_metadata")
+        self.assertTrue(row.fetching_metadata_since, "the metadata timer must be armed")
 
-    def test_the_metadata_timeout_guard_never_fires_for_a_magnet(self):
-        """The downstream effect of the status revert, proved rather than assumed."""
+    def test_the_metadata_timeout_guard_fires_for_a_stuck_magnet(self):
+        """The suspend-after-N-days watchdog, which the status revert made unreachable."""
         self.use_handle_factory(lambda: FakeHandle(has_metadata=False))
         entry = self.add_torrent_entry()
         params = magnet_params()
@@ -1017,22 +1002,15 @@ class TestAddTorrentDispatch(EngineTestCase):
             self.engine.add_torrent(entry)
 
         row = self.db.get_download("t1")
-        stale = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        row.fetching_metadata_since = stale
+        row.fetching_metadata_since = (
+            datetime.now(timezone.utc) - timedelta(days=30)
+        ).isoformat()
         self.db.update_download(row)
-        # Re-arm the status the way add_torrent's own update_download left it.
-        row = self.db.get_download("t1")
-        self.assertEqual(
-            row.status, "queued",
-            "KNOWN BUG: because the status reverted, the suspend-after-N-days guard in "
-            "_check_fetching_metadata_timeout is unreachable for magnet downloads",
-        )
         self.engine._torrent_config = TorrentConfig(metadata_fetch_timeout_days=1)
         self.engine._check_fetching_metadata_timeout("t1", row, {"downloaded": 0})
-        self.assertNotEqual(
+        self.assertEqual(
             self.db.get_download("t1").status, "suspended",
-            "KNOWN BUG: a month-old fetching_metadata torrent is never suspended, because "
-            "the guard requires status == 'fetching_metadata' and the row says 'queued'",
+            "a month-old fetching_metadata torrent must be suspended",
         )
 
     def test_a_handle_with_metadata_and_no_fastresume_is_rechecked_first(self):
@@ -1562,18 +1540,14 @@ class TestFilePriority(EngineTestCase):
     def test_an_unknown_id_is_refused(self):
         self.assertFalse(self.engine.set_torrent_file_priority("nope", 0, 0))
 
-    def test_unchecking_a_file_on_a_finished_torrent_updates_the_cache_only(self):
-        """The function reports success, but the change never reaches the database.
+    def test_unchecking_a_file_on_a_finished_torrent_persists(self):
+        """The uncheck must survive a reload, not just the current session.
 
-        KNOWN BUG: ``DownloadEntry.metadata`` is a property that re-parses ``metadata_json``
-        and returns a *fresh* dict on every access, and its ``__setitem__`` is what syncs a
-        change back. ``set_torrent_file_priority`` mutates a *nested* list element
-        (``f["priority"] = priority``) and then calls ``update_download``, which serialises
-        the unchanged ``metadata_json``. Top-level assignments like
-        ``entry.metadata["manual_seeding"] = True`` are fine; nested ones are silently
-        dropped. So unchecking a file inside a finished torrent is reflected in the UI for
-        the rest of the session and then reverts. Re-assigning the container
-        (``entry.metadata["files"] = files``) would persist it.
+        Regression test. ``DownloadEntry.metadata`` re-parses ``metadata_json`` on every
+        access and only a *top-level* assignment syncs, so mutating a file dict in place was
+        discarded and ``update_download`` wrote the old JSON back: the call reported success
+        and the UI updated, then every file was priority 4 again after a restart. The call
+        site now re-assigns the whole list.
         """
         self.add_torrent_entry(status="completed")
         entry = self.db.get_download("t1")
@@ -1583,16 +1557,15 @@ class TestFilePriority(EngineTestCase):
         ]
         self.db.update_download(entry)
         self.assertTrue(self.engine.set_torrent_file_priority("t1", 1, 0))
+
         files = self.db.get_download("t1").metadata["files"]
-        self.assertEqual(
-            files[1]["priority"], 4,
-            "KNOWN BUG: a nested metadata mutation is dropped, so the per-file priority "
-            "change is lost on reload even though the call reports success",
-        )
+        self.assertEqual(files[0]["priority"], 4, "the sibling file is untouched")
+        self.assertEqual(files[1]["priority"], 0, "the change must reach the database")
+        self.assertEqual(files[1]["status"], "skipped")
         self.assertEqual(self.session.added, [], "no handle should be created to uncheck a file")
 
     def test_a_top_level_metadata_assignment_does_persist(self):
-        """The contrast that proves the bug is about *nested* mutation only."""
+        """The contrast that documents why the file list is re-assigned."""
         self.add_torrent_entry(status="completed")
         entry = self.db.get_download("t1")
         entry.metadata["files"] = [
@@ -1614,7 +1587,7 @@ class TestFilePriority(EngineTestCase):
         handle.file_priority = MagicMock(side_effect=RuntimeError("boom"))
         self.assertFalse(self.engine.set_torrent_file_priority("t1", 0, 0))
 
-    def test_a_live_priority_change_is_forwarded_to_the_handle(self):
+    def test_a_live_priority_change_reaches_both_the_handle_and_the_database(self):
         self.add_torrent_entry()
         handle = self.attach()
         entry = self.db.get_download("t1")
@@ -1623,26 +1596,11 @@ class TestFilePriority(EngineTestCase):
         ]
         self.db.update_download(entry)
         self.assertTrue(self.engine.set_torrent_file_priority("t1", 0, 0))
-        self.assertIn(("file_priority", 0, 0), handle.calls)
-        self.assertEqual(handle._priorities[0], 0, "libtorrent must be told about the change")
-
-    def test_a_nested_metadata_change_is_not_persisted_known_bug(self):
-        """Same root cause as the offline path, but on a live handle."""
-        self.add_torrent_entry()
-        self.attach()
-        entry = self.db.get_download("t1")
-        entry.metadata["files"] = [
-            {"index": 0, "path": "Payload/a.bin", "size": 100, "downloaded": 50, "progress": 50.0},
-        ]
-        self.db.update_download(entry)
-        self.assertTrue(self.engine.set_torrent_file_priority("t1", 0, 0))
+        self.assertIn(("file_priority", 0, 0), handle.calls, "libtorrent must be told")
         stored = self.db.get_download("t1").metadata["files"][0]
-        self.assertNotIn(
-            "status", stored,
-            "KNOWN BUG: the per-file status/priority written into entry.metadata['files'] is "
-            "a nested mutation, so update_download serialises the old metadata_json and the "
-            "details panel's file rows revert on the next load",
-        )
+        self.assertEqual(stored["status"], "skipped")
+        self.assertEqual(stored["priority_label"], "Don't Download")
+        self.assertEqual(stored["priority"], 0)
 
     def test_rechecking_a_file_on_a_finished_torrent_resumes_the_download(self):
         self.add_torrent_entry(status="completed", total_size=1000, downloaded_size=1000)
@@ -2249,4 +2207,5 @@ class TestConcurrentAccess(EngineTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 

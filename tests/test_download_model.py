@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
+from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import QApplication, QTableView
@@ -468,9 +469,21 @@ class TestMainWindowSortingIntegration(unittest.TestCase):
         self.db = Database(":memory:")
         self.db.open()
         self.addCleanup(self.db.close)
+        # MainWindow starts a 4 s timer that probes Tor from a worker thread. Left real,
+        # that thread opens a non-loopback socket, which the suite's hermeticity guard
+        # blocks - and the resulting worker thread outlives the test, so it is still inside
+        # the (by then restored) socket patch while _destroy_window runs closeEvent and
+        # processEvents, which faults the interpreter. Mock the transport, as the guard
+        # asks, and stop the timer up front rather than only at teardown.
+        probe = patch("my_idm.manager.is_tor_reachable", return_value=False)
+        probe.start()
+        self.addCleanup(probe.stop)
         self.manager = DownloadManager(self.db)
         self.addCleanup(self.manager.stop)
         self.win = MainWindow(self.manager)
+        tor_timer = getattr(self.win, "_tor_availability_timer", None)
+        if tor_timer is not None:
+            tor_timer.stop()
         self.addCleanup(self._destroy_window, self.win)
 
     @staticmethod

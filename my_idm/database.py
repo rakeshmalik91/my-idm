@@ -328,7 +328,26 @@ class DownloadEntry:
 
 
 class _MetadataDict(dict):
-    """A dictionary wrapper that automatically serializes back to DownloadEntry.metadata_json upon mutation."""
+    """A dict that serialises itself back to ``DownloadEntry.metadata_json`` on mutation.
+
+    Only *top-level* mutations sync. ``DownloadEntry.metadata`` re-parses ``metadata_json``
+    on every access and hands back a fresh instance, so this is the only hook that can
+    persist a change.
+
+    Consequence, and the reason this is not a deep proxy: a **nested** mutation is silently
+    discarded unless the whole container is re-assigned.
+
+    .. code-block:: python
+
+        entry.metadata["manual_seeding"] = True      # persists
+        files = entry.metadata["files"]
+        files[0]["priority"] = 0                      # lost on its own
+        entry.metadata["files"] = files                # this is what persists it
+
+    A deep proxy would remove the footgun but re-wrap the whole structure on every access -
+    and ``metadata`` is read several times per second per torrent in ``poll_all`` - so the
+    call sites above are written explicitly instead.
+    """
 
     def __init__(self, entry: DownloadEntry, initial: dict):
         super().__init__(initial)
@@ -559,7 +578,18 @@ class Database:
         self._conn.commit()
 
     def update_status(self, download_id: str, status: str,
-                      error_message: str = ""):
+                      error_message: Optional[str] = None):
+        """Update a download's status.
+
+        ``completed`` and ``downloading`` always clear ``error_message`` - a fresh start
+        means the old diagnostic is no longer relevant. ``error`` always records it.
+
+        Every other status leaves it alone *unless* a message is supplied: the default is
+        ``None`` meaning "don't touch", so a bare ``update_status(id, "queued")`` cannot
+        silently erase a diagnostic, while ``update_status(id, "queued", msg)`` - the
+        retry notice - is actually persisted. The same applies to ``file_not_found`` and
+        ``threat_detected``, whose messages used to be dropped on the floor.
+        """
         now = _now_iso()
         if status == "completed":
             self._conn.execute(
@@ -572,6 +602,11 @@ class Database:
                 (status, now, download_id),
             )
         elif status == "error":
+            self._conn.execute(
+                "UPDATE downloads SET status = ?, error_message = ? WHERE id = ?",
+                (status, error_message or "", download_id),
+            )
+        elif error_message is not None:
             self._conn.execute(
                 "UPDATE downloads SET status = ?, error_message = ? WHERE id = ?",
                 (status, error_message, download_id),

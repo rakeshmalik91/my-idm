@@ -97,7 +97,10 @@ def find_chrome_hwnd(parent_pid: Optional[int] = None) -> Optional[int]:
                     user32.GetWindowRect(hwnd, rect)
                     w = rect[2] - rect[0]
                     h = rect[3] - rect[1]
-                    if w > 200 and h > 150:
+                    # Skip tiny windows (tooltips, splitters) that share the class name.
+                    # The floor is inclusive: 200x150 is the documented minimum, so a
+                    # window of exactly that size qualifies.
+                    if w >= 200 and h >= 150:
                         found_hwnd = hwnd
                         return False
             return True

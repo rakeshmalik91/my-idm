@@ -56,35 +56,46 @@ class SecurityConfig:
     # Scan timing: "after_complete" (auto-scan on completion) or "manual_only"
     scan_timing: str = "after_complete"
 
-    # Threat exclusions: categories and custom patterns to silently allow
+    # Threat exclusions: categories and custom patterns to silently allow.
+    # None means "never configured" and falls back to KNOWN_THREAT_CATEGORIES. An empty
+    # list means the user explicitly unticked every category, i.e. exclude nothing - the two
+    # must stay distinguishable or the dialog cannot express "allow no threats".
     ignored_threat_categories: list = None  # e.g. ["HackTool", "CrackTool"]
     ignored_threat_patterns: str = ""       # comma-separated custom substrings
 
     def __post_init__(self):
-        if self.ignored_threat_categories is None:
-            self.ignored_threat_categories = list(KNOWN_THREAT_CATEGORIES)
+        if isinstance(self.ignored_threat_categories, str):
+            # Tolerate a hand-edited config that stored the bare string.
+            self.ignored_threat_categories = [
+                c.strip() for c in self.ignored_threat_categories.split(",") if c.strip()
+            ]
 
     def get_effective_threat_exclusions(self) -> list[str]:
-        if self.ignored_threat_categories:
-            cats = [c for c in self.ignored_threat_categories if c.strip()]
-            if cats:
-                return cats
-        return list(KNOWN_THREAT_CATEGORIES)
+        """Categories to allow silently.
+
+        Unset (``None``) falls back to the built-in defaults. Any list is honoured as
+        written - including an empty one, which means "exclude nothing". Previously a
+        falsy list was treated the same as unset, so a user who unticked every category
+        silently got the five defaults back and the dialog could not express the choice.
+        """
+        if self.ignored_threat_categories is None:
+            return list(KNOWN_THREAT_CATEGORIES)
+        return [c for c in self.ignored_threat_categories if c and c.strip()]
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        # Emit the effective categories so the dict round-trips exactly: a config saved
+        # and reloaded compares equal to the one that was saved.
+        data["ignored_threat_categories"] = self.get_effective_threat_exclusions()
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> SecurityConfig:
+        # Missing key -> defaults. Present but empty -> the user excluded nothing, which
+        # has to stay distinguishable or the dialog cannot express "allow no threats".
         cats = data.get("ignored_threat_categories")
-        if cats is None:
-            cats = list(KNOWN_THREAT_CATEGORIES)
-        elif isinstance(cats, str):
+        if isinstance(cats, str):
             cats = [c.strip() for c in cats.split(",") if c.strip()]
-            if not cats:
-                cats = list(KNOWN_THREAT_CATEGORIES)
-        elif isinstance(cats, list) and not cats:
-            cats = list(KNOWN_THREAT_CATEGORIES)
         return cls(
             scan_before_download=bool(data.get("scan_before_download", True)),
             warn_high_risk_extensions=bool(data.get("warn_high_risk_extensions", True)),
@@ -96,7 +107,9 @@ class SecurityConfig:
             custom_scanner_args=str(data.get("custom_scanner_args", '"%file%"')),
             action_on_threat=str(data.get("action_on_threat", "warn")),
             scan_timing=str(data.get("scan_timing", "after_complete")),
-            ignored_threat_categories=list(cats) if isinstance(cats, list) else list(KNOWN_THREAT_CATEGORIES),
+            ignored_threat_categories=(
+                list(cats) if isinstance(cats, list) else None
+            ),
             ignored_threat_patterns=str(data.get("ignored_threat_patterns", "")),
         )
 
@@ -124,12 +137,13 @@ class SecurityConfig:
             settings = QSettings("MyIDM", "My-IDM")
         settings.beginGroup("Security")
         val = settings.value("ignored_threat_categories", None)
-        if val is None or not str(val).strip():
-            cats = list(KNOWN_THREAT_CATEGORIES)
+        if val is None:
+            # Never written: fall back to the defaults.
+            cats = None
         else:
+            # A present-but-empty value means the user explicitly excluded nothing, which
+            # has to survive the round trip or un-ticking every box is a no-op.
             cats = [c.strip() for c in str(val).split(",") if c.strip()]
-            if not cats:
-                cats = list(KNOWN_THREAT_CATEGORIES)
         cfg = cls(
             scan_before_download=settings.value("scan_before_download", True, type=bool),
             warn_high_risk_extensions=settings.value("warn_high_risk_extensions", True, type=bool),
@@ -162,11 +176,30 @@ def find_windows_defender_path() -> Optional[str]:
     platform_dir = r"C:\ProgramData\Microsoft\Windows Defender\Platform"
     if os.path.isdir(platform_dir):
         try:
+            # Collect every build first and pick the highest version. os.walk yields
+            # directory entries in filesystem order and the loop returned on the first hit,
+            # so which Defender build got used depended on NTFS enumeration order - an old
+            # build could win over a newer one.
+            found = []
             for root, _, files in os.walk(platform_dir):
                 if "MpCmdRun.exe" in files:
                     full_path = os.path.join(root, "MpCmdRun.exe")
                     if os.path.isfile(full_path):
-                        return full_path
+                        found.append(full_path)
+            if found:
+                def _version(path: str):
+                    # ...\Platform\<version>\MpCmdRun.exe
+                    name = os.path.basename(os.path.dirname(path))
+                    parts = []
+                    for chunk in name.split("."):
+                        if chunk.isdigit():
+                            parts.append(int(chunk))
+                        else:
+                            break
+                    return tuple(parts) or (0,)
+
+                found.sort(key=_version, reverse=True)
+                return found[0]
         except Exception as e:
             log.debug("Error searching platform directory: %s", e)
 
@@ -365,9 +398,27 @@ def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool, str]:
 
 
 def quarantine_or_delete_file(file_path: str) -> bool:
-    """Delete an infected file from disk."""
+    """Delete an infected file from disk.
+
+    Refuses blank and current-directory paths. ``Path("")`` is ``Path(".")``, so an empty
+    ``file_path`` - an unresolved download row, a failed path probe returning "" - would
+    otherwise ``shutil.rmtree`` the process's working directory, recursively, with no
+    prompt. On Windows the CWD is wherever the app was launched from.
+    """
     try:
+        if not file_path or not str(file_path).strip():
+            log.error("Refusing to quarantine a blank path")
+            return False
         fp = Path(file_path)
+        # Guard the resolved target too: ".", "./" and "sub/.." all name the CWD.
+        try:
+            resolved = fp.resolve()
+        except OSError:
+            resolved = fp.absolute()
+        cwd = Path.cwd().resolve()
+        if resolved == cwd or resolved == cwd.parent:
+            log.error("Refusing to quarantine the working directory: %s", file_path)
+            return False
         if fp.exists():
             if fp.is_file():
                 fp.unlink()

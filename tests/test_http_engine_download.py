@@ -42,6 +42,7 @@ from PySide6.QtWidgets import QApplication
 from my_idm import http_engine as http_engine_module
 from my_idm.config import GeneralConfig, TorConfig
 from my_idm.database import Database, DownloadEntry, SegmentEntry
+from my_idm import http_engine as te_module
 from my_idm.http_engine import (
     CHUNK_SIZE,
     DEFAULT_SEGMENTS,
@@ -520,15 +521,14 @@ class TestSegmentedDownload(EngineTestCase):
         run_async(self.engine._segmented_download(entry, asyncio.Event()))
         self.assertEqual(session.pending, 0, "nothing is left to fetch")
 
-    def test_all_complete_leaves_stale_live_segments_known_limitation(self):
-        """Documents a real defect rather than blessing it.
+    def test_all_complete_releases_live_segments(self):
+        """A finished segmented download must not keep reporting live segments.
 
-        ``_segmented_download`` registers ``_active_segments[download_id]`` and only pops
-        it from the ``finally`` of the ``asyncio.gather`` block. The "all segments done"
-        early return happens *before* that block, so a fully-completed segmented download
-        leaves its segments in ``get_live_segments()`` for the lifetime of the process -
-        the details panel would show a finished download as still segmented. Fixing it
-        means popping on the early-return path too.
+        Regression test. ``_active_segments[download_id]`` is cleared from the ``finally`` of
+        the ``asyncio.gather`` block, but the "all segments done" early return happens
+        *before* it - so ``get_live_segments()`` went on reporting a finished download as
+        segmented for the lifetime of the process, and the details panel showed a
+        permanently "segmented" completed torrent.
         """
         entry = self._entry(total=40, segments=4)
         segs = HTTPEngine._create_segments("d1", 40, 4)
@@ -536,10 +536,9 @@ class TestSegmentedDownload(EngineTestCase):
             seg.status = "completed"
         self.db.add_segments(segs)
         run_async(self.engine._segmented_download(entry, asyncio.Event()))
-        self.assertIsNotNone(
+        self.assertIsNone(
             self.engine.get_live_segments("d1"),
-            "KNOWN LIMITATION: the all-complete early return skips the `finally` that "
-            "clears _active_segments, so live segments leak for the process lifetime",
+            "a fully-completed segmented download must release its live segments",
         )
 
     def test_live_segments_are_published_while_running_and_released_after(self):
@@ -727,34 +726,37 @@ class TestDownloadOneSegment(EngineTestCase):
             with self.assertRaises(_FallbackToSingle):
                 self.run_segment(entry, seg)
 
-    def test_curl_unexpected_status_bypasses_the_retry_ladder_known_limitation(self):
-        """Documents a real defect rather than blessing it.
+    def test_curl_unexpected_status_is_retried_then_reported(self):
+        """A curl transfer that returns HTTP 500 must go through the retry ladder.
 
-        The aiohttp segment path raises ``aiohttp.ClientError`` for an unexpected status,
-        which the ladder catches. ``_download_segment_curl`` raises a *plain* ``Exception``,
-        which the ``except (aiohttp.ClientError, asyncio.TimeoutError, OSError)`` clause
-        does not catch - so a curl transfer that returns 500 is not retried at all and the
-        segment is abandoned still marked "downloading" in the details panel. Raising an
-        ``aiohttp.ClientError`` there (or widening the catch) would fix it.
+        Regression test. The aiohttp segment path raises ``aiohttp.ClientError`` for an
+        unexpected status, and the ladder catches it. The curl path raised a *plain*
+        ``Exception``, which the ladder's ``except (aiohttp.ClientError,
+        asyncio.TimeoutError, OSError)`` clause does not catch - so a 500 was not retried at
+        all and the segment was abandoned still marked "downloading".
         """
         entry, seg = self._entry_and_seg()
-        entry.max_retries = 5
+        entry.max_retries = 3
         self.db.update_download(entry)
         entry.metadata["use_curl_cffi"] = True
         self.db.update_download(entry)
         self.use_session()
-        factory = curl_session_factory([FakeCurlResponse(500), FakeCurlResponse(500)])
-        with patch.object(http_engine_module, "CurlAsyncSession", factory):
-            with self.assertRaises(Exception):
-                self.run_segment(entry, seg)
-        self.assertEqual(
-            len(factory.created), 1,
-            "KNOWN LIMITATION: a curl segment failure is not retried, because it raises a "
-            "plain Exception the ladder's except clause does not catch",
+        factory = curl_session_factory(
+            [FakeCurlResponse(500), FakeCurlResponse(500), FakeCurlResponse(500)]
         )
+        with patch.object(te_module, "CurlAsyncSession", factory):
+            with self.assertRaises(Exception) as ctx:
+                self.run_segment(entry, seg)
+        self.assertIn("failed after 3 retries", str(ctx.exception))
         self.assertEqual(
-            seg.status, "downloading",
-            "KNOWN LIMITATION: the abandoned curl segment is never flipped to 'error'",
+            len(factory.created), 3,
+            "every attempt must go through curl_cffi, or a 500 is silently not retried",
+        )
+        self.assertEqual(seg.status, "error", "an exhausted segment must be marked as error")
+        self.assertEqual(self.db.get_segments("d1")[0].status, "error")
+        self.assertIn(
+            "failed after 3 retries", str(ctx.exception),
+            "the terminal error must say the ladder was exhausted, not blame a cause",
         )
 
     def test_curl_cancel_mid_transfer_reports_paused(self):
@@ -825,9 +827,24 @@ class TestDownloadOneSegment(EngineTestCase):
         self.assertIn("pending", seen, "a retrying segment must be reset to pending")
         self.assertEqual(seen[-1], "completed")
 
+    def test_a_segment_failure_names_the_transport_cause(self):
+        """The segmented ladder had its own generic terminal raise; same fix applies."""
+        entry, seg = self._entry_and_seg()
+        entry.max_retries = 2
+        self.db.update_download(entry)
+        self.use_session(gets=[
+            FakeResponse(raise_on_enter=OSError("connection reset by peer"))] * 2
+        )
+        with self.assertRaises(Exception) as ctx:
+            self.run_segment(entry, seg)
+        self.assertIn("failed after 2 retries", str(ctx.exception))
+        self.assertIn(
+            "connection reset by peer", str(ctx.exception),
+            "the transport cause must survive into the error the download reports",
+        )
+
     def test_a_failure_after_cancel_does_not_retry(self):
         """A dead connection on a cancelled segment must not hammer the server.
-
         The cancel is tripped from inside the rate-limiter sleep, i.e. *after* the chunk
         has been written. That is the only ordering in which the body raises a transport
         error while the flag is already set, which is exactly the branch under test.
@@ -943,14 +960,14 @@ class TestSingleDownload(EngineTestCase):
         self.assertEqual(entry.downloaded_size, 10)
         self.assertEqual(len(session.get_calls), 1, "it must not retry blindly")
 
-    def test_416_on_a_stale_range_still_overwrites_the_file(self):
-        """A 416 with an unknown total cannot mean "done", so the retry must re-fetch.
+    def test_416_on_a_stale_range_restarts_from_byte_zero(self):
+        """A 416 on a partial file must drop the Range header, not re-send it.
 
-        KNOWN LIMITATION: the code pops the stale ``Range`` header on the 416 path, but the
-        top of the retry loop rebuilds ``headers`` from the on-disk size, so the same stale
-        ``Range`` is re-sent. The download still ends up correct (the 200 branch forces
-        ``mode="wb"``), but the wasted request is sent once per attempt. Tracked so the
-        dead ``headers.pop("Range", None)`` line is impossible to miss.
+        Regression test. The 416 branch popped ``Range`` and set ``existing_size = 0``, but
+        the top of the retry loop recomputed ``headers`` from the on-disk size on every
+        attempt, so the identical stale range was re-sent until the ladder gave up. The
+        restart is now latched in ``force_restart`` rather than expressed by mutating a
+        header that is rebuilt one line later.
         """
         entry = self._entry(total_size=0)
         Path(entry.file_path).write_bytes(b"01234")
@@ -960,9 +977,8 @@ class TestSingleDownload(EngineTestCase):
         ])
         run_async(self.engine._single_download(entry, asyncio.Event()))
         self.assertEqual(
-            session.ranges(), ["bytes=5-", "bytes=5-"],
-            "KNOWN LIMITATION: the 416 branch pops the Range header, but the retry loop "
-            "rebuilds it from the unchanged on-disk size and re-sends the stale range",
+            session.ranges(), ["bytes=5-", None],
+            "the retry after a 416 must request the whole body, not the same stale range",
         )
         self.assertEqual(Path(entry.file_path).read_bytes(), b"0123456789")
 
@@ -977,6 +993,10 @@ class TestSingleDownload(EngineTestCase):
             run_async(self.engine._single_download(entry, asyncio.Event()))
         self.assertIn("failed after 3 retries", str(ctx.exception))
         self.assertEqual(len(session.get_calls), 3)
+        self.assertEqual(
+            session.ranges(), ["bytes=5-", None, None],
+            "after the first 416 the Range must stay dropped for every remaining attempt",
+        )
 
     def test_unexpected_status_is_retried_then_raises(self):
         entry = self._entry()
@@ -1377,12 +1397,16 @@ class TestRunDownload(EngineTestCase):
         self.assertEqual([s[1] for s in self.status_trail()][-1], "queued")
         self.assertIn(
             "Retrying", self.status_trail()[-1][2],
-            "the retry notice reaches the GUI even though the row keeps an empty "
-            "error_message (see TestHandleRetry.test_the_retry_notice_is_never_persisted)",
+            "the retry notice reaches the GUI",
         )
-        # See TestHandleRetry.test_the_retry_counter_is_reset_by_the_stale_in_memory_entry
-        # for why the counter itself is still 0 here.
-        self.assertEqual(row.retry_count, 0)
+        self.assertEqual(
+            row.error_message,
+            "Retrying in 2s (1/3): Single-stream download failed after 3 retries: "
+            "no route to host",
+            "the notice is persisted and names the cause, so it survives the app closing "
+            "mid-backoff and is diagnosable without the log",
+        )
+        self.assertEqual(row.retry_count, 1, "the first failure must count as attempt 1")
 
     def test_exhausted_retries_end_in_error(self):
         entry = self.add_entry(total_size=10, max_retries=1)
@@ -1396,15 +1420,14 @@ class TestRunDownload(EngineTestCase):
         self.assertIn("failed after 1 retries", row.error_message)
         self.assertIn("error", [s[1] for s in self.status_trail()])
 
-    def test_the_transport_error_is_lost_from_the_retry_message_known_limitation(self):
-        """Documents a real defect rather than blessing it.
+    def test_the_transport_cause_reaches_the_retry_message(self):
+        """Regression test: the retry reason must be diagnosable.
 
-        ``_single_download`` swallows each ``aiohttp.ClientError`` / ``OSError`` and, once
-        the ladder is exhausted, raises a generic
-        ``"Single-stream download failed after N retries"``. The original message
-        ("no route to host", a TLS error, ...) never reaches the row, so the user is shown
-        a retry count instead of a diagnosable cause. Chaining the last exception into the
-        terminal raise would fix it.
+        ``_single_download`` used to swallow every ``aiohttp.ClientError`` / ``OSError``
+        and, once the ladder was exhausted, raise a generic "failed after N retries". The
+        original message - a DNS failure, a TLS error, a refused connection - never reached
+        the row, so the user was shown a retry count instead of a cause. The last failure is
+        now carried into the terminal raise.
         """
         entry = self.add_entry(total_size=10, max_retries=1)
         self.use_session(
@@ -1412,10 +1435,9 @@ class TestRunDownload(EngineTestCase):
             gets=[FakeResponse(raise_on_enter=OSError("no route to host"))],
         )
         run_async(self.engine._run_download(entry, asyncio.Event()))
-        self.assertNotIn(
+        self.assertIn(
             "no route to host", self.entry().error_message,
-            "KNOWN LIMITATION: the terminal raise discards the transport error, so the "
-            "row's error_message carries only a retry count",
+            "the transport cause must survive into the row's error_message",
         )
 
     def test_an_error_after_the_row_disappeared_does_not_crash(self):
@@ -1507,9 +1529,15 @@ class TestHandleRetry(EngineTestCase):
         self.assertEqual(row.metadata.get("retry_delay"), 2.0, "the default backoff base is 2s")
         self.assertEqual([s[1] for s in self.status_trail()], ["queued"])
 
-    def test_the_retry_notice_reaches_the_status_callback(self):
+    def test_the_retry_notice_is_persisted_and_forwarded(self):
+        """The backoff is stored on the row *and* pushed to the GUI."""
         entry = self.add_entry(max_retries=3)
         self.engine._handle_retry(entry, "boom")
+        row = self.entry()
+        self.assertGreater(row.metadata.get("next_retry_at", 0), 0, "the backoff must be recorded")
+        self.assertEqual(row.metadata.get("retry_delay"), 2.0, "the default backoff base is 2s")
+        self.assertEqual([s[1] for s in self.status_trail()], ["queued"])
+        self.assertEqual(row.error_message, "Retrying in 2s (1/3): boom")
         _, status, message = self.status_trail()[-1]
         self.assertEqual(status, "queued")
         self.assertIn("Retrying in", message)
@@ -1525,75 +1553,86 @@ class TestHandleRetry(EngineTestCase):
         message = self.status_trail()[-1][2]
         self.assertIn("Retrying (", message)
         self.assertNotIn("Retrying in", message)
-
-    def test_the_retry_notice_is_never_persisted_known_bug(self):
-        """Documents a real defect rather than blessing it.
-
-        ``_handle_retry`` builds a user-facing "Retrying in 2s (1/3): <cause>" message and
-        hands it to ``Database.update_status(did, "queued", msg)``, which only writes
-        ``error_message`` for the ``completed`` / ``downloading`` / ``error`` statuses - the
-        ``else`` branch updates the status alone. The message therefore reaches the live
-        GUI through the status callback but is never stored: if the app is closed during
-        the backoff window, the retry reason is lost and the row looks like a plain queued
-        download.
-        """
-        entry = self.add_entry(max_retries=3)
-        self.engine._handle_retry(entry, "boom")
-        self.assertEqual(
-            self.entry().error_message, "",
-            "KNOWN BUG: update_status() ignores error_message for the 'queued' status, so "
-            "the retry reason is dropped instead of being persisted on the row",
-        )
-
-    def test_the_retry_counter_is_reset_by_the_stale_in_memory_entry_known_bug(self):
-        """Documents a real defect rather than blessing it.
+    def test_the_retry_counter_advances(self):
+        """Regression test: the attempt counter must actually count.
 
         ``_handle_retry`` bumps the counter with ``Database.increment_retry()`` and then
-        calls ``update_download(entry)`` to persist the backoff metadata - but ``entry`` is
-        the object the engine was handed, whose ``retry_count`` is whatever it was before
-        the increment. That write puts the stale value back, so the counter is *always*
-        back to 0 in the database.
+        calls ``update_download(entry)`` to persist the backoff metadata. ``update_download``
+        writes *every* column, and ``entry`` is the object the engine was handed, whose
+        ``retry_count`` is whatever it was before the increment - so the write put the stale
+        value straight back.
 
-        Consequences, both real:
-
-        * ``count < entry.max_retries`` is true forever, so the "exhausted retries" branch
-          is unreachable whenever ``max_retries > 1`` and a permanently failing download
-          re-queues indefinitely instead of landing in ``error``;
-        * ``DownloadManager._process_queue`` gates on ``e.retry_count >= e.max_retries``
-          (manager.py:1755), so that safety net never trips either.
-
-        Fix: either re-read the row after incrementing and use that object's
-        ``retry_count``, or carry the new count onto ``entry`` before ``update_download``.
+        Consequences, both real: ``count < entry.max_retries`` was true forever, so the
+        "exhausted retries" branch was unreachable whenever ``max_retries > 1`` and a
+        permanently failing download re-queued indefinitely instead of landing in ``error``;
+        and ``DownloadManager._process_queue`` gates on ``retry_count >= max_retries``, so
+        that safety net never tripped either.
         """
         entry = self.add_entry(max_retries=3)
         self.engine._handle_retry(entry, "boom")
         self.assertEqual(
-            self.entry().retry_count, 0,
-            "KNOWN BUG: _handle_retry writes the stale in-memory retry_count back over the "
-            "incremented one, so the counter never advances and the download retries forever",
+            self.entry().retry_count, 1,
+            "the counter must survive update_download, or the download retries forever",
         )
         self.assertEqual(
             self.entry().status, "queued",
-            "and because the counter never advances, the exhausted-retries branch is "
-            "unreachable, so the download can never reach the error state",
+            "the first failure against max_retries=3 must requeue for a retry",
         )
 
-    def test_repeated_failures_never_reach_the_error_state(self):
+    def test_repeated_failures_reach_the_error_state(self):
+        """Regression test: a download must stop retrying once it runs out."""
         entry = self.add_entry(max_retries=3)
+        statuses = []
         for _ in range(10):
             self.engine._handle_retry(entry, "boom")
+            statuses.append(self.entry().status)
+            if self.entry().status == "error":
+                break
         self.assertEqual(
-            self.entry().status, "queued",
-            "KNOWN BUG: ten failures against max_retries=3 still leave the row queued, "
-            "because the reset retry_count makes the exhaustion check unreachable",
+            statuses[-1], "error",
+            f"ten failures against max_retries=3 must end in error, got {statuses}",
         )
+        self.assertEqual(
+            len(statuses), 3,
+            f"the download must be given up on at the configured limit, not later: {statuses}",
+        )
+        self.assertEqual(self.entry().error_message, "boom")
 
     def test_max_retries_of_one_still_reaches_the_error_state(self):
-        """The bug is masked at ``max_retries == 1``, which is why it survived."""
+        """The single-retry case, which the counter bug happened to mask."""
         entry = self.add_entry(max_retries=1)
         self.engine._handle_retry(entry, "boom")
         self.assertEqual(self.entry().status, "error")
         self.assertEqual(self.entry().retry_count, 1)
+
+    def test_the_retry_notice_is_persisted(self):
+        """Regression test: the retry reason must survive on the row.
+
+        ``_handle_retry`` builds a user-facing "Retrying in 2s (1/3): <cause>" message and
+        hands it to ``Database.update_status(did, "queued", msg)``, whose ``else`` branch
+        used to update the status alone. The message reached the live GUI through the status
+        callback but was never stored: if the app was closed during the backoff window, the
+        retry reason was lost and the row looked like a plain queued download.
+
+        ``update_status`` now writes the message whenever one is supplied, while a bare
+        ``update_status(id, "queued")`` still leaves an existing diagnostic alone.
+        """
+        entry = self.add_entry(max_retries=3)
+        self.engine._handle_retry(entry, "boom")
+        self.assertEqual(
+            self.entry().error_message, "Retrying in 2s (1/3): boom",
+            "the retry reason must be persisted, not only emitted to the GUI",
+        )
+
+    def test_a_status_change_without_a_message_preserves_the_diagnostic(self):
+        """The deliberate asymmetry the fix had to keep: a bare status change never clears."""
+        self.add_entry(max_retries=1)
+        self.db.update_status("d1", "error", "real failure")
+        self.db.update_status("d1", "queued")
+        self.assertEqual(
+            self.db.get_download("d1").error_message, "real failure",
+            "moving back to queued must not erase the diagnostic before the user has seen it",
+        )
 
     def test_exhausted_retries_move_to_error(self):
         entry = self.add_entry(max_retries=1)

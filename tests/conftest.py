@@ -33,6 +33,7 @@ import os
 import shutil
 import socket
 import tempfile
+import threading
 from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtCore import QSettings
@@ -136,10 +137,22 @@ def _address_is_loopback(address) -> bool:
 
 
 def _deny_network(address, what="connect") -> None:
+    """Refuse a non-loopback connection attempt.
+
+    Raises on the main thread, where the failure lands on the test that caused it. A
+    background thread gets the violation *recorded* but no exception: production code runs
+    its probes on daemon threads (``DownloadManager``'s ``tor-probe``, for one) and wraps
+    them in ``except Exception``, so a raise there is swallowed anyway - while faulting the
+    interpreter if it lands during shutdown, which is what turned this into a hard
+    "Windows fatal exception: access violation" that killed the run instead of failing a
+    test. The run still goes red, via the teardown report.
+    """
     if _address_is_loopback(address):
         return
     detail = f"real network connection attempted ({what} -> {address!r})"
-    _record_violation("network", detail)
+    _record_violation("network", f"{detail} (from a non-main thread)")
+    if threading.current_thread() is not threading.main_thread():
+        return
     raise AssertionError(
         f"Test suite attempted a {detail}. "
         "Tests must be hermetic: mock the transport or use a loopback address."
@@ -171,6 +184,9 @@ def block_non_loopback_network(monkeypatch):
         if not _loopback(host):
             detail = f"DNS/host lookup for {host!r}:{port!r}"
             _record_violation("network", detail)
+            if threading.current_thread() is not threading.main_thread():
+                # See _deny_network: never raise out of a worker thread.
+                return real_getaddrinfo(host, port, *args, **kwargs)
             raise AssertionError(
                 f"Test suite attempted a {detail}. Mock the transport instead of "
                 "resolving a public host."

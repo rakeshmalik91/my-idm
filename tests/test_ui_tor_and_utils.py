@@ -1610,14 +1610,13 @@ class TestRobustMove(UtilFileTestCase):
         self.assertEqual((target / "cover.jpg").read_bytes(), b"c")
         self.assertFalse(source.exists(), "the emptied source tree must be cleaned up")
 
-    def test_a_same_size_prior_partial_file_is_treated_as_already_moved(self):
-        """A prior attempt that copied the file is detected by size alone.
+    def test_a_same_size_but_different_prior_partial_file_is_overwritten(self):
+        """A same-length target is not proof the move already happened.
 
-        KNOWN LIMITATION: the "already moved" check compares ``st_size`` only, never the
-        content, so a target left truncated at exactly the source's length by a previous
-        crash is treated as a completed move and the good source copy is deleted. A hash or
-        byte comparison would be needed to notice the difference. Pinned so the behaviour
-        cannot change unnoticed.
+        Regression test. The resume check compared ``st_size`` only, so a target left
+        truncated at exactly the source's length by a previous crashed attempt was treated
+        as a completed move: the good source copy was deleted and the corrupt target kept.
+        The content is now verified (sampled, so it stays cheap on a multi-gigabyte file).
         """
         source = self.tmp / "Show"
         source.mkdir()
@@ -1628,11 +1627,28 @@ class TestRobustMove(UtilFileTestCase):
         ok, err = robust_move_download_files(source, target)
         self.assertTrue(ok, err)
         self.assertEqual(
-            (target / "a.mkv").read_bytes(), b"abcde",
-            "KNOWN LIMITATION: an identically-sized but corrupt prior copy is kept and the "
-            "good source file is deleted, because the resume check compares size only",
+            (target / "a.mkv").read_bytes(), b"12345",
+            "a same-length but different target must be overwritten with the good source",
         )
-        self.assertFalse((source / "a.mkv").exists())
+        self.assertFalse(
+            (source / "a.mkv").exists(),
+            "the source must be gone only because it was actually moved, not skipped",
+        )
+
+    def test_a_truncated_tail_is_detected_even_when_the_head_matches(self):
+        """The realistic corruption: a copy whose head landed but whose tail did not."""
+        source = self.tmp / "Show"
+        source.mkdir()
+        payload = b"A" * (3 << 20)
+        (source / "big.mkv").write_bytes(payload)
+        target = self.tmp / "Anime"
+        target.mkdir()
+        # Same length, identical head, zeros where the tail should be.
+        (target / "big.mkv").write_bytes(payload[:1 << 20] + b"\x00" * (2 << 20))
+
+        ok, err = robust_move_download_files(source, target)
+        self.assertTrue(ok, err)
+        self.assertEqual((target / "big.mkv").read_bytes(), payload)
 
     def test_a_differently_sized_prior_partial_file_is_overwritten(self):
         source = self.tmp / "Show"

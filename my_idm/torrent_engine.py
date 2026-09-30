@@ -6,9 +6,11 @@ import logging
 import os
 import shutil
 import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable, Any
+from urllib.parse import urlparse
 
 from my_idm.config import TorConfig, TorrentConfig
 from my_idm.database import Database, DownloadEntry
@@ -207,6 +209,9 @@ class TorrentEngine:
         self._filename_cb: Optional[Callable[[str, str], None]] = None
         self._running = False
         self._last_active_time: dict[str, float] = {}
+        # Seeding rows whose handle has already been repaired once, so the repair is
+        # logged once per episode rather than once per poll tick.
+        self._repaired_seeding: set[str] = set()
 
     def set_general_config(self, config: object):
         """Set general configuration for timeout settings."""
@@ -427,13 +432,30 @@ class TorrentEngine:
                         if self._network_config.proxy_username
                         else lt.proxy_type_t.http
                     )
-                sett["force_proxy"] = True
-                sett["proxy_peer_connections"] = True
-                sett["proxy_tracker_connections"] = True
-                log.info(
-                    "TorrentEngine proxy configured: %s://%s:%d",
-                    pt, self._network_config.proxy_host, self._network_config.proxy_port,
-                )
+                else:
+                    # An unrecognised type (a typo, "https", a stray space) used to fall
+                    # through with force_proxy=True and whatever proxy_type the previous
+                    # apply left behind - a connection forced through a proxy libtorrent
+                    # will not use, which fails silently. Ignore the setting instead.
+                    log.warning(
+                        "Ignoring unrecognised proxy_type %r; not forcing a proxy. "
+                        "Valid values are 'none', 'socks5' and 'http'.",
+                        pt,
+                    )
+                    pt = "none"
+                if pt == "none":
+                    sett["proxy_type"] = lt.proxy_type_t.none
+                    sett["proxy_hostname"] = ""
+                    sett["proxy_port"] = 0
+                    sett["force_proxy"] = False
+                else:
+                    sett["force_proxy"] = True
+                    sett["proxy_peer_connections"] = True
+                    sett["proxy_tracker_connections"] = True
+                    log.info(
+                        "TorrentEngine proxy configured: %s://%s:%d",
+                        pt, self._network_config.proxy_host, self._network_config.proxy_port,
+                    )
             else:
                 sett["proxy_type"] = lt.proxy_type_t.none
                 sett["proxy_hostname"] = ""
@@ -658,7 +680,6 @@ class TorrentEngine:
             # Fetch remote .torrent file and cache locally
             torrent_cache = FASTRESUME_DIR / f"{entry.id}.torrent"
             try:
-                import urllib.request
                 req = urllib.request.Request(
                     url,
                     headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"}
@@ -742,7 +763,19 @@ class TorrentEngine:
             handle.pause()
             # Preserve completed status — do not switch to fetching_metadata
         elif entry.status == "seeding":
-            # Keep seeding active and apply seeding upload limit
+            # Keep seeding active: clear auto_managed and resume, exactly as the paused and
+            # completed branches above do the reverse. Without this a handle restored paused
+            # from a fastresume stays paused forever, so the row reads "Seeding" while
+            # libtorrent runs nothing - and because poll_all's transition is guarded on the
+            # status *not* already being "seeding", nothing ever corrects it. See
+            # tests/test_state_transitions.py::TestRowAndHandleDisagreement.
+            try:
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.set_flags(lt.torrent_flags.auto_managed)
+            except Exception:
+                pass
+            handle.resume()
+            # Apply seeding upload limit
             self._apply_seeding_limit_to_handle(handle)
         else:
             has_meta = False
@@ -769,6 +802,13 @@ class TorrentEngine:
             if initial_status == "fetching_metadata":
                 if not entry.fetching_metadata_since:
                     entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                    # Carry the status onto the in-memory entry first: update_download writes
+                    # every column, so the caller's stale `entry.status` ("queued") would
+                    # otherwise revert the update_status above, leaving the row reading
+                    # "Queued" while the callback announces "fetching_metadata" - and with it
+                    # the suspend-after-N-days watchdog, which requires that status, can
+                    # never fire for a magnet.
+                    entry.status = initial_status
                     self._db.update_download(entry)
             if self._status_cb:
                 self._status_cb(entry.id, initial_status, "")
@@ -898,6 +938,9 @@ class TorrentEngine:
             self._db.update_status(download_id, new_status)
             if entry and new_status == "fetching_metadata" and not entry.fetching_metadata_since:
                 entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                # Carry the status across: update_download writes every column, so a stale
+                # entry.status would revert the update_status on the line above.
+                entry.status = new_status
                 self._db.update_download(entry)
             if self._status_cb:
                 self._status_cb(download_id, new_status, "")
@@ -941,6 +984,9 @@ class TorrentEngine:
             self._db.update_status(download_id, new_status)
             if entry and new_status == "fetching_metadata" and not entry.fetching_metadata_since:
                 entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                # Carry the status across: update_download writes every column, so a stale
+                # entry.status would revert the update_status on the line above.
+                entry.status = new_status
                 self._db.update_download(entry)
             if self._status_cb:
                 self._status_cb(download_id, new_status, "")
@@ -1307,6 +1353,32 @@ class TorrentEngine:
                     )
                 continue
 
+            # Mirror of the guard above: a row that reads "seeding" must have a handle that
+            # is actually seeding. A deliberate pause writes "completed", never "seeding"
+            # (see pause()), so this can never fight the user - it only repairs handles that
+            # came back paused from a fastresume, or that fell back to downloading. No status
+            # callback and no re-stamp: the row's status is already right, and re-stamping
+            # would reset the duration-limit baseline on every tick.
+            if entry.status == "seeding" and not self._is_handle_seeding(handle, status):
+                was_paused = self._handle_is_paused(handle)
+                was_state = status.get("state")
+                try:
+                    if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                        handle.set_flags(lt.torrent_flags.auto_managed)
+                    handle.resume()
+                    self._apply_seeding_limit_to_handle(handle)
+                    if download_id not in self._repaired_seeding:
+                        self._repaired_seeding.add(download_id)
+                        log.info(
+                            "Repaired seeding torrent %s: handle was %s, resumed",
+                            download_id,
+                            "paused" if was_paused else f"in state {was_state}",
+                        )
+                except Exception as exc:
+                    log.debug("Could not repair seeding torrent %s: %s", download_id, exc)
+            elif entry.status == "seeding":
+                self._repaired_seeding.discard(download_id)
+
             cb_dl = status["downloaded"]
             cb_tot = status["total_size"]
             if entry.status in ("completed", "seeding"):
@@ -1423,6 +1495,9 @@ class TorrentEngine:
                     self._db.update_status(download_id, "fetching_metadata")
                     if not entry.fetching_metadata_since:
                         entry.fetching_metadata_since = datetime.now(timezone.utc).isoformat()
+                        # Carry the status across: update_download writes every column, so a
+                        # stale entry.status would revert the update_status above.
+                        entry.status = "fetching_metadata"
                         self._db.update_download(entry)
                     if self._status_cb:
                         self._status_cb(download_id, "fetching_metadata", "")
@@ -1505,6 +1580,30 @@ class TorrentEngine:
 
     # -- details queries -----------------------------------------------------
 
+    @staticmethod
+    def _handle_is_paused(handle: Any) -> bool:
+        """Read the paused flag, tolerating a libtorrent build without ``status.paused``."""
+        try:
+            s = handle.status()
+            raw = getattr(s, "paused", None)
+            if raw is not None and not type(raw).__name__.startswith("MagicMock"):
+                return bool(raw)
+            return bool(getattr(s, "is_paused", False))
+        except Exception:
+            return False
+
+    @classmethod
+    def _is_handle_seeding(cls, handle: Any, status: dict) -> bool:
+        """True when the handle is genuinely uploading, not merely labelled seeding."""
+        if cls._handle_is_paused(handle):
+            return False
+        state = status.get("state")
+        if state not in ("finished", "seeding"):
+            return False
+        # A finished torrent whose payload is not fully present is not seeding.
+        total = status.get("total_size", 0)
+        return not (total > 0 and status.get("downloaded", 0) < total)
+
     def get_torrent_files(self, download_id: str) -> list[dict]:
         """Returns details for each file in the torrent."""
         entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
@@ -1535,6 +1634,10 @@ class TorrentEngine:
                             f["status"] = "completed"
                         else:
                             f["status"] = "skipped"
+                    # Persist the back-fill. Without the re-assignment the fresh dict parsed
+                    # from metadata_json is thrown away and the cache never catches up.
+                    entry.metadata["files"] = cached
+                    self._db.update_download(entry)
                 return _adjust_paths(cached)
             return []
 
@@ -1616,12 +1719,17 @@ class TorrentEngine:
         if not handle and entry:
             if entry.status in ("completed", "seeding") and priority == 0:
                 if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
-                    for f in entry.metadata["files"]:
+                    files = entry.metadata["files"]
+                    for f in files:
                         if f.get("index") == file_index:
                             f["priority"] = priority
                             f["priority_label"] = _priority_to_label(priority)
                             f["status"] = "skipped"
                             break
+                    # Re-assign the whole list: DownloadEntry.metadata re-parses
+                    # metadata_json on every access and only a top-level assignment syncs,
+                    # so mutating the nested dict in place is silently discarded.
+                    entry.metadata["files"] = files
                     self._db.update_download(entry)
                 return True
             self.add_torrent(entry)
@@ -1642,7 +1750,8 @@ class TorrentEngine:
 
             # Update file metadata if stored
             if entry and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
-                for f in entry.metadata["files"]:
+                files = entry.metadata["files"]
+                for f in files:
                     if f.get("index") == file_index:
                         f["priority"] = priority
                         f["priority_label"] = _priority_to_label(priority)
@@ -1655,6 +1764,8 @@ class TorrentEngine:
                         else:
                             f["status"] = "pending"
                         break
+                # Re-assign so the change survives: see the note in the no-handle branch.
+                entry.metadata["files"] = files
                 self._db.update_download(entry)
 
             # If unchecked file is checked (priority > 0) after download was complete:
@@ -1960,3 +2071,4 @@ class TorrentEngine:
                                     f"Suspended after {timeout_days} day(s) of fetching metadata")
         except (ValueError, TypeError) as exc:
             log.debug("Error parsing fetching_metadata_since for %s: %s", download_id, exc)
+
