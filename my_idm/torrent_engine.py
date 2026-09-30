@@ -7,6 +7,8 @@ import os
 import shutil
 import time
 import urllib.request
+import humanize
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Callable, Any
@@ -15,7 +17,12 @@ from urllib.parse import urlparse
 from my_idm.config import TorConfig, TorrentConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.network import NetworkConfig, is_interface_active
-from my_idm.utils import normalize_path, robust_move_download_files, unlock_path
+from my_idm.utils import (
+    check_disk_space,
+    normalize_path,
+    robust_move_download_files,
+    unlock_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +142,29 @@ def _is_save_resume_data_failed_alert(alert: Any) -> bool:
     return type(alert).__name__ in ("save_resume_data_failed_alert", "FakeSaveResumeDataFailedAlert")
 
 
+def _directory_size(path: Path) -> int:
+    """Total bytes of the regular files under *path*, 0 if it cannot be walked.
+
+    Used to work out how much of a torrent is already on disk, so a resume is only asked
+    for the bytes it still needs. Failures return 0, which makes the caller *more*
+    conservative, never less: it will ask for the full size rather than under-count what is
+    already there.
+    """
+    import os as _os
+
+    total = 0
+    try:
+        for root, _dirs, files in _os.walk(str(path)):
+            for name in files:
+                try:
+                    total += _os.path.getsize(_os.path.join(root, name))
+                except OSError:
+                    continue
+    except Exception:
+        return total
+    return total
+
+
 def _newer_seed_stamp(previous: str, epoch: int) -> str:
     """Return the ISO stamp to record for a completed seed, or "" to leave it alone.
 
@@ -212,6 +242,9 @@ class TorrentEngine:
         # Seeding rows whose handle has already been repaired once, so the repair is
         # logged once per episode rather than once per poll tick.
         self._repaired_seeding: set[str] = set()
+        # Downloads already checked against free disk space, so the check runs once
+        # per download rather than on every 1 Hz poll.
+        self._disk_checked: set[str] = set()
 
     def set_general_config(self, config: object):
         """Set general configuration for timeout settings."""
@@ -1379,6 +1412,20 @@ class TorrentEngine:
             elif entry.status == "seeding":
                 self._repaired_seeding.discard(download_id)
 
+            # One free-space check per download, at the first poll where the size is known.
+            # A magnet has no size until its metadata arrives, so this cannot live in
+            # add_torrent: the caller overwrites the status (and any message) that a
+            # failure there would set. By this point the transition above has already run
+            # and nothing clobbers what we write.
+            if (
+                download_id not in self._disk_checked
+                and status.get("total_size", 0) > 0
+                and entry.status not in ("error", "completed", "paused", "stopped")
+            ):
+                self._disk_checked.add(download_id)
+                if not self._enforce_disk_space(entry, status["total_size"]):
+                    continue
+
             cb_dl = status["downloaded"]
             cb_tot = status["total_size"]
             if entry.status in ("completed", "seeding"):
@@ -2018,6 +2065,78 @@ class TorrentEngine:
             log.debug("Saved fastresume for %s", matched_did)
         except Exception as exc:
             log.warning("Failed saving fastresume for %s: %s", matched_did, exc)
+
+    def _enforce_disk_space(self, entry: DownloadEntry, total_size: int) -> bool:
+        """Refuse to start a torrent the target volume cannot hold.
+
+        The failure this prevents is the slow one: a torrent writes its payload as it
+        arrives, so a 40 GB swarm into a 2 GB volume runs for an hour and dies near the end,
+        with the tracker blaming the network. Only the *remaining* bytes are required, so a
+        resume that already has 30 GB on disk needs 10 GB more rather than 40.
+
+        The torrent is paused and stripped of ``auto_managed`` on failure, so libtorrent
+        cannot keep writing and cannot restart it by itself; the row carries the reason.
+
+        Returns True to continue. A volume whose free space cannot be read never blocks
+        anything - see ``utils.check_disk_space``.
+        """
+        if not self._general_config or not self._general_config.disk_space_check:
+            return True
+        if total_size <= 0:
+            return True
+
+        target = entry.file_path or entry.save_path
+        if not target:
+            return True
+
+        already = 0
+        try:
+            candidate = Path(target)
+            if candidate.is_dir():
+                already = _directory_size(candidate)
+            elif candidate.exists():
+                already = candidate.stat().st_size
+        except OSError:
+            already = 0
+        needed = max(0, int(total_size) - already)
+        if needed <= 0:
+            return True
+
+        headroom_mb = int(getattr(self._general_config, "disk_space_headroom_mb", 0) or 0)
+        headroom_bytes = headroom_mb * 1024 * 1024
+        ok, free, shortfall = check_disk_space(target, needed, headroom_bytes)
+        if ok:
+            return True
+
+        headroom = humanize.naturalsize(headroom_bytes, binary=True) if headroom_bytes else ""
+        reason = (
+            f"Not enough disk space: {humanize.naturalsize(needed, binary=True)} still "
+            f"needed but only {humanize.naturalsize(free, binary=True)} free"
+            + (f" (a {headroom} safety margin is also required)" if headroom else "")
+            + f". Short by {humanize.naturalsize(shortfall, binary=True)}. "
+            f"Free up space, choose a different folder, or turn off "
+            f"Preferences -> General -> 'Check free disk space before downloading'."
+        )
+        log.warning("Refusing to start torrent %s: %s", entry.id, reason)
+
+        handle = self._handles.get(entry.id)
+        if handle is not None:
+            try:
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
+                handle.pause()
+            except Exception as exc:
+                log.debug("Could not pause refused torrent %s: %s", entry.id, exc)
+        # Drop the "already checked" mark so resuming retries the decision against
+        # whatever free space there is by then.
+        self._disk_checked.discard(entry.id)
+        entry.error_message = reason
+        # update_status persists both status and message; no update_download, or the stale
+        # in-memory status would be written straight back over it.
+        self._db.update_status(entry.id, "error", reason)
+        if self._status_cb:
+            self._status_cb(entry.id, "error", reason)
+        return False
 
     def _check_fetching_metadata_timeout(self, download_id: str, entry: DownloadEntry, status: dict):
         """Check if torrent has been in fetching_metadata state too long and suspend if needed."""

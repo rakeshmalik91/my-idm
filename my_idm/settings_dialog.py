@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QUrl, QSettings
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QSize, QUrl, QSettings
+from PySide6.QtGui import QDesktopServices, QFontMetrics, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -136,6 +137,16 @@ class SettingsDialog(QDialog):
 
         self._interfaces: list[NetworkInterfaceInfo] = []
         self._tabs = QTabWidget()
+        # Nine tabs across the top either scroll their titles out of sight or wrap onto a
+        # second row that pushes the content down. Moving the bar to the West side is not
+        # enough on its own: a vertical QTabBar whose tabs are too narrow *rotates the
+        # labels 90 degrees* and still clips them, so the bar is hidden and a plain
+        # QListWidget is used as the navigator instead.
+        #
+        # `_tabs` still owns the pages and the current index, so every existing caller
+        # (setCurrentIndex, widget(i), tabText(i), count()) keeps working unchanged.
+        self._tabs.setDocumentMode(True)
+        self._tabs.tabBar().hide()
 
         self._setup_ui()
         if self._manager and hasattr(self._manager, "animepahe_status_changed"):
@@ -168,6 +179,115 @@ class SettingsDialog(QDialog):
             return self._db
         except Exception:
             return None
+
+    def _build_tab_body(self) -> QWidget:
+        """Sidebar navigator on the left, tab pages on the right, in one row.
+
+        A ``QListWidget`` rather than a vertical ``QTabBar``: Qt rotates a vertical tab
+        bar's labels 90 degrees whenever the tab is narrower than its text, which is most
+        of these titles, and clips whatever does not fit. A list draws horizontal text at a
+        width we choose, scrolls when the list is longer than the dialog, and keeps the
+        emoji icons.
+
+        Both directions are kept in sync: clicking a row switches page, and switching page
+        (including ``setCurrentIndex`` from ``initial_tab``) moves the selection. Signals
+        are blocked on the programmatic half to stop the two bouncing off each other.
+        """
+        body = QWidget()
+        row = QHBoxLayout(body)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self._tab_sidebar = QListWidget()
+        self._tab_sidebar.setObjectName("preferencesSidebar")
+        self._tab_sidebar.setFixedWidth(self._sidebar_width())
+        self._tab_sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._tab_sidebar.setSpacing(1)
+        for i in range(self._tabs.count()):
+            text = self._tabs.tabText(i)
+            item = QListWidgetItem(text)
+            # Split off the leading emoji so it renders at a consistent size rather than
+            # as a full-height glyph next to 11px text.
+            if " " in text:
+                icon, _, label = text.partition(" ")
+                item.setText(label)
+                item.setIcon(self._emoji_icon(icon))
+                item.setData(Qt.ItemDataRole.UserRole, label)
+            else:
+                item.setData(Qt.ItemDataRole.UserRole, text)
+            self._tab_sidebar.addItem(item)
+        self._tab_sidebar.setCurrentRow(0)
+
+        row.addWidget(self._tab_sidebar)
+        row.addWidget(self._tabs, 1)
+
+        self._tab_sidebar.currentRowChanged.connect(self._on_sidebar_row_changed)
+        self._tabs.currentChanged.connect(self._on_tab_current_changed)
+        return body
+
+    def _emoji_icon(self, emoji: str):
+        from PySide6.QtGui import QPixmap
+
+        from my_idm.utils import create_emoji_icon
+
+        try:
+            return create_emoji_icon(emoji, size=16)
+        except Exception:
+            return QIcon()
+
+    def _sidebar_width(self) -> int:
+        """Wide enough for the longest label plus its icon, capped so it cannot dominate."""
+        metrics = QFontMetrics(self.font())
+        labels = []
+        for i in range(self._tabs.count()):
+            text = self._tabs.tabText(i)
+            labels.append(text.partition(" ")[2] or text)
+        widest = max((metrics.horizontalAdvance(t) for t in labels), default=120)
+        return max(170, min(widest + 62, 300))
+
+    def _on_sidebar_row_changed(self, row: int) -> None:
+        if row >= 0 and row != self._tabs.currentIndex():
+            self._tabs.setCurrentIndex(row)
+
+    def _on_tab_current_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        if self._tab_sidebar.currentRow() != index:
+            self._tab_sidebar.blockSignals(True)
+            try:
+                self._tab_sidebar.setCurrentRow(index)
+            finally:
+                self._tab_sidebar.blockSignals(False)
+
+    def _size_sidebar_to_titles(self) -> None:
+        """Give the vertical tab bar a width that actually shows the titles.
+
+        A ``QTabWidget`` in the West position collapses to icon width (24 px) on its own:
+        the bar has no intrinsic width from a vertical layout, so every title is clipped
+        away and the sidebar becomes nine identical icons. Sizing it from the widest
+        measured title keeps all nine readable, and ``setExpanding(False)`` stops one long
+        entry from stretching the sidebar and squeezing the content pane.
+        """
+        bar = self._tabs.tabBar()
+        try:
+            bar.setExpanding(False)
+            # The dialog's own font, not bar.font(): a freshly created QTabBar has no
+            # resolved font until it is polished, and asking for one here raised.
+            metrics = QFontMetrics(self.font())
+            widest = max(
+                (metrics.horizontalAdvance(self._tabs.tabText(i))
+                 for i in range(self._tabs.count())),
+                default=0,
+            )
+            icon = self._tabs.iconSize().width()
+            # icon + spacing + text, plus room for the rounded frame and the selection
+            # indicator. Qt enforces its own ~200px floor for rounded vertical tabs, so
+            # anything under that is silently ignored - hence the generous padding.
+            bar.setMinimumWidth(widest + icon + 44)
+            bar.setMaximumWidth(widest + icon + 52)
+        except Exception:
+            # Purely cosmetic: never let a sidebar measurement stop Preferences opening.
+            bar.setMinimumWidth(200)
 
     def _restore_size_from_db(self):
         """Restore preferences window dimensions from database or QSettings."""
@@ -240,13 +360,16 @@ class SettingsDialog(QDialog):
         root_layout.setContentsMargins(18, 18, 18, 18)
 
         # Tabs
-        self._tabs.addTab(self._wrap_scrollable(self._create_general_tab()), "📁 General && Downloads")
+        self._tabs.addTab(self._wrap_scrollable(self._create_general_tab()), "📁 General & Downloads")
+        self._tabs.addTab(self._wrap_scrollable(self._create_views_tab()), "👁️ Views & Columns")
         self._tabs.addTab(self._wrap_scrollable(self._create_torrent_tab()), "🧲 BitTorrent")
         self._tabs.addTab(self._wrap_scrollable(self._create_browser_tab()), "🌐 Browser Integration")
-        self._tabs.addTab(self._wrap_scrollable(self._create_network_privacy_tab()), "🛡️ Network && Privacy (VPN && Tor)")
-        self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus && Security")
-        self._tabs.addTab(self._wrap_scrollable(self._create_external_tools_tab()), "🛠️ External Tools")
-        root_layout.addWidget(self._tabs)
+        self._tabs.addTab(self._wrap_scrollable(self._create_vpn_tab()), "🛡️ VPN & Proxy")
+        self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor")
+        self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus & Security")
+        self._tabs.addTab(self._wrap_scrollable(self._create_external_tools_tab()), "🌐 AnimePahe Scraper")
+        self._tabs.addTab(self._wrap_scrollable(self._create_youtube_tab()), "▶️ YouTube (yt-dlp)")
+        root_layout.addWidget(self._build_tab_body())
 
         # Dialog Buttons
         btn_layout = QHBoxLayout()
@@ -263,6 +386,236 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self._save_btn)
 
         root_layout.addLayout(btn_layout)
+
+    def _create_views_tab(self) -> QWidget:
+        """Segregated-view grouping plus which columns the downloads table shows, and in what order.
+
+        The column half is a UI over state the table already owns: visibility and order
+        live in the QHeaderView's own state, which ``MainWindow._save_ui_state_to_db()``
+        already persists as a ``header_state`` blob. So this tab never invents a second
+        source of truth - it reads the header, lets the user edit it, writes it straight
+        back, and lets the existing save path persist it.
+        """
+        from my_idm.download_model import (
+            SEGREGATED_MODES,
+            SEGREGATED_MODE_LABELS,
+        )
+
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        # -- Segregated view ---------------------------------------------------
+        seg_group = QGroupBox("Segregated View")
+        seg_layout = QVBoxLayout(seg_group)
+
+        self._seg_enabled_cb = QCheckBox("Group downloads into sections")
+        self._seg_enabled_cb.setToolTip(
+            "Splits the table into collapsible sections. Choose what the sections group by "
+            "below. The View menu can also toggle this at any time."
+        )
+        seg_layout.addWidget(self._seg_enabled_cb)
+
+        self._seg_mode_combo = QComboBox()
+        for mode in SEGREGATED_MODES:
+            self._seg_mode_combo.addItem(SEGREGATED_MODE_LABELS[mode], mode)
+        self._seg_mode_combo.setToolTip(
+            "Status groups Active / Seeding / Inactive. Date groups Today / Yesterday / "
+            "Last 7 Days / Last 30 Days / Older. File Type groups Video / Audio / Archives "
+            "/ Documents / Photos / General."
+        )
+        seg_layout.addWidget(self._seg_mode_combo)
+        layout.addWidget(seg_group)
+
+        # -- Columns -----------------------------------------------------------
+        col_group = QGroupBox("Downloads Table Columns")
+        col_layout = QVBoxLayout(col_group)
+        col_layout.addWidget(QLabel(
+            "Tick a column to show it. Use the arrows to change the left-to-right order."
+        ))
+
+        # List on the left, actions stacked on the right. The horizontal layout matters:
+        # with the buttons underneath, the list inherited the group's full stretch and the
+        # long names ("Seeding Started At", "File / Folder Name") either overflowed the row
+        # or forced a horizontal scrollbar, which read as a broken control.
+        col_body = QHBoxLayout()
+        self._column_list = QListWidget()
+        self._column_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._column_list.setUniformItemSizes(True)
+        # Elide rather than scroll sideways or clip mid-glyph: a column name that cannot
+        # be fully shown is still identifiable from its start plus the tooltip.
+        self._column_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._column_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._column_list.setVerticalScrollMode(
+            QListWidget.ScrollMode.ScrollPerPixel
+        )
+        # Enough room for the longest header plus the checkbox, so nothing is elided at a
+        # normal window width.
+        self._column_list.setMinimumWidth(260)
+        self._column_list.setMinimumHeight(300)
+        # The first row was clipped against the viewport edge. `uniformItemSizes` makes Qt
+        # size every row from the first one it measures, so without a margin the top row
+        # renders half a line high and "#" reads as a smudge.
+        self._column_list.setViewportMargins(0, 4, 0, 4)
+        col_body.addWidget(self._column_list, 1)
+
+        btn_col = QVBoxLayout()
+        self._col_up_btn = QPushButton("▲  Move Up")
+        self._col_down_btn = QPushButton("▼  Move Down")
+        self._col_reset_btn = QPushButton("↺  Reset")
+        self._col_reset_btn.setToolTip(
+            "Show every column and restore the default left-to-right order, widths, "
+            "sorting and filters"
+        )
+        for btn in (self._col_up_btn, self._col_down_btn, self._col_reset_btn):
+            btn_col.addWidget(btn)
+        btn_col.addStretch()
+        col_body.addLayout(btn_col)
+        # Match the list's top margin so the buttons do not sit above the first row.
+        col_body.insertSpacing(0, 0)
+        col_body.setContentsMargins(0, 0, 0, 0)
+        col_layout.addSpacing(4)
+        col_layout.addLayout(col_body, 1)
+        layout.addWidget(col_group, 1)
+
+        self._col_up_btn.clicked.connect(lambda: self._move_selected_column(-1))
+        self._col_down_btn.clicked.connect(lambda: self._move_selected_column(1))
+        self._col_reset_btn.clicked.connect(self._reset_columns_to_defaults)
+        self._seg_enabled_cb.toggled.connect(self._seg_mode_combo.setEnabled)
+
+        self._populate_views_tab()
+        return tab
+
+    # -- Views tab: population ------------------------------------------------
+
+    def _table_view(self):
+        """The downloads table, or None when the dialog is standalone.
+
+        ``SettingsDialog`` is constructed standalone by tests and by any future headless
+        use, so every view control has to work - and simply apply nothing - without a
+        parent window.
+        """
+        parent = self.parent()
+        table = getattr(parent, "_table", None)
+        if table is None or getattr(table, "horizontalHeader", None) is None:
+            return None
+        return table
+
+    def _populate_views_tab(self) -> None:
+        from my_idm.download_model import (
+            DEFAULT_SEGREGATED_MODE,
+            SEGREGATED_MODES,
+        )
+
+        db = self._db
+        if db is not None:
+            self._seg_enabled_cb.setChecked(bool(db.get_ui_state("segregated_view_enabled", False)))
+            mode = db.get_ui_state("segregated_view_mode", DEFAULT_SEGREGATED_MODE)
+            if mode not in SEGREGATED_MODES:
+                mode = DEFAULT_SEGREGATED_MODE
+            index = self._seg_mode_combo.findData(mode)
+            self._seg_mode_combo.setCurrentIndex(max(0, index))
+        self._seg_mode_combo.setEnabled(self._seg_enabled_cb.isChecked())
+
+        self._column_list.clear()
+        table = self._table_view()
+        header = table.horizontalHeader() if table is not None else None
+        from my_idm.download_model import Col
+
+        # Walk *visual* positions and ask for the logical column sitting there, so the list
+        # reads left-to-right exactly as the table renders. Iterating logical indices and
+        # trying to place each one at its visual slot drops columns, because a slot is
+        # already occupied by a column that has not been placed yet.
+        for visual in range(Col.COUNT):
+            logical = header.logicalIndex(visual) if header is not None else visual
+            if logical < 0:
+                continue
+            item = QListWidgetItem(Col.HEADERS[logical])
+            item.setData(Qt.ItemDataRole.UserRole, logical)
+            # QListWidgetItem.setToolTip takes a single string, unlike QWidget's two-arg
+            # overload. The item may be elided in a narrow dialog, so the tooltip carries
+            # the full name and what the tick does.
+            item.setToolTip(f"{Col.HEADERS[logical]} — shown in the downloads table")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            hidden = header.isSectionHidden(logical) if header is not None else False
+            item.setCheckState(
+                Qt.CheckState.Unchecked if hidden else Qt.CheckState.Checked
+            )
+            self._column_list.addItem(item)
+
+    def _move_selected_column(self, delta: int) -> None:
+        row = self._column_list.currentRow()
+        if row < 0:
+            return
+        target = row + delta
+        if target < 0 or target >= self._column_list.count():
+            return
+        item = self._column_list.takeItem(row)
+        self._column_list.insertItem(target, item)
+        self._column_list.setCurrentRow(target)
+
+    def _reset_columns_to_defaults(self) -> None:
+        from my_idm.download_model import Col
+
+        for position in range(self._column_list.count()):
+            item = self._column_list.item(position)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setText(Col.HEADERS[item.data(Qt.ItemDataRole.UserRole)])
+        self._column_list.setCurrentRow(-1)
+        parent = self.parent()
+        if hasattr(parent, "_on_reset_view"):
+            parent._on_reset_view()
+        else:
+            self._populate_views_tab()
+
+    # -- Views tab: apply -----------------------------------------------------
+
+    def _apply_views_tab(self) -> None:
+        """Push the tab's state into the table and the database.
+
+        Column visibility and order are written straight onto the header in the order the
+        list shows, using an ascending sweep. A descending sweep strands a displaced
+        section near the front, which then shifts every subsequent position - the same trap
+        ``MainWindow._on_reset_view`` documents.
+        """
+        from my_idm.download_model import Col
+
+        db = self._db
+        if db is not None:
+            db.set_ui_state("segregated_view_enabled", self._seg_enabled_cb.isChecked())
+            db.set_ui_state("segregated_view_mode", self._seg_mode_combo.currentData())
+
+        table = self._table_view()
+        if table is None:
+            return
+        header = table.horizontalHeader()
+
+        wanted_hidden = set()
+        order: list[int] = []
+        for position in range(self._column_list.count()):
+            item = self._column_list.item(position)
+            logical = int(item.data(Qt.ItemDataRole.UserRole))
+            order.append(logical)
+            if item.checkState() == Qt.CheckState.Unchecked:
+                wanted_hidden.add(logical)
+
+        for logical in range(Col.COUNT):
+            header.setSectionHidden(logical, logical in wanted_hidden)
+        for slot, logical in enumerate(order):
+            visual = header.visualIndex(logical)
+            if visual != slot:
+                header.moveSection(visual, slot)
+
+        parent = self.parent()
+        if hasattr(parent, "_set_segregation_mode"):
+            parent._set_segregation_mode(self._seg_mode_combo.currentData())
+        elif hasattr(parent, "_on_toggle_segregated_view"):
+            parent._on_toggle_segregated_view(self._seg_enabled_cb.isChecked())
+        if hasattr(parent, "_save_ui_state_to_db"):
+            parent._save_ui_state_to_db()
 
     def _create_general_tab(self) -> QWidget:
         tab = QWidget()
@@ -614,11 +967,45 @@ class SettingsDialog(QDialog):
         meta_row.addWidget(self._metadata_timeout_spin)
         meta_layout.addLayout(meta_row)
 
+        # -- free disk space ---------------------------------------------------
+        self._disk_space_check_cb = QCheckBox(
+            "Check free disk space before downloading"
+        )
+        self._disk_space_check_cb.setToolTip(
+            "Refuse a download the target drive cannot hold, instead of letting it fail "
+            "part-way through. A download that exactly fills the volume is also refused, "
+            "so the disk is never left at 100%."
+        )
+        meta_layout.addWidget(self._disk_space_check_cb)
+
+        headroom_row = QHBoxLayout()
+        headroom_row.addWidget(QLabel("Safety margin to keep free:"), 1)
+        self._disk_space_headroom_spin = QSpinBox()
+        self._disk_space_headroom_spin.setRange(0, 1024 * 1024)
+        self._disk_space_headroom_spin.setSingleStep(64)
+        self._disk_space_headroom_spin.setSuffix(" MB")
+        self._disk_space_headroom_spin.setToolTip(
+            "Extra space required on top of the download size, so the page file, the "
+            "recycle bin and everything else sharing the drive still have room. "
+            "0 means the download must fit exactly."
+        )
+        headroom_row.addWidget(self._disk_space_headroom_spin)
+        meta_layout.addLayout(headroom_row)
+        # A margin for a check that is off is a setting that does nothing, so grey it out.
+        self._disk_space_check_cb.toggled.connect(self._disk_space_headroom_spin.setEnabled)
+
         layout.addWidget(meta_group)
         layout.addStretch()
         return tab
 
-    def _create_network_privacy_tab(self) -> QWidget:
+    def _create_vpn_tab(self) -> QWidget:
+        """Network adapter / VPN binding and proxy settings.
+
+        Split out of the former combined "Network & Privacy" tab. The kill switch and
+        the proxy describe the local network path, while Tor (its own tab now) is a
+        routing decision that stands alone. Sharing one tab meant scrolling past three
+        unrelated groups to reach the one setting being changed.
+        """
         tab = QWidget()
         layout = QVBoxLayout(tab)
         layout.setSpacing(14)
@@ -701,6 +1088,16 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(proxy_group)
 
+        layout.addStretch()
+        return tab
+
+    def _create_tor_tab(self) -> QWidget:
+        """Tor SOCKS5 routing, split out of the former combined Network & Privacy tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
         # 3. Tor Onion Routing & Privacy
         tor_group = QGroupBox("🧅 Tor Network Privacy && Onion Routing")
         tor_inner = QVBoxLayout(tor_group)
@@ -770,12 +1167,6 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
         return tab
-
-    def _create_network_tab(self) -> QWidget:
-        return self._create_network_privacy_tab()
-
-    def _create_tor_tab(self) -> QWidget:
-        return self._create_network_privacy_tab()
 
     def _create_security_tab(self) -> QWidget:
         tab = QWidget()
@@ -1087,6 +1478,22 @@ class SettingsDialog(QDialog):
         ap_layout.addWidget(logs_group)
 
         layout.addWidget(ap_group)
+        layout.addStretch()
+        return tab
+
+
+    def _create_youtube_tab(self) -> QWidget:
+        """YouTube / yt-dlp settings, split out of the combined External Tools tab.
+
+        ``ExternalToolsConfig`` configures exactly two tools - the AnimePahe scraper and
+        yt-dlp - so one tab per tool is the honest split. The AnimePahe tab keeps its own
+        nested "Download Anime by URL" and "Diagnostics & Logs" groups, which are
+        actions on that same tool.
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
         layout.addWidget(self._create_youtube_group())
         layout.addStretch()
         return tab
@@ -1658,6 +2065,9 @@ class SettingsDialog(QDialog):
         self._max_seeding_speed_spin.setValue(self._torrent_cfg.max_seeding_speed)
         self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
         self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
+        self._disk_space_check_cb.setChecked(self._general_cfg.disk_space_check)
+        self._disk_space_headroom_spin.setValue(self._general_cfg.disk_space_headroom_mb)
+        self._disk_space_headroom_spin.setEnabled(self._general_cfg.disk_space_check)
 
         # Backlog locations
         self._backlog_list.clear()
@@ -2274,6 +2684,8 @@ class SettingsDialog(QDialog):
         self._general_cfg.close_to_tray = self._close_to_tray_cb.isChecked()
         self._general_cfg.start_minimized = self._start_minimized_cb.isChecked()
         self._general_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
+        self._general_cfg.disk_space_check = self._disk_space_check_cb.isChecked()
+        self._general_cfg.disk_space_headroom_mb = self._disk_space_headroom_spin.value()
         locs = [self._backlog_list.item(i).text().strip() for i in range(self._backlog_list.count())]
         self._general_cfg.backlog_locations = [l for l in locs if l]
         self._general_cfg.clear_backlog_after_load = self._clear_backlog_cb.isChecked()
@@ -2371,6 +2783,11 @@ class SettingsDialog(QDialog):
         self._browser_cfg.save()
         if self._manager and hasattr(self._manager, "set_browser_config"):
             self._manager.set_browser_config(self._browser_cfg)
+
+        # 8. Apply Views: segregated grouping and table columns. Last, because it writes
+        # straight onto the live table rather than into a config object.
+        if hasattr(self, "_apply_views_tab"):
+            self._apply_views_tab()
 
         self.accept()
 

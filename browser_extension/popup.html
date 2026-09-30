@@ -40,7 +40,10 @@
     </div>
 
     <div id="skipNotice" class="skip-notice" hidden>
-      <div class="skip-title">Last download not captured <span id="skipCount"></span></div>
+      <div class="skip-title">
+        <span>Last download not captured <span id="skipCount"></span></span>
+        <button id="dismissSkipBtn" class="skip-dismiss" title="Clear this notice and the toolbar badge">✕</button>
+      </div>
       <div id="skipReason" class="skip-reason"></div>
       <div id="skipUrl" class="skip-url"></div>
     </div>

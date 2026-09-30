@@ -255,6 +255,135 @@ ACTIVE_SECTION_STATUSES = {
 SEEDING_SECTION_STATUSES = {"seeding"}
 INACTIVE_SECTION_STATUSES = {"completed", "stopped", "file_not_found", "suspended"}
 
+# -- File-type segregation -------------------------------------------------
+# A third segregated mode, grouping by what the payload *is* rather than when it was added
+# or whether it is still running. Users accumulate mixed libraries and the only way to find
+# "the PDFs" today is the Name column plus manual sorting.
+SECTION_TYPE_VIDEO = "type_video"
+SECTION_TYPE_AUDIO = "type_audio"
+SECTION_TYPE_ARCHIVE = "type_archive"
+SECTION_TYPE_DOCUMENTS = "type_documents"
+SECTION_TYPE_PHOTO = "type_photo"
+SECTION_TYPE_GENERAL = "type_general"
+
+#: Extension -> category. Lower-case, no leading dot. Ordered most-specific first: a
+#: compound extension like ``tar.gz`` is matched by its **last** component below, so only
+#: the tail needs listing here.
+TYPE_CATEGORY_EXTENSIONS: dict[str, str] = {
+    # Video
+    "mp4": SECTION_TYPE_VIDEO, "mkv": SECTION_TYPE_VIDEO, "avi": SECTION_TYPE_VIDEO,
+    "mov": SECTION_TYPE_VIDEO, "wmv": SECTION_TYPE_VIDEO, "flv": SECTION_TYPE_VIDEO,
+    "webm": SECTION_TYPE_VIDEO, "m4v": SECTION_TYPE_VIDEO, "mpg": SECTION_TYPE_VIDEO,
+    "mpeg": SECTION_TYPE_VIDEO, "ts": SECTION_TYPE_VIDEO, "m2ts": SECTION_TYPE_VIDEO,
+    "3gp": SECTION_TYPE_VIDEO, "vob": SECTION_TYPE_VIDEO, "rmvb": SECTION_TYPE_VIDEO,
+    # Audio
+    "mp3": SECTION_TYPE_AUDIO, "flac": SECTION_TYPE_AUDIO, "aac": SECTION_TYPE_AUDIO,
+    "ogg": SECTION_TYPE_AUDIO, "oga": SECTION_TYPE_AUDIO, "wav": SECTION_TYPE_AUDIO,
+    "m4a": SECTION_TYPE_AUDIO, "wma": SECTION_TYPE_AUDIO, "opus": SECTION_TYPE_AUDIO,
+    "aiff": SECTION_TYPE_AUDIO, "alac": SECTION_TYPE_AUDIO, "mid": SECTION_TYPE_AUDIO,
+    # Archive
+    "zip": SECTION_TYPE_ARCHIVE, "rar": SECTION_TYPE_ARCHIVE,
+    "7z": SECTION_TYPE_ARCHIVE, "gz": SECTION_TYPE_ARCHIVE,
+    "bz2": SECTION_TYPE_ARCHIVE, "xz": SECTION_TYPE_ARCHIVE,
+    "zst": SECTION_TYPE_ARCHIVE, "tar": SECTION_TYPE_ARCHIVE,
+    "cab": SECTION_TYPE_ARCHIVE, "arj": SECTION_TYPE_ARCHIVE, "lzh": SECTION_TYPE_ARCHIVE,
+    "iso": SECTION_TYPE_ARCHIVE, "tgz": SECTION_TYPE_ARCHIVE,
+    # Documents
+    "pdf": SECTION_TYPE_DOCUMENTS, "epub": SECTION_TYPE_DOCUMENTS,
+    "mobi": SECTION_TYPE_DOCUMENTS, "azw3": SECTION_TYPE_DOCUMENTS,
+    "doc": SECTION_TYPE_DOCUMENTS, "docx": SECTION_TYPE_DOCUMENTS,
+    "xls": SECTION_TYPE_DOCUMENTS, "xlsx": SECTION_TYPE_DOCUMENTS,
+    "ppt": SECTION_TYPE_DOCUMENTS, "pptx": SECTION_TYPE_DOCUMENTS,
+    "odt": SECTION_TYPE_DOCUMENTS, "ods": SECTION_TYPE_DOCUMENTS,
+    "odp": SECTION_TYPE_DOCUMENTS, "rtf": SECTION_TYPE_DOCUMENTS,
+    "txt": SECTION_TYPE_DOCUMENTS, "md": SECTION_TYPE_DOCUMENTS,
+    "csv": SECTION_TYPE_DOCUMENTS, "json": SECTION_TYPE_DOCUMENTS,
+    "xml": SECTION_TYPE_DOCUMENTS, "html": SECTION_TYPE_DOCUMENTS,
+    "htm": SECTION_TYPE_DOCUMENTS, "chm": SECTION_TYPE_DOCUMENTS,
+    # Photo
+    "jpg": SECTION_TYPE_PHOTO, "jpeg": SECTION_TYPE_PHOTO, "png": SECTION_TYPE_PHOTO,
+    "gif": SECTION_TYPE_PHOTO, "bmp": SECTION_TYPE_PHOTO, "webp": SECTION_TYPE_PHOTO,
+    "tiff": SECTION_TYPE_PHOTO, "tif": SECTION_TYPE_PHOTO, "svg": SECTION_TYPE_PHOTO,
+    "heic": SECTION_TYPE_PHOTO, "heif": SECTION_TYPE_PHOTO, "avif": SECTION_TYPE_PHOTO,
+    "raw": SECTION_TYPE_PHOTO, "cr2": SECTION_TYPE_PHOTO, "nef": SECTION_TYPE_PHOTO,
+    "arw": SECTION_TYPE_PHOTO, "dng": SECTION_TYPE_PHOTO, "psd": SECTION_TYPE_PHOTO,
+    "ico": SECTION_TYPE_PHOTO,
+}
+
+#: Display order of the file-type sections in the table.
+TYPE_SECTION_DEFS = [
+    (SECTION_TYPE_VIDEO, "Video", "__section_type_video__"),
+    (SECTION_TYPE_AUDIO, "Audio", "__section_type_audio__"),
+    (SECTION_TYPE_ARCHIVE, "Archives", "__section_type_archive__"),
+    (SECTION_TYPE_DOCUMENTS, "Documents", "__section_type_documents__"),
+    (SECTION_TYPE_PHOTO, "Photos", "__section_type_photo__"),
+    (SECTION_TYPE_GENERAL, "General", "__section_type_general__"),
+]
+
+#: The segregated modes the View menu offers, in menu order.
+SEGREGATED_MODES = ("status", "date", "type")
+DEFAULT_SEGREGATED_MODE = "status"
+
+#: Menu / UI labels for the modes, kept beside the modes so the View menu and the
+#: Preferences tab cannot drift apart.
+SEGREGATED_MODE_LABELS = {
+    "status": "Status (Active / Seeding / Inactive)",
+    "date": "Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)",
+    "type": "File Type (Video / Audio / Archives / Documents / Photos / General)",
+}
+
+
+def split_extension(name: str) -> tuple[str, str]:
+    """Split *name* into (stem, extension-with-dot), lower-cased and dot-prefixed.
+
+    Returns ``("", "")`` for a blank name. Mirrors ``utils.split_extension`` but is kept
+    local so ``download_model`` stays importable without ``utils`` (and therefore without
+    Qt-free test collection pulling in the whole app).
+    """
+    if not name:
+        return "", ""
+    base = name.replace("\\", "/").rstrip("/").split("/")[-1]
+    idx = base.rfind(".")
+    # A leading dot is a hidden file, not an extension (".gitignore" has none).
+    if idx <= 0 or idx == len(base) - 1:
+        return base, ""
+    return base[:idx], base[idx:].lower()
+
+
+def get_entry_type_category(entry: DownloadEntry) -> str:
+    """Classify a download into Video / Audio / Archive / Documents / Photo / General.
+
+    The extension is taken from ``filename``, falling back to the leaf of ``file_path`` so
+    a torrent whose root folder carries the extension still lands in the right section.
+    Anything unrecognised - including a download with no name yet - is ``General``, which
+    is the catch-all section and therefore never empty-by-accident.
+    """
+    candidates = []
+    filename = (getattr(entry, "filename", "") or "").strip()
+    if filename:
+        candidates.append(filename)
+    file_path = (getattr(entry, "file_path", "") or "").strip()
+    if file_path:
+        candidates.append(file_path.replace("\\", "/").rstrip("/").split("/")[-1])
+    # An explicit user override wins, so a mis-detected item can be filed by hand.
+    override = ""
+    try:
+        meta = entry.metadata
+        if meta:
+            override = str(meta.get("type_category") or "")
+    except Exception:
+        override = ""
+    if override in {cat for cat, _t, _s in TYPE_SECTION_DEFS}:
+        return override
+
+    for candidate in candidates:
+        _stem, ext = split_extension(candidate)
+        if ext:
+            category = TYPE_CATEGORY_EXTENSIONS.get(ext.lstrip("."))
+            if category:
+                return category
+    return SECTION_TYPE_GENERAL
+
 DATE_SECTION_DEFS = [
     (SECTION_DATE_TODAY, "Today", "__section_date_today__"),
     (SECTION_DATE_YESTERDAY, "Yesterday", "__section_date_yesterday__"),
@@ -454,8 +583,13 @@ class DownloadTableModel(QAbstractTableModel):
         self.endResetModel()
 
     def set_segregated_view(self, enabled: bool, mode: Optional[str] = None):
-        if mode is not None and mode in ("status", "date"):
+        # An unknown mode is ignored rather than stored, so a stale persisted value from a
+        # newer build (or a hand-edited ui_state) degrades to the default instead of
+        # silently disabling segregation.
+        if mode is not None and mode in SEGREGATED_MODES:
             self._segregated_mode = mode
+        if self._segregated_mode not in SEGREGATED_MODES:
+            self._segregated_mode = DEFAULT_SEGREGATED_MODE
         if self._segregated_view == enabled and mode is None:
             return
         self._segregated_view = enabled
@@ -465,8 +599,8 @@ class DownloadTableModel(QAbstractTableModel):
         return self._segregated_view
 
     def set_segregated_mode(self, mode: str):
-        if mode not in ("status", "date"):
-            mode = "status"
+        if mode not in SEGREGATED_MODES:
+            mode = DEFAULT_SEGREGATED_MODE
         if self._segregated_mode != mode:
             self._segregated_mode = mode
             if self._segregated_view:
@@ -758,16 +892,27 @@ class DownloadTableModel(QAbstractTableModel):
                 (SECTION_DATE_OLDER, "Older", older_entries, "__section_date_older__"),
             ]
         else:
-            # Segregated view: group by Active, Seeding, Inactive
-            active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
-            seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
-            inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
+            # Segregated view: group by Active, Seeding, Inactive, or by file type.
+            if self._segregated_mode == "type":
+                buckets: dict[str, list[DownloadEntry]] = {
+                    cat: [] for cat, _t, _s in TYPE_SECTION_DEFS
+                }
+                for e in filtered:
+                    buckets[get_entry_type_category(e)].append(e)
+                groups = [
+                    (cat, title, buckets[cat], sentinel)
+                    for cat, title, sentinel in TYPE_SECTION_DEFS
+                ]
+            else:
+                active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
+                seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
+                inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
 
-            groups = [
-                (SECTION_ACTIVE, "Active", active_entries, "__section_active__"),
-                (SECTION_SEEDING, "Seeding", seeding_entries, "__section_seeding__"),
-                (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
-            ]
+                groups = [
+                    (SECTION_ACTIVE, "Active", active_entries, "__section_active__"),
+                    (SECTION_SEEDING, "Seeding", seeding_entries, "__section_seeding__"),
+                    (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
+                ]
 
         if self._sort_column is not None:
             for _, _, group_entries, _ in groups:
@@ -909,6 +1054,19 @@ class DownloadTableModel(QAbstractTableModel):
         if 0 <= row < len(self._entries):
             e = self._entries[row]
             return None if getattr(e, "is_section_header", False) else e
+        return None
+
+    def get_section_header(self, row: int) -> Optional[DownloadEntry]:
+        """The section-header row at *row*, or None if that row is a real download.
+
+        The counterpart to :meth:`get_entry`, which deliberately hides section rows. Callers
+        that need to read a section's title or count - the delegate does it for display,
+        and the Views preferences tab does it for the mode list - need this rather than
+        reaching into ``_entries``.
+        """
+        if 0 <= row < len(self._entries):
+            e = self._entries[row]
+            return e if getattr(e, "is_section_header", False) else None
         return None
 
     def get_entry_by_id(self, download_id: str) -> Optional[DownloadEntry]:

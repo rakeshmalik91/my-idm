@@ -159,6 +159,44 @@ function recordSkip(reason, url) {
   });
 }
 
+// Explain an uncapturable URL in terms of the site that produced it.
+//
+// A `blob:` URL embeds its own origin - `blob:https://github.com/<uuid>` - so the site is
+// read out of the URL rather than assumed. Naming the site the user is actually looking at
+// is what makes the advice actionable; a hardcoded example would be wrong advice for
+// every other site, and blob URLs come from any page that builds a file in JS.
+function describeUncapturable(url) {
+  const raw = String(url || "");
+  const scheme = (raw.split(":")[0] || "").toLowerCase();
+
+  // blob:https://host/path -> https://host
+  let site = "";
+  if (scheme === "blob") {
+    const inner = raw.slice("blob:".length);
+    const match = inner.match(/^([a-z][a-z0-9+.-]*:\/\/[^/?#]+)/i);
+    if (match) site = match[1];
+  }
+
+  const what = scheme === "data"
+    ? "an inline data: URL (the whole file is embedded in the page)"
+    : `a ${scheme || "non-HTTP"}: URL, which is a reference to something inside the browser`;
+
+  const lines = [
+    `${site ? site + " handed" : "This page handed"} the browser ${what}.`,
+    "That has no address an external downloader can request, so only the browser can fetch it," +
+      " and Chrome downloads it instead.",
+  ];
+
+  if (scheme === "blob" || scheme === "data") {
+    lines.push(
+      "To capture it, right-click the link and copy the link address: if that is also a " +
+      "blob:/data: URL it cannot be captured, but the ordinary https:// link for the same " +
+      "file usually can."
+    );
+  }
+  return lines.join(" ");
+}
+
 function setBadge(count) {
   try {
     if (!chrome.action || !chrome.action.setBadgeText) return;
@@ -169,10 +207,10 @@ function setBadge(count) {
   }
 }
 
-function clearSkips() {
-  chrome.storage.local.remove(["lastSkip", "skipCount"]);
-  setBadge(0);
-}
+// Note: clearing a skip is owned by the popup (popup.js), which clears both the stored
+// keys and the badge text itself. It is not a service-worker concern, and an earlier
+// `clearSkips()` here had no caller at all - dead code that read as though the badge
+// could be dismissed when in fact it only ever climbed.
 
 async function getCookiesForUrl(url) {
   if (!chrome.cookies || !chrome.cookies.getAll) return "";
@@ -297,21 +335,14 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 
       const downloadUrl = item.finalUrl || item.url || "";
 
-      // Reject schemes with no HTTP transport. `blob:` is what Chrome reports for
-      // JS-generated downloads - and what GitHub hands out on some private-repo asset
-      // pages - and it is a browser-internal object reference that no external
-      // downloader can fetch. Handing one to My-IDM only produces a download that fails
-      // the full retry ladder (5s, 10s, 20s, 40s, 60s) before erroring. The Firefox
-      // engine below already had this guard; Chrome did not, so the same page was
-      // captured on one browser and skipped on the other.
+      // Reject schemes with no HTTP transport. `blob:` is what a browser reports for a
+      // JS-generated download, and it is an in-memory object reference that no external
+      // downloader can fetch - handing one to My-IDM only produces a download that fails
+      // the full retry ladder (5s, 10s, 20s, 40s, 60s) before erroring. The Firefox engine
+      // below already had this guard; Chrome did not, so the same page was captured on one
+      // browser and skipped on the other.
       if (!isCapturableUrl(downloadUrl)) {
-        recordSkip(
-          "This page handed the browser an internal URL (blob:/data:), which has no " +
-          "address an external downloader can request. Chrome downloads it instead. " +
-          "Right-click the link and copy its address - if it is a blob: URL, use Chrome's " +
-          "own download; an https://github.com/... link can be captured.",
-          downloadUrl
-        );
+        recordSkip(describeUncapturable(downloadUrl), downloadUrl);
         suggest({ filename: item.filename });
         return;
       }

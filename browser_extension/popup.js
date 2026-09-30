@@ -12,6 +12,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const skipReason = document.getElementById("skipReason");
   const skipUrl = document.getElementById("skipUrl");
   const skipCount = document.getElementById("skipCount");
+  const dismissSkipBtn = document.getElementById("dismissSkipBtn");
 
   let currentPort = 19582;
 
@@ -48,6 +49,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     skipCount.textContent = count > 1 ? `(${count} this session)` : "";
     skipNotice.hidden = false;
   }
+
+  // Dismiss the notice and clear the toolbar badge.
+  //
+  // Both were previously write-only: `clearSkips()` existed in background.js but nothing
+  // ever called it, so the badge count could only climb and the notice could never be
+  // acknowledged. The badge is cleared here as well as in storage, because the badge text
+  // is toolbar state rather than stored data.
+  dismissSkipBtn.addEventListener("click", async () => {
+    await chrome.storage.local.remove(["lastSkip", "skipCount"]);
+    try {
+      if (chrome.action && chrome.action.setBadgeText) {
+        await chrome.action.setBadgeText({ text: "" });
+      }
+    } catch (e) {
+      // A missing badge API must not stop the notice being cleared.
+    }
+    skipNotice.hidden = true;
+    skipCount.textContent = "";
+    skipReason.textContent = "";
+    skipUrl.textContent = "";
+  });
 
   async function checkHealth() {
     statusDot.className = "dot";

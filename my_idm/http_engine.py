@@ -12,6 +12,7 @@ from typing import Optional, Callable
 from urllib.parse import unquote, urlparse, parse_qs
 
 import aiohttp
+import humanize
 
 try:
     from curl_cffi.requests import AsyncSession as CurlAsyncSession
@@ -23,7 +24,7 @@ except ImportError:
 from my_idm.config import TorConfig, GeneralConfig
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.network import NetworkConfig, is_interface_active
-from my_idm.utils import get_unique_filename
+from my_idm.utils import check_disk_space, get_unique_filename
 
 log = logging.getLogger(__name__)
 
@@ -484,6 +485,72 @@ class HTTPEngine:
         self._emit_status(entry.id, "error", reason)
         return False
 
+    def _enforce_disk_space(self, entry: DownloadEntry, probed_total: int) -> bool:
+        """Refuse to start a download the target volume cannot hold.
+
+        The failure this prevents is expensive and completely avoidable: the segmented
+        path pre-allocates the whole file with ``truncate(total_size)`` and the
+        single-stream path appends as it goes, so a 40 GB download into a 2 GB volume
+        either fails immediately at allocation or grinds for an hour and dies at 95%.
+
+        Only the *remaining* bytes are required, not the whole file: a resume that already
+        has 30 GB on disk needs 10 GB more, and demanding 40 GB would refuse a download
+        that is nearly done.
+
+        Returns True to continue, False once the entry has been marked as failed. A volume
+        whose free space cannot be read never blocks anything - see
+        ``utils.check_disk_space``.
+        """
+        if not self._general_config or not self._general_config.disk_space_check:
+            return True
+        if probed_total <= 0:
+            # Size unknown (chunked response, magnet): nothing to compare against. The
+            # progressive writes will surface the real failure if the disk does fill.
+            return True
+
+        target = entry.file_path or entry.save_path
+        if not target:
+            return True
+
+        already = 0
+        try:
+            candidate = Path(target)
+            if candidate.is_file():
+                already = candidate.stat().st_size
+        except OSError:
+            already = 0
+        needed = max(0, int(probed_total) - already)
+        if needed <= 0:
+            return True
+
+        headroom = int(getattr(self._general_config, "disk_space_headroom_mb", 0) or 0) * 1024 * 1024
+        ok, free, shortfall = check_disk_space(target, needed, headroom)
+        if ok:
+            if needed + headroom > free:
+                log.debug(
+                    "Disk headroom is tight for %s: %d free, %d needed (+%d headroom)",
+                    entry.id, free, needed, headroom,
+                )
+            return True
+
+        reason = (
+            f"Not enough disk space: {humanize.naturalsize(needed, binary=True)} still "
+            f"needed but only {humanize.naturalsize(free, binary=True)} free"
+            + (f" (a {humanize.naturalsize(headroom, binary=True)} safety margin is also "
+               f"required)" if headroom else "")
+            + f". Short by {humanize.naturalsize(shortfall, binary=True)}. "
+            f"Free up space, choose a different folder, or turn off "
+            f"Preferences -> General -> 'Check free disk space before downloading'."
+        )
+        log.warning("Refusing to start %s: %s", entry.id, reason)
+        entry.error_message = reason
+        # update_status persists both status and message. No update_download here: it
+        # writes every column and `entry.status` is still the pre-refusal value, which
+        # would put the row straight back to "queued".
+        self._db.update_status(entry.id, "error", reason)
+        self._emit_status(entry.id, "error", reason)
+        return False
+
     async def _run_download(self, entry: DownloadEntry,
                             cancel_evt: asyncio.Event):
         download_id = entry.id
@@ -524,6 +591,10 @@ class HTTPEngine:
             # only place the threshold can be enforced without guessing. Downloads the
             # user added by hand never carry `pending_min_bytes` and are unaffected.
             if not self._enforce_browser_min_size(entry, total_size):
+                return
+
+            # Now the size is authoritative, it can be compared with the volume.
+            if not self._enforce_disk_space(entry, total_size):
                 return
 
             # Update entry with discovered info

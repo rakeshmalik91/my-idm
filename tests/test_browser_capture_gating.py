@@ -182,9 +182,48 @@ class TestExtensionSchemeGuard(unittest.TestCase):
 
     def test_the_recorded_reason_explains_the_workaround(self):
         """The message has to tell the user what to do, not just that it failed."""
-        chromium = self.source.split("onDeterminingFilename.addListener")[1]
-        self.assertIn("Right-click the link", chromium)
-        self.assertIn("blob: URL", chromium)
+        self.assertIn("right-click the link", self.source)
+        self.assertIn("copy the link address", self.source)
+
+    def test_the_reason_is_not_hardcoded_to_one_site(self):
+        """A skip fires for any page, so the advice must not name one host.
+
+        Regression: the message originally read "an https://github.com/... link can be
+        captured", because it was written while diagnosing a GitHub capture. `blob:` URLs
+        come from any page that builds a file in JavaScript, so on every other site the
+        popup told the user to look for a link shape that had nothing to do with what they
+        were downloading. The site is now read out of the URL itself.
+
+        Only *user-facing* strings are checked: a comment may still use a real host to
+        illustrate the URL format.
+        """
+        code = self._strip_line_comments(self.source)
+        for site in ("github.com", "gitlab.com", "example.co.uk", "notion.so"):
+            with self.subTest(site=site):
+                self.assertNotIn(
+                    site, code,
+                    f"no site may be baked into the extension's user-facing text ({site})",
+                )
+        self.assertIn(
+            "describeUncapturable", code,
+            "the reason must be built from the URL, not hardcoded",
+        )
+        self.assertIn(
+            'raw.slice("blob:".length)', code,
+            "the origin is read out of the blob URL so the message can name the site",
+        )
+
+    @staticmethod
+    def _strip_line_comments(source: str) -> str:
+        """Drop `//` comments so a doc example is not mistaken for shipped text.
+
+        Deliberately naive about `//` inside string literals; for this file that only
+        affects the URL regex and the ``127.0.0.1`` literals, neither of which contains a
+        site name, so the false stripping cannot hide a real violation.
+        """
+        return "\n".join(
+            line.split("//")[0] for line in source.splitlines()
+        )
 
     def test_the_popup_surfaces_the_stored_reason(self):
         popup_js = (
@@ -199,6 +238,39 @@ class TestExtensionSchemeGuard(unittest.TestCase):
         self.assertIn("skip-notice", (Path(__file__).resolve().parents[1]
                                       / "browser_extension" / "styles.css").read_text(
                                           encoding="utf-8"))
+    def test_clearing_lives_in_the_popup_not_as_dead_code_in_background(self):
+        """A `clearSkips()` with no caller is worse than none: it reads as the feature.
+
+        Regression: the helper existed in background.js and was never invoked, while the
+        badge could only climb. Clearing is now the popup's job - it owns both the stored
+        keys and the badge text - and the unused helper is gone rather than left as a trap.
+        """
+        code = self._strip_line_comments(self.source)
+        self.assertNotIn(
+            "clearSkips", code,
+            "the dead helper must be removed, not left looking like the dismiss feature",
+        )
+        popup_js = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "popup.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'chrome.storage.local.remove(["lastSkip", "skipCount"])', popup_js,
+            "clearing belongs to the popup, which is the only context that can dismiss it",
+        )
+
+    def test_the_dismiss_control_is_styled_and_reachable(self):
+        popup_html = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "popup.html"
+        ).read_text(encoding="utf-8")
+        styles = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "styles.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skip-dismiss", popup_html, "the button carries the styled class")
+        self.assertIn(".skip-dismiss", styles, "and that class must exist in the stylesheet")
+        self.assertIn("skipNotice.hidden = true", (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "popup.js"
+        ).read_text(encoding="utf-8"), "dismissing must hide the notice immediately")
+
 
 
 class TestServerSchemeGate(unittest.TestCase):
@@ -444,6 +516,33 @@ class EngineMinSizeTestCase(unittest.TestCase):
         row = self.run_with_probe(1)
         self.assertEqual(row.status, "completed")
 
+
+    def test_the_skip_notice_can_be_dismissed(self):
+        """Regression: `clearSkips()` existed but nothing ever called it.
+
+        Both the stored notice and the badge count were write-only, so the toolbar badge
+        could only ever climb and a stale warning could never be acknowledged - it stayed
+        on screen telling the user a download had not been captured long after they had
+        acted on it. The popup now owns clearing, and it clears the badge text as well as
+        the storage, because the badge is toolbar state rather than stored data.
+        """
+        popup_js = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "popup.js"
+        ).read_text(encoding="utf-8")
+        popup_html = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "popup.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            'chrome.storage.local.remove(["lastSkip", "skipCount"])', popup_js,
+            "dismissing must remove both stored keys",
+        )
+        self.assertIn(
+            "setBadgeText", popup_js,
+            "the toolbar badge is separate state and must be cleared too",
+        )
+        self.assertIn('id="dismissSkipBtn"', popup_html, "there must be a control to click")
+        self.assertIn("dismissSkipBtn.addEventListener", popup_js)
 
 if __name__ == "__main__":
     unittest.main()

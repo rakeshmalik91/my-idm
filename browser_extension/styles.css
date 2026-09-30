@@ -270,6 +270,25 @@ textarea {
   color: #e8a33d;
   font-weight: 600;
   margin-bottom: 3px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.skip-dismiss {
+  margin-left: auto;
+  background: none;
+  border: 1px solid #e8a33d;
+  border-radius: 3px;
+  color: #e8a33d;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.skip-dismiss:hover {
+  background: rgba(232, 163, 61, 0.18);
 }
 
 .skip-reason {

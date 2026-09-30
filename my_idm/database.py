@@ -9,7 +9,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,6 +22,76 @@ DB_PATH = APP_DIR / "downloads.db"
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+#: Statuses that mean "the payload is on disk". `seeding` counts: those downloads *are*
+#: complete, they just happen to still be uploading.
+COMPLETE_STATUSES = ("completed", "seeding")
+
+
+@dataclass(frozen=True)
+class DownloadStats:
+    """One bucket of download/upload totals. All byte figures are raw bytes, not strings."""
+    count: int = 0
+    downloaded: int = 0
+    uploaded: int = 0
+    completed: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "count": self.count,
+            "downloaded": self.downloaded,
+            "uploaded": self.uploaded,
+            "completed": self.completed,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DownloadStats:
+        return cls(
+            count=int(data.get("count", 0)),
+            downloaded=int(data.get("downloaded", 0)),
+            uploaded=int(data.get("uploaded", 0)),
+            completed=int(data.get("completed", 0)),
+        )
+
+    def __add__(self, other: DownloadStats) -> DownloadStats:
+        return DownloadStats(
+            count=self.count + other.count,
+            downloaded=self.downloaded + other.downloaded,
+            uploaded=self.uploaded + other.uploaded,
+            completed=self.completed + other.completed,
+        )
+
+
+@dataclass(frozen=True)
+class StatsSnapshot:
+    """Every bucket the statistics popup shows, read in one pass.
+
+    The summary buckets are keyed on ``added_at``, the only timestamp written exactly once
+    and never re-stamped, so the figures do not move when a download is later paused or
+    re-checked. ``series`` drives the chart and follows the range/granularity the user
+    picked there; its labels are ``YYYY-MM-DD`` or ``YYYY-MM`` depending on ``bucket``.
+    """
+    today: DownloadStats = field(default_factory=DownloadStats)
+    week: DownloadStats = field(default_factory=DownloadStats)
+    month: DownloadStats = field(default_factory=DownloadStats)
+    year: DownloadStats = field(default_factory=DownloadStats)
+    lifetime: DownloadStats = field(default_factory=DownloadStats)
+    series: tuple[tuple[str, DownloadStats], ...] = ()
+    bucket: str = "day"
+    since: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "today": self.today.to_dict(),
+            "week": self.week.to_dict(),
+            "month": self.month.to_dict(),
+            "year": self.year.to_dict(),
+            "lifetime": self.lifetime.to_dict(),
+            "series": [[label, s.to_dict()] for label, s in self.series],
+            "bucket": self.bucket,
+            "since": self.since,
+        }
 
 
 def _json_default(obj: Any) -> Any:
@@ -592,8 +662,16 @@ class Database:
         """
         now = _now_iso()
         if status == "completed":
+            # Only the *first* completion stamps the time. `completed` does double duty:
+            # it means both "the payload arrived" and "a seeding session ended", because
+            # TorrentEngine.pause() maps a seeder onto it. Re-stamping on every later
+            # transition moved the completion date of every torrent whose seeding was
+            # stopped by hand, by the ratio limit or the duration limit - which is what
+            # "completed today" in the statistics view is built on.
             self._conn.execute(
-                "UPDATE downloads SET status = ?, completed_at = ?, error_message = '' WHERE id = ?",
+                "UPDATE downloads SET status = ?, "
+                "completed_at = CASE WHEN completed_at = '' THEN ? ELSE completed_at END, "
+                "error_message = '' WHERE id = ?",
                 (status, now, download_id),
             )
         elif status == "downloading":
@@ -640,6 +718,140 @@ class Database:
             "SELECT * FROM downloads ORDER BY added_at DESC"
         ).fetchall()
         return [self._row_to_entry(r) for r in rows]
+
+    # -- statistics ---------------------------------------------------------
+
+    #: One bucket per cut-off, in the order the popup shows them. `added_at` is stored as
+    #: an ISO string by ``_now_iso()``, so ``substr(..., 1, 10)`` is the UTC date and
+    #: ``substr(..., 1, 7)`` the month.
+    _STATS_BUCKETS = (
+        ("today", 0),
+        ("week", 6),
+        ("month", 29),
+        ("year", 364),
+    )
+
+    def _stats_row_to_bucket(self, row) -> DownloadStats:
+        """Aggregate a ``GROUP BY`` row into a bucket, tolerating NULL sums.
+
+        A download with no known size contributes NULL to ``SUM``, and a bare ``None``
+        would render as "None GB" in the popup, so every figure goes through int().
+        """
+        return DownloadStats(
+            count=int(row["count"] or 0),
+            downloaded=int(row["downloaded"] or 0),
+            uploaded=int(row["uploaded"] or 0),
+            completed=int(row["completed"] or 0),
+        )
+
+    def _stats_sum_for(self, since: Optional[str]) -> DownloadStats:
+        """Totals for every row whose ``added_at`` date is on or after *since*.
+
+        *since* is an ISO date prefix (``YYYY-MM-DD``). ``None`` means all time. A row with
+        an empty ``added_at`` never matches a cut-off, but does count towards the
+        lifetime: a hand-written row is still a download the user has.
+        """
+        completed_sql = (
+            f"SUM(CASE WHEN status IN ({','.join('?' * len(COMPLETE_STATUSES))}) "
+            f"THEN 1 ELSE 0 END)"
+        )
+        params: list[Any] = list(COMPLETE_STATUSES)
+        where = ""
+        if since is not None:
+            # The GLOB guard matters: `substr(added_at,1,10) >= ?` is a *string* compare,
+            # and a hand-edited 'not-a-date' sorts after '2026-09-24' ('n' > '2'), so a
+            # corrupt timestamp would silently land in the today bucket. Requiring a
+            # YYYY-MM-DD prefix keeps unparseable rows out of every dated bucket; they
+            # still count towards the lifetime total.
+            where = (
+                " WHERE added_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
+                "AND substr(added_at, 1, 10) >= ?"
+            )
+            params.append(since)
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS count, "
+            "       COALESCE(SUM(total_size), 0) AS downloaded, "
+            "       COALESCE(SUM(uploaded_size), 0) AS uploaded, "
+            f"       {completed_sql} AS completed "
+            f"FROM downloads{where}",
+            params,
+        ).fetchone()
+        return self._stats_row_to_bucket(row)
+
+    def get_download_stats(
+        self,
+        today=None,
+        since: Optional[date] = None,
+        bucket: str = "day",
+    ) -> StatsSnapshot:
+        """Read every statistics bucket in one call.
+
+        *today* is injected rather than read from the clock, which is what makes the whole
+        aggregation testable without freezing time - the same convention the date-based
+        segregation uses. It is interpreted as a local date, matching ``added_at`` being
+        written in UTC but bucketed by the calendar day the user sees.
+
+        *since* and *bucket* drive the chart series: the range to plot (None = all time)
+        and whether to group by day (``substr(...,1,10)``) or month
+        (``substr(...,1,7)``). The summary buckets above are fixed and unaffected - they
+        are the headline numbers, and a chart range should not silently redefine them.
+        """
+        if today is None:
+            today = datetime.now().date()
+        elif isinstance(today, datetime):
+            today = today.date()
+        if isinstance(since, datetime):
+            since = since.date()
+
+        values = {}
+        for name, days_back in self._STATS_BUCKETS:
+            cutoff = (today - timedelta(days=days_back)).isoformat()
+            values[name] = self._stats_sum_for(cutoff)
+        values["lifetime"] = self._stats_sum_for(None)
+
+        return StatsSnapshot(
+            today=values["today"],
+            week=values["week"],
+            month=values["month"],
+            year=values["year"],
+            lifetime=values["lifetime"],
+            series=self._stats_series(since, bucket),
+            bucket=bucket if bucket in ("day", "month") else "day",
+            since=since.isoformat() if since else "",
+        )
+
+    def _stats_series(
+        self, since: Optional[date], bucket: str
+    ) -> tuple[tuple[str, DownloadStats], ...]:
+        """The chart series, grouped by day or month and clipped to *since*.
+
+        The same ``GLOB`` guard as the cut-off buckets applies: without it a corrupt
+        ``added_at`` sorts into a bucket by string comparison, so a hand-edited
+        ``not-a-date`` would appear on the chart and in whatever bucket it sorted into.
+        """
+        width = 10 if bucket == "day" else 7
+        completed_sql = (
+            f"SUM(CASE WHEN status IN ({','.join('?' * len(COMPLETE_STATUSES))}) "
+            f"THEN 1 ELSE 0 END)"
+        )
+        params: list[Any] = [*COMPLETE_STATUSES]
+        where = (
+            " WHERE added_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"
+        )
+        if since is not None:
+            where += f" AND substr(added_at, 1, {width}) >= ?"
+            params.append(since.isoformat()[:width])
+        rows = self._conn.execute(
+            f"SELECT substr(added_at, 1, {width}) AS bucket, "
+            "       COUNT(*) AS count, "
+            "       COALESCE(SUM(total_size), 0) AS downloaded, "
+            "       COALESCE(SUM(uploaded_size), 0) AS uploaded, "
+            f"       {completed_sql} AS completed "
+            f"FROM downloads{where} "
+            "GROUP BY bucket ORDER BY bucket",
+            params,
+        ).fetchall()
+        return tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
 
     def get_next_queue_order(self) -> int:
         row = self._conn.execute(

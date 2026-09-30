@@ -15,8 +15,9 @@ to build any of it.
 | Verdict | Count | Features |
 | --- | --- | --- |
 | **HAVE** | 5 | duplicate detection, history + search, exponential backoff, Firefox extension, resume *detection* |
+| **DONE** | 1 | **disk-space check** (was MISSING — implemented 2026-09-30) |
 | **PARTIAL** | 7 | resume UI gating, CLI, keep-alive reuse, per-download limits, segment sizing, memory-mapped merge\*, CLI subcommands\* |
-| **MISSING** | 11 | HTTP/2, mmap merge, clipboard monitor, global hotkey, bandwidth stats, scheduler, categories, disk-space check, URL editing, named queues, segment staggering |
+| **MISSING** | 10 | HTTP/2, mmap merge, clipboard monitor, global hotkey, bandwidth stats, scheduler, categories, URL editing, named queues, segment staggering |
 
 ---
 
@@ -37,25 +38,54 @@ Shape: a `queues` table (`id`, `name`, `max_concurrent`), `downloads.queue_id` r
 `queue_order`, and a queue switcher. **Migratable without data loss** — existing rows get
 the default queue.
 
-### 2. Disk-space check before starting — MISSING
+### 2. Disk-space check before starting — DONE
 RDM: "Validates free space before starting download."
 
-Nothing anywhere calls `shutil.disk_usage` or equivalent; `psutil` is a declared
-dependency but is only used for NIC enumeration (`network.py:171-173`).
+Was: nothing called `shutil.disk_usage` anywhere; `psutil` was only used for NIC
+enumeration (`network.py:171-173`).
 
-Why it matters: a 40 GB download into a 2 GB free volume fails at 95% after an hour of
-user time. This is a cheap guard (`shutil.disk_usage(save_path).free` vs the probed
-`Content-Length`) and one of the highest value-per-line items in this list.
+Implemented as `utils.check_disk_space` / `utils.get_free_disk_space`, enforced by
+`HTTPEngine._enforce_disk_space` (right after the probe, when the size is authoritative)
+and `TorrentEngine._enforce_disk_space` (first poll where a magnet's size is known — it
+cannot live in `add_torrent`, because the manager overwrites the status and message a
+failure there would set). Settings: `GeneralConfig.disk_space_check` (on by default) and
+`disk_space_headroom_mb` (256), exposed in Preferences → General beside the BitTorrent
+suspend timeout.
 
-### 3. Bandwidth statistics — MISSING
+Two rules the tests pin:
+
+- only the **remaining** bytes are required, so a resume holding 30 GB of a 40 GB file needs
+  10 GB more, not 40 — otherwise every resume of a large download is refused;
+- a volume whose free space **cannot be read** never blocks anything. Refusing a download
+  because we could not obtain a number would be worse than letting it try.
+
+A refused torrent is paused and stripped of `auto_managed`, so libtorrent can neither keep
+writing nor restart it on its own, and the check is re-run on resume rather than being
+marked done. Covered by `tests/test_disk_space.py` (50 tests).
+
+### 3. Bandwidth statistics — DONE
 RDM: "Live status bar with daily/monthly/yearly/lifetime download totals."
 
-No aggregation SQL exists; the schema (`database.py:452-498`) has no stats or events
-table, and `uploaded_size` is a per-row counter that is never summed.
+**Implemented** — see [Bandwidth Statistics](../../architecture/statistics.md) for the
+design, and `my_idm/stats_dialog.py` for the implementation.
 
-Why it matters: it's the "look what this tool did for me" feature, and the data needed
-(`added_at`, `completed_at`, `total_size`, `uploaded_size`) is **already in the table** —
-so this is a `GROUP BY strftime(...)` query and a small dialog, not a schema migration.
+- `Database.get_download_stats(today, daily_days=30)` reads every bucket in one call and
+  returns a `StatsSnapshot` (`DownloadStats` value objects, frozen and additive). `today` is
+  **injected**, which is what makes the date arithmetic assertable without a frozen clock.
+  Buckets use `substr(added_at,1,10)` rather than `strftime`, plus a `GLOB` guard on the
+  date prefix: the cut-off is a *string* compare, so a hand-edited `not-a-date` sorts after
+  `2026-09-24` and would otherwise be filed under *today*.
+- A `📊 Statistics…` toolbar action beside **Preferences**, opening a read-only popup with
+  the totals grid, a stacked per-day volume chart, and a live speed sparkline.
+- Charts are `QPainter`-drawn, not matplotlib: matplotlib and numpy are importable here but
+  are **absent from `requirements.txt`**, so depending on them would work on the author's
+  machine and fail for anyone installing from the requirements file.
+- **Prerequisite fixed:** `completed_at` was re-stamped whenever a download left `seeding`,
+  so "completed today" was already wrong for every torrent whose seeding was stopped by
+  hand, by the ratio limit or the duration limit. `update_status` now stamps only when the
+  column is empty, so the first completion wins.
+
+Covered by `tests/test_statistics.py` (71 tests).
 
 ### 4. Categories — auto-sort downloads by file type — MISSING
 RDM: "Auto-sort downloads by file type (Videos, Archives, Documents, etc.)."

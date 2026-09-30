@@ -205,6 +205,65 @@ def extract_source_domain(url: str) -> str:
     return ""
 
 
+def get_free_disk_space(path: str | Path) -> int:
+    """Free bytes on the volume that will hold *path*, or 0 if it cannot be determined.
+
+    Walks up to the nearest existing ancestor, because the save directory is often created
+    on demand and a fresh torrent folder may not exist yet - ``shutil.disk_usage`` on a
+    missing path raises, and the answer we want is the volume's, not the directory's.
+
+    Returns 0 for "unknown" rather than raising: a caller that cannot measure free space
+    must not block a download, it must let it proceed. The same convention as the
+    ``0 = unlimited`` speed limit.
+    """
+    import shutil
+
+    if not path or not str(path).strip():
+        # A blank target is unknown, not "the current directory" - Path("") is Path(".")
+        # and quietly measuring the CWD would be a surprising thing for a blank argument
+        # to do.
+        return 0
+    try:
+        candidate = Path(path)
+        if candidate.is_dir():
+            return int(shutil.disk_usage(str(candidate)).free)
+        # A file path, or one that does not exist yet: start at the parent and walk up
+        # until there is something existing to measure.
+        probe = candidate.parent if candidate.suffix else candidate
+        for _ in range(64):
+            if probe.exists():
+                return int(shutil.disk_usage(str(probe)).free)
+            parent = probe.parent
+            if parent == probe:
+                break
+            probe = parent
+    except Exception:
+        return 0
+    return 0
+
+
+def check_disk_space(
+    target_path: str | Path,
+    needed_bytes: int,
+    headroom_bytes: int = 0,
+) -> tuple[bool, int, int]:
+    """Is there room for *needed_bytes* more on the volume holding *target_path*?
+
+    Returns ``(ok, free_bytes, shortfall_bytes)``. ``ok`` is True whenever free space cannot
+    be measured: refusing a download because we could not read a number would be worse than
+    letting it try. ``headroom_bytes`` is slack on top of the requirement, so a download that
+    exactly fills the volume is not started - the page file, the recycle bin and whatever
+    else shares the disk all want room, and a volume at 100% stalls unrelated work.
+    """
+    free = get_free_disk_space(target_path)
+    if free <= 0:
+        return True, 0, 0
+    if needed_bytes <= 0:
+        return True, free, 0
+    shortfall = int(needed_bytes) + max(0, int(headroom_bytes)) - free
+    return shortfall <= 0, free, max(0, shortfall)
+
+
 def unlock_path(file_path: str | Path) -> None:
     """Attempt to unlock a file or directory on disk by clearing read-only/system flags and running GC."""
     if not file_path:

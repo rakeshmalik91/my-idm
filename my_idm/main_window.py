@@ -60,7 +60,12 @@ from my_idm.dialogs import (
     MoveDownloadDialog,
     RenameDialog,
 )
-from my_idm.download_model import Col, DownloadTableModel
+from my_idm.download_model import (
+    DEFAULT_SEGREGATED_MODE,
+    SEGREGATED_MODES,
+    Col,
+    DownloadTableModel,
+)
 from my_idm.header_view import FilterHeaderView
 from my_idm.manager import DownloadManager
 from my_idm.resources import get_app_icon, get_app_logo_pixmap
@@ -629,6 +634,12 @@ class MainWindow(QMainWindow):
         self._act_move_down.setToolTip("Move selected download down in queue order")
         self._act_move_down.triggered.connect(self._on_move_queue_down)
 
+        self._act_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
+        self._act_stats.setToolTip(
+            "Download and upload totals for today, this week, this month and this year"
+        )
+        self._act_stats.triggered.connect(self._on_show_statistics)
+
         self._act_preferences = QAction(_create_emoji_icon("⚙"), "Preferences…", self)
         self._act_preferences.setShortcut(QKeySequence("Ctrl+,"))
         self._act_preferences.setToolTip(
@@ -770,6 +781,7 @@ class MainWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
+        toolbar.addAction(self._act_stats)
         toolbar.addAction(self._act_preferences)
 
         # Show only icons without text for playback and action buttons
@@ -858,6 +870,13 @@ class MainWindow(QMainWindow):
         self._act_seg_by_date.triggered.connect(lambda: self._set_segregation_mode("date"))
         self._seg_mode_group.addAction(self._act_seg_by_date)
         self._menu_segregated_view.addAction(self._act_seg_by_date)
+
+        self._act_seg_by_type = QAction("File Type (Video / Audio / Archives / Documents / Photos / General)", self)
+        self._act_seg_by_type.setCheckable(True)
+        self._act_seg_by_type.setChecked(self._segregated_view_mode == "type")
+        self._act_seg_by_type.triggered.connect(lambda: self._set_segregation_mode("type"))
+        self._seg_mode_group.addAction(self._act_seg_by_type)
+        self._menu_segregated_view.addAction(self._act_seg_by_type)
 
         view_menu.addAction(self._act_toggle_details)
         view_menu.addSeparator()
@@ -1567,21 +1586,27 @@ class MainWindow(QMainWindow):
         self._on_open_file()
 
     def _set_segregation_mode(self, mode: str):
-        if mode not in ("status", "date"):
-            mode = "status"
+        if mode not in SEGREGATED_MODES:
+            mode = DEFAULT_SEGREGATED_MODE
         self._segregated_view_mode = mode
         self._manager.db.set_ui_state("segregated_view_mode", mode)
-        if hasattr(self, "_act_seg_by_status"):
-            self._act_seg_by_status.setChecked(mode == "status")
-        if hasattr(self, "_act_seg_by_date"):
-            self._act_seg_by_date.setChecked(mode == "date")
+        for action_name, value in (
+            ("_act_seg_by_status", "status"),
+            ("_act_seg_by_date", "date"),
+            ("_act_seg_by_type", "type"),
+        ):
+            action = getattr(self, action_name, None)
+            if action is not None:
+                action.setChecked(mode == value)
 
         if not self._segregated_view_enabled:
             self._act_segregated_view.setChecked(True)
         else:
             self._model.set_segregated_mode(mode)
             self._apply_table_spans()
-            mode_str = "Status" if mode == "status" else "Date"
+            mode_str = {"status": "Status", "date": "Date", "type": "File Type"}.get(
+                mode, "Status"
+            )
             self._status_label.setText(f"Segregated view grouped by {mode_str}")
 
     def _on_toggle_segregated_view(self, checked: bool):
@@ -2086,6 +2111,22 @@ class MainWindow(QMainWindow):
         )
         if ok:
             self._set_speed_limit(val_kb * 1024, is_upload)
+
+    def _on_show_statistics(self):
+        """Open the read-only statistics popup, beside Preferences in the toolbar.
+
+        The speed sparkline reads the same aggregate the status bar shows, so the chart and
+        the status bar can never disagree - see ``docs/architecture/statistics.md``.
+        """
+        from my_idm.stats_dialog import StatisticsPopup
+
+        dlg = StatisticsPopup(
+            self._manager._db,
+            parent=self,
+            speed_provider=lambda: self._model.get_aggregate_speeds()[0],
+        )
+        dlg.show()
+        return dlg
 
     def _on_open_preferences(self, initial_tab: int = 0):
         dlg = SettingsDialog(

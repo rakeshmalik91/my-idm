@@ -59,6 +59,12 @@ class GeneralConfig:
     backlog_poll_interval: int = 60
     backlog_poll_enabled: bool = True
     metadata_fetch_timeout_days: int = 1
+    # Refuse to start a download the volume cannot hold. Off-by-default would let a 40 GB
+    # download run for an hour and fail at 95%, so it is on unless the user says otherwise.
+    disk_space_check: bool = True
+    # Slack required on top of the download size, so a download that exactly fills the
+    # volume is refused rather than leaving the disk at 100%.
+    disk_space_headroom_mb: int = 256
     enable_system_tray: bool = True
     minimize_to_tray: bool = True
     close_to_tray: bool = True
@@ -129,6 +135,8 @@ class GeneralConfig:
             "backlog_poll_interval": self.backlog_poll_interval,
             "backlog_poll_enabled": self.backlog_poll_enabled,
             "metadata_fetch_timeout_days": self.metadata_fetch_timeout_days,
+        "disk_space_check": self.disk_space_check,
+        "disk_space_headroom_mb": self.disk_space_headroom_mb,
             "enable_system_tray": self.enable_system_tray,
             "minimize_to_tray": self.minimize_to_tray,
             "close_to_tray": self.close_to_tray,
@@ -163,6 +171,8 @@ class GeneralConfig:
             backlog_poll_interval=int(data.get("backlog_poll_interval", 60)),
             backlog_poll_enabled=bool(data.get("backlog_poll_enabled", True)),
             metadata_fetch_timeout_days=int(data.get("metadata_fetch_timeout_days", 1)),
+        disk_space_check=bool(data.get("disk_space_check", True)),
+        disk_space_headroom_mb=max(0, int(data.get("disk_space_headroom_mb", 256))),
             enable_system_tray=bool(data.get("enable_system_tray", True)),
             minimize_to_tray=bool(data.get("minimize_to_tray", True)),
             close_to_tray=bool(data.get("close_to_tray", True)),
@@ -191,6 +201,8 @@ class GeneralConfig:
         settings.setValue("backlog_poll_interval", self.backlog_poll_interval)
         settings.setValue("backlog_poll_enabled", self.backlog_poll_enabled)
         settings.setValue("metadata_fetch_timeout_days", self.metadata_fetch_timeout_days)
+        settings.setValue("disk_space_check", self.disk_space_check)
+        settings.setValue("disk_space_headroom_mb", self.disk_space_headroom_mb)
         settings.setValue("enable_system_tray", self.enable_system_tray)
         settings.setValue("minimize_to_tray", self.minimize_to_tray)
         settings.setValue("close_to_tray", self.close_to_tray)
@@ -226,6 +238,9 @@ class GeneralConfig:
         backlog_poll_interval = settings.value("backlog_poll_interval", 60, type=int)
         backlog_poll_enabled = settings.value("backlog_poll_enabled", True, type=bool)
         metadata_fetch_timeout_days = settings.value("metadata_fetch_timeout_days", 1, type=int)
+        disk_space_check = settings.value("disk_space_check", True, type=bool)
+        disk_space_headroom_mb = max(0, settings.value(
+            "disk_space_headroom_mb", 256, type=int))
         enable_system_tray = settings.value("enable_system_tray", True, type=bool)
         minimize_to_tray = settings.value("minimize_to_tray", True, type=bool)
         close_to_tray = settings.value("close_to_tray", True, type=bool)
@@ -250,6 +265,8 @@ class GeneralConfig:
             backlog_poll_interval=int(backlog_poll_interval),
             backlog_poll_enabled=bool(backlog_poll_enabled),
             metadata_fetch_timeout_days=int(metadata_fetch_timeout_days),
+        disk_space_check=bool(disk_space_check),
+        disk_space_headroom_mb=int(disk_space_headroom_mb),
             enable_system_tray=bool(enable_system_tray),
             minimize_to_tray=bool(minimize_to_tray),
             close_to_tray=bool(close_to_tray),

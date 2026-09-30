@@ -315,7 +315,22 @@ class TestDialogsScrollable(unittest.TestCase):
 
         dlg = SettingsDialog()
         try:
-            self.assertEqual(dlg._tabs.count(), 6)
+            # Named rather than counted: a new tab should be a deliberate line change, and
+            # the scroll-area guarantee below must cover it automatically either way.
+            self.assertEqual(
+                [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())],
+                [
+                    "📁 General & Downloads",
+                    "👁️ Views & Columns",
+                    "🧲 BitTorrent",
+                    "🌐 Browser Integration",
+                    "🛡️ VPN & Proxy",
+                    "🧅 Tor",
+                    "🛡️ Antivirus & Security",
+                    "🌐 AnimePahe Scraper",
+                    "▶️ YouTube (yt-dlp)",
+                ],
+            )
             for i in range(dlg._tabs.count()):
                 widget = dlg._tabs.widget(i)
                 self.assertIsInstance(widget, QScrollArea)

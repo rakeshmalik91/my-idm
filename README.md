@@ -140,6 +140,7 @@ All settings and runtime data are persisted in the user profile:
 - [**Table Views & Segregation**](docs/architecture/table-views.md) — Column definitions and ordering, delegates, date-segregation algorithms, and the size/status/type header filters.
 - [**Window Lifecycle & System Tray**](docs/architecture/window-system-tray.md) — Window geometry persistence, close-to-tray behaviour, and the tray context menu.
 - [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
+- [**Bandwidth Statistics**](docs/architecture/statistics.md) — Today / week / month / year / all-time totals from the existing `downloads` table, a `📊 Statistics` toolbar action beside Preferences, a per-day volume chart and a live speed sparkline.
 - [**User Guide**](docs/user-guide.md) — End-user walkthrough of every feature, settings tab, and keyboard shortcut.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 - [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.
