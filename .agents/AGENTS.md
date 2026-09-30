@@ -41,7 +41,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 
 1. **Commit Convention**: Follow standard conventional commit prefixes (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `chore:`).
 2. **Testing**: Always run `python -m pytest` and ensure all unit tests pass before committing.
-   - The full suite is green: `945 passed, 1 skipped`. The single skip is the opt-in real
+   - The full suite is green: `1665 passed, 1 skipped`. The single skip is the opt-in real
      Windows Defender scan (`MYIDM_RUN_AV_TESTS`).
    - **The suite is hermetic by construction, enforced in `tests/conftest.py`.** Autouse
      fixtures fail the run if anything escapes the sandbox, so a violation is a bug to fix,
@@ -50,10 +50,20 @@ The canonical architecture documentation is organized under [`docs/architecture/
      - destructive `subprocess` commands (`taskkill`, `del`, `rd`) are refused and recorded
        (`block_destructive_subprocess`); violations are reported at session teardown so a
        production `except Exception` cannot hide them,
+     - anything that would pop open File Explorer on the host - `os.startfile`,
+       `explorer.exe`, or a local-file `QDesktopServices.openUrl` - is refused and recorded
+       (`block_desktop_shell_launches`); remote URLs stay allowed for the browser tests,
      - `my_idm.database.DB_PATH` is redirected to a temp file, so a `Database()` with no
        argument (e.g. `SettingsDialog._get_db()`) can never open the user's live database,
      - the system clipboard is snapshotted, cleared, and restored per test.
      `ALLOW_DESTRUCTIVE_SUBPROCESS` is the only opt-out, and a test that sets it must say why.
+   - **Never let a test call a destructive filesystem helper on a path you did not create.**
+     `quarantine_or_delete_file("")` resolves `Path("")` to `Path(".")`, i.e. the process's
+     **current working directory**, and `shutil.rmtree`s it - so an unguarded call from the
+     repo root deletes the repository. Any test touching such a helper must `os.chdir` into its
+     own temp tree in `setUp` and restore it in cleanup. The same applies to any helper that
+     resolves a blank or relative path: pin the behaviour with a canary inside the temp dir
+     rather than asserting on the return value.
    - **Never use the real OS clipboard in a test.** `QClipboard.setText` is a silent no-op when
      the clipboard is transiently locked, which is what made
      `test_copy_multiple_urls_to_clipboard` flaky. Patch the single accessor production uses

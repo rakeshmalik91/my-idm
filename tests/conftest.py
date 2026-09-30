@@ -18,6 +18,12 @@ Additional session-wide hermeticity guards (see `AGENTS.md` conventions 4 and 8)
   internet.
 * Destructive Windows shell commands (``taskkill`` / ``del`` / ``rd``) issued through
   ``subprocess`` are refused unless a test opts in explicitly.
+* Anything that would pop open File Explorer on the host - ``os.startfile``,
+  ``explorer.exe``, or a local-file ``QDesktopServices.openUrl`` - is refused, so a test
+  can never flash a real Explorer window on the developer's desktop.
+* Tests that call a destructive filesystem helper run with the working directory moved
+  into their own temp tree, so a blank path (which resolves to ``.``) cannot reach the
+  repository.
 * The system clipboard is snapshotted, cleared, and restored around every test, so a
   leftover developer clipboard cannot trigger production code that prefills from it
   (``YouTubeDialog._prefill`` would otherwise fire a real yt-dlp network request).
@@ -224,6 +230,72 @@ def block_destructive_subprocess(monkeypatch):
         return real_popen_init(self, args, *rest, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", guarded_run, raising=True)
+    monkeypatch.setattr(subprocess.Popen, "__init__", guarded_popen_init, raising=True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def block_desktop_shell_launches(monkeypatch):
+    """Refuse anything that would pop open File Explorer / the default app on the host.
+
+    Three production paths reach the shell, and all three are reachable from a test:
+
+    * ``external_tools.open_file_in_default_app`` calls ``os.startfile()`` for a folder,
+      and ``os.startfile`` on a *directory* opens File Explorer;
+    * ``external_tools.show_in_folder`` spawns ``explorer.exe /select,<path>``;
+    * both fall back to ``QDesktopServices.openUrl(QUrl.fromLocalFile(...))``, which opens
+      Explorer for a local path.
+
+    A test that fences only one of them still flashes a real Explorer window on the
+    developer's desktop mid-run, which is alarming and easy to misattribute. Recorded the
+    same way as the subprocess guard: raise, but also keep the call site so a broad
+    ``except Exception`` in production code cannot hide the attempt.
+    """
+    import os
+    import subprocess
+
+    from PySide6.QtGui import QDesktopServices
+
+    real_startfile = os.startfile
+
+    def guarded_startfile(path, *args, **kwargs):
+        _record_violation("shell", f"os.startfile({str(path)!r}) would open Explorer")
+        raise AssertionError(
+            f"Test suite attempted os.startfile({str(path)!r}), which opens File Explorer on "
+            "the host. Patch os.startfile as well as QDesktopServices."
+        )
+
+    real_open_url = QDesktopServices.openUrl
+
+    def guarded_open_url(url):
+        if url.isLocalFile() or url.scheme() in ("", "file"):
+            _record_violation(
+                "shell", f"QDesktopServices.openUrl({url.toString()!r}) would open Explorer"
+            )
+            raise AssertionError(
+                f"Test suite attempted QDesktopServices.openUrl({url.toString()!r}), which "
+                "opens File Explorer on the host. Patch QDesktopServices.openUrl."
+            )
+        return real_open_url(url)
+
+    real_popen_init = subprocess.Popen.__init__
+
+    def guarded_popen_init(self, args, *rest, **kwargs):
+        try:
+            exe = os.path.basename(str(args[0])).lower()
+        except Exception:
+            exe = ""
+        if exe.startswith("explorer"):
+            _record_violation("shell", f"explorer launch {list(args)!r}")
+            raise AssertionError(
+                f"Test suite attempted to spawn {list(args)!r}, which opens File Explorer "
+                "on the host. Patch subprocess.Popen."
+            )
+        return real_popen_init(self, args, *rest, **kwargs)
+
+    monkeypatch.setattr(os, "startfile", guarded_startfile, raising=True)
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(guarded_open_url),
+                        raising=True)
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded_popen_init, raising=True)
     yield
 
