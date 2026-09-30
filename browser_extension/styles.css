@@ -248,3 +248,38 @@ textarea {
   color: var(--error);
   border: 1px solid var(--error);
 }
+
+/* Shown in the popup when the extension has declined a capture. A skip is otherwise
+   invisible - Chrome downloads the file itself - so this is the only place the user
+   learns that My-IDM saw the download and said no, and why. */
+.skip-notice {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: rgba(232, 163, 61, 0.12);
+  border: 1px solid #e8a33d;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.skip-notice[hidden] {
+  display: none;
+}
+
+.skip-title {
+  color: #e8a33d;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.skip-reason {
+  color: var(--text-main);
+}
+
+.skip-url {
+  color: var(--text-muted);
+  margin-top: 3px;
+  word-break: break-all;
+  font-family: monospace;
+  font-size: 10px;
+}

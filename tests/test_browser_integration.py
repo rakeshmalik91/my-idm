@@ -362,6 +362,9 @@ class TestBrowserServerLiveEndpoints:
                         cookies="session=abc123xyz; user=john",
                         referrer="https://example.com/downloads",
                         user_agent="Mozilla/5.0 TestBrowser",
+                        # No minimum configured in this test, so nothing is deferred to the
+                        # engine's own probe. See tests/test_browser_capture_gating.py.
+                        pending_min_bytes=0,
                     )
 
                     # 4b. POST /add with file size below min_file_size_kb threshold -> ignored

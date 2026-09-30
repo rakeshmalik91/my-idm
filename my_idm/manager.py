@@ -1690,8 +1690,15 @@ class DownloadManager(QObject):
         cookies: Optional[Union[str, dict]] = None,
         referrer: str = "",
         user_agent: str = "",
+        pending_min_bytes: int = 0,
     ) -> Optional[str]:
-        """Add a download initiated from the browser extension."""
+        """Add a download initiated from the browser extension.
+
+        ``pending_min_bytes`` is the caller's minimum-capture threshold when it could not
+        determine the file size itself. It is recorded on the entry so the HTTP engine can
+        apply the threshold against its own authoritative probe - see
+        ``HTTPEngine._enforce_browser_min_size``.
+        """
         combined_headers = {}
         if headers and isinstance(headers, dict):
             combined_headers.update(headers)
@@ -1712,6 +1719,8 @@ class DownloadManager(QObject):
             meta["cookies"] = cookies
         if user_agent:
             meta["user_agent"] = user_agent
+        if pending_min_bytes and int(pending_min_bytes) > 0:
+            meta["pending_min_bytes"] = int(pending_min_bytes)
 
         download_id = self.add_download(
             url=url,

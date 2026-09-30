@@ -423,6 +423,67 @@ class HTTPEngine:
 
     # -- download logic ------------------------------------------------------
 
+    def _enforce_browser_min_size(self, entry: DownloadEntry, probed_total: int) -> bool:
+        """Refuse a browser capture that is below the configured minimum size.
+
+        ``BrowserServer`` applies the minimum itself when it can size the download, but it
+        could not: Chrome reports ``totalBytes: 0`` for responses without a Content-Length
+        (and for every ``blob:`` URL), and the server's fallback probe has a 1.8 s budget
+        that a slow or auth-gated origin can blow. Its check is therefore guarded by
+        ``total_bytes > 0``, so an unsizeable URL walked straight past a configured
+        minimum - which is how a sub-threshold file kept getting captured.
+
+        The engine probes every download before transferring a byte, so it gets a second,
+        authoritative chance. This is deliberately not applied to hand-added downloads: the
+        setting means "minimum size to *intercept*", and a user pasting a 4 KB URL should
+        still get it.
+
+        Returns True to continue, False once the entry has been marked as skipped.
+        """
+        min_bytes = 0
+        try:
+            meta = entry.metadata
+            if meta:
+                min_bytes = int(meta.get("pending_min_bytes") or 0)
+        except Exception:
+            min_bytes = 0
+        if min_bytes <= 0:
+            return True
+
+        # Still unknown after our own probe: we cannot judge, and refusing everything
+        # unsizeable would break every chunked / gzip-encoded download.
+        if probed_total <= 0:
+            log.info(
+                "Browser minimum of %d bytes not enforced for %s: size still unknown",
+                min_bytes, entry.id,
+            )
+            return True
+
+        if probed_total >= min_bytes:
+            # Now that the real size is known the threshold has been satisfied, so drop it
+            # rather than re-checking on every resume.
+            try:
+                entry.metadata.pop("pending_min_bytes", None)
+                self._db.update_download(entry)
+            except Exception:
+                pass
+            return True
+
+        reason = (
+            f"File size ({probed_total} bytes) is below the browser-capture minimum of "
+            f"{min_bytes} bytes. Raise or disable the minimum in "
+            f"Preferences -> Browser Integration to keep capturing files this small."
+        )
+        log.info("Skipping browser download %s: %s", entry.id, reason)
+        entry.error_message = reason
+        # update_status persists both the status and the message. Do NOT follow it with
+        # update_download(entry): that writes every column, and `entry.status` is still the
+        # pre-refusal value, so it would put the row straight back to "queued" - which is
+        # how a refused capture would sit in the queue looking like it was about to start.
+        self._db.update_status(entry.id, "error", reason)
+        self._emit_status(entry.id, "error", reason)
+        return False
+
     async def _run_download(self, entry: DownloadEntry,
                             cancel_evt: asyncio.Event):
         download_id = entry.id
@@ -456,6 +517,14 @@ class HTTPEngine:
             supports_range, total_size, etag, filename = await self._probe_url(
                 entry.url, entry=entry
             )
+
+            # Apply a browser-capture minimum that the capture path could not evaluate
+            # because the extension reported no size and its own probe came back empty.
+            # This is the first point where the authoritative size is known, so it is the
+            # only place the threshold can be enforced without guessing. Downloads the
+            # user added by hand never carry `pending_min_bytes` and are unaffected.
+            if not self._enforce_browser_min_size(entry, total_size):
+                return
 
             # Update entry with discovered info
             if total_size and total_size != entry.total_size:

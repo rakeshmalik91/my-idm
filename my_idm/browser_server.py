@@ -15,6 +15,26 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: URL schemes an external downloader can actually fetch. Everything else the browser can
+#: hand us - ``blob:`` (a JS-generated in-memory object), ``data:`` (inline payload),
+#: ``file:``, ``javascript:``, ``about:``, ``chrome-extension:`` - has no HTTP transport
+#: outside the page that created it.
+CAPTURABLE_SCHEMES = ("http", "https", "magnet")
+
+
+def is_capturable_url(url: str) -> bool:
+    """True when *url* is a scheme My-IDM can fetch on its own.
+
+    Scheme-only test, deliberately: a host cannot be validated without a request, and the
+    whole point here is to reject the URLs that provably cannot work *before* spending a
+    retry ladder on them. Case-insensitive because ``BLOB:`` and ``HtTpS://`` are equally
+    valid to a browser.
+    """
+    if not url or not isinstance(url, str):
+        return False
+    scheme = url.split("://", 1)[0].split(":", 1)[0].strip().lower()
+    return scheme in CAPTURABLE_SCHEMES
+
 
 class BrowserServer:
     """Runs a local aiohttp REST server on 127.0.0.1:19582 to receive downloads from the browser extension."""
@@ -152,6 +172,27 @@ class BrowserServer:
                 headers=self._cors_headers(),
             )
 
+        # Reject schemes that have no HTTP transport before anything is queued. A
+        # `blob:` URL (what Chrome reports for JS-generated downloads, and what GitHub
+        # hands out on some private-repo asset pages) is a browser-internal object
+        # reference: there is nothing for an external downloader to fetch. Queuing one
+        # only to fail means the user waits out the full retry ladder - 5s, 10s, 20s, 40s,
+        # 60s - for a download that can never start. `data:` is the same class of thing.
+        if not is_capturable_url(url):
+            return web.json_response(
+                {
+                    "status": "ignored",
+                    "reason": "unsupported_url_scheme",
+                    "message": (
+                        f"Cannot capture '{url[:80]}': only http, https and magnet URLs can "
+                        "be downloaded outside the browser. This page handed us a "
+                        "browser-internal URL, so the browser should download it natively."
+                    ),
+                },
+                status=200,
+                headers=self._cors_headers(),
+            )
+
         filename = body.get("filename", "").strip()
         save_path = body.get("save_path", "").strip()
         cookies = body.get("cookies", "")
@@ -167,6 +208,7 @@ class BrowserServer:
             total_bytes = 0
 
         min_bytes = self._config.min_file_size_kb * 1024
+        pending_min_bytes = 0
         if self._config.min_file_size_kb > 0 and not url.startswith("magnet:"):
             # If size was not provided by browser extension, do a fast probe
             if total_bytes <= 0:
@@ -199,7 +241,19 @@ class BrowserServer:
                     status=200,
                     headers=self._cors_headers(),
                 )
-
+            if total_bytes <= 0:
+                # The size is still unknown, so the threshold cannot be applied here.
+                # Do NOT simply accept it: the `total_bytes > 0` guard above means an
+                # unsizeable URL walked straight past a configured minimum, which is how a
+                # sub-threshold file kept getting captured. Hand the threshold to the
+                # engine instead - it probes every download before transferring a byte, so
+                # it has the authoritative size and can refuse with a real reason.
+                log.info(
+                    "Size unknown for browser download '%s'; deferring the %d KB minimum "
+                    "to the engine's own probe",
+                    filename or url, self._config.min_file_size_kb,
+                )
+                pending_min_bytes = min_bytes
 
         try:
             download_id = self._manager.add_download_from_browser(
@@ -210,6 +264,7 @@ class BrowserServer:
                 cookies=cookies,
                 referrer=referrer,
                 user_agent=user_agent,
+                pending_min_bytes=pending_min_bytes,
             )
             return web.json_response(
                 {"status": "ok", "id": download_id},

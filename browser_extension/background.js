@@ -130,6 +130,50 @@ async function getConfig() {
   });
 }
 
+// URL schemes an external downloader can actually fetch. `blob:` and `data:` are
+// browser-internal: a blob is an opaque handle to an in-memory object, a data URL is an
+// inline payload, and neither has an HTTP representation that My-IDM could request.
+const CAPTURABLE_SCHEMES = ["http:", "https:", "magnet:"];
+
+function isCapturableUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  const lower = url.trim().toLowerCase();
+  return CAPTURABLE_SCHEMES.some((scheme) => lower.startsWith(scheme));
+}
+
+// Record a declined capture so the popup can explain it.
+//
+// A skip is otherwise completely invisible: Chrome downloads the file itself, so the only
+// symptom is a file that never shows up in My-IDM, with no reason recorded anywhere the
+// user is looking. The service-worker console has the detail but is effectively invisible
+// to anyone who does not know to open it.
+function recordSkip(reason, url) {
+  console.log(`[My-IDM] Not capturing '${String(url).slice(0, 80)}': ${reason}`);
+  chrome.storage.local.get(["skipCount"], (stored) => {
+    const next = (stored.skipCount || 0) + 1;
+    chrome.storage.local.set({
+      lastSkip: { reason: reason, url: String(url).slice(0, 300), at: Date.now() },
+      skipCount: next
+    });
+    setBadge(next);
+  });
+}
+
+function setBadge(count) {
+  try {
+    if (!chrome.action || !chrome.action.setBadgeText) return;
+    chrome.action.setBadgeText({ text: count > 0 ? String(count) : "" });
+    chrome.action.setBadgeBackgroundColor({ color: "#e8a33d" });
+  } catch (err) {
+    // A missing badge API must never break interception.
+  }
+}
+
+function clearSkips() {
+  chrome.storage.local.remove(["lastSkip", "skipCount"]);
+  setBadge(0);
+}
+
 async function getCookiesForUrl(url) {
   if (!chrome.cookies || !chrome.cookies.getAll) return "";
   try {
@@ -253,6 +297,25 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 
       const downloadUrl = item.finalUrl || item.url || "";
 
+      // Reject schemes with no HTTP transport. `blob:` is what Chrome reports for
+      // JS-generated downloads - and what GitHub hands out on some private-repo asset
+      // pages - and it is a browser-internal object reference that no external
+      // downloader can fetch. Handing one to My-IDM only produces a download that fails
+      // the full retry ladder (5s, 10s, 20s, 40s, 60s) before erroring. The Firefox
+      // engine below already had this guard; Chrome did not, so the same page was
+      // captured on one browser and skipped on the other.
+      if (!isCapturableUrl(downloadUrl)) {
+        recordSkip(
+          "This page handed the browser an internal URL (blob:/data:), which has no " +
+          "address an external downloader can request. Chrome downloads it instead. " +
+          "Right-click the link and copy its address - if it is a blob: URL, use Chrome's " +
+          "own download; an https://github.com/... link can be captured.",
+          downloadUrl
+        );
+        suggest({ filename: item.filename });
+        return;
+      }
+
       // Ignore local loopback requests to avoid loops
       if (downloadUrl.includes("127.0.0.1:19582") || downloadUrl.includes("localhost:19582")) {
         suggest({ filename: item.filename });
@@ -325,7 +388,7 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       if (!cfg.enabled || !cfg.interceptDownloads) return;
 
       const downloadUrl = item.finalUrl || item.url || "";
-      if (!downloadUrl || downloadUrl.startsWith("blob:") || downloadUrl.startsWith("data:")) return;
+      if (!downloadUrl || !isCapturableUrl(downloadUrl)) return;
       if (downloadUrl.includes("127.0.0.1:19582") || downloadUrl.includes("localhost:19582")) return;
 
       // Extract filename from item or download URL
