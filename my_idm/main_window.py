@@ -712,7 +712,10 @@ class MainWindow(QMainWindow):
         self._act_move.triggered.connect(self._on_move)
 
         self._act_recheck = QAction(_create_emoji_icon("🔄"), "Recheck", self)
-        self._act_recheck.setToolTip("Verify existing files on disk")
+        self._act_recheck.setToolTip(
+            "Verify existing files on disk. Also the way back from \"File not found\": "
+            "restore the file and recheck to confirm it complete."
+        )
         self._act_recheck.triggered.connect(self._on_recheck)
 
         self._act_open_file = QAction(_create_emoji_icon("📄"), "Open File", self)
@@ -2562,7 +2565,13 @@ class MainWindow(QMainWindow):
         self._act_delete.setEnabled(has_selection)
         self._act_delete_file.setEnabled(has_selection and has_existing_file)
         self._act_move.setEnabled(has_selection and has_existing_file)
-        self._act_recheck.setEnabled(has_selection and has_existing_file)
+        # Recheck deliberately does NOT gate on has_existing_file. Gating it there was exactly
+        # backwards: recheck is the one action that inspects the disk, so it is the way out of
+        # "file not found" - the user restores or moves the file back and rechecks, and
+        # DownloadManager.recheck_download flips the row to completed (or resets it to queued
+        # with the reason, if the file really is still gone). With the gate on, the only way
+        # back was to re-download the whole thing.
+        self._act_recheck.setEnabled(has_selection)
         self._act_open_file.setEnabled(single_has_existing_file)
         self._act_open_folder.setEnabled(has_selection and has_existing_file)
         self._act_scan_antivirus.setEnabled(has_selection and has_existing_file)

@@ -200,6 +200,8 @@ Rechecking verifies existing files:
 - **Torrents**: Runs `force_recheck()` — libtorrent verifies every piece against its hash
 - **HTTP**: Compares file size on disk vs. the expected total size. If the file is fully downloaded, it's marked as completed. If the file is missing, progress is reset.
 
+**Recheck is the way back from "File not found".** Unlike the other file actions (Open File, Open Folder, Move, Rename, Delete File, Malware Scan), which are greyed out for a `File not found` row because there is no file to act on, **Recheck stays enabled** — it is the one action that looks *at* the disk. Restore or move the file back and click Recheck: if it is complete the row returns to `Completed`, if it is partial it goes to `Paused` with the real byte count, and if it really is still gone the row resets to `Queued` with the reason shown.
+
 ### Open File / Open Folder
 
 - **📄 Open File** (Enter) — Opens the downloaded file with the default application

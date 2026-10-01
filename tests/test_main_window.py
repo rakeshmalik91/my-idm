@@ -2985,11 +2985,76 @@ class TestActionStatesDynamicGating(_MainWindowTestCase):
         self.assertFalse(self.win._act_delete_file.isEnabled())
         self.assertFalse(self.win._act_open_file.isEnabled())
         self.assertFalse(self.win._act_open_folder.isEnabled())
-        self.assertFalse(self.win._act_recheck.isEnabled())
 
         # Non-file dependent operations remain enabled
         self.assertTrue(self.win._act_delete.isEnabled(), "Can remove entry from list")
         self.assertTrue(self.win._act_resume.isEnabled(), "Can re-download missing file")
+        # Recheck is the exception to the file-dependent group, because it is the action that
+        # *looks* at the disk. Gating it here left no way back short of a full re-download.
+        self.assertTrue(
+            self.win._act_recheck.isEnabled(),
+            "recheck must be offered for a file_not_found row so a restored file can be confirmed",
+        )
+
+    def test_recheck_is_disabled_only_when_nothing_is_selected(self):
+        """Recheck's only gate is the selection - every status, including file_not_found."""
+        self.db.add_download(
+            DownloadEntry(id="r0", url="http://e.com/0.zip", filename="0.zip", status="file_not_found")
+        )
+        self.win._load_history()
+        self.assertFalse(
+            self.win._act_recheck.isEnabled(),
+            "with nothing selected there is no row to verify",
+        )
+
+        for i, status in enumerate((
+            "file_not_found", "completed", "downloading", "queued",
+            "paused", "stopped", "error", "threat_detected", "seeding",
+            "suspended", "fetching_metadata", "checking", "scanning", "stalled",
+        )):
+            with self.subTest(status=status):
+                did = f"rchk-{status}"
+                self.db.add_download(DownloadEntry(
+                    id=did, url=f"http://e.com/{did}.zip",
+                    filename=f"{did}.zip", status=status,
+                ))
+                self.win._load_history()
+                row = self.win._model.row_for_id(did)
+                self.assertIsNotNone(row)
+                self.win._table.selectRow(row)
+                self.assertTrue(
+                    self.win._act_recheck.isEnabled(),
+                    f"recheck must be available for a '{status}' row",
+                )
+
+    def test_recheck_recovers_a_file_not_found_row_once_the_file_is_back(self):
+        """End to end: the newly enabled button restores the row it is supposed to recover."""
+        target = Path(tempfile.gettempdir()) / "recheck-recovered.zip"
+        try:
+            target.write_bytes(b"R" * 4096)
+            self.db.add_download(DownloadEntry(
+                id="fnf-recover",
+                url="http://e.com/recovered.zip",
+                filename="recovered.zip",
+                file_path=str(target),
+                save_path=str(target.parent),
+                total_size=4096,
+                downloaded_size=4096,
+                status="file_not_found",
+            ))
+            self.win._load_history()
+            row = self.win._model.row_for_id("fnf-recover")
+            self.win._table.selectRow(row)
+            self.assertTrue(self.win._act_recheck.isEnabled())
+
+            self.win._on_recheck()
+
+            self.assertEqual(self.db.get_download("fnf-recover").status, "completed")
+        finally:
+            try:
+                target.unlink()
+            except OSError:
+                pass
 
     def test_context_menu_bandwidth_allocation_gating(self):
         from PySide6.QtCore import QPoint
