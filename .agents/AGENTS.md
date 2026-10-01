@@ -20,6 +20,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Database & Persistence** | [`database.md`](file:///d:/Projects/my-idm/docs/architecture/database.md) | Schema, constraints, indexing, `metadata_json` contract, migrations, self-healing. |
 | **Queues & Concurrency** | [`queues.md`](file:///d:/Projects/my-idm/docs/architecture/queues.md) | Named queues, per-queue concurrency budgets, the start gate, priority ordering, the seeded AnimePahe/YouTube source queues, and `queue=` in backlog files. |
 | **Browser Integration** | [`browser-integration.md`](file:///d:/Projects/my-idm/docs/architecture/browser-integration.md) | MV3 extension, loopback REST server (127.0.0.1:19582), interception, cookies. |
+| **Blob URL Handling** | [`blob-urls.md`](file:///d:/Projects/my-idm/docs/architecture/blob-urls.md) | Evaluation of browser `blob:` URLs, process-isolation limits, extension-assisted transfer, and native browser fallbacks. |
 | **Capture (Hotkey & Clipboard)** | [`capture.md`](file:///d:/Projects/my-idm/docs/architecture/capture.md) | System-wide `RegisterHotKey` via a native event filter, clipboard capture, the `intercept_all` toggle. |
 | **Window & System Tray** | [`window-system-tray.md`](file:///d:/Projects/my-idm/docs/architecture/window-system-tray.md) | Tray lifecycle, minimize/close-to-tray, completion toasts. |
 | **Table Views & Segregation** | [`table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md) | Table model, delegates, status/date/type segregation, section headers, context menus. |

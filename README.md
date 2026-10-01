@@ -153,6 +153,7 @@ machine while they run.
 - [**Antivirus & Security**](docs/architecture/antivirus.md) — Pre-download checks, Defender/custom scanning, and quarantine.
 - [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
 - [**Browser Integration (Chrome & Firefox)**](docs/architecture/browser-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
+- [**Blob URL Handling**](docs/architecture/blob-urls.md) — Evaluation of browser `blob:` URLs, process-isolation limits, extension-assisted transfer, and native browser fallbacks.
 - [**Capture (Hotkey & Clipboard)**](docs/architecture/capture.md) — System-wide hotkey that toggles download capture, clipboard URL capture with an all-or-nothing gate, and the shared `intercept_all` switch.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**YouTube Scraper**](docs/architecture/youtube-scraper.md) — yt-dlp integration, Mode A (direct URL) vs Mode B (ffmpeg merge), dialog, and rate-limit budgeting.
