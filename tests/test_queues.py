@@ -1426,6 +1426,23 @@ class TestQueueFilterPopupWiring(unittest.TestCase):
         finally:
             popup.close()
 
+    def test_the_popup_renders_color_swatch_icons(self):
+        from my_idm.header_view import MultiselectFilterPopup
+
+        app = QApplication.instance() or QApplication(sys.argv)
+        popup = MultiselectFilterPopup(
+            Col.QUEUE_NAME,
+            None,
+            {"q1": 2, "q2": 1},
+            items=[("q1", "Torrents"), ("q2", "YouTube")],
+            colors={"q1": "#3fb950", "q2": "#f85149"},
+        )
+        try:
+            self.assertFalse(popup._checkboxes["q1"].icon().isNull())
+            self.assertFalse(popup._checkboxes["q2"].icon().isNull())
+        finally:
+            popup.close()
+
 
 class TestQueueColumnTooltip(unittest.TestCase):
     """The column can collapse to the swatch alone, so hover has to carry the name."""
@@ -1619,6 +1636,11 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
                 spin = dialog._table.cellWidget(row, 2)
                 self.assertIsInstance(spin, QSpinBox)
 
+    def test_table_row_height_prevents_spinbox_cropping(self):
+        """Table rows must be at least 32px tall to prevent spinbox bottom clipping."""
+        dialog = self._dialog()
+        self.assertGreaterEqual(dialog._table.verticalHeader().defaultSectionSize(), 32)
+
     def test_the_default_queue_limit_is_editable(self):
         # It used to be the one row with a blank cell, which read as "not editable" rather
         # than "deliberately pinned".
@@ -1722,7 +1744,7 @@ class TestQueueUiWiring(_MainWindowTestCase):
         # Not "after some event" - a user opening the app sees this combo immediately.
         labels = self._combo_labels()
         self.assertEqual(labels[0], "All Queues")
-        self.assertEqual(labels[1], DEFAULT_QUEUE_NAME)
+        self.assertEqual(labels[1], f"{DEFAULT_QUEUE_NAME}  (Global)")
         self.assertIn("AnimePahe", " | ".join(labels))
         self.assertIn("YouTube", " | ".join(labels))
         data = self._win_queue_data()
@@ -1926,6 +1948,21 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.win._refresh_queue_ui()
         self.assertIn("Staging", [a.text() for a in self.win._menu_queues.actions()])
         self.assertIn("Staging", [a.text() for a in self.win._menu_move_to_queue.actions()])
+
+    def test_queue_combo_and_menus_have_swatch_icons(self):
+        self.manager.create_queue("Torrents", 1)
+        qid = next(q.id for q in self.manager.get_queues() if q.name == "Torrents")
+        self.manager.set_queue_color(qid, "#3fb950")
+        self.win._refresh_queue_ui()
+        # Find Torrents in queue combo
+        idx = self.win._queue_combo.findText("Torrents", Qt.MatchFlag.MatchStartsWith)
+        self.assertGreaterEqual(idx, 0)
+        self.assertFalse(self.win._queue_combo.itemIcon(idx).isNull())
+
+        # Check move to queue action icon
+        move_action = next(a for a in self.win._move_to_queue_actions if a.text() == "Torrents")
+        self.assertFalse(move_action.icon().isNull())
+
 
     def test_the_window_feeds_the_model_a_colour_for_every_queue(self):
         queue_id = next(q.id for q in self.manager.get_queues() if q.name == "AnimePahe")

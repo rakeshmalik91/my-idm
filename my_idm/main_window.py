@@ -93,6 +93,7 @@ from my_idm.settings_dialog import (
 )
 from my_idm.external_tools import launch_animepahe_gui
 from my_idm.styles import Colors
+from my_idm.utils import create_color_swatch_icon
 
 log = logging.getLogger(__name__)
 
@@ -1278,13 +1279,13 @@ class MainWindow(QMainWindow):
         tray_menu.addAction(act_add)
         tray_menu.addSeparator()
 
-        act_pause_all = QAction("⏸️ Pause All Downloads", self)
-        act_pause_all.triggered.connect(self._on_pause_all_downloads)
-        tray_menu.addAction(act_pause_all)
+        self._tray_act_pause_all = QAction("⏸️ Pause All Downloads", self)
+        self._tray_act_pause_all.triggered.connect(self._on_pause_all_downloads)
+        tray_menu.addAction(self._tray_act_pause_all)
 
-        act_resume_all = QAction("▶️ Resume All Downloads", self)
-        act_resume_all.triggered.connect(self._on_resume_all_downloads)
-        tray_menu.addAction(act_resume_all)
+        self._tray_act_resume_all = QAction("▶️ Resume All Downloads", self)
+        self._tray_act_resume_all.triggered.connect(self._on_resume_all_downloads)
+        tray_menu.addAction(self._tray_act_resume_all)
         tray_menu.addSeparator()
 
         # Checkable, so the row shows the live state rather than describing an action. This is
@@ -1656,6 +1657,7 @@ class MainWindow(QMainWindow):
         self._model.load_entries(entries)
         self._update_count_label()
         self._update_speed_label()
+        self._update_action_states()
 
     # -- selected entries helper ---------------------------------------------
 
@@ -2227,6 +2229,7 @@ class MainWindow(QMainWindow):
         else:
             return
 
+        self._update_action_states()
         menu = QMenu(self)
         menu.addAction(self._act_resume)
         menu.addAction(self._act_force_start)
@@ -2257,6 +2260,11 @@ class MainWindow(QMainWindow):
             ("High (75%)", "high"),
             ("Max (100%)", "max"),
         ]
+        active_alloc_statuses = {
+            "downloading", "fetching_metadata", "stalled", "checking", "scanning", "queued", "paused", "seeding"
+        }
+        can_alloc = bool(entry and entry.status in active_alloc_statuses)
+        bw_menu.setEnabled(can_alloc)
         for label, val in alloc_options:
             act = bw_menu.addAction(label)
             act.setCheckable(True)
@@ -2270,7 +2278,7 @@ class MainWindow(QMainWindow):
         queue_menu = menu.addMenu("Move to Queue")
         current_queue = (entry.queue_id or DEFAULT_QUEUE_ID) if entry else DEFAULT_QUEUE_ID
         for queue in self._manager.get_queues():
-            q_act = queue_menu.addAction(queue.name)
+            q_act = queue_menu.addAction(create_color_swatch_icon(queue.color), queue.name)
             q_act.setCheckable(True)
             q_act.setChecked(queue.id == current_queue)
             q_act.triggered.connect(
@@ -2377,6 +2385,7 @@ class MainWindow(QMainWindow):
         self._restore_selection(selected)
         self._update_count_label()
         self._update_speed_label()
+        self._update_action_states()
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 
@@ -2415,6 +2424,7 @@ class MainWindow(QMainWindow):
         if entry:
             self._model.add_entry(entry)
             self._update_count_label()
+            self._update_action_states()
 
     # -- queues ---------------------------------------------------------------
 
@@ -2451,14 +2461,13 @@ class MainWindow(QMainWindow):
         self._queue_combo.clear()
         self._queue_combo.addItem("All Queues", ALL_QUEUES)
         for queue in queues:
-            label = queue.name
-            if not queue.is_default:
-                label = (
-                    f"{queue.name}  (max {queue.max_concurrent})"
-                    if queue.max_concurrent > 0
-                    else f"{queue.name}  (Global)"
-                )
-            self._queue_combo.addItem(label, queue.id)
+            label = (
+                f"{queue.name}  (max {queue.max_concurrent})"
+                if queue.max_concurrent > 0
+                else f"{queue.name}  (Global)"
+            )
+            icon = create_color_swatch_icon(queue.color)
+            self._queue_combo.addItem(icon, label, queue.id)
         self._queue_combo.setCurrentIndex(max(0, self._queue_combo.findData(active)))
         self._queue_combo.blockSignals(False)
 
@@ -2474,7 +2483,8 @@ class MainWindow(QMainWindow):
         self._menu_queues.addAction(self._act_queue_all)
         self._menu_queues.addSeparator()
         for queue in queues:
-            action = QAction(queue.name, self)
+            icon = create_color_swatch_icon(queue.color)
+            action = QAction(icon, queue.name, self)
             action.setCheckable(True)
             action.setChecked(queue.id == active)
             action.triggered.connect(
@@ -2489,7 +2499,8 @@ class MainWindow(QMainWindow):
 
         self._menu_move_to_queue.clear()
         for queue in queues:
-            action = QAction(queue.name, self)
+            icon = create_color_swatch_icon(queue.color)
+            action = QAction(icon, queue.name, self)
             action.triggered.connect(
                 lambda _checked=False, qid=queue.id: self._on_move_selected_to_queue(qid)
             )
@@ -2498,6 +2509,78 @@ class MainWindow(QMainWindow):
         # Nothing selected means nothing to move. The actions grey out rather than the whole
         # submenu, so the menu does not change shape under the user's cursor.
         self._update_move_to_queue_enabled()
+
+    def _update_action_states(self):
+        """Update enabled states of toolbar, menu, and context menu actions based on selection and status."""
+        if not hasattr(self, "_act_resume"):
+            return
+
+        selected_ids = self._selected_ids()
+        all_entries = self._manager.get_all_entries() if hasattr(self, "_manager") else []
+        id_map = {e.id: e for e in all_entries}
+        selected_entries = [id_map[did] for did in selected_ids if did in id_map]
+
+        has_selection = len(selected_entries) > 0
+        single_selection = len(selected_entries) == 1
+
+        resumable_statuses = {
+            "paused", "stopped", "error", "file_not_found", "threat_detected", "suspended"
+        }
+        pausable_statuses = {
+            "downloading", "fetching_metadata", "stalled", "checking", "scanning", "queued", "seeding"
+        }
+        active_non_seeding_statuses = {
+            "downloading", "fetching_metadata", "stalled", "checking", "scanning", "queued"
+        }
+        stoppable_statuses = {
+            "downloading", "fetching_metadata", "stalled", "checking", "scanning", "queued", "paused", "seeding"
+        }
+        force_startable_statuses = {
+            "paused", "stopped", "queued", "error", "file_not_found", "threat_detected", "stalled", "suspended"
+        }
+
+        can_resume = has_selection and any(e.status in resumable_statuses for e in selected_entries)
+        can_pause = has_selection and any(e.status in pausable_statuses for e in selected_entries)
+        can_stop = has_selection and any(e.status in stoppable_statuses for e in selected_entries)
+        can_force_start = has_selection and any(e.status in force_startable_statuses for e in selected_entries)
+        can_seed = has_selection and any(
+            e.download_type == "torrent" and e.status in ("completed", "paused", "stopped")
+            for e in selected_entries
+        )
+
+        has_existing_file = any(e.status != "file_not_found" for e in selected_entries)
+        single_has_existing_file = single_selection and selected_entries[0].status != "file_not_found"
+
+        self._act_resume.setEnabled(can_resume)
+        self._act_pause.setEnabled(can_pause)
+        self._act_stop.setEnabled(can_stop)
+        self._act_force_start.setEnabled(can_force_start)
+        self._act_start_seeding.setEnabled(can_seed)
+
+        self._act_copy_url.setEnabled(has_selection)
+        self._act_rename.setEnabled(single_has_existing_file)
+        self._act_delete.setEnabled(has_selection)
+        self._act_delete_file.setEnabled(has_selection and has_existing_file)
+        self._act_move.setEnabled(has_selection and has_existing_file)
+        self._act_recheck.setEnabled(has_selection and has_existing_file)
+        self._act_open_file.setEnabled(single_has_existing_file)
+        self._act_open_folder.setEnabled(has_selection and has_existing_file)
+        self._act_scan_antivirus.setEnabled(has_selection and has_existing_file)
+        self._act_move_up.setEnabled(has_selection)
+        self._act_move_down.setEnabled(has_selection)
+        self._update_move_to_queue_enabled()
+
+        has_resumable = any(e.status in resumable_statuses for e in all_entries)
+        has_pausable_non_seeding = any(e.status in active_non_seeding_statuses for e in all_entries)
+        has_seeding = any(e.status == "seeding" for e in all_entries)
+
+        self._act_resume_all.setEnabled(has_resumable)
+        self._act_pause_all.setEnabled(has_pausable_non_seeding)
+        self._act_stop_all_seeding.setEnabled(has_seeding)
+        if hasattr(self, "_tray_act_resume_all"):
+            self._tray_act_resume_all.setEnabled(has_resumable)
+        if hasattr(self, "_tray_act_pause_all"):
+            self._tray_act_pause_all.setEnabled(has_pausable_non_seeding)
 
     def _update_move_to_queue_enabled(self):
         """Grey out **Move to Queue**'s actions when there is nothing selected.
@@ -2571,11 +2654,13 @@ class MainWindow(QMainWindow):
         self._model.remove_entry(download_id)
         self._update_count_label()
         self._update_speed_label()
+        self._update_action_states()
 
     def _on_download_moved(self, download_id: str):
         entry = self._manager.get_entry(download_id)
         if entry:
             self._model.refresh_entry(download_id, entry)
+            self._update_action_states()
 
     def _on_download_renamed(self, download_id: str, new_filename: str):
         entry = self._manager.get_entry(download_id)
@@ -2587,6 +2672,7 @@ class MainWindow(QMainWindow):
         self._table.viewport().update()
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
+        self._update_action_states()
 
     # -- helpers -------------------------------------------------------------
 
@@ -3357,7 +3443,7 @@ class MainWindow(QMainWindow):
         entry = self._first_selected_entry()
         self._details_panel.set_download_id(entry.id if entry else None)
         self._update_queue_status(entry)
-        self._update_move_to_queue_enabled()
+        self._update_action_states()
 
     def _update_queue_status(self, entry):
         """Show which queue the selected download belongs to.

@@ -712,7 +712,7 @@ class DetailsPanel(QWidget):
 
         # 3. Peers & Swarm Tab
         self._tab_peers = self._create_peers_tab()
-        self._tabs.addTab(self._tab_peers, "👥 Peers & Swarm")
+        self._tabs.addTab(self._tab_peers, "👥 Peers && Swarm")
 
         # 4. Trackers Tab
         self._tab_trackers = self._create_trackers_tab()

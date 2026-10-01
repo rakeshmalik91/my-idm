@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable, Optional, Set, Tuple
 
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor,
     QCursor,
@@ -36,6 +36,7 @@ from my_idm.download_model import (
     TYPE_FILTER_LABELS,
 )
 from my_idm.styles import Colors
+from my_idm.utils import create_color_swatch_icon
 
 
 class MultiselectFilterPopup(QFrame):
@@ -50,6 +51,7 @@ class MultiselectFilterPopup(QFrame):
         counts: dict[str, int],
         parent: Optional[QWidget] = None,
         items: Optional[Iterable[Tuple[str, str]]] = None,
+        colors: Optional[dict[str, str]] = None,
     ):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self._column = column
@@ -176,6 +178,9 @@ class MultiselectFilterPopup(QFrame):
             count = counts.get(key, 0)
             cb = QCheckBox(f"{label}  ({count})")
             cb.setCursor(Qt.CursorShape.PointingHandCursor)
+            if colors and key in colors and colors[key]:
+                cb.setIcon(create_color_swatch_icon(colors[key], size=12))
+                cb.setIconSize(QSize(12, 12))
             is_checked = (selected_keys is None) or (key in selected_keys)
             cb.setChecked(is_checked)
             cb.stateChanged.connect(self._on_item_toggled)
@@ -381,6 +386,7 @@ class FilterHeaderView(QHeaderView):
             return
 
         items = None
+        colors = None
         if logical_index == Col.STATUS:
             current_selection = getattr(model, "status_filter", lambda: None)()
             counts = getattr(model, "get_status_counts", lambda: {})()
@@ -393,12 +399,13 @@ class FilterHeaderView(QHeaderView):
             # Queue ids are the filter keys but names are what a person recognises, so the
             # popup gets the live id -> name mapping from the model.
             items = getattr(model, "queue_filter_items", lambda: [])()
+            colors = getattr(model, "_queue_colors", {})
         else:
             current_selection = getattr(model, "type_filter", lambda: None)()
             counts = getattr(model, "get_type_counts", lambda: {})()
 
         popup = MultiselectFilterPopup(
-            logical_index, current_selection, counts, self, items=items
+            logical_index, current_selection, counts, self, items=items, colors=colors
         )
         popup.filter_changed.connect(self._on_filter_changed)
 

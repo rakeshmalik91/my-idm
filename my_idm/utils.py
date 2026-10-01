@@ -170,6 +170,24 @@ def create_emoji_icon(emoji: str, size: int = 32):
     return QIcon(pix)
 
 
+def create_color_swatch_icon(color: str, size: int = 14, radius: int = 3):
+    """Create a high-DPI QIcon containing a rounded rectangle color swatch."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    if not color:
+        return QIcon(pix)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QColor(color))
+    p.setPen(QPen(QColor(0, 0, 0, 80), 1))
+    p.drawRoundedRect(1, 1, size - 2, size - 2, radius, radius)
+    p.end()
+    return QIcon(pix)
+
+
 def extract_source_domain(url: str) -> str:
     """Extract clean source website domain from a download URL or magnet link."""
     if not url:

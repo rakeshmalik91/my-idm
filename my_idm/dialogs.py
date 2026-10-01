@@ -546,12 +546,7 @@ class RenameDialog(QDialog):
         self._name_edit.returnPressed.connect(self._accept)
         layout.addWidget(self._name_edit)
 
-        # Pre-select basename excluding extension if dot is present
-        if "." in current_name and not current_name.startswith("."):
-            dot_idx = current_name.rfind(".")
-            self._name_edit.setSelection(0, dot_idx)
-        else:
-            self._name_edit.selectAll()
+        self._name_edit.selectAll()
 
         layout.addSpacing(8)
 
@@ -612,6 +607,7 @@ class QueueManagerDialog(QDialog):
             ["Queue", "Downloads", "Max at once  (0 = Global)"]
         )
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(34)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)

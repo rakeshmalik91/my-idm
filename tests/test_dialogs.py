@@ -406,7 +406,7 @@ class TestRenameDialog(unittest.TestCase):
         try:
             self.assertGreaterEqual(dlg.minimumWidth(), 550)
             self.assertEqual(dlg._name_edit.text(), "debian-12.0.0-amd64-netinst.iso")
-            self.assertEqual(dlg._name_edit.selectedText(), "debian-12.0.0-amd64-netinst")
+            self.assertEqual(dlg._name_edit.selectedText(), "debian-12.0.0-amd64-netinst.iso")
             self.assertEqual(dlg.new_name, "debian-12.0.0-amd64-netinst.iso")
         finally:
             dlg.close()

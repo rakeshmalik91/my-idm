@@ -359,7 +359,7 @@ text. `Colors.TEXT_DISABLED` is deliberately darker than `TEXT_DIM` (dark `#4d55
 `TEXT_DISABLED` is for a control that cannot be used right now, and reusing the dimmer of the
 two is what left the greyed-out item looking live.
 
-The combo shows non-default queues as `Torrents  (max 1)` or `Torrents  (Global)`, so a limit
+The combo shows queues with their limits (e.g. `Default  (Global)`, `Torrents  (max 1)` or `Torrents  (Global)`), so a limit
 is visible from the toolbar without opening anything.
 
 ### `QueueManagerDialog`

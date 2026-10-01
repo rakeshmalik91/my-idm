@@ -112,7 +112,7 @@ class NetworkSettingsDialog(QDialog):
 
         vpn_layout.addWidget(ks_group)
         vpn_layout.addStretch()
-        tabs.addTab(vpn_tab, "🛡️ VPN & Adapter Binding")
+        tabs.addTab(vpn_tab, "🛡️ VPN && Adapter Binding")
 
         # Tab 2: Proxy
         proxy_tab = QWidget()
