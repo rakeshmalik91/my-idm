@@ -230,6 +230,7 @@ Rechecking verifies existing files:
 3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
 4. Right-click any section header to expand/collapse all sections or quickly switch between Status and Date grouping.
 5. The active segregation mode (`status` or `date`), enabled state, and individual collapsed section states are persisted in SQLite and restored automatically on next launch.
+6. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
 
 ### Context Menu
 

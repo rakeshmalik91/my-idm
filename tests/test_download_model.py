@@ -15,6 +15,7 @@ from my_idm.download_model import DownloadTableModel, Col
 from my_idm.delegates import ProgressBarDelegate
 from my_idm.manager import DownloadManager
 from my_idm.main_window import MainWindow
+from tests.conftest import rows_by_section
 
 app = QApplication.instance() or QApplication([])
 
@@ -980,6 +981,104 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(self.model.segregated_mode(), "status")
         # 3 status headers (Active, Seeding, Inactive) + 5 items = 8 rows
         self.assertEqual(self.model.rowCount(), 8)
+
+    def test_date_grouping_rebuckets_after_local_midnight(self):
+        """The date sections must follow the calendar day, not freeze at the last rebuild.
+
+        Today/Yesterday/Last 7 Days are relative to the current day, but nothing scheduled a
+        rebuild: _apply_sort only reads the clock when something else already triggered one
+        (a status change, a filter, a sort). A quiet app left open across midnight therefore
+        kept showing yesterday's grouping for the whole new day.
+        """
+        from datetime import datetime, timedelta
+
+        now = datetime.now().astimezone()
+        e_today = DownloadEntry(
+            id="roll-today", url="http://a", filename="a", added_at=now.isoformat()
+        )
+        e_yesterday = DownloadEntry(
+            id="roll-yest", url="http://b", filename="b",
+            added_at=(now - timedelta(days=1)).isoformat(),
+        )
+        self.model.load_entries([e_today, e_yesterday])
+        self.model.set_segregated_view(True, mode="date")
+
+        sections = rows_by_section(self.model)
+        self.assertEqual(sections["Today"], ["roll-today"])
+        self.assertEqual(sections["Yesterday"], ["roll-yest"])
+
+        # Still the same day: the once-a-second poll must cost nothing.
+        self.assertFalse(self.model.date_grouping_is_stale(now_dt=now))
+        self.assertFalse(self.model.refresh_date_grouping(now_dt=now))
+
+        # Midnight passes. Neither row keeps its section: the one that was Today is now
+        # Yesterday, and the one that was Yesterday is now two days old.
+        tomorrow = now + timedelta(days=1)
+        self.assertTrue(self.model.date_grouping_is_stale(now_dt=tomorrow))
+        self.assertTrue(self.model.refresh_date_grouping(now_dt=tomorrow))
+
+        sections = rows_by_section(self.model)
+        self.assertEqual(sections["Today"], [])
+        self.assertEqual(sections["Yesterday"], ["roll-today"])
+        self.assertEqual(sections["Last 7 Days"], ["roll-yest"])
+
+        # ...and it settles: polling again on the new day is a no-op.
+        self.assertFalse(self.model.date_grouping_is_stale(now_dt=tomorrow))
+        self.assertFalse(self.model.refresh_date_grouping(now_dt=tomorrow))
+        # All five headers stay rendered even when empty, so the user sees "Today (0)"
+        # rather than a missing section.
+        self.assertEqual(self.model.rowCount(), 7)  # 5 headers + 2 entries
+
+    def test_date_grouping_keeps_collapsed_sections_across_a_rollover(self):
+        """A midnight rebuild must not expand the sections the user had folded away."""
+        from datetime import datetime, timedelta
+
+        from my_idm.download_model import SECTION_DATE_OLDER
+
+        now = datetime.now().astimezone()
+        entries = [
+            DownloadEntry(
+                id=f"roll-collapse-{i}", url=f"http://{i}", filename=str(i),
+                added_at=(now - timedelta(days=60)).isoformat(),
+            )
+            for i in range(3)
+        ]
+        self.model.load_entries(entries)
+        self.model.set_segregated_view(True, mode="date")
+        self.model.set_section_collapsed(SECTION_DATE_OLDER, True)
+        # Collapsed: the header survives, its rows do not.
+        self.assertEqual(rows_by_section(self.model)["Older"], [])
+
+        self.assertTrue(self.model.refresh_date_grouping(now_dt=now + timedelta(days=1)))
+        self.assertTrue(self.model.is_section_collapsed(SECTION_DATE_OLDER))
+        self.assertEqual(rows_by_section(self.model)["Older"], [])
+
+    def test_date_grouping_never_goes_stale_for_modes_without_a_today(self):
+        """Status and file-type sections have no notion of today, so the poll stays free.
+
+        _details_timer ticks once a second for the life of the process, including while the
+        window is hidden to the tray, so a false positive here is a permanent loop of full
+        model resets.
+        """
+        from datetime import datetime, timedelta
+
+        now = datetime.now().astimezone()
+        self.model.load_entries([_make_entry("1", "bravo.zip", added_at=now.isoformat())])
+        far_future = now + timedelta(days=400)
+
+        # Segregation off entirely.
+        self.model.set_segregated_view(False, mode="date")
+        self.assertFalse(self.model.date_grouping_is_stale(now_dt=far_future))
+        self.assertFalse(self.model.refresh_date_grouping(now_dt=far_future))
+
+        for mode in ("status", "type"):
+            with self.subTest(mode=mode):
+                self.model.set_segregated_view(True, mode=mode)
+                self.assertFalse(
+                    self.model.date_grouping_is_stale(now_dt=far_future),
+                    f"{mode} sections do not depend on the current day",
+                )
+                self.assertFalse(self.model.refresh_date_grouping(now_dt=far_future))
 
 
 if __name__ == "__main__":

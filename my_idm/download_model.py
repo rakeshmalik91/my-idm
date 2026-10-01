@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional, Set
 
@@ -471,6 +471,12 @@ class DownloadTableModel(QAbstractTableModel):
         self._segregated_view: bool = False
         self._segregated_mode: str = "status"
         self._collapsed_sections: set[str] = set()
+        # Local calendar date the last "date" segregation was built against. The sections are
+        # relative to today (Today / Yesterday / Last 7 Days), so the grouping silently goes
+        # stale when the local day rolls over under a running app. None means "never built",
+        # which refresh_date_grouping() treats as stale. Set only by the date branch of
+        # _apply_sort, which is the single place that reads the clock for this purpose.
+        self._segregation_date: Optional[date] = None
         # Which named queue the view is scoped to. ALL_QUEUES ("") means every queue, which is
         # the default and the startup state: history is the product, so downloads the user
         # already had must never go missing just because a queue is selected.
@@ -630,9 +636,9 @@ class DownloadTableModel(QAbstractTableModel):
                 return False
         return True
 
-    def _reapply_filter(self):
+    def _reapply_filter(self, now_dt: Optional[datetime] = None):
         self.beginResetModel()
-        self._apply_sort()
+        self._apply_sort(now_dt)
         self._rebuild_index()
         self.endResetModel()
 
@@ -662,6 +668,38 @@ class DownloadTableModel(QAbstractTableModel):
 
     def segregated_mode(self) -> str:
         return self._segregated_mode
+
+    def date_grouping_is_stale(self, now_dt: Optional[datetime] = None) -> bool:
+        """True when the "date" sections were built against a different local day.
+
+        Callers that must capture view state *before* triggering a rebuild (a model reset
+        drops the selection) need to ask first and act second, so this is deliberately
+        separate from refresh_date_grouping() rather than folded into its return value.
+        """
+        if not self._segregated_view or self._segregated_mode != "date":
+            return False
+        if now_dt is None:
+            now_dt = datetime.now().astimezone()
+        # None means the sections have never been built, which is as stale as a past day.
+        return self._segregation_date != now_dt.date()
+
+    def refresh_date_grouping(self, now_dt: Optional[datetime] = None) -> bool:
+        """Rebuild the date sections if the local calendar day has rolled over.
+
+        The Today / Yesterday / Last 7 Days sections are relative to the *current* day, so a
+        long-lived window showing yesterday's grouping is just wrong: nothing else schedules a
+        rebuild, and _apply_sort only reads the clock when something else already triggered one.
+        A quiet app therefore kept "Today" full of yesterday's downloads all day. The caller is
+        expected to poll this (MainWindow's 1 Hz details tick does) and to re-apply selection
+        afterwards, because _reapply_filter resets the model and drops the view's selection.
+
+        Returns True when a rebuild happened, so the caller can skip its usual work otherwise.
+        Only the "date" mode is affected: status and file-type sections do not depend on today.
+        """
+        if not self.date_grouping_is_stale(now_dt):
+            return False
+        self._reapply_filter(now_dt)
+        return True
 
     def set_section_collapsed(self, section_id: str, collapsed: bool):
         if collapsed:
@@ -1010,7 +1048,7 @@ class DownloadTableModel(QAbstractTableModel):
         self.changePersistentIndexList(old_indexes, new_indexes)
         self.layoutChanged.emit()
 
-    def _apply_sort(self):
+    def _apply_sort(self, now_dt: Optional[datetime] = None):
         filtered = [e for e in self._all_entries if self._matches_filter(e)]
         ascending = (
             self._sort_order == Qt.SortOrder.AscendingOrder
@@ -1027,39 +1065,36 @@ class DownloadTableModel(QAbstractTableModel):
             self._entries = filtered
             return
 
+        buckets: dict[str, list[DownloadEntry]]
         if self._segregated_mode == "date":
-            # Segregated view: group by Today, Yesterday, Last 7 Days, Last 30 Days, Older
-            today_entries: list[DownloadEntry] = []
-            yesterday_entries: list[DownloadEntry] = []
-            last_7_days_entries: list[DownloadEntry] = []
-            last_30_days_entries: list[DownloadEntry] = []
-            older_entries: list[DownloadEntry] = []
+            # Segregated view: group by Today, Yesterday, Last 7 Days, Last 30 Days, Older.
+            # Buckets and section ids both come from DATE_SECTION_DEFS so the header rows and
+            # the classifier cannot drift apart; the literals used to be spelled twice.
+            buckets = {
+                sec_id: [] for sec_id, _t, _s in DATE_SECTION_DEFS
+            }
 
-            now_dt = datetime.now().astimezone()
+            if now_dt is None:
+                now_dt = datetime.now().astimezone()
+            # Remember the day this snapshot was built against so refresh_date_grouping() can
+            # tell a stale grouping from a current one without diffing the sections.
+            self._segregation_date = now_dt.date()
             for e in filtered:
-                cat = get_entry_date_category(e, now_dt)
-                if cat == SECTION_DATE_TODAY:
-                    today_entries.append(e)
-                elif cat == SECTION_DATE_YESTERDAY:
-                    yesterday_entries.append(e)
-                elif cat in (SECTION_DATE_LAST_7_DAYS, "date_this_week"):
-                    last_7_days_entries.append(e)
-                elif cat in (SECTION_DATE_LAST_30_DAYS, "date_this_month"):
-                    last_30_days_entries.append(e)
-                else:
-                    older_entries.append(e)
+                # get_entry_date_category only ever returns the five ids above (the old
+                # "date_this_week"/"date_this_month" spellings are aliased onto the canonical
+                # ones at module level), but an unknown value must not silently drop a row.
+                buckets.setdefault(
+                    get_entry_date_category(e, now_dt), buckets[SECTION_DATE_OLDER]
+                ).append(e)
 
             groups = [
-                (SECTION_DATE_TODAY, "Today", today_entries, "__section_date_today__"),
-                (SECTION_DATE_YESTERDAY, "Yesterday", yesterday_entries, "__section_date_yesterday__"),
-                (SECTION_DATE_LAST_7_DAYS, "Last 7 Days", last_7_days_entries, "__section_date_last_7_days__"),
-                (SECTION_DATE_LAST_30_DAYS, "Last 30 Days", last_30_days_entries, "__section_date_last_30_days__"),
-                (SECTION_DATE_OLDER, "Older", older_entries, "__section_date_older__"),
+                (sec_id, title, buckets[sec_id], hdr_id)
+                for sec_id, title, hdr_id in DATE_SECTION_DEFS
             ]
         else:
             # Segregated view: group by Active, Seeding, Inactive, or by file type.
             if self._segregated_mode == "type":
-                buckets: dict[str, list[DownloadEntry]] = {
+                buckets = {
                     cat: [] for cat, _t, _s in TYPE_SECTION_DEFS
                 }
                 for e in filtered:

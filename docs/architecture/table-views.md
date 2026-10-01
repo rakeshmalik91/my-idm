@@ -163,6 +163,43 @@ def get_entry_date_category(entry: DownloadEntry, now_dt: Optional[datetime] = N
         return SECTION_DATE_OLDER
 ```
 
+Buckets and section IDs both come from `DATE_SECTION_DEFS`, which is also the source of the
+header rows' IDs and titles — the classifier and the headers used to spell the same five
+literals twice. All five headers are always emitted, so a section that has gone empty renders
+as `TODAY (0)` rather than disappearing.
+
+`now_dt` is **injected, never read from the clock at the call site**, matching
+`Database.get_download_stats(today=...)`: `_apply_sort(now_dt=None)` and
+`_reapply_filter(now_dt=None)` thread it through so the same `now` drives the classification
+*and* the staleness bookkeeping below.
+
+#### Midnight Rollover
+
+The buckets are relative to the current day, so the grouping is only correct for the day it was
+built on. `_apply_sort` reads the clock on every rebuild, but nothing *scheduled* a rebuild, so
+a quiet app left open across midnight kept showing yesterday's grouping — including a `TODAY`
+section full of yesterday's downloads — until some unrelated event (a status change, a filter, a
+sort) happened to reset the model.
+
+`DownloadTableModel` therefore records the local date each date-mode rebuild was built against
+(`_segregation_date`) and exposes two methods:
+
+| Method | Behaviour |
+| :--- | :--- |
+| `date_grouping_is_stale(now_dt=None)` | True only in `date` mode when the local day differs from `_segregation_date`. `None` (never built) counts as stale. |
+| `refresh_date_grouping(now_dt=None)` | Rebuilds via `_reapply_filter(now_dt)` if stale; returns whether it rebuilt. |
+
+`MainWindow._on_details_timer_tick` polls `date_grouping_is_stale()` on the existing 1 Hz
+`_details_timer` rather than adding a timer of its own: that one already runs on the GUI thread
+and keeps ticking while the window is hidden to the tray, which is exactly when a rollover goes
+unnoticed. `MainWindow._regroup_for_new_day()` then captures the selected IDs **before** the
+rebuild, because a model reset drops the view's selection, and restores them through
+`_restore_selection` the same way `_on_toggle_segregated_view` does. `_collapsed_sections`
+survives, so sections the user had folded stay folded across the rollover.
+
+`status` and `type` sections have no notion of today, so `date_grouping_is_stale()` returns False
+for them and the poll costs one `date()` comparison per second.
+
 ### 2. Section Header Spanning & Interactions
 
 - **Full-Row Spans**: `MainWindow._apply_table_spans()` calls `self._table.setSpan(row, 0, 1, Col.COUNT)` for every section header index discovered via `model.get_section_header_row_indices()`.

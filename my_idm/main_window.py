@@ -3477,9 +3477,32 @@ class MainWindow(QMainWindow):
         return queue.name if queue else DEFAULT_QUEUE_NAME
 
     def _on_details_timer_tick(self):
+        # Polled here rather than on its own timer: this one already runs at 1 Hz on the GUI
+        # thread, and it keeps running while the window is hidden to tray - which is exactly
+        # when a midnight rollover happens unnoticed.
+        if self._model.date_grouping_is_stale():
+            self._regroup_for_new_day()
         if self._details_panel.isVisible() and self._details_panel.current_download_id:
             self._details_panel.refresh()
         self._update_speed_label()
+
+    def _regroup_for_new_day(self):
+        """Regroup the date sections after local midnight, keeping the selection.
+
+        Today/Yesterday/Last 7 Days are relative to the current day, so a window left open
+        across midnight kept yesterday's grouping until some unrelated event happened to
+        rebuild the model. The rebuild is a model reset, which drops the view's selection, so
+        the ids are captured first and reapplied exactly as _on_toggle_segregated_view does.
+        _apply_table_spans is already wired to modelReset; calling it here keeps this handler
+        self-contained and consistent with every other caller that mutates the sections.
+        """
+        selected = self._selected_ids()
+        if not self._model.refresh_date_grouping():
+            return
+        self._restore_selection(selected)
+        self._apply_table_spans()
+        if self._segregated_view_enabled:
+            self._status_label.setText("Day grouping updated")
 
     # -- UI State persistence in database ------------------------------------
 

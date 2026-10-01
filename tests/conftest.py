@@ -72,6 +72,25 @@ _INTERACTIVE_MODULES = frozenset({
 _HAS_UI_TESTS = False
 
 
+def rows_by_section(model) -> dict:
+    """Map each rendered section title to the ids currently listed under it.
+
+    A ``DownloadTableModel`` interleaves synthetic header rows with real entries in one flat
+    ``_entries`` list, so "which downloads are in Today?" means walking that list and
+    tracking the header each entry follows. Tests covering segregation, collapsing and the
+    date rollover all need exactly that, and none of them care about row indices.
+    """
+    out: dict = {}
+    current = None
+    for entry in model._entries:
+        if getattr(entry, "is_section_header", False):
+            current = entry.section_title
+            out[current] = []
+        elif current is not None:
+            out[current].append(entry.id)
+    return out
+
+
 def pytest_collection_modifyitems(items):
     """Apply the `ui` marker to every test in an interactive module.
 

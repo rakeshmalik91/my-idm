@@ -16,7 +16,7 @@ from PySide6.QtCore import (
     Qt,
 )
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtTest import QTest
+from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -40,6 +40,7 @@ from my_idm.settings_dialog import (
     TAB_VPN,
     tab_index,
 )
+from tests.conftest import rows_by_section
 
 app = QApplication.instance() or QApplication([])
 
@@ -667,6 +668,78 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
             self.win._on_table_double_clicked(self.win._model.index(first_header, 0))
             mock_open.assert_not_called()
         self.assertNotIn("active", self.win._model._collapsed_sections)
+
+    def test_details_timer_regroups_date_sections_after_midnight(self):
+        """A window left open across local midnight must re-bucket the date sections.
+
+        Today/Yesterday/Last 7 Days are relative to the current day, but nothing scheduled a
+        rebuild, so the sections stayed frozen at whatever the last status change or filter
+        produced. _details_timer is the 1 Hz clock that drives the fix, and it keeps ticking
+        while the window is hidden to the tray - which is when the rollover goes unnoticed.
+        """
+        from datetime import datetime, timedelta
+
+        import my_idm.download_model as download_model
+
+        class _TomorrowDatetime(datetime):
+            """`datetime` as the download model sees it, with the day advanced by one.
+
+            Class body reads the enclosing test scope, so `datetime` inside now() is the
+            real class - otherwise this would recurse.
+            """
+
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(days=1)
+
+        now = datetime.now().astimezone()
+        self.db.add_download(DownloadEntry(
+            id="roll-today",
+            url="https://example.com/today.zip",
+            filename="today.zip",
+            status="completed",
+            added_at=now.isoformat(),
+        ))
+        self.win._load_history()
+
+        self.win._set_segregation_mode("date")
+        QApplication.processEvents()
+        self.assertEqual(self.win._segregated_view_mode, "date")
+        self.assertTrue(self.win._model.is_segregated_view())
+
+        row = self.win._model.row_for_id("roll-today")
+        self.assertIsNotNone(row)
+        self.win._table.selectRow(row)
+        self.assertEqual(self.win._selected_ids(), ["roll-today"])
+
+        # Steady state: the 1 Hz tick must not touch the model while the day is unchanged.
+        same_day_resets = QSignalSpy(self.win._model.modelReset)
+        self.win._on_details_timer_tick()
+        self.assertEqual(same_day_resets.size(), 0)
+
+        with patch.object(download_model, "datetime", _TomorrowDatetime):
+            self.win._on_details_timer_tick()
+
+            # "roll-today" was added today, so after midnight it belongs under Yesterday
+            # and Today is left empty.
+            sections = rows_by_section(self.win._model)
+            self.assertEqual(sections["Today"], [])
+            self.assertEqual(sections["Yesterday"], ["roll-today"])
+
+            # The rebuild is a model reset, which silently drops the view's selection - the
+            # user must not lose the row they were working on just because it is past
+            # midnight.
+            self.assertEqual(self.win._selected_ids(), ["roll-today"])
+
+            # And it settles: further ticks on the new day must not reset the model again.
+            # size() counts emissions; count() is the arity of the last signal, not the
+            # number of times it fired.
+            settled_resets = QSignalSpy(self.win._model.modelReset)
+            self.win._on_details_timer_tick()
+            self.win._on_details_timer_tick()
+            self.assertEqual(
+                settled_resets.size(), 0, "a settled day must not rebuild on every tick"
+            )
 
     def test_open_file_missing_triggers_file_not_found(self):
         """Opening a missing file should mark status as file_not_found."""
