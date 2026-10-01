@@ -107,3 +107,28 @@ def notify_download_error(filename: str, error: str) -> bool:
     title = "Download Failed"
     message = f"Failed: {filename}\n{error[:100]}"
     return show_notification(title, message, duration=10)
+
+
+def notify_clipboard_download_captured(
+    filenames: list[str], skipped: int = 0
+) -> bool:
+    """Show notification when clipboard capture adds one or more downloads.
+
+    Silent capture is the failure mode worth designing against: the clipboard monitor adds a
+    download with no visible sign, and a user who does not realise that is what happened has no
+    way to connect the new row to the thing they copied. The browser equivalent
+    (:func:`notify_browser_download_caught`) already notifies for the same reason.
+
+    A batch of one is named, because a lone filename is actionable; a batch of many is counted,
+    because a wall of filenames is not.
+    """
+    if not filenames:
+        return False
+    title = "Captured from Clipboard"
+    if len(filenames) == 1:
+        message = f"Added: {filenames[0]}"
+    else:
+        message = f"Added {len(filenames)} downloads from the clipboard"
+    if skipped:
+        message += f"\n{skipped} over the per-copy limit were skipped"
+    return show_notification(title, message, duration=5)

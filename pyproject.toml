@@ -31,4 +31,7 @@ norecursedirs = [".kilo", "*worktree*", ".git", "__pycache__", ".pytest_cache"]
 filterwarnings = [
     "ignore:.*pkg_resources is deprecated as an API.*:UserWarning",
 ]
+markers = [
+    "ui: constructs real Qt windows or dialogs, drives the system tray, or round-trips the real system clipboard. Applied automatically by tests/conftest.py from _INTERACTIVE_MODULES. Excluded from the basic sanity tier (pytest -m 'not ui') because it visibly interferes with the desktop, so it must not be run unattended in the background.",
+]
 

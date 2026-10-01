@@ -19,7 +19,21 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from PySide6.QtCore import QObject, Signal, QTimer, Slot
 
-from my_idm.database import Database, DownloadEntry, SegmentEntry, _now_iso
+from my_idm.database import (
+    ALL_QUEUES,
+    DEFAULT_QUEUE_ID,
+    DEFAULT_QUEUE_NAME,
+    SOURCE_QUEUES,
+    Database,
+    DownloadEntry,
+    QueueInfo,
+    SegmentEntry,
+    _now_iso,
+)
+
+#: source_key -> queue id, for the two seeded source queues. Built from the table so the ids
+#: cannot drift between the seeder and the router.
+_SOURCE_QUEUE_BY_KEY = {key: queue_id for queue_id, _name, key in SOURCE_QUEUES}
 from my_idm.http_engine import HTTPEngine
 from my_idm.config import (
     GeneralConfig,
@@ -131,36 +145,59 @@ def _expected_total_size(metadata: Any, format_selector: str) -> int:
 
 
 class ParsedBacklogEntry(tuple):
-    """Backwards-compatible 3-tuple (url, save_path, new_dir) with filename and headers attributes."""
+    """Backwards-compatible 3-tuple (url, save_path, new_dir) with extra attributes."""
     def __new__(cls, url: Optional[str], save_path: str, new_dir: Optional[str],
-                filename: str = "", headers: Optional[dict[str, str]] = None):
+                filename: str = "", headers: Optional[dict[str, str]] = None,
+                queue: str = "", queue_directive: str = ""):
         return super().__new__(cls, (url, save_path, new_dir))
 
     def __init__(self, url: Optional[str], save_path: str, new_dir: Optional[str],
-                 filename: str = "", headers: Optional[dict[str, str]] = None):
+                 filename: str = "", headers: Optional[dict[str, str]] = None,
+                 queue: str = "", queue_directive: str = ""):
         self.url = url
         self.save_path = save_path
         self.new_dir = new_dir
         self.filename = filename
         self.headers = headers or {}
+        #: Queue named on *this* download line, overriding the sticky directive.
+        self.queue = queue
+        #: Queue named by a sticky ``queue:`` directive on this line. Empty when the line is not
+        #: a directive. Kept separate from ``queue`` so the caller can tell "this line set the
+        #: queue for what follows" from "this line's download goes to a queue".
+        self.queue_directive = queue_directive
 
 
 def parse_backlog_entry(
     raw_line: str,
     active_save_path: str = "",
     last_comment: str = "",
+    active_queue: str = "",
 ) -> ParsedBacklogEntry:
     """Parse a single backlog file line.
 
     Returns a backwards-compatible 3-tuple (url, save_path, new_dir) with
-    .filename and .headers attributes:
+    .filename, .headers, .queue and .queue_directive attributes:
     - If line is empty or comment: (None, "", None).
     - If line sets directory directive (# dir: ..., dir=..., [path]): (None, "", directive_path).
-    - If line contains a download URL/magnet: (url, save_path, None, filename, headers).
+    - If line sets a queue directive (# queue: ..., queue=...): ``queue_directive`` is the name.
+    - If line contains a download URL/magnet: (url, save_path, None, filename, headers, queue).
+
+    ``queue=`` on a download line names that line's queue; a ``queue:`` directive on its own line
+    applies to every download after it, the same way ``dir:`` does. A per-line value wins over
+    the sticky one. An unknown name is *not* created here - :meth:`queue_id_for_name` decides.
     """
     line = raw_line.strip()
     if not line:
         return ParsedBacklogEntry(None, "", None)
+
+    # Queue directive, checked before the directory directive because both use the same
+    # "name: value" shape. Returns no new_dir: a queue is not a path.
+    m_comment_queue = re.match(r'^#+\s*queue\s*[:=]\s*(.+)$', line, re.IGNORECASE)
+    if m_comment_queue:
+        return ParsedBacklogEntry(
+            None, "", None,
+            queue_directive=m_comment_queue.group(1).strip().strip('"\''),
+        )
 
     # Check for comment directive: e.g. # dir: /path or # save_path: /path
     m_comment_dir = re.match(r'^#+\s*(?:dir|save_path|path)\s*[:=]\s*(.+)$', line, re.IGNORECASE)
@@ -181,6 +218,12 @@ def parse_backlog_entry(
         return ParsedBacklogEntry(None, "", normalize_path(p))
 
     # Directive without leading comment: e.g. dir = D:\Path or save_path = D:\Path
+    m_queue = re.match(r'^queue\s*[:=]\s*(.+)$', line, re.IGNORECASE)
+    if m_queue:
+        return ParsedBacklogEntry(
+            None, "", None, queue_directive=m_queue.group(1).strip().strip('"\''),
+        )
+
     m_dir = re.match(r'^(?:dir|save_path|path)\s*[:=]\s*(.+)$', line, re.IGNORECASE)
     if m_dir:
         p = m_dir.group(1).strip().strip('"\'')
@@ -190,6 +233,7 @@ def parse_backlog_entry(
     url = ""
     save_path = ""
     filename = ""
+    queue = ""
     headers: dict[str, str] = {}
 
     # Extract filename or directives if embedded in line
@@ -208,6 +252,8 @@ def parse_backlog_entry(
                     save_path = v_clean
                 elif k_clean in ("filename", "file", "out", "name"):
                     filename = v_clean
+                elif k_clean == "queue":
+                    queue = v_clean
                 elif k_clean in ("referer", "referrer"):
                     headers["Referer"] = v_clean
                 elif k_clean.startswith("header"):
@@ -259,6 +305,14 @@ def parse_backlog_entry(
         if m_out_opt:
             filename = m_out_opt.group(1) or m_out_opt.group(2) or m_out_opt.group(3)
             line = (line[:m_out_opt.start()] + " " + line[m_out_opt.end():]).strip()
+
+        # aria2-style queue="Name". Taken before the space-splitting fallback so a queue name
+        # containing a space cannot swallow the rest of the URL.
+        m_queue_opt = re.search(r'\bqueue\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|(\S+))', line, re.IGNORECASE)
+        if m_queue_opt:
+            queue = (m_queue_opt.group(1) or m_queue_opt.group(2)
+                     or m_queue_opt.group(3)).strip()
+            line = (line[:m_queue_opt.start()] + " " + line[m_queue_opt.end():]).strip()
 
         m_ref_opt = re.search(r'referer\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|(\S+))', line, re.IGNORECASE)
         if m_ref_opt:
@@ -312,7 +366,13 @@ def parse_backlog_entry(
         if "Referer" not in headers:
             headers["Referer"] = "https://kwik.cx/"
 
-    return ParsedBacklogEntry(url, save_path, None, filename=filename, headers=headers)
+    if queue:
+        queue = queue.strip().strip('"\'')
+
+    return ParsedBacklogEntry(
+        url, save_path, None, filename=filename, headers=headers,
+        queue=queue or active_queue,
+    )
 
 
 
@@ -336,6 +396,8 @@ class DownloadManager(QObject):
     tor_config_changed = Signal(object)       # TorConfig
     threat_detected = Signal(str, str)       # download_id, report
     queue_order_changed = Signal()
+    queues_changed = Signal()              # the queue list, its limits or its membership changed
+    queue_scope_changed = Signal(str)      # the queue the downloads list is scoped to ("" = all)
     tor_status_changed = Signal(str, str)     # status ("connecting"|"connected"|"disconnecting"|"disconnected"|"error"), message
     tor_availability_changed = Signal(bool)  # a Tor SOCKS5 endpoint is reachable
     _tor_probe_result = Signal(bool)          # private: emitted from the probe thread
@@ -516,15 +578,21 @@ class DownloadManager(QObject):
         # Auto-resume queued and interrupted downloads on startup in priority order
         all_entries = self._db.get_all_downloads()
         all_entries.sort(key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or ""))
+        # resume_download enforces the per-queue budget, so walking the list in priority order
+        # means each queue fills to its own limit and the overflow stays queued for the 1 Hz
+        # tick rather than being started here and then blocked.
         for entry in all_entries:
             if entry.status == "queued":
-                log.info("Auto-starting queued download on startup: %s (order=%s)", entry.id, entry.queue_order)
+                log.info("Auto-starting queued download on startup: %s (order=%s, queue=%s)",
+                         entry.id, entry.queue_order, entry.queue_id)
                 self.resume_download(entry.id)
             elif self._general_config.auto_resume_startup and entry.status in ("downloading", "checking", "fetching_metadata"):
-                log.info("Auto-resuming interrupted download on startup: %s (order=%s)", entry.id, entry.queue_order)
+                log.info("Auto-resuming interrupted download on startup: %s (order=%s, queue=%s)",
+                         entry.id, entry.queue_order, entry.queue_id)
                 self.resume_download(entry.id)
             elif entry.status == "seeding" and getattr(self._torrent_config, "resume_seeding_on_startup", True):
-                log.info("Auto-resuming seeding torrent on startup: %s (order=%s)", entry.id, entry.queue_order)
+                log.info("Auto-resuming seeding torrent on startup: %s (order=%s, queue=%s)",
+                         entry.id, entry.queue_order, entry.queue_id)
                 self._torrent.add_torrent(entry)
 
         # Launch external tools (e.g. AnimePahe scraper) if configured
@@ -1249,6 +1317,35 @@ class DownloadManager(QObject):
                     await self._browser_server.start()
                 asyncio.run_coroutine_threadsafe(_restart_server(), self._loop)
 
+    def set_capture_enabled(self, enabled: bool) -> tuple[bool, str]:
+        """Turn browser capture on or off without stopping the loopback server.
+
+        Flips ``BrowserIntegrationConfig.intercept_all`` rather than ``enabled``, which is the
+        difference between a paused capture and a disconnected one: ``enabled=False`` tears the
+        REST server down, so the extension can no longer reach the app to be told *why* it was
+        declined. ``intercept_all`` is the field the extension already mirrors onto
+        ``cfg.interceptDownloads`` and already gates its interception on, so it is the one
+        field that means "stop intercepting".
+
+        The browser's own copy of that flag is re-synced on its timer (see
+        ``background.js``), so browser-native interception converges within that interval;
+        ``BrowserServer._handle_add`` reads the same object directly, so anything sent to the
+        app is declined immediately.
+
+        Returns ``(changed, message)`` for the caller's status line.
+        """
+        current = bool(self._browser_config.intercept_all)
+        if current == bool(enabled):
+            return False, f"Download capture is already {'on' if current else 'off'}."
+        self._browser_config.intercept_all = bool(enabled)
+        # set_browser_config persists, re-points the server and emits the change signal; the
+        # server stays up because `enabled` is untouched.
+        self.set_browser_config(self._browser_config)
+        log.info(
+            "Download capture %s", "enabled" if enabled else "disabled",
+        )
+        return True, f"Download capture {'enabled' if enabled else 'disabled'}."
+
     def set_tor_config(self, config: TorConfig):
         """Update Tor routing and SOCKS5 proxy configuration."""
         self._tor_config = config
@@ -1503,6 +1600,13 @@ class DownloadManager(QObject):
         """Update general download and application preferences."""
         self._general_config = config
         self._http.set_general_config_sync(config)
+        # The torrent engine reads general settings too - the disk-space gate and
+        # `metadata_fetch_timeout_days` both live here - and `SettingsDialog` hands back a
+        # *copy*, so without this line it kept the object built at startup and kept
+        # enforcing the settings the user had just changed. Setting a checker on one engine
+        # but not the other is exactly the kind of half-applied preference that is
+        # impossible to spot from the UI.
+        self._torrent.set_general_config(config)
         config.save()
         self._apply_backlog_timer_config()
         self.general_config_changed.emit(config)
@@ -1548,11 +1652,27 @@ class DownloadManager(QObject):
                      num_segments: int = 8,
                      filename: str = "",
                      headers: Optional[dict] = None,
-                     metadata: Optional[dict] = None) -> Optional[str]:
-        """Add a new download. Returns download_id or None if duplicate resumed."""
+                     metadata: Optional[dict] = None,
+                     queue_id: str = "") -> Optional[str]:
+        """Add a new download. Returns download_id or None if duplicate resumed.
+
+        ``queue_id`` names the queue the download joins. When it is blank the queue is
+        **inferred from the source** (:meth:`_infer_queue_for_source`), so an AnimePahe or
+        YouTube download lands in its own queue whichever entry point created it. An explicit
+        choice is never overridden — the Add Download dialog and the clipboard monitor pass the
+        active queue, and a Move to Queue exists for afterwards.
+        """
         url = url.strip()
         if not url:
             return None
+        # Whether the caller chose a queue must be captured *before* resolve_queue_id, which
+        # turns a blank into the default id and would make "was it blank?" unanswerable.
+        explicit_queue = bool(queue_id)
+        queue_id = self._db.resolve_queue_id(queue_id)
+        if not explicit_queue:
+            inferred = self._infer_queue_for_source(url, metadata)
+            if inferred:
+                queue_id = inferred
 
         # Pre-download security check
         is_safe, risk_level, sec_details = check_url_safety(url, self._security_config)
@@ -1661,6 +1781,7 @@ class DownloadManager(QObject):
             num_segments=num_segments,
             added_at=_now_iso(),
             status="queued",
+            queue_id=queue_id,
         )
         if entry_metadata:
             entry.metadata = entry_metadata
@@ -1668,11 +1789,10 @@ class DownloadManager(QObject):
         self._db.add_download(entry)
         self.download_added.emit(entry.id)
 
-        # Start if within concurrent limit; otherwise stays queued
-        max_concurrent = self._general_config.max_concurrent_downloads
-        if max_concurrent <= 0:
-            max_concurrent = 3
-        if self._get_active_download_count() < max_concurrent:
+        # Start if within the global and per-queue limits; otherwise stays queued.
+        counts = self._active_counts_by_queue()
+        limits = self._queue_limits()
+        if self._may_start(entry, counts, limits, self._general_config.effective_max_concurrent):
             self._start_entry(entry)
         else:
             entry.status = "queued"
@@ -1738,25 +1858,66 @@ class DownloadManager(QObject):
 
         return download_id
 
-    def _get_active_download_count(self) -> int:
-        """Count downloads currently in active transferring states or starting."""
-        entries = self._db.get_all_downloads()
-        active_ids = {
-            e.id for e in entries
-            if e.status in ("downloading", "checking", "fetching_metadata", "stalled")
-        }
-        active_ids.update(self._starting_downloads)
-        return len(active_ids)
+    def _get_active_download_count(self, queue_id: str = "") -> int:
+        """Active transfers across every queue, or just one when *queue_id* is given."""
+        counts = self._active_counts_by_queue()
+        if queue_id:
+            return counts.get(self._db.resolve_queue_id(queue_id), 0)
+        return sum(counts.values())
+
+    def _active_counts_by_queue(self) -> dict[str, int]:
+        """Active transfers per queue, including ones not yet reported as downloading.
+
+        ``_starting_downloads`` is added in because it covers the window between deciding to
+        start a download and the engine reporting it as ``downloading``. Without it a queue's
+        first start always overshoots its own budget by exactly this set's size, and the
+        overshoot is invisible until it settles.
+
+        One grouped query rather than a full scan per candidate: the grouped form is what makes
+        per-queue accounting *cheaper* than the single global count it replaces.
+        """
+        counts = self._db.get_active_counts_by_queue()
+        for did in self._starting_downloads:
+            entry = self._db.get_download(did)
+            if entry:
+                key = self._db.resolve_queue_id(entry.queue_id)
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    def _queue_limits(self) -> dict[str, int]:
+        """Local concurrency ceiling per queue. ``0`` means unlimited within that queue."""
+        return {q.id: q.effective_max_concurrent for q in self._db.get_queues()}
+
+    def _may_start(self, entry: DownloadEntry, counts: dict[str, int],
+                   limits: dict[str, int], global_max: int) -> bool:
+        """Whether *entry* can start now, under both the global and its own queue's budget.
+
+        The single decision every start path shares. It is a method rather than inlined
+        arithmetic because three call sites reach ``_start_entry`` without passing through each
+        other - ``_process_queue``, ``add_download`` and ``resume_download`` - and a check
+        written into only one of them is a check that will be bypassed.
+        """
+        if sum(counts.values()) >= global_max:
+            return False
+        limit = limits.get(self._db.resolve_queue_id(entry.queue_id), 0)
+        # limit 0 == unlimited within the queue; only the global ceiling can stop it.
+        if limit > 0 and counts.get(self._db.resolve_queue_id(entry.queue_id), 0) >= limit:
+            return False
+        return True
 
     def _process_queue(self):
-        """Start queued downloads up to the concurrent limit, ordered by priority."""
-        max_concurrent = self._general_config.max_concurrent_downloads
-        if max_concurrent <= 0:
-            max_concurrent = 3
+        """Start queued downloads up to the global and per-queue limits, in priority order.
 
-        active = self._get_active_download_count()
-        available = max_concurrent - active
-        if available <= 0:
+        Ordering is *queue_order within a queue*, and a queue that has budget is considered
+        before one that does not. That second part is deliberate: a user who puts a torrent in
+        its own queue with ``max_concurrent = 1`` wants it to start first, not to be starved by
+        a queue of 500 small files. A saturated queue sinks to the back of the walk rather than
+        being dropped, so it is picked up the moment a slot frees.
+        """
+        global_max = self._general_config.effective_max_concurrent
+        counts = self._active_counts_by_queue()
+        limits = self._queue_limits()
+        if sum(counts.values()) >= global_max:
             return
 
         now = time.time()
@@ -1772,23 +1933,48 @@ class DownloadManager(QObject):
                     continue
             eligible.append(e)
 
-        eligible.sort(key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or ""))
-
-        started = 0
+        priority = lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "")
+        by_queue: dict[str, list[DownloadEntry]] = {}
         for entry in eligible:
-            if started >= available:
-                break
-            if self._get_active_download_count() >= max_concurrent:
-                break
-            if entry.retry_count > 0:
-                log.info(
-                    "Auto-retrying queued download %s (attempt %d/%d, order=%s)",
-                    entry.id, entry.retry_count + 1, entry.max_retries, entry.queue_order,
-                )
-            else:
-                log.info("Starting queued download %s (order=%s)", entry.id, entry.queue_order)
-            self._start_entry(entry)
-            started += 1
+            by_queue.setdefault(self._db.resolve_queue_id(entry.queue_id), []).append(entry)
+        for group in by_queue.values():
+            group.sort(key=priority)
+
+        # Queues that can still start something come first; the rest follow so that a slot
+        # opening up in a saturated queue is filled immediately rather than on the next tick.
+        # Ties break on the queue switcher's own order (default first, then the user's
+        # `position`), never on the raw id - ids are uuids, so an id tiebreaker would make the
+        # dispatch order differ between two runs with identical state.
+        order_index = {
+            queue.id: index for index, queue in enumerate(self._db.get_queues())
+        }
+
+        def has_budget(queue_id: str) -> bool:
+            limit = limits.get(queue_id, 0)
+            used = counts.get(queue_id, 0)
+            return limit <= 0 or used < limit
+
+        queue_ids = sorted(
+            by_queue, key=lambda q: (not has_budget(q), order_index.get(q, 999))
+        )
+
+        for queue_id in queue_ids:
+            for entry in by_queue[queue_id]:
+                if not self._may_start(entry, counts, limits, global_max):
+                    continue
+                if entry.retry_count > 0:
+                    log.info(
+                        "Auto-retrying queued download %s (attempt %d/%d, order=%s, queue=%s)",
+                        entry.id, entry.retry_count + 1, entry.max_retries,
+                        entry.queue_order, queue_id,
+                    )
+                else:
+                    log.info(
+                        "Starting queued download %s (order=%s, queue=%s)",
+                        entry.id, entry.queue_order, queue_id,
+                    )
+                self._start_entry(entry)
+                counts[queue_id] = counts.get(queue_id, 0) + 1
 
     def _start_entry(self, entry: DownloadEntry):
         """Dispatch download to the right engine."""
@@ -2021,7 +2207,7 @@ class DownloadManager(QObject):
         entry.error_message = ""
         entry.last_tried_at = _now_iso()
         if entry.queue_order <= 0:
-            entry.queue_order = self._db.get_next_queue_order()
+            entry.queue_order = self._db.get_next_queue_order(entry.queue_id)
         if not entry.file_path and entry.filename and entry.save_path:
             entry.file_path = str(Path(entry.save_path) / entry.filename)
 
@@ -2035,10 +2221,9 @@ class DownloadManager(QObject):
         self._db.update_download(entry)
         self.status_changed.emit(download_id, "queued", "")
 
-        max_concurrent = self._general_config.max_concurrent_downloads
-        if max_concurrent <= 0:
-            max_concurrent = 3
-        if self._get_active_download_count() >= max_concurrent:
+        counts = self._active_counts_by_queue()
+        limits = self._queue_limits()
+        if not self._may_start(entry, counts, limits, self._general_config.effective_max_concurrent):
             return
 
         self._start_entry(entry)
@@ -2570,36 +2755,193 @@ class DownloadManager(QObject):
         self.status_changed.emit(download_id, "file_not_found", "File not found on disk")
 
     def move_queue_up(self, download_id: str) -> bool:
-        """Move download up in queue order."""
-        downloads = self._db.get_all_downloads()
-        downloads.sort(key=lambda d: d.queue_order if d.queue_order > 0 else 999999)
-        idx = next((i for i, d in enumerate(downloads) if d.id == download_id), -1)
-        if idx > 0:
-            target = downloads[idx - 1]
-            curr = downloads[idx]
-            curr_order = curr.queue_order if curr.queue_order > 0 else (idx + 1)
-            target_order = target.queue_order if target.queue_order > 0 else idx
-            self._db.update_queue_order(curr.id, target_order)
-            self._db.update_queue_order(target.id, curr_order)
-            self.queue_order_changed.emit()
-            return True
-        return False
+        """Move a download up in its queue's priority order.
+
+        Scoped to the download's own queue. Sorting every download together made the control
+        meaningless across queues: moving a row up in queue A cannot change what happens in
+        queue B, and letting it appear to do so was the bug.
+        """
+        return self._move_within_queue(download_id, -1)
 
     def move_queue_down(self, download_id: str) -> bool:
-        """Move download down in queue order."""
-        downloads = self._db.get_all_downloads()
-        downloads.sort(key=lambda d: d.queue_order if d.queue_order > 0 else 999999)
-        idx = next((i for i, d in enumerate(downloads) if d.id == download_id), -1)
-        if idx != -1 and idx < len(downloads) - 1:
-            target = downloads[idx + 1]
-            curr = downloads[idx]
-            curr_order = curr.queue_order if curr.queue_order > 0 else (idx + 1)
-            target_order = target.queue_order if target.queue_order > 0 else (idx + 2)
-            self._db.update_queue_order(curr.id, target_order)
-            self._db.update_queue_order(target.id, curr_order)
-            self.queue_order_changed.emit()
-            return True
-        return False
+        """Move a download down in its queue's priority order."""
+        return self._move_within_queue(download_id, +1)
+
+    def _move_within_queue(self, download_id: str, delta: int) -> bool:
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return False
+        queue_id = self._db.resolve_queue_id(entry.queue_id)
+        siblings = [
+            d for d in self._db.get_all_downloads(queue_id)
+            if d.queue_order > 0 or d.id == download_id
+        ]
+        siblings.sort(key=lambda d: (d.queue_order if d.queue_order > 0 else 999999,
+                                    d.added_at or ""))
+        idx = next((i for i, d in enumerate(siblings) if d.id == download_id), -1)
+        if idx == -1:
+            return False
+        target_idx = idx + delta
+        if target_idx < 0 or target_idx >= len(siblings):
+            return False
+
+        # Move the entry in the list, then renumber the WHOLE queue densely. Renumbering only the
+        # affected run left the rows before it holding values the moved row had just vacated,
+        # producing two downloads with the same priority - which is the bug this shape was
+        # written to avoid in the first place. Whole-queue renumbering is O(n) writes on one
+        # user action, which is not the bottleneck worth optimising.
+        moving = siblings.pop(idx)
+        siblings.insert(target_idx, moving)
+        for position, item in enumerate(siblings, start=1):
+            if item.queue_order != position:
+                self._db.update_queue_order(item.id, position)
+        self.queue_order_changed.emit()
+        return True
+
+    # -- named queues ---------------------------------------------------------
+
+    #: Hosts that identify their source by URL rather than by metadata. A YouTube link pasted
+    #: into the Add Download dialog or captured from the browser carries no `source_type`, but
+    #: it is still obviously a YouTube download.
+    _YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com")
+
+    def _infer_queue_for_source(
+        self, url: str, metadata: Optional[dict]
+    ) -> str:
+        """The queue a download belongs to by virtue of where it came from, or ``""``.
+
+        Matches the ``source_type`` / ``added_by`` markers the YouTube and AnimePahe paths
+        already write, and falls back to the URL host so a hand-added YouTube link is routed
+        the same way. Returns ``""`` when nothing matches, meaning "use the default queue".
+        """
+        meta = metadata or {}
+        source_type = str(meta.get("source_type", "")).lower()
+        added_by = str(meta.get("added_by", "")).lower()
+        if "youtube" in source_type or "youtube" in added_by:
+            return _SOURCE_QUEUE_BY_KEY.get("youtube", "")
+        if "animepahe" in source_type or "animepahe" in added_by:
+            return _SOURCE_QUEUE_BY_KEY.get("animepahe", "")
+        lowered = url.lower()
+        if any(host in lowered for host in self._YOUTUBE_HOSTS):
+            return _SOURCE_QUEUE_BY_KEY.get("youtube", "")
+        return ""
+
+    def queue_id_for_name(self, name: str) -> str:
+        """Resolve a queue *name* (as a backlog file spells it) to its id.
+
+        Falls back to the default queue for an unknown name and says so in the log. Creating
+        the queue instead would be worse: backlog files can be machine-generated, and a
+        generator plus auto-create is how you end up with "Queue1", "Queue2".
+        """
+        queue = self._db.get_queue_by_name(name)
+        if queue:
+            return queue.id
+        cleaned = (name or "").strip()
+        if cleaned:
+            log.warning(
+                "Backlog references unknown queue %r; using %s instead. "
+                "Create it first if that was not intended.",
+                cleaned, DEFAULT_QUEUE_NAME,
+            )
+        return DEFAULT_QUEUE_ID
+
+    def get_queues(self) -> list[QueueInfo]:
+        """All queues, default first."""
+        return self._db.get_queues()
+
+    def get_queue(self, queue_id: str) -> Optional[QueueInfo]:
+        """One queue by id. Blank or unknown resolves to the default rather than ``None``."""
+        return self._db.get_queue(queue_id)
+
+    def get_active_queue(self) -> str:
+        """The queue the downloads list is scoped to. ``""`` means all queues."""
+        stored = self._db.get_ui_state("active_queue_id", "") or ""
+        return stored if stored and self._db.get_queue(stored) else ""
+
+    def set_active_queue(self, queue_id: str):
+        """Scope the downloads list to one queue, or to all of them when *queue_id* is blank.
+
+        Blanking is the default and the startup state: history is the product, so a user must
+        never find downloads they already had missing because a queue is selected.
+        """
+        resolved = queue_id if queue_id and self._db.get_queue(queue_id) else ""
+        self._db.set_ui_state("active_queue_id", resolved)
+        self.queue_scope_changed.emit(resolved)
+        self.queues_changed.emit()
+
+    def create_queue(self, name: str, max_concurrent: int = 3) -> tuple[bool, str]:
+        ok, message = self._db.create_queue(name, max_concurrent)
+        if ok:
+            self.queues_changed.emit()
+        return ok, message
+
+    def rename_queue(self, queue_id: str, name: str) -> tuple[bool, str]:
+        ok, message = self._db.rename_queue(queue_id, name)
+        if ok:
+            self.queues_changed.emit()
+        return ok, message
+
+    def set_queue_max_concurrent(self, queue_id: str, max_concurrent: int):
+        """Change a queue's local concurrency ceiling.
+
+        Takes effect on the next 1 Hz queue tick rather than pre-emptively: pausing a running
+        download to free a slot would be a worse surprise than a one-second delay.
+        """
+        self._db.set_queue_max_concurrent(queue_id, max_concurrent)
+        self.queues_changed.emit()
+        self._process_queue()
+
+    def set_queue_color(self, queue_id: str, color: str) -> tuple[bool, str]:
+        """Change a queue's swatch colour, which every row of that queue redraws."""
+        ok, message = self._db.set_queue_color(queue_id, color)
+        if ok:
+            self.queues_changed.emit()
+        return ok, message
+
+    def move_queue_in_list(self, queue_id: str, delta: int):
+        self._db.move_queue_position(queue_id, delta)
+        self.queues_changed.emit()
+
+    def delete_queue(self, queue_id: str) -> tuple[bool, str]:
+        """Delete a queue, moving its downloads to the default one.
+
+        The count of re-homed downloads is folded into the message so the caller can surface
+        *how much history just moved* before the view stops showing it.
+        """
+        moved = len(self._db.get_all_downloads(queue_id))
+        ok, message = self._db.delete_queue(queue_id)
+        if not ok:
+            return ok, message
+        # Compare against the *stored* scope, not get_active_queue(). That getter falls back
+        # to "" when the stored id no longer resolves - and the queue just deleted is exactly
+        # such a case - so asking it "is the deleted queue selected?" always answers no, and
+        # the stale id survives in ui_state with the view still filtered to a dead queue.
+        stored_scope = self._db.get_ui_state("active_queue_id", "") or ""
+        if stored_scope == queue_id:
+            self.set_active_queue("")
+        self.queues_changed.emit()
+        return True, message if not moved else f"{message} ({moved} moved)"
+
+    def move_downloads_to_queue(self, download_ids: list[str], queue_id: str) -> tuple[bool, str]:
+        """Re-home downloads into another queue, preserving their relative priority."""
+        if not download_ids:
+            return False, "No downloads selected."
+        target = self._db.get_queue(queue_id)
+        if not target:
+            return False, "That queue no longer exists."
+
+        # Keep the order the user selected them in, not the order the rows happened to come
+        # back from the database.
+        order = {did: i for i, did in enumerate(download_ids)}
+        existing = [did for did in download_ids if self._db.get_download(did)]
+        existing.sort(key=lambda did: order.get(did, 0))
+
+        moved = self._db.reassign_queue(existing, target.id)
+        if not moved:
+            return False, "None of those downloads still exist."
+        self.queues_changed.emit()
+        self.queue_order_changed.emit()
+        return True, f"Moved {moved} download(s) to '{target.name}'."
 
     # -- recheck -------------------------------------------------------------
 
@@ -2699,19 +3041,35 @@ class DownloadManager(QObject):
 
         count = 0
         active_save_path = ""
+        # Sticky queue name from a `queue:` directive, mirroring active_save_path. Held as a
+        # *name* because that is what the file spells; resolved to an id per download line, so a
+        # queue renamed between two lines of the same file still lands correctly.
+        active_queue = ""
         entries_info: list[tuple[int, str, bool, bool]] = []
         total_download_lines = 0
         successful_download_lines = 0
 
         last_comment = ""
         for idx, raw_line in enumerate(lines):
-            parsed = parse_backlog_entry(raw_line, active_save_path, last_comment=last_comment)
+            parsed = parse_backlog_entry(
+                raw_line, active_save_path,
+                last_comment=last_comment, active_queue=active_queue,
+            )
             url, save_path, new_dir = parsed[0], parsed[1], parsed[2]
             entry_filename = getattr(parsed, "filename", "")
             entry_headers = getattr(parsed, "headers", {})
+            entry_queue = getattr(parsed, "queue", "")
 
             if new_dir:
                 active_save_path = new_dir
+                entries_info.append((idx, raw_line, False, True))
+                continue
+
+            # A queue directive has no new_dir, so it is handled after the dir check: it sets
+            # the queue for every download that follows, exactly as `dir:` does.
+            queue_directive = getattr(parsed, "queue_directive", "")
+            if queue_directive:
+                active_queue = queue_directive
                 entries_info.append((idx, raw_line, False, True))
                 continue
 
@@ -2750,6 +3108,9 @@ class DownloadManager(QObject):
                         filename=entry_filename,
                         headers=entry_headers,
                         metadata=entry_source or None,
+                        # Blank when the file named no queue, which lets add_download infer
+                        # one from the source instead.
+                        queue_id=self.queue_id_for_name(entry_queue) if entry_queue else "",
                     )
                     if res:
                         count += 1
@@ -2829,6 +3190,11 @@ class DownloadManager(QObject):
 
     def get_all_entries(self) -> list[DownloadEntry]:
         return self._db.get_all_downloads()
+
+    def find_by_url(self, url: str) -> Optional[DownloadEntry]:
+        """The entry for *url*, or ``None``. Unlike :meth:`get_entry` this is a plain lookup
+        with no engine status merge, so it is cheap enough to call per row."""
+        return self._db.find_by_url(url)
 
     def get_entry(self, download_id: str) -> Optional[DownloadEntry]:
         entry = self._db.get_download(download_id)

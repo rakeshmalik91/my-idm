@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Set
 
 import humanize
 from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
@@ -18,11 +18,22 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont
 
 from my_idm.config import TorConfig
-from my_idm.database import DownloadEntry
+from my_idm.database import (
+    ALL_QUEUES,
+    DEFAULT_QUEUE_ID,
+    DEFAULT_QUEUE_NAME,
+    DownloadEntry,
+)
 from my_idm.styles import Colors
 from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, to_int
 
 _ICON_CACHE: dict[str, Any] = {}
+
+#: Custom item role carrying a row's queue swatch colour, for the Queue column's delegate.
+#: A dedicated role rather than ``UserRole``, which is already column-specific (it answers the
+#: source *domain* for that column), and rather than decoding a colour back out of the cell
+#: text, which would tie the delegate to a presentation detail.
+QUEUE_COLOR_ROLE = Qt.ItemDataRole.UserRole + 1
 
 def _get_icon(emoji: str):
     if emoji not in _ICON_CACHE:
@@ -51,6 +62,7 @@ class Col:
     LAST_SEEDED = 14
     SOURCE = 15
     SEEDING_STARTED_AT = 16
+    QUEUE_NAME = 17
 
     DATE_COLUMNS = (ADDED, LAST_TRIED, COMPLETED)
 
@@ -58,6 +70,7 @@ class Col:
         "#", "Name", "Source Domain", "Size", "Progress", "Status", "Speed", "ETA",
         "Seeds / Peers", "Added", "Last Tried", "Completed",
         "Save Path", "File / Folder Name", "Last Seeded", "Source", "Seeding Started At",
+        "Queue",
     ]
     COUNT = len(HEADERS)
 
@@ -458,6 +471,20 @@ class DownloadTableModel(QAbstractTableModel):
         self._segregated_view: bool = False
         self._segregated_mode: str = "status"
         self._collapsed_sections: set[str] = set()
+        # Which named queue the view is scoped to. ALL_QUEUES ("") means every queue, which is
+        # the default and the startup state: history is the product, so downloads the user
+        # already had must never go missing just because a queue is selected.
+        self._queue_scope: str = ALL_QUEUES
+        # queue_id -> display name, for Col.QUEUE_NAME. Injected rather than read from the
+        # database: the model has no DB handle, and queue names are the one thing a row cannot
+        # carry itself (unlike Source, which is derived from metadata_json).
+        self._queue_names: dict[str, str] = {}
+        # queue_id -> "#rrggbb", for the swatch in Col.QUEUE_NAME. Same injection reason as
+        # _queue_names: the model has no database handle.
+        self._queue_colors: dict[str, str] = {}
+        # Queue ids ticked in the Queue column's header filter; None means no filter. Distinct
+        # from _queue_scope, which is the toolbar's single-queue selection.
+        self._queue_filter: Optional[Set[str]] = None
 
     @property
     def tor_config(self) -> Optional[TorConfig]:
@@ -556,7 +583,34 @@ class DownloadTableModel(QAbstractTableModel):
         domain = extract_source_domain(entry.url)
         return bool(domain) and query in domain.lower()
 
+    def _in_queue_scope(self, entry: DownloadEntry) -> bool:
+        """Whether *entry* belongs to the queue the view is scoped to.
+
+        Its own method rather than a line inside ``_matches_filter`` because the three
+        ``get_*_counts`` members below hand-roll their own filter chains over ``_all_entries``,
+        and a scope applied in only one of them would make the header chip counts disagree with
+        the rows they filter.
+        """
+        if not self._queue_scope:
+            return True
+        return (entry.queue_id or DEFAULT_QUEUE_ID) == self._queue_scope
+
+    def _in_queue_filter(self, entry: DownloadEntry) -> bool:
+        """Whether *entry* passes the Queue column's header filter.
+
+        Distinct from ``_in_queue_scope``: the scope narrows the list to one queue from the
+        toolbar, this picks any number of them from the column header, and both can be active
+        at once.
+        """
+        if self._queue_filter is None:
+            return True
+        return (entry.queue_id or DEFAULT_QUEUE_ID) in self._queue_filter
+
     def _matches_filter(self, entry: DownloadEntry) -> bool:
+        if not self._in_queue_scope(entry):
+            return False
+        if not self._in_queue_filter(entry):
+            return False
         if not self._matches_search(entry):
             return False
         if self._type_filter is not None:
@@ -653,7 +707,52 @@ class DownloadTableModel(QAbstractTableModel):
             or self._type_filter is not None
             or self._size_filter is not None
             or bool(self._search_query)
+            or bool(self._queue_scope)
+            or self._queue_filter is not None
         )
+
+    def queue_scope(self) -> str:
+        """The queue the view is scoped to, or ``""`` for all queues."""
+        return self._queue_scope
+
+    def set_queue_names(self, names: dict[str, str]):
+        """Supply the queue_id -> display name mapping used by ``Col.QUEUE_NAME``.
+
+        A rename or a deletion changes what several rows show at once, so the whole mapping is
+        replaced rather than diffed. Rows whose queue is not in the mapping render as the
+        default queue's name, which is what a blank ``queue_id`` means anyway.
+        """
+        if names == self._queue_names:
+            return
+        self._queue_names = dict(names)
+
+    def set_queue_colors(self, colors: dict[str, str]):
+        """Supply the queue_id -> ``#rrggbb`` mapping used by the Queue column's swatch."""
+        if colors == self._queue_colors:
+            return
+        self._queue_colors = dict(colors)
+
+    def queue_color_for(self, entry: DownloadEntry) -> str:
+        """Swatch colour for *entry*'s queue, or "" when the queue has none."""
+        return self._queue_colors.get(entry.queue_id or DEFAULT_QUEUE_ID, "")
+
+    def queue_name_for(self, entry: DownloadEntry) -> str:
+        """Display name of *entry*'s queue.
+
+        Falls back to the default queue's name for an unknown id rather than showing a raw
+        uuid: the write paths normalise, so this only happens if a row was repaired by hand.
+        """
+        return self._queue_names.get(
+            entry.queue_id or DEFAULT_QUEUE_ID, DEFAULT_QUEUE_NAME
+        )
+
+    def set_queue_scope(self, queue_id: str):
+        """Scope the view to one queue, or to every queue when *queue_id* is blank."""
+        resolved = queue_id or ALL_QUEUES
+        if resolved == self._queue_scope:
+            return
+        self._queue_scope = resolved
+        self._reapply_filter()
 
     def search_query(self) -> str:
         return self._search_query
@@ -705,20 +804,82 @@ class DownloadTableModel(QAbstractTableModel):
         self._size_filter = set(allowed_buckets) if allowed_buckets is not None else None
         self._reapply_filter()
 
+    def set_queue_filter(self, allowed_ids: Optional[set[str]]):
+        """Restrict the view to downloads in the named queues.
+
+        Keys are queue **ids**, not names: a rename would otherwise leave the filter holding a
+        label that matches nothing, and the view would silently come up empty. The popup shows
+        the name; the filter stores the id.
+        """
+        if allowed_ids is not None and len(allowed_ids) >= len(self._queue_names):
+            # Everything ticked is the same as nothing ticked, which is how Select All reads.
+            allowed_ids = None
+        if self._queue_filter == allowed_ids:
+            return
+        self._queue_filter = set(allowed_ids) if allowed_ids is not None else None
+        self._reapply_filter()
+
+    def queue_filter(self) -> Optional[set[str]]:
+        """The queue ids currently ticked, or ``None`` for no filter."""
+        return self._queue_filter
+
+    def is_queue_filtered(self) -> bool:
+        return self._queue_filter is not None
+
+    def queue_filter_items(self) -> list[tuple[str, str]]:
+        """``(queue_id, queue_name)`` pairs for the filter popup, default queue first."""
+        return list(self._queue_names.items())
+
     def clear_filters(self):
         """Clear the header filters. The search box is cleared separately."""
-        if self._status_filter is None and self._type_filter is None and self._size_filter is None:
+        if (
+            self._status_filter is None
+            and self._type_filter is None
+            and self._size_filter is None
+            and self._queue_filter is None
+        ):
             return
         self._status_filter = None
         self._type_filter = None
         self._size_filter = None
+        self._queue_filter = None
         self._reapply_filter()
+
+    def get_queue_counts(self) -> dict[str, int]:
+        """Rows per queue id, honouring the other active filters.
+
+        The Queue filter's own selection is deliberately *not* applied here: a filter popup
+        that counted only the ticked queues would show every other queue as 0 and read as if
+        they were empty.
+        """
+        counts = {queue_id: 0 for queue_id in self._queue_names}
+        for entry in self._all_entries:
+            if getattr(entry, "is_section_header", False):
+                continue
+            if not self._in_queue_scope(entry):
+                continue
+            if not self._matches_search(entry):
+                continue
+            if self._type_filter is not None and (
+                entry.download_type or "http"
+            ) not in self._type_filter:
+                continue
+            if self._status_filter is not None and not any(
+                entry.status in STATUS_FILTER_GROUPS.get(group, {group})
+                for group in self._status_filter
+            ):
+                continue
+            key = entry.queue_id or DEFAULT_QUEUE_ID
+            counts[key] = counts.get(key, 0) + 1
+        return counts
 
     def get_size_counts(self) -> dict[str, int]:
         """Rows per size bucket, honouring the other active filters."""
         counts = {key: 0 for key, _label, _lo, _hi in SIZE_FILTER_BUCKETS}
         for e in self._all_entries:
             if getattr(e, "is_section_header", False):
+                continue
+            if not self._in_queue_scope(e):
                 continue
             if self._type_filter is not None and (e.download_type or "http") not in self._type_filter:
                 continue
@@ -739,6 +900,8 @@ class DownloadTableModel(QAbstractTableModel):
     def get_status_counts(self) -> dict[str, int]:
         counts = {k: 0 for k in STATUS_FILTER_GROUPS}
         for e in self._all_entries:
+            if not self._in_queue_scope(e):
+                continue
             if self._type_filter is not None:
                 dtype = e.download_type or "http"
                 if dtype not in self._type_filter:
@@ -752,6 +915,8 @@ class DownloadTableModel(QAbstractTableModel):
     def get_type_counts(self) -> dict[str, int]:
         counts = {k: 0 for k in TYPE_FILTER_LABELS}
         for e in self._all_entries:
+            if not self._in_queue_scope(e):
+                continue
             if self._status_filter is not None:
                 matched = any(e.status in STATUS_FILTER_GROUPS.get(g, set()) for g in self._status_filter)
                 if not matched:
@@ -1028,6 +1193,11 @@ class DownloadTableModel(QAbstractTableModel):
                 return (0, entry.seeding_started_at) if has_time else (1, "")
             else:
                 return (1, entry.seeding_started_at) if has_time else (0, "")
+
+        if col == Col.QUEUE_NAME:
+            # Plain case-insensitive name compare, same shape as Col.SOURCE. Ties fall back to
+            # the shared (queue_order, added_at) ordering in _apply_sort.
+            return self.queue_name_for(entry).lower()
 
         return ""
 
@@ -1373,6 +1543,22 @@ class DownloadTableModel(QAbstractTableModel):
 
         entry = self._entries[row]
 
+        if role == QUEUE_COLOR_ROLE:
+            # Read before the section-header branch: a section header is not in a queue, but
+            # returning "" for it keeps the delegate on its plain-text path rather than making
+            # it guess.
+            return self.queue_color_for(entry) if not getattr(
+                entry, "is_section_header", False
+            ) else ""
+
+        if role == Qt.ItemDataRole.ToolTipRole and col == Col.QUEUE_NAME:
+            # The column collapses to the swatch alone when narrow, and a coloured square with
+            # no legend is unreadable - so the hover carries the name whether or not the cell
+            # had room to show it. Set here rather than in the delegate so it does not depend
+            # on the column's width. The colour hex is deliberately left out: nobody identifies
+            # a queue by its hex, and it made the tooltip read like a debug field.
+            return self.queue_name_for(entry)
+
         if getattr(entry, "is_section_header", False):
             if role == Qt.ItemDataRole.DisplayRole:
                 if col == Col.QUEUE:
@@ -1616,6 +1802,9 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.SEEDING_STARTED_AT:
             return _format_time(entry.seeding_started_at)
+
+        if col == Col.QUEUE_NAME:
+            return self.queue_name_for(entry)
 
         return None
 

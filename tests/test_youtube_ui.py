@@ -1401,5 +1401,51 @@ class TestYouTubeSettingsUI(unittest.TestCase):
         dlg.close()
 
 
+class TestGroupBoxTitleStyling(unittest.TestCase):
+    """A QGroupBox title sits *on* the frame, so the frame must break behind it.
+
+    That only works if the title is opaque. With no background the 1px border shows through
+    the glyphs, and every group box in the app - including "Downloads Table Columns" on the
+    Views tab - renders its title looking struck through, which reads as a cropped or broken
+    control rather than as a label.
+    """
+
+    def _block(self, sheet: str, selector: str) -> str:
+        parts = sheet.split(selector)
+        self.assertGreater(
+            len(parts), 1, f"no {selector!r} rule in the stylesheet"
+        )
+        return parts[1].split("}")[0]
+
+    def test_the_title_paints_an_opaque_background(self):
+        from my_idm.styles import DARK_STYLESHEET, Colors
+
+        block = self._block(DARK_STYLESHEET, "QGroupBox::title")
+        self.assertIn(
+            f"background: {Colors.BG_DARK}", block,
+            "QGroupBox::title has no opaque background, so the frame shows through the "
+            "text and the label looks struck through",
+        )
+
+    def test_the_title_background_matches_the_widget_it_sits_on(self):
+        """A mismatched colour masks the border but leaves a visible patch behind the text.
+
+        ``QGroupBox`` declares no background of its own, so it inherits the ``QWidget`` rule.
+        The title has to use that same colour or the mask reads as a box.
+        """
+        from my_idm.styles import DARK_STYLESHEET, Colors
+
+        widget_block = self._block(DARK_STYLESHEET, "QWidget {")
+        self.assertIn(f"background-color: {Colors.BG_DARK}", widget_block)
+        self.assertIn(Colors.BG_DARK, self._block(DARK_STYLESHEET, "QGroupBox::title"))
+
+    def test_the_group_box_border_is_still_thin_and_single(self):
+        """The mask must not come from thickening the frame into a band."""
+        from my_idm.styles import DARK_STYLESHEET, Colors
+
+        block = self._block(DARK_STYLESHEET, "QGroupBox {")
+        self.assertIn(f"border: 1px solid {Colors.BORDER}", block)
+
+
 if __name__ == "__main__":
     unittest.main()

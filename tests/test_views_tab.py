@@ -24,10 +24,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtWidgets import QApplication, QCheckBox, QListWidget
 
 from my_idm.database import Database, DownloadEntry
+from my_idm.settings_dialog import TAB_VIEWS
+from my_idm.styles import STYLESHEETS, _PALETTES
 from my_idm.download_model import (
     DEFAULT_SEGREGATED_MODE,
     SEGREGATED_MODES,
@@ -265,10 +267,36 @@ class ViewsTabTestCase(unittest.TestCase):
         cls.manager = DownloadManager(cls.db)
         cls.window = MainWindow(cls.manager)
 
+    @staticmethod
+    def _dispose(widget):
+        """Close a widget and **actually destroy it**.
+
+        Two separate things go wrong otherwise, and both are silent:
+
+        * ``MainWindow.closeEvent`` ignores the close event and hides the window whenever
+          close-to-tray is on (it is by default), so a bare ``close()`` leaves it alive.
+        * ``deleteLater()`` posts a ``DeferredDelete`` event, and
+          ``QApplication.processEvents()`` does **not** deliver those by default - the loop
+          has to be asked for ``AllEvents``, or ``sendPostedEvents`` called directly. So the
+          usual ``close()`` + ``deleteLater()`` + ``processEvents()`` idiom destroys nothing.
+
+        A surviving widget still counts. ``apply_theme`` calls ``app.setStyleSheet``, which
+        restyles every live top-level widget, so each leak makes the next theme switch
+        proportionally slower. Measured: ten undeleted ``SettingsDialog`` objects left 4,212
+        live widgets and 100 top-level ones, which turned this file from 27 seconds into
+        over thirteen minutes.
+        """
+        try:
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            return  # already destroyed by an earlier cleanup
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        QApplication.processEvents()
+
     @classmethod
     def tearDownClass(cls):
-        cls.window.close()
-        cls.window.deleteLater()
+        cls._dispose(cls.window)
         cls.manager.stop()
         cls.db.close()
         cls._tmp.cleanup()
@@ -278,8 +306,7 @@ class ViewsTabTestCase(unittest.TestCase):
         from my_idm.settings_dialog import SettingsDialog
 
         dialog = SettingsDialog(db=self.db, parent=self.window)
-        self.addCleanup(dialog.close)
-        self.addCleanup(dialog.deleteLater)
+        self.addCleanup(self._dispose, dialog)
         QApplication.processEvents()
         return dialog
 
@@ -514,6 +541,248 @@ class TestViewMenuOffersTheTypeMode(ViewsTabTestCase):
         self.assertTrue(self.window._act_seg_by_status.isChecked())
 
 
+class TestColumnListIsNeverSliced(ViewsTabTestCase):
+    """The list's height comes from a stretch, so it must not end mid-row.
+
+    The layout hands the list whatever height is left over, which lands on an arbitrary
+    pixel value. The last visible row was therefore **bisected** by the bottom of the frame
+    - a half-height checkbox and a name cut through the middle. With seventeen columns that
+    happened at most window sizes, and it reads as a broken control rather than as a list
+    with more below.
+
+    ``_WholeRowListWidget`` constrains the viewport to a whole multiple of the row height,
+    so the leftover becomes blank space inside the frame. Checked across a range of heights
+    because the defect only appears at some of them.
+    """
+
+    SIZES = ((740, 560), (740, 640), (900, 560), (1000, 700), (1100, 600), (1400, 800))
+
+    def _sized(self, width, height):
+        from my_idm.settings_dialog import TAB_VIEWS, SettingsDialog
+
+        dialog = SettingsDialog(db=self.db, parent=self.window, initial_tab=TAB_VIEWS)
+        self.addCleanup(self._dispose, dialog)
+        dialog.resize(width, height)
+        dialog.show()
+        for _ in range(3):
+            QApplication.processEvents()
+        return dialog
+
+    def _at_minimum(self):
+        """The dialog at its own minimum size, with Views the current page.
+
+        Constructed *with* the Views tab selected rather than switched to afterwards: a
+        dialog opened on General never lays the Views page out, so switching to it later
+        leaves a stale geometry and every measurement below is of the wrong widget. Sized
+        once, too - resizing to 0 and back leaves the freshly-current page unlaid-out.
+        """
+        from my_idm.settings_dialog import TAB_VIEWS, SettingsDialog
+
+        dialog = SettingsDialog(db=self.db, parent=self.window, initial_tab=TAB_VIEWS)
+        self.addCleanup(self._dispose, dialog)
+        dialog.resize(dialog.minimumWidth(), dialog.minimumHeight())
+        dialog.show()
+        for _ in range(4):
+            QApplication.processEvents()
+        return dialog
+
+    def test_no_row_is_partially_visible_at_any_window_size(self):
+        for width, height in self.SIZES:
+            with self.subTest(size=f"{width}x{height}"):
+                dialog = self._sized(width, height)
+                self.assertFalse(
+                    dialog._column_list.has_partially_visible_row(),
+                    "the list clips a row in half instead of ending between two",
+                )
+
+    def test_the_height_is_always_a_whole_number_of_rows(self):
+        """The invariant that actually prevents cropping, at any window size.
+
+        The widget owns its height, so this holds whatever the font, DPI or window size -
+        which is the point. Earlier attempts snapped a height the layout still owned, and
+        were only correct for the font they were measured with.
+        """
+        for width, height in self.SIZES:
+            with self.subTest(size=f"{width}x{height}"):
+                dialog = self._sized(width, height)
+                lst = dialog._column_list
+                row = lst.sizeHintForRow(0)
+                self.assertGreater(row, 0)
+                margins = lst.viewportMargins()
+                content = lst.height() - (
+                    2 * lst.frameWidth() + margins.top() + margins.bottom()
+                )
+                self.assertEqual(
+                    content % row, 0,
+                    f"content height {content} is not a whole multiple of the "
+                    f"{row}px row height",
+                )
+                self.assertFalse(lst.has_partially_visible_row())
+
+    def test_growing_the_window_does_not_change_the_row_count(self):
+        """A fixed height means the same whole rows are shown at every window size.
+
+        The alternative - growing with the window - is what let an arbitrary leftover pixel
+        count cut a row in half.
+        """
+        dialog = self._sized(1400, 800)
+        lst = dialog._column_list
+        tall = lst.rows_that_fit()
+        height = lst.height()
+        dialog.resize(740, 560)
+        for _ in range(3):
+            QApplication.processEvents()
+        self.assertEqual(lst.rows_that_fit(), tall)
+        self.assertEqual(lst.height(), height)
+        self.assertFalse(lst.has_partially_visible_row())
+
+    def test_every_row_is_still_reachable_by_scrolling(self):
+        """Scrolling to the end must reveal the last column in full."""
+        dialog = self._sized(740, 560)
+        lst = dialog._column_list
+        bar = lst.verticalScrollBar()
+        bar.setValue(bar.maximum())
+        QApplication.processEvents()
+        last = lst.visualItemRect(lst.item(lst.count() - 1))
+        self.assertLessEqual(
+            last.bottom(), lst.viewport().rect().bottom(),
+            "the last column cannot be scrolled fully into view",
+        )
+
+    def test_the_list_is_not_cropped_at_the_dialog_minimum(self):
+        """The reported symptom, stated directly.
+
+        Whether the *page* needs to scroll is a separate question that depends on the font
+        size in force, so it is not asserted here; whether the list slices a row is not
+        font-dependent, and that is the defect.
+        """
+        dialog = self._at_minimum()
+        lst = dialog._column_list
+        self.assertFalse(
+            lst.has_partially_visible_row(),
+            "the column list is cropped at the dialog's minimum size",
+        )
+
+    def test_every_column_is_visible_without_scrolling(self):
+        """No row is half-shown and the list needs no scrollbar.
+
+        Whether *all* seventeen fit at once depends on the row height, which depends on the
+        Qt style and font in force - about 17px per row under the real stylesheet, about 28px
+        without it. Pinning a row **count** here would therefore assert something about the
+        test harness rather than about the product, so it is deliberately not asserted; that
+        all seventeen do fit at once was confirmed by rendering the dialog, and is protected
+        by the invariants below, which hold in any environment.
+        """
+        lst = self._at_minimum()._column_list
+        viewport = lst.viewport().rect()
+
+        for index in range(lst.count()):
+            rect = lst.visualItemRect(lst.item(index))
+            if not viewport.intersects(rect):
+                continue
+            with self.subTest(row=index):
+                self.assertTrue(
+                    viewport.contains(rect),
+                    "a row is cut by the list frame instead of ending between two rows",
+                )
+        self.assertFalse(lst.has_partially_visible_row())
+
+    def test_the_column_list_shows_every_column_by_default(self):
+        """All seventeen rows, unless the font is too tall to fit them.
+
+        ``DEFAULT_VISIBLE_ROWS`` is the whole set on purpose: this list has always shown
+        every column, and trimming it hides columns rather than fixing anything.
+        """
+        dialog = self.make_dialog()
+        lst = dialog._column_list
+        self.assertEqual(
+            lst._visible_rows, lst.count(),
+            "the list should size itself to show every column it holds",
+        )
+
+    def test_the_group_box_has_no_hole_above_the_list(self):
+        """The Fixed-height list cannot absorb slack, so the layout used to centre it.
+
+        That left a ~46px gap between the hint and the first row and a similar one under the
+        last, with the group frame drawn around empty space. Asserted as a bound rather than
+        an exact value because it is padding, and padding is font-dependent.
+        """
+        dialog = self._sized(820, 700)
+        lst = dialog._column_list
+        group = lst.parentWidget()
+        hint = group.layout().itemAt(0).widget()
+        self.assertIsNotNone(hint, "the hint label is no longer the group's first item")
+
+        gap_above = lst.geometry().top() - hint.geometry().bottom()
+        last_row = lst.visualItemRect(lst.item(lst.count() - 1))
+        last_bottom = lst.geometry().top() + lst.viewport().y() + last_row.bottom()
+        gap_below = group.rect().bottom() - last_bottom
+
+        self.assertLessEqual(
+            gap_above, 24,
+            f"{gap_above}px of dead space between the hint and the first column",
+        )
+        self.assertLessEqual(
+            gap_below, 28,
+            f"{gap_below}px of dead space under the last column, inside the group frame",
+        )
+
+    def test_the_group_box_hugs_its_content(self):
+        """Its height should be the content's, not the page's."""
+        dialog = self._sized(820, 700)
+        group = dialog._column_list.parentWidget()
+        dialog.resize(820, 1100)
+        for _ in range(4):
+            QApplication.processEvents()
+        dialog.resize(820, 700)
+        for _ in range(4):
+            QApplication.processEvents()
+        self.assertLessEqual(
+            group.height(), group.sizeHint().height() + 2,
+            "the group grows with the window instead of hugging the list",
+        )
+
+    def test_the_hint_label_wraps_instead_of_being_clipped(self):
+        """A plain QLabel in a QVBoxLayout never wraps, so it clips mid-word when narrow."""
+        from PySide6.QtWidgets import QLabel
+
+        from my_idm.settings_dialog import tab_index
+
+        dialog = self.make_dialog()
+        # currentWidget() follows whichever tab is showing, which a neighbouring test may
+        # have changed; the search has to look at the Views page specifically or this test
+        # passes or fails depending on collection order.
+        dialog._tabs.setCurrentIndex(tab_index(TAB_VIEWS))
+        QApplication.processEvents()
+        hints = [
+            label for label in dialog._tabs.currentWidget().findChildren(QLabel)
+            if label.text().startswith("Tick a column")
+        ]
+        self.assertEqual(len(hints), 1, "the column hint label was not found")
+        self.assertTrue(
+            hints[0].wordWrap(),
+            "without word wrap the hint is cut off at the right edge in a narrow dialog",
+        )
+
+    def test_an_empty_list_does_not_raise(self):
+        """`sizeHintForRow` returns -1 with no items; sizing must tolerate that.
+
+        An earlier version fell back to a font-derived row height there, which ran ~28px
+        against a real ~17px and inflated the page by hundreds of pixels.
+        """
+        from my_idm.settings_dialog import _WholeRowListWidget
+
+        empty = _WholeRowListWidget()
+        self.addCleanup(empty.deleteLater)
+        empty.relayout_rows()
+        self.assertFalse(empty.has_partially_visible_row())
+        self.assertEqual(empty.rows_that_fit(), 0)
+
+        empty.addItem("first")
+        empty.relayout_rows()
+        self.assertGreaterEqual(empty.rows_that_fit(), 1)
+
+
 class TestColumnListLayout(ViewsTabTestCase):
     """The list must present every column without overflowing its row.
 
@@ -729,6 +998,406 @@ class TestAmpersandRendering(ViewsTabTestCase):
                         following and not following.isspace(),
                         f"{title!r} has a bare '&' before a space, which QGroupBox drops",
                     )
+
+
+class TestSegregationEnableCheckboxIsApplied(ViewsTabTestCase):
+    """The "group downloads into sections" box must actually reach the table.
+
+    It did not. ``_apply_views_tab`` called ``_set_segregation_mode()`` first, which
+    force-*enables* segregation when it is currently off, and only reached the branch that
+    applied the checkbox behind an ``elif`` that could never run. Two consequences, both
+    silent:
+
+    * saving with the box **unticked** turned segregation back on and overwrote the
+      ``False`` the dialog had just written to the database;
+    * unticking it while a live view was on did nothing at all until the next restart.
+    """
+
+    def setUp(self):
+        self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+        self.window._on_toggle_segregated_view(False)
+
+    def test_saving_with_the_box_unticked_does_not_enable_segregation(self):
+        dialog = self.make_dialog()
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._apply_views_tab()
+        try:
+            self.assertFalse(
+                self.window._model.is_segregated_view(),
+                "an unticked 'group downloads into sections' must stay unticked",
+            )
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_saving_with_the_box_unticked_persists_false(self):
+        """The clobber: the force-enable overwrote the ``False`` just written."""
+        dialog = self.make_dialog()
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._apply_views_tab()
+        try:
+            self.assertIs(
+                self.db.get_ui_state("segregated_view_enabled"), False,
+                "the database must record the user's unticked choice, not the model's",
+            )
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_unticking_the_box_turns_a_live_view_off(self):
+        dialog = self.make_dialog()
+        self.window._set_segregation_mode("type")
+        self.assertTrue(self.window._model.is_segregated_view())
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._apply_views_tab()
+        try:
+            self.assertFalse(self.window._model.is_segregated_view())
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_unticking_the_box_updates_the_view_menu_checkmark(self):
+        dialog = self.make_dialog()
+        self.window._set_segregation_mode("type")
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._apply_views_tab()
+        try:
+            self.assertFalse(
+                self.window._act_segregated_view.isChecked(),
+                "the View-menu checkmark must agree with the table",
+            )
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_the_mode_is_still_persisted_while_the_box_is_unticked(self):
+        """Hiding the sections must not throw away which mode they were grouped by."""
+        dialog = self.make_dialog()
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._apply_views_tab()
+        try:
+            self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "type")
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_ticking_the_box_still_applies_the_mode(self):
+        """The fix must not have broken the original happy path."""
+        dialog = self.make_dialog()
+        dialog._seg_enabled_cb.setChecked(True)
+        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._apply_views_tab()
+        try:
+            self.assertTrue(self.window._model.is_segregated_view())
+            self.assertEqual(self.window._model.segregated_mode(), "type")
+            self.assertIs(self.db.get_ui_state("segregated_view_enabled"), True)
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_the_whole_save_path_respects_an_unticked_box(self):
+        """Go through ``_on_save``, not just ``_apply_views_tab`` in isolation."""
+        dialog = self.make_dialog()
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._on_save()
+        try:
+            self.assertFalse(self.window._model.is_segregated_view())
+            self.assertIs(self.db.get_ui_state("segregated_view_enabled"), False)
+        finally:
+            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+
+    def test_saving_from_a_standalone_dialog_still_writes_the_flag(self):
+        """No parent to apply anything live, so the database write is all there is."""
+        from my_idm.settings_dialog import SettingsDialog
+
+        dialog = SettingsDialog(db=self.db)
+        self.addCleanup(dialog.close)
+        self.addCleanup(dialog.deleteLater)
+        QApplication.processEvents()
+        self.assertIsNone(dialog._table_view())
+        dialog._seg_enabled_cb.setChecked(False)
+        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("date"))
+        dialog._apply_views_tab()
+        self.assertIs(self.db.get_ui_state("segregated_view_enabled"), False)
+        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "date")
+
+
+class TestThemeSelector(ViewsTabTestCase):
+    """Preferences ▸ Views ▸ Appearance ▸ Theme.
+
+    **Deliberately only one test here performs a real theme switch.** ``apply_theme`` calls
+    ``app.setStyleSheet``, which restyles every widget of every live window - about 1.5s in
+    the application, and far more in a suite that has built a dozen windows. An earlier
+    version of this class switched in five tests and took over thirteen minutes; the rest
+    assert the contract around the switch instead, which costs nothing because
+    ``apply_theme`` returns early when the requested theme is already live.
+    """
+
+    def setUp(self):
+        from my_idm.styles import DEFAULT_THEME, apply_theme
+
+        self.addCleanup(apply_theme, QApplication.instance(), DEFAULT_THEME)
+
+    def test_the_selector_is_on_the_views_tab(self):
+        dialog = self.make_dialog()
+        from my_idm.styles import THEME_NAMES
+
+        self.assertGreaterEqual(
+            dialog._theme_combo.findData(THEME_NAMES[0]), 0,
+            "the theme combo offers no known theme",
+        )
+
+    def test_every_theme_is_selectable_and_has_a_label(self):
+        from my_idm.styles import THEME_LABELS, THEME_NAMES
+
+        dialog = self.make_dialog()
+        combo = dialog._theme_combo
+        self.assertEqual(combo.count(), len(THEME_NAMES))
+        for theme in THEME_NAMES:
+            with self.subTest(theme=theme):
+                self.assertGreaterEqual(combo.findData(theme), 0)
+                self.assertTrue(THEME_LABELS[theme].strip())
+
+    def test_both_themes_have_a_rendered_stylesheet(self):
+        """A theme with no sheet would silently fall back to whatever was applied before."""
+        for theme in STYLESHEETS:
+            with self.subTest(theme=theme):
+                self.assertTrue(STYLESHEETS[theme].strip())
+        self.assertNotEqual(STYLESHEETS["dark"], STYLESHEETS["light"])
+
+    def test_the_original_dark_theme_is_untouched(self):
+        """The greyish dark theme is the app's established look and must not shift.
+
+        Light was added alongside it, never in place of it, so `DARK_STYLESHEET` has to stay
+        exactly what it was.
+        """
+        from my_idm.styles import DARK_STYLESHEET, DEFAULT_THEME
+
+        self.assertEqual(DARK_STYLESHEET, STYLESHEETS[DEFAULT_THEME])
+
+    def test_the_stored_theme_is_shown(self):
+        from my_idm.styles import THEME_NAMES
+
+        self.db.set_ui_state("theme", THEME_NAMES[-1])
+        dialog = self.make_dialog()
+        self.assertEqual(
+            dialog._theme_combo.currentData(), THEME_NAMES[-1],
+            "Preferences must show the persisted theme, not the running one",
+        )
+
+    def test_an_unknown_stored_theme_falls_back_without_raising(self):
+        dialog = self.make_dialog()
+        self.db.set_ui_state("theme", "chartreuse")
+        dialog._populate_views_tab()
+        self.assertTrue(dialog._theme_combo.currentData())
+
+    def test_saving_persists_the_choice(self):
+        """Asserted with the theme already live, so no restyle is needed to prove the write."""
+        from my_idm.styles import THEME_NAMES
+
+        chosen = THEME_NAMES[-1]
+        self.db.set_ui_state("theme", chosen)
+        dialog = self.make_dialog()
+        dialog._theme_combo.setCurrentIndex(dialog._theme_combo.findData(chosen))
+        dialog._apply_views_tab()
+        self.assertEqual(self.db.get_ui_state("theme"), chosen)
+
+    def test_saving_applies_the_theme_immediately(self):
+        """The one real switch: visible before Save is pressed."""
+        from my_idm.styles import THEME_NAMES, current_theme
+
+        dialog = self.make_dialog()
+        chosen = THEME_NAMES[-1]
+        dialog._theme_combo.setCurrentIndex(dialog._theme_combo.findData(chosen))
+        dialog._apply_views_tab()
+        self.assertEqual(current_theme(), chosen)
+        self.assertEqual(
+            QApplication.instance().styleSheet(), STYLESHEETS[chosen],
+            "the application stylesheet must actually change",
+        )
+
+    def test_applying_the_live_theme_again_is_a_no_op(self):
+        """The early return, which is what keeps a Preferences save cheap."""
+        from my_idm.styles import apply_theme, current_theme
+
+        first = apply_theme(QApplication.instance(), current_theme())
+        second = apply_theme(QApplication.instance(), first)
+        self.assertEqual(first, second)
+
+    def test_a_corrupt_stored_theme_does_not_break_startup(self):
+        """`_apply_persisted_theme` runs inside `__init__`: raising there means no window."""
+        self.db.set_ui_state("theme", "chartreuse")
+        self.assertIn(self.window._apply_persisted_theme(), tuple(STYLESHEETS))
+
+    def test_a_failing_theme_read_falls_back_to_the_default(self):
+        from unittest.mock import patch
+
+        from my_idm.styles import DEFAULT_THEME
+
+        with patch.object(
+            self.db, "get_ui_state", side_effect=RuntimeError("db gone")
+        ):
+            applied = self.window._apply_persisted_theme()
+        self.assertEqual(applied, DEFAULT_THEME)
+
+
+class TestSegregationModeSurvivesRestart(ViewsTabTestCase):
+    """A persisted mode has to come back.
+
+    ``MainWindow.__init__`` kept the pre-``type`` two-value whitelist when the third mode
+    was added, so choosing File Type and restarting silently grouped the table by Status
+    again - and the menu entry came back unticked, because its checked state was derived
+    from the value that had just been discarded.
+    """
+
+    def window_with_mode(self, mode):
+        from my_idm.main_window import MainWindow
+
+        self.db.set_ui_state("segregated_view_mode", mode)
+        self.db.set_ui_state("segregated_view_enabled", True)
+        window = MainWindow(self.manager)
+        self.addCleanup(self._dispose, window)
+        return window
+
+    def test_a_persisted_type_mode_is_kept(self):
+        self.assertEqual(self.window_with_mode("type")._segregated_view_mode, "type")
+
+    def test_the_type_menu_entry_is_checked_on_startup(self):
+        window = self.window_with_mode("type")
+        self.assertTrue(window._act_seg_by_type.isChecked())
+        self.assertFalse(window._act_seg_by_status.isChecked())
+        self.assertFalse(window._act_seg_by_date.isChecked())
+
+    def test_the_model_is_in_type_mode_on_startup(self):
+        self.assertEqual(
+            self.window_with_mode("type")._model.segregated_mode(), "type"
+        )
+
+    def test_every_registered_mode_survives_a_restart(self):
+        """Not just 'type': no mode may be silently dropped on the way back in."""
+        for mode in SEGREGATED_MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    self.window_with_mode(mode)._segregated_view_mode, mode
+                )
+
+    def test_a_date_mode_still_survives(self):
+        self.assertEqual(self.window_with_mode("date")._segregated_view_mode, "date")
+
+    def test_an_unknown_persisted_mode_degrades_to_the_default(self):
+        self.assertEqual(
+            self.window_with_mode("colour")._segregated_view_mode,
+            DEFAULT_SEGREGATED_MODE,
+        )
+
+    def test_a_non_string_persisted_mode_degrades_to_the_default(self):
+        """``str()`` of a number is not a mode; it must not become the mode."""
+        self.db.set_ui_state("segregated_view_mode", 7)
+        self.db.set_ui_state("segregated_view_enabled", True)
+        from my_idm.main_window import MainWindow
+
+        window = MainWindow(self.manager)
+        self.addCleanup(self._dispose, window)
+        self.assertEqual(window._segregated_view_mode, DEFAULT_SEGREGATED_MODE)
+
+
+class TestSegregationModeLabels(ViewsTabTestCase):
+    """The status bar names the mode; it used to say "Date" for everything but "status".
+
+    The View-menu handler and the Preferences tab drive the same state through two
+    separate lookups, and only one of them was updated when the third mode landed.
+    """
+
+    def setUp(self):
+        self.addCleanup(self.window._set_segregation_mode, DEFAULT_SEGREGATED_MODE)
+        self.addCleanup(self.window._on_toggle_segregated_view, False)
+
+    def test_every_mode_has_a_distinct_label(self):
+        labels = [self.window._segregation_mode_label(m) for m in SEGREGATED_MODES]
+        self.assertEqual(
+            len(set(labels)), len(labels), f"two modes share the label {labels!r}"
+        )
+
+    def test_no_label_is_empty(self):
+        for mode in SEGREGATED_MODES:
+            with self.subTest(mode=mode):
+                self.assertTrue(self.window._segregation_mode_label(mode).strip())
+
+    def test_the_type_mode_is_labelled_file_type(self):
+        self.assertEqual(self.window._segregation_mode_label("type"), "File Type")
+
+    def test_an_unknown_mode_falls_back_rather_than_crashing(self):
+        self.assertTrue(self.window._segregation_mode_label("colour"))
+
+    def test_toggling_on_names_the_current_mode(self):
+        for mode in SEGREGATED_MODES:
+            with self.subTest(mode=mode):
+                self.window._set_segregation_mode(mode)
+                self.window._on_toggle_segregated_view(True)
+                self.assertIn(
+                    self.window._segregation_mode_label(mode),
+                    self.window._status_label.text(),
+                )
+
+    def test_the_type_mode_is_not_reported_as_date(self):
+        """The literal symptom: mode 'type' announced as 'Date'."""
+        self.window._set_segregation_mode("type")
+        self.window._on_toggle_segregated_view(True)
+        text = self.window._status_label.text()
+        self.assertNotIn("Date", text)
+        self.assertIn("File Type", text)
+
+    def test_choosing_a_mode_while_disabled_still_enables_segregation(self):
+        """Documented View-menu behaviour that the checkbox fix must not have broken.
+
+        This also covers the View-menu checkmark sync: ``_set_segregation_mode`` enables
+        segregation by checking the action, which emits nothing when it is already checked,
+        so without the sync the enable silently did not happen.
+        """
+        self.window._on_toggle_segregated_view(False)
+        self.window._set_segregation_mode("type")
+        self.assertTrue(self.window._model.is_segregated_view())
+
+    def test_the_menu_checkmark_follows_a_programmatic_toggle(self):
+        self.window._on_toggle_segregated_view(True)
+        self.assertTrue(self.window._act_segregated_view.isChecked())
+        self.window._on_toggle_segregated_view(False)
+        self.assertFalse(self.window._act_segregated_view.isChecked())
+
+
+class TestDisabledStyling(unittest.TestCase):
+    """A disabled control has to *look* unavailable, not merely behave that way.
+
+    There was no `QMenu::item:disabled` rule at all, so Qt's own disabled rendering applied —
+    which on this palette is barely dimmer than the enabled text. A greyed-out **Move to
+    Queue** therefore read as live, and was reported as "not clickable".
+    """
+
+    def test_every_palette_defines_a_disabled_colour(self):
+        for theme in STYLESHEETS:
+            with self.subTest(theme=theme):
+                # _PALETTES holds name -> {attribute: value} snapshots, not the classes.
+                self.assertTrue(
+                    _PALETTES[theme].get("TEXT_DISABLED"),
+                    f"{theme} has no TEXT_DISABLED",
+                )
+
+    def test_the_disabled_colour_is_dimmer_than_the_dim_one(self):
+        # Dimmer is the whole point: TEXT_DIM is for de-emphasised text, TEXT_DISABLED for a
+        # control that cannot be used right now.
+        for theme in STYLESHEETS:
+            with self.subTest(theme=theme):
+                self.assertNotEqual(
+                    _PALETTES[theme]["TEXT_DISABLED"], _PALETTES[theme]["TEXT_DIM"]
+                )
+
+    def test_both_sheets_style_a_disabled_menu_item(self):
+        for theme, sheet in STYLESHEETS.items():
+            with self.subTest(theme=theme):
+                self.assertIn("QMenu::item:disabled", sheet)
+                self.assertIn(_PALETTES[theme]["TEXT_DISABLED"], sheet)
+
+    def test_a_disabled_item_does_not_paint_a_hover_background(self):
+        # Otherwise the row still highlights under the cursor and reads as live.
+        for theme, sheet in STYLESHEETS.items():
+            with self.subTest(theme=theme):
+                self.assertIn("QMenu::item:disabled:selected", sheet)
 
 
 if __name__ == "__main__":

@@ -966,6 +966,20 @@ class TestRowAndHandleDisagreement(TransitionTestCase):
 # HTTP downloads: the same expected-state contract
 # ===========================================================================
 
+def _fast_retry_config() -> GeneralConfig:
+    """A GeneralConfig whose retry backoff is at its floor.
+
+    `_get_retry_delay` sleeps for real (`await asyncio.sleep(delay)` in http_engine), so with
+    the production default of 2s the retry tests waited out the backoff rather than testing
+    anything: one test alone spent 14 seconds asleep. 0.1 is the floor `get_retry_delay`
+    clamps to, so this is the fastest the production path can go - the retry *behaviour* under
+    test is unchanged, only the waiting is removed.
+    """
+    cfg = GeneralConfig()
+    cfg.retry_delay = 0.1
+    cfg.retry_max_delay = 0.1
+    return cfg
+
 class TestHttpStateTransitions(unittest.TestCase):
     """The same expected-state contract for plain HTTP downloads.
 
@@ -990,7 +1004,7 @@ class TestHttpStateTransitions(unittest.TestCase):
             status_cb=lambda *a: self.callbacks.append(("status", a)),
             filename_cb=lambda *a: self.callbacks.append(("filename", a)),
         )
-        self.engine.set_general_config_sync(GeneralConfig())
+        self.engine.set_general_config_sync(_fast_retry_config())
         self.engine._session = FakeSession()
         self.addCleanup(self._drop)
 

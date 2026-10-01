@@ -8,7 +8,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
-from PySide6.QtCore import QItemSelectionModel, QSettings, Qt
+from PySide6.QtCore import (
+    QEvent,
+    QItemSelectionModel,
+    QPointF,
+    QSettings,
+    Qt,
+)
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -24,6 +31,15 @@ from my_idm.database import Database, DownloadEntry
 from my_idm.download_model import Col
 from my_idm.main_window import MainWindow
 from my_idm.manager import DownloadManager
+from my_idm.settings_dialog import (
+    TAB_BROWSER,
+    TAB_EXTERNAL_TOOLS,
+    TAB_SECURITY,
+    TAB_TOR,
+    TAB_TORRENT,
+    TAB_VPN,
+    tab_index,
+)
 
 app = QApplication.instance() or QApplication([])
 
@@ -518,6 +534,10 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         header.resizeSection(Col.NAME, 350)
         self.assertEqual(self.win._table.columnWidth(Col.NAME), 350)
 
+        # Save Path is hidden by default on a fresh profile (see
+        # `DEFAULT_HIDDEN_COLUMNS`), and a hidden section reports a width of 0. Show it
+        # first: this test is about resizing, not about the default arrangement.
+        header.setSectionHidden(Col.SAVE_PATH, False)
         header.resizeSection(Col.SAVE_PATH, 400)
         self.assertEqual(self.win._table.columnWidth(Col.SAVE_PATH), 400)
 
@@ -1014,8 +1034,14 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
             with patch.object(self.manager, "add_download") as mock_add:
                 self.win._on_add()
                 self.assertEqual(mock_add.call_count, 2)
-                mock_add.assert_any_call("https://example.com/batch1.zip", "D:/Downloads", 8)
-                mock_add.assert_any_call("https://example.com/batch2.zip", "D:/Downloads", 8)
+                # The active queue is threaded through so a download added while a queue is
+                # selected joins that queue. With nothing selected it is "" -> Default.
+                mock_add.assert_any_call(
+                    "https://example.com/batch1.zip", "D:/Downloads", 8, queue_id=""
+                )
+                mock_add.assert_any_call(
+                    "https://example.com/batch2.zip", "D:/Downloads", 8, queue_id=""
+                )
 
     def test_on_add_cancelled_queues_nothing(self):
         """A rejected Add Download dialog must not queue a single URL.
@@ -1506,11 +1532,11 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         # the three newest (LAST_SEEDED, SOURCE, SEEDING_STARTED_AT) were *appended*
         # in the last upgrade: SOURCE_DOMAIN and FILE_NAME already existed and were
         # merely moved to the tail. So the stale state describes
-        # `Col.COUNT - 3` columns, derived here rather than re-typed.
-        appended_columns = 3
+        # `Col.COUNT - 4` columns, derived here rather than re-typed.
+        appended_columns = 4
         legacy_count = Col.COUNT - appended_columns
         self.assertEqual(legacy_count, 14, "the pre-append build had 14 columns")
-        self.assertEqual(len(_DEFAULT_TAIL_COLUMNS), 5)
+        self.assertEqual(len(_DEFAULT_TAIL_COLUMNS), 6)
         for col in (Col.LAST_SEEDED, Col.SOURCE, Col.SEEDING_STARTED_AT):
             self.assertGreaterEqual(
                 col, legacy_count,
@@ -1532,7 +1558,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             self.win._restore_ui_state_from_db()
 
         # New columns land at the very end...
-        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1)
         self.assertEqual(header.count(), Col.COUNT)
         # ...the tail is fully pinned...
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
@@ -1586,7 +1612,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         span = len(_DEFAULT_TAIL_COLUMNS)
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
             self.assertEqual(header.visualIndex(col), Col.COUNT - span + i, Col.HEADERS[col])
-        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1)
 
     def test_new_column_indices_do_not_shift_existing_columns(self):
         """Persisted column indices must keep pointing at the same columns.
@@ -1607,12 +1633,12 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             ("COMPLETED", 11), ("SAVE_PATH", 12), ("FILE_NAME", 13),
         ):
             self.assertEqual(getattr(Col, name), value, name)
-        self.assertEqual(Col.COUNT, 17)
-        # The three appended columns are exactly the ones newer than that
-        # 14-column build, contiguous and last.
-        self.assertEqual(Col.COUNT - 3, 14)
+        self.assertEqual(Col.COUNT, 18)
+        # The appended columns are exactly the ones newer than that 14-column build,
+        # contiguous and last.
+        self.assertEqual(Col.COUNT - 4, 14)
         self.assertEqual(
-            [Col.LAST_SEEDED, Col.SOURCE, Col.SEEDING_STARTED_AT],
+            [Col.LAST_SEEDED, Col.SOURCE, Col.SEEDING_STARTED_AT, Col.QUEUE_NAME],
             list(range(14, Col.COUNT)),
         )
         self.assertEqual(Col.HEADERS[Col.LAST_SEEDED], "Last Seeded")
@@ -1623,8 +1649,8 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         header = self.win._table.horizontalHeader()
         header.moveSection(header.visualIndex(Col.SOURCE), 0)
         self.win._on_reset_view()
-        self.assertEqual(header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1)
-        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 2)
+        self.assertEqual(header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1)
+        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 3)
 
     def test_details_panel_state_survives_a_hidden_window_save(self):
         """Regression: the panel appeared closed after restart.
@@ -1926,7 +1952,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
 
         # Only the three newest columns were appended; SOURCE_DOMAIN and
         # FILE_NAME already existed and were merely pinned to the tail.
-        legacy_count = Col.COUNT - 3
+        legacy_count = Col.COUNT - 4
         self.assertEqual(legacy_count, 14)
         header = self.win._table.horizontalHeader()
         # Scramble the tail the way a pre-upgrade restoreState() would.
@@ -1947,7 +1973,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertEqual(healed.pos().x(), 350)
         self.assertEqual(healed.pos().y(), 250)
         self.assertEqual(
-            healed_header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1,
+            healed_header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1,
             "the newest column must be re-pinned to the end after an upgrade",
         )
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
@@ -2047,6 +2073,137 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertTrue(any("Preferences" in t for t in action_texts))
         self.assertTrue(any("Add Download" in t for t in action_texts))
         self.assertTrue(any("Exit" in t for t in action_texts))
+
+    def _tray_menu(self):
+        if self.win._tray_icon is None:
+            self.skipTest("system tray unavailable")
+        menu = self.win._tray_icon.contextMenu()
+        self.assertIsNotNone(menu)
+        return menu
+
+    def _right_click_at(self, menu, action):
+        """Deliver a real right-button press+release over *action*, as a person would."""
+        menu.show()
+        QApplication.processEvents()
+        pos = QPointF(menu.actionGeometry(action).center())
+        for event_type in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+        ):
+            event = QMouseEvent(
+                event_type,
+                pos,
+                QPointF(menu.mapToGlobal(menu.actionGeometry(action).center())),
+                Qt.MouseButton.RightButton,
+                Qt.MouseButton.RightButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            QApplication.sendEvent(menu, event)
+        QApplication.processEvents()
+
+    def test_a_right_click_on_a_tray_item_does_not_activate_it(self):
+        """A mis-landed right-click must not fire a menu entry.
+
+        ``QMenu`` treats a right-button press+release as an ordinary activation. The bottom
+        two tray rows are Restart and **Exit**, so a reflexive right-click - the gesture
+        people reach for after a fumbled left-click - used to shut My-IDM down mid-download
+        with no confirmation. ``_RightClickGuard`` consumes the button events so a
+        right-click can only dismiss the menu.
+        """
+        from unittest.mock import patch
+
+        menu = self._tray_menu()
+        exit_action = next(a for a in menu.actions() if "Exit" in a.text())
+
+        with patch.object(self.win, "_exit_app") as exit_mock:
+            self._right_click_at(menu, exit_action)
+        exit_mock.assert_not_called()
+
+    def test_a_left_click_on_the_exit_item_still_works(self):
+        """The guard must swallow the right button only.
+
+        A guard that swallowed every button event would pass the test above while leaving
+        the menu unusable, so the ordinary path is pinned here.
+        """
+        from unittest.mock import patch
+
+        menu = self._tray_menu()
+        exit_action = next(a for a in menu.actions() if "Exit" in a.text())
+
+        with patch.object(self.win, "_exit_app") as exit_mock:
+            exit_action.trigger()  # what a left click ends up doing
+        self.assertEqual(exit_mock.call_count, 1)
+
+    def test_every_destructive_tray_item_is_unreachable_by_right_click(self):
+        """Restart and Exit are both one mis-aimed right-click from losing work."""
+        from unittest.mock import patch
+
+        menu = self._tray_menu()
+        for needle in ("Exit", "Restart"):
+            action = next((a for a in menu.actions() if needle in a.text()), None)
+            self.assertIsNotNone(action, f"no {needle} entry in the tray menu")
+            with patch.object(self.win, "_exit_app") as exit_mock, \
+                 patch.object(self.win, "_restart_app") as restart_mock:
+                self._right_click_at(menu, action)
+                exit_mock.assert_not_called()
+                restart_mock.assert_not_called()
+
+    def test_the_guard_belongs_to_the_tray_menu(self):
+        """Installed on the menu itself, and kept alive for as long as it is needed.
+
+        PySide6 exposes no way to enumerate installed filters, so ownership plus the
+        behavioural tests above are the check. A filter with no Python reference would be
+        garbage-collected and silently stop filtering.
+        """
+        from my_idm.main_window import _RightClickGuard
+
+        menu = self._tray_menu()
+        guard = getattr(self.win, "_tray_right_click_guard", None)
+        self.assertIsInstance(guard, _RightClickGuard)
+        self.assertIs(guard.parent(), menu)
+
+    def test_the_guard_swallows_right_button_events_only(self):
+        from my_idm.main_window import _RightClickGuard
+
+        guard = _RightClickGuard()
+        for event_type in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick,
+        ):
+            for button in (
+                Qt.MouseButton.RightButton,
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.MiddleButton,
+                Qt.MouseButton.BackButton,
+            ):
+                with self.subTest(event=event_type.name, button=button.name):
+                    event = QMouseEvent(
+                        event_type, QPointF(1, 1), QPointF(1, 1),
+                        button, button, Qt.KeyboardModifier.NoModifier,
+                    )
+                    blocked = guard.eventFilter(None, event)
+                    self.assertEqual(
+                        blocked, button == Qt.MouseButton.RightButton,
+                        "only the right button may be swallowed",
+                    )
+
+    def test_the_guard_passes_through_unrelated_events(self):
+        from my_idm.main_window import _RightClickGuard
+
+        guard = _RightClickGuard()
+        for event_type in (
+            QEvent.Type.WindowActivate,
+            QEvent.Type.MouseMove,
+            QEvent.Type.KeyPress,
+            QEvent.Type.Enter,
+            QEvent.Type.Leave,
+        ):
+            with self.subTest(event=event_type.name):
+                self.assertFalse(
+                    guard.eventFilter(None, QEvent(event_type)),
+                    "a filter that eats non-mouse events would break the menu entirely",
+                )
 
     def test_system_tray_has_add_download_action(self):
         """Tray context menu exposes an Add Download entry."""
@@ -2341,6 +2498,252 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         with unittest.mock.patch("my_idm.notifications.notify_download_complete") as mock_notify:
             self.win._on_status_changed("seed-4", "seeding", "")
             mock_notify.assert_not_called()
+
+
+class TestDefaultHiddenColumns(unittest.TestCase):
+    """Six columns are hidden on a fresh profile only."""
+
+    def test_a_fresh_profile_hides_the_default_columns(self):
+        from my_idm.database import Database
+        from my_idm.download_model import Col
+        from my_idm.main_window import DEFAULT_HIDDEN_COLUMNS, MainWindow
+        from my_idm.manager import DownloadManager
+
+        db = Database(":memory:")
+        db.open()
+        self.addCleanup(db.close)
+        mgr = DownloadManager(db)
+        self.addCleanup(mgr.stop)
+        win = MainWindow(mgr)
+        self.addCleanup(win.close)
+        self.addCleanup(win.deleteLater)
+        QApplication.processEvents()
+
+        header = win._table.horizontalHeader()
+        for col in DEFAULT_HIDDEN_COLUMNS:
+            with self.subTest(column=Col.HEADERS[col]):
+                self.assertTrue(
+                    header.isSectionHidden(col),
+                    f"{Col.HEADERS[col]} should start hidden",
+                )
+        self.assertFalse(
+            header.isSectionHidden(Col.NAME),
+            "the primary columns must stay visible",
+        )
+
+    def test_a_saved_header_state_is_not_overridden(self):
+        """Changing a default must not re-arrange a profile that already has its own."""
+        from my_idm.database import Database
+        from my_idm.download_model import Col
+        from my_idm.main_window import DEFAULT_HIDDEN_COLUMNS, MainWindow
+        from my_idm.manager import DownloadManager
+
+        db = Database(":memory:")
+        db.open()
+        self.addCleanup(db.close)
+        mgr = DownloadManager(db)
+        self.addCleanup(mgr.stop)
+
+        # First window: show everything, then let it persist that arrangement.
+        first = MainWindow(mgr)
+        QApplication.processEvents()
+        header = first._table.horizontalHeader()
+        for col in range(Col.COUNT):
+            header.setSectionHidden(col, False)
+        first._save_ui_state_to_db()
+        self.addCleanup(first.close)
+        self.addCleanup(first.deleteLater)
+        QApplication.processEvents()
+
+        second = MainWindow(mgr)
+        self.addCleanup(second.close)
+        self.addCleanup(second.deleteLater)
+        QApplication.processEvents()
+
+        header = second._table.horizontalHeader()
+        for col in DEFAULT_HIDDEN_COLUMNS:
+            with self.subTest(column=Col.HEADERS[col]):
+                self.assertFalse(
+                    header.isSectionHidden(col),
+                    "a saved arrangement must win over the default",
+                )
+
+    def test_the_default_set_is_small_and_leaves_the_usual_columns(self):
+        from my_idm.download_model import Col
+        from my_idm.main_window import DEFAULT_HIDDEN_COLUMNS
+
+        self.assertLessEqual(len(DEFAULT_HIDDEN_COLUMNS), 6)
+        for col in (Col.NAME, Col.SIZE, Col.PROGRESS, Col.STATUS, Col.SPEED):
+            self.assertNotIn(
+                col, DEFAULT_HIDDEN_COLUMNS,
+                f"{Col.HEADERS[col]} is a primary column and must stay visible",
+            )
+
+    def test_the_default_sort_column_is_never_hidden_by_default(self):
+        """Hiding the sorted column hides the sort indicator with it."""
+        from my_idm.download_model import Col
+        from my_idm.main_window import DEFAULT_HIDDEN_COLUMNS
+
+        self.assertNotIn(
+            Col.ADDED, DEFAULT_HIDDEN_COLUMNS,
+            "Col.ADDED is the default sort column; hiding it leaves the table looking "
+            "unsorted",
+        )
+
+
+class TestToolsMenuOpensTheRightPreferencesPage(_MainWindowTestCase):
+    """The six "…Settings…" Tools-menu entries must open the page they name.
+
+    Each handler used to pass a hard-coded integer written against the *old* six-tab
+    layout. When the Preferences window grew to nine pages the indices stayed in range, so
+    ``SettingsDialog`` raised nothing and simply opened the wrong page - every one of the
+    six landing one or two pages off:
+
+    =========================  =====================  ===================
+    Menu entry                 Opened                 Should have opened
+    =========================  =====================  ===================
+    BitTorrent Settings…       Views & Columns         BitTorrent
+    Browser Integration …      BitTorrent             Browser Integration
+    VPN & Network Settings…    Browser Integration    VPN & Proxy
+    Tor Network Settings…      Browser Integration    Tor
+    Antivirus & Security …     VPN & Proxy            Antivirus & Security
+    External Tools Settings…   Tor                    AnimePahe Scraper
+    =========================  =====================  ===================
+
+    The handlers now pass a ``TAB_*`` name, which resolves through ``tab_index()`` and
+    raises on an unknown page.
+    """
+
+    #: handler -> (page it must open, a word that page's title must contain)
+    EXPECTED = (
+        ("_on_open_torrent_settings", TAB_TORRENT, "BitTorrent"),
+        ("_on_open_browser_settings", TAB_BROWSER, "Browser"),
+        ("_on_open_network_settings", TAB_VPN, "VPN"),
+        ("_on_open_tor_settings", TAB_TOR, "Tor"),
+        ("_on_open_security_settings", TAB_SECURITY, "Antivirus"),
+        ("_on_open_external_tools_settings", TAB_EXTERNAL_TOOLS, "AnimePahe"),
+    )
+
+    def _record_argument(self, handler_name):
+        """Call a handler with ``_on_open_preferences`` stubbed; return what it passed."""
+        recorded = []
+        original = self.win._on_open_preferences
+        self.win._on_open_preferences = lambda tab: recorded.append(tab)
+        try:
+            getattr(self.win, handler_name)()
+        finally:
+            self.win._on_open_preferences = original
+        self.assertEqual(
+            len(recorded), 1, f"{handler_name} did not open Preferences exactly once"
+        )
+        return recorded[0]
+
+    def test_each_handler_passes_the_right_page_name(self):
+        for handler, expected_name, _word in self.EXPECTED:
+            with self.subTest(handler=handler):
+                self.assertEqual(
+                    self._record_argument(handler), expected_name,
+                    f"{handler} opens the wrong Preferences page",
+                )
+
+    def test_each_handler_lands_on_a_page_named_for_it(self):
+        """Close the loop: the name it passes really is the page with that title."""
+        from my_idm.settings_dialog import SettingsDialog
+
+        for handler, expected_name, word in self.EXPECTED:
+            with self.subTest(handler=handler):
+                passed = self._record_argument(handler)
+                dlg = SettingsDialog(db=self.db, initial_tab=passed)
+                self.addCleanup(dlg.close)
+                self.addCleanup(dlg.deleteLater)
+                QApplication.processEvents()
+                self.assertEqual(dlg.current_tab_name(), expected_name)
+                self.assertIn(
+                    word, dlg._tabs.tabText(dlg._tabs.currentIndex()),
+                    f"{handler} lands on a page whose title does not mention {word!r}",
+                )
+
+    def test_no_two_handlers_point_at_the_same_page(self):
+        """A copy-paste slip that made two menu items identical is invisible otherwise."""
+        passed = [self._record_argument(h) for h, _n, _w in self.EXPECTED]
+        self.assertEqual(
+            len(set(passed)), len(passed),
+            f"two Tools-menu entries open the same page: {passed}",
+        )
+
+    def test_every_opened_page_is_a_distinct_tab(self):
+        indices = {
+            tab_index(self._record_argument(h)) for h, _n, _w in self.EXPECTED
+        }
+        self.assertEqual(len(indices), len(self.EXPECTED))
+
+    def test_the_tools_menu_wires_every_handler(self):
+        """A renamed or mis-wired slot would leave an entry opening the wrong page."""
+        for handler, _name, _word in self.EXPECTED:
+            with self.subTest(handler=handler):
+                self.assertTrue(hasattr(self.win, handler))
+
+    def test_every_settings_action_triggers_its_handler(self):
+        """Trigger the real ``QAction`` and assert which page it asks for.
+
+        Proves the menu entry is wired to the right slot, end to end, rather than only
+        that the slot itself behaves - a mis-wired or unwired entry is the failure that
+        would otherwise reach the user and not the suite.
+        """
+        actions = {
+            self.win._act_torrent_settings: TAB_TORRENT,
+            self.win._act_browser_settings: TAB_BROWSER,
+            self.win._act_network_settings: TAB_VPN,
+            self.win._act_tor_settings: TAB_TOR,
+            self.win._act_security_settings: TAB_SECURITY,
+            self.win._act_external_tools_settings: TAB_EXTERNAL_TOOLS,
+        }
+        original = self.win._on_open_preferences
+        for action, expected in actions.items():
+            with self.subTest(action=action.text()):
+                recorded = []
+                self.win._on_open_preferences = lambda tab: recorded.append(tab)
+                try:
+                    action.trigger()
+                finally:
+                    self.win._on_open_preferences = original
+                self.assertEqual(recorded, [expected])
+
+    def test_every_settings_action_is_reachable_from_the_tools_menu(self):
+        """An action that is never added to a menu is dead code, however correct."""
+        menu_actions = set()
+        for action in self.win.menuBar().actions():
+            submenu = action.menu()
+            if submenu is not None:
+                menu_actions.update(submenu.actions())
+        for action in (
+            self.win._act_torrent_settings,
+            self.win._act_browser_settings,
+            self.win._act_network_settings,
+            self.win._act_tor_settings,
+            self.win._act_security_settings,
+            self.win._act_external_tools_settings,
+        ):
+            with self.subTest(action=action.text()):
+                self.assertIn(action, menu_actions)
+
+    def test_every_settings_action_is_reachable_from_the_tools_menu(self):
+        """An action that is never added to a menu is dead code, however correct."""
+        menu_actions = set()
+        for action in self.win.menuBar().actions():
+            submenu = action.menu()
+            if submenu is not None:
+                menu_actions.update(submenu.actions())
+        for action in (
+            self.win._act_torrent_settings,
+            self.win._act_browser_settings,
+            self.win._act_network_settings,
+            self.win._act_tor_settings,
+            self.win._act_security_settings,
+            self.win._act_external_tools_settings,
+        ):
+            with self.subTest(action=action.text()):
+                self.assertIn(action, menu_actions)
 
 
 if __name__ == "__main__":

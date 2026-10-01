@@ -96,20 +96,64 @@ Any download line can override the active destination folder, specify an explici
 | **Semicolon (`;`)** | `https://example.com/file.zip;D:\Downloads\ISO` |
 | **Space Separated** | `https://example.com/file.iso D:\Downloads\ISO` |
 
-### 3.3 Automatic Filename & Header Resolution
+### 3.3 Queue Assignment
+
+A download line can name the [named queue](queues.md) it belongs to, and a queue directive
+applies to everything after it — the same sticky-then-override shape as `dir:`.
+
+```text
+# queue: YouTube                 <- sticky: every download below goes to YouTube
+https://youtu.be/a
+https://youtu.be/b
+
+https://example.com/film.mkv | queue=AnimePahe    <- per-line, overrides the directive
+https://example.com/other.zip queue="Big files"   <- aria2 style; quotes allow spaces
+```
+
+| Form | Example |
+| :--- | :--- |
+| **Sticky directive** | `# queue: YouTube`, `queue = YouTube`, `#queue=YouTube` |
+| **Multi-Pipe** | `https://example.com/a.zip \| queue=YouTube` |
+| **Aria2 style** | `https://example.com/a.zip queue="Big files"` |
+
+Precedence: **per-line `queue=` > the sticky directive > inference from the source.** With no
+queue named anywhere, `add_download` infers one — an AnimePahe comment marker or a
+`youtube.com` / `youtu.be` URL routes to that source's built-in queue. See
+[Source queues](queues.md#source-queues).
+
+Names are resolved case-insensitively against the `queues` table. An **unknown name falls back
+to Default and logs a warning** rather than creating the queue: backlog files can be
+machine-generated, and auto-create plus a generator is how you end up with "Queue1", "Queue2".
+A queue directive line is never itself treated as a download, so the
+`clear_backlog_after_load` rewrite preserves it exactly as it preserves `dir:`.
+
+#### The writer side lives in another repo
+
+`D:\Projects\animepahe-downloader\modules\my_idm.py` writes these files. `add_to_my_idm_backlog()`
+takes a `queue` argument, defaults it to `config.MY_IDM_QUEUE_NAME` (`"AnimePahe"`), and appends
+`| queue=<name>` as the **trailing** column. It is last on purpose: My-IDM also accepts
+positional columns (`url | dir | filename`), so a queue name containing a space would otherwise
+be read as a save path. The leading columns stay byte-identical to what an older build wrote,
+which keeps that repo's duplicate-URL scan — which compares the first column only — working.
+
+This is a **two-repo contract**: changing the line shape on either side needs the other. Both
+sides have tests pinning the exact shape — `tests/test_queues.py::TestBacklogQueueDirectives` and
+`TestBacklogQueueRouting` here, `tests/test_my_idm.py` there.
+
+### 3.4 Automatic Filename & Header Resolution
 My-IDM employs a multi-tiered resolution cascade for filenames and headers:
 1. **Explicit Line Parameter**: Parameter `filename=...`, `out=...`, or 3rd pipe column `url | dir | filename`.
 2. **Preceding Comment Extraction**: If an immediately preceding comment contains `(filename.ext)` or `[filename.ext]` (e.g. `# Episode 1 (AnimePahe_Ep1.mp4)`), My-IDM automatically adopts the parenthesized filename.
 3. **URL Query Parameters**: For direct streaming or CDN URLs where the path is a hash (e.g. `owocdn.top/mp4/hash?file=ActualName.mp4`), My-IDM extracts `file=`, `filename=`, `name=`, or `title=` from the query string.
 4. **Smart Video CDN Auto-Referer**: For known media hosts requiring referers (`*.owocdn.top`, `kwik.*`), My-IDM automatically supplies `Referer: https://kwik.cx/` and applies modern browser TLS impersonation via `curl_cffi` to prevent HTTP 403 Forbidden errors.
 
-### 3.4 Path Expansion Rules
+### 3.5 Path Expansion Rules
 Destination paths in backlog files automatically undergo:
 1. **Environment Variable Expansion**: `%USERPROFILE%`, `%APPDATA%`, `$HOME`.
 2. **User Home Expansion**: Tilde shortcuts like `~/Downloads` expand to the current user's home path.
 3. **Path Normalization**: Slashes are normalized to unified forward slashes (`/`), and surrounding quotes (`"` or `'`) are stripped.
 
-### 3.5 Comments and Blank Lines
+### 3.6 Comments and Blank Lines
 - Blank lines and whitespace-only lines are ignored.
 - Lines starting with `#` or `//` are treated as comments (unless they match a `# dir:` directive).
 

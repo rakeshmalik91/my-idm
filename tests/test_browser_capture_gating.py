@@ -24,6 +24,7 @@ does not auto-update), so a server-side check is not redundant.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -37,6 +38,7 @@ from my_idm.browser_server import CAPTURABLE_SCHEMES, is_capturable_url
 from my_idm.config import BrowserIntegrationConfig, GeneralConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.http_engine import HTTPEngine
+from my_idm.settings_dialog import SettingsDialog
 from tests.fake_http import FakeResponse, FakeSession, run_async
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -419,6 +421,68 @@ class TestServerMinimumSizeGate(unittest.TestCase):
             response = run_async(self._add({"url": "https://e.com/tiny.zip"}))
         self.assertEqual(self._body(response)["reason"], "file_size_below_minimum")
         self.manager.add_download_from_browser.assert_not_called()
+
+
+class TestServerCapturePausedGate(unittest.TestCase):
+    """``POST /add`` must decline politely while capture is paused.
+
+    Pausing capture flips ``intercept_all`` rather than ``enabled``, precisely so this server
+    stays up: the extension needs somewhere to be told *why* it was declined. That makes this
+    gate the reason a paused capture is a pause rather than a disconnect.
+    """
+
+    def setUp(self):
+        self.manager = MagicMock()
+        self.manager.add_download_from_browser.return_value = "new-id"
+        self.config = BrowserIntegrationConfig(enabled=True, intercept_all=False)
+        self.server = bs_module.BrowserServer(self.manager, self.config)
+
+    def _add(self, url="https://example.com/big.zip"):
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"url": url, "filename": "x.bin"})
+        return run_async(self.server._handle_add(request))
+
+    def test_the_gate_answers_ignored_not_error(self):
+        # 200 + "ignored" on purpose: the extension reads a non-ok status as "My-IDM is
+        # broken" and falls back to a browser download, whereas `ignored` is the shape it
+        # already understands for "handled, not queued".
+        response = self._add()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.text)["status"], "ignored")
+        self.assertEqual(json.loads(response.text)["reason"], "capture_paused")
+
+    def test_nothing_is_queued_while_paused(self):
+        self._add()
+        self.manager.add_download_from_browser.assert_not_called()
+
+    def test_the_pause_runs_before_the_scheme_and_size_gates(self):
+        # A paused capture must cost no probe and no parsing work.
+        with patch.object(
+            bs_module.BrowserServer, "_probe_content_length", new=AsyncMock()
+        ) as probe:
+            self._add()
+        probe.assert_not_called()
+
+    def test_resuming_capture_restores_acceptance(self):
+        self.config.intercept_all = True
+        response = self._add()
+        self.assertEqual(json.loads(response.text)["status"], "ok")
+        self.manager.add_download_from_browser.assert_called_once()
+
+    def test_disabling_integration_still_wins_over_the_pause(self):
+        # enabled=False is the harder gate and keeps its own 403.
+        self.config.enabled = False
+        response = self._add()
+        self.assertEqual(response.status, 403)
+
+    def test_the_preferences_copy_advertises_the_hard_gate(self):
+        # The server gate makes intercept_all a kill switch for *every* capture, so a checkbox
+        # that still calls it "automatically intercept" promises something it does not do.
+        dlg = SettingsDialog(browser_config=self.config)
+        self.addCleanup(dlg.deleteLater)
+        tooltip = dlg._browser_intercept_cb.toolTip()
+        self.assertIn("declines every capture", tooltip)
+        self.assertIn("right-click", tooltip)
 
 
 class EngineMinSizeTestCase(unittest.TestCase):

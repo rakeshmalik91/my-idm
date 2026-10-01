@@ -5,6 +5,8 @@ MainWindow (nothing asserted them), several `Database` query/mutator methods, an
 the `TorrentEngine` wrappers that `DownloadManager.move_download` depends on.
 """
 
+import ast
+import inspect
 import sys
 import tempfile
 import unittest
@@ -35,6 +37,8 @@ class TestKeyboardShortcuts(unittest.TestCase):
         "Open File": "Return",
         "Open Folder": "Ctrl+O",
         "Load Backlog": "Ctrl+L",
+        # The key is the action's text, so it follows the label - see
+        # test_the_toolbar_spells_the_label_out_in_full in tests/test_statistics.py.
         "Preferences": "Ctrl+,",
         "Details Panel": "F4",
         "Select All": "Ctrl+A",
@@ -109,6 +113,29 @@ class TestKeyboardShortcuts(unittest.TestCase):
     def test_shortcuts_are_case_insensitive_normalised(self):
         """Ctrl+, must not be reported as Ctrl+,<modifier> or similar."""
         self.assertEqual(self._shortcuts().get("Preferences"), "Ctrl+,")
+
+    def test_the_prefs_shortcut_is_bound_to_both_prefs_entries(self):
+        """The toolbar and the Tools menu each have their own action for one feature.
+
+        A shortcut lives on exactly one ``QAction``, so if it were set on the menu's copy it
+        would fire from the toolbar too, and if set on both it would be registered twice.
+        ``test_shortcut_sequences_are_unique`` catches the duplicate case; this pins which
+        action owns it. Both actions now read "Preferences…", so the owner is identified by
+        identity rather than by label - matching on text would accept either one.
+        """
+        owners = [
+            action
+            for action in self.win.findChildren(QAction)
+            if action.shortcut().toString() == "Ctrl+,"
+        ]
+        self.assertEqual(
+            owners, [self.win._act_preferences],
+            f"Ctrl+, is bound to {[a.text() for a in owners]}, "
+            f"expected exactly the toolbar action",
+        )
+        self.assertEqual(self.win._act_preferences.shortcut().toString(), "Ctrl+,")
+        self.assertTrue(self.win._act_tools_preferences.shortcut().isEmpty())
+        self.assertTrue(self.win._act_stats.shortcut().isEmpty())
 
 
 class TestDatabaseQueries(unittest.TestCase):
@@ -566,6 +593,156 @@ class TestTorrentEngineWrappers(unittest.TestCase):
         self.assertTrue(self.db.get_download("t1").metadata.get("route_through_tor"))
         self.engine.set_torrent_tor_route("t1", False)
         self.assertFalse(self.engine.is_torrent_tor_routed("t1"))
+
+
+class TestNoShadowedDefinitions(unittest.TestCase):
+    """A definition repeated in one scope silently replaces the first one.
+
+    ``StatisticsPopup._populate_grid`` was defined twice by an editing slip. The two
+    bodies happened to be equivalent, so nothing misbehaved and no test failed - but the
+    class is exactly where a stale first copy hides a real difference, and the only signal
+    is a future edit touching the *second* copy and wondering why the first still exists.
+
+    Scope matters: ``__init__`` and ``paintEvent`` legitimately repeat across classes, and
+    a property plus its ``@name.setter`` is one logical definition, not a collision.
+    """
+
+    MODULES = (
+        "my_idm.stats_dialog",
+        "my_idm.settings_dialog",
+        "my_idm.main_window",
+        "my_idm.database",
+        "my_idm.download_model",
+        "my_idm.manager",
+        "my_idm.http_engine",
+        "my_idm.torrent_engine",
+        "my_idm.utils",
+        "my_idm.config",
+        "my_idm.browser_server",
+        "my_idm.details_panel",
+    )
+
+    @staticmethod
+    def _is_setter(node) -> bool:
+        """True for ``@name.setter``, which extends a property rather than shadowing it."""
+        for deco in node.decorator_list:
+            if (
+                isinstance(deco, ast.Attribute)
+                and deco.attr == "setter"
+                and getattr(deco.value, "id", None) == node.name
+            ):
+                return True
+        return False
+
+    def _duplicates(self, body) -> list[str]:
+        counts: dict[str, int] = {}
+        for child in body:
+            if not isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                continue
+            if isinstance(child, ast.FunctionDef) and self._is_setter(child):
+                continue
+            counts[child.name] = counts.get(child.name, 0) + 1
+        return sorted(name for name, count in counts.items() if count > 1)
+
+    def test_no_module_rebinds_a_name_in_the_same_scope(self):
+        import importlib
+
+        for name in dict.fromkeys(self.MODULES):
+            module = importlib.import_module(name)
+            with self.subTest(module=name):
+                tree = ast.parse(inspect.getsource(module))
+                offenders = {}
+                module_level = self._duplicates(tree.body)
+                if module_level:
+                    offenders["module scope"] = module_level
+                for node in tree.body:
+                    if isinstance(node, ast.ClassDef):
+                        found = self._duplicates(node.body)
+                        if found:
+                            offenders[node.name] = found
+                self.assertEqual(
+                    offenders, {},
+                    "a redefinition shadows the first definition silently",
+                )
+
+    def test_the_statistics_grid_is_defined_exactly_once(self):
+        """The specific instance that motivated the check."""
+        from my_idm.stats_dialog import StatisticsPopup
+
+        self.assertEqual(
+            inspect.getsource(StatisticsPopup).count("def _populate_grid"), 1
+        )
+
+
+class TestSanityTierIsNonInteractive(unittest.TestCase):
+    """The basic sanity tier must not disturb the desktop it runs on.
+
+    `pytest -m "not ui"` is meant to be safe to leave running in the background, which means
+    it must not read or write the real clipboard and must not repaint the real taskbar. An
+    earlier version of `isolate_system_clipboard` snapshotted, cleared and restored the OS
+    clipboard on *every* one of 2400+ tests, which is exactly the interference this tier
+    exists to avoid - so the invariant is pinned here rather than left to a code comment.
+    """
+
+    def test_a_non_ui_test_sees_a_fake_clipboard_not_the_operating_system_one(self):
+        from PySide6.QtGui import QGuiApplication
+        from tests import conftest
+
+        clipboard = QGuiApplication.clipboard()
+        self.assertIsInstance(clipboard, conftest._FakeClipboard)
+        # And the fake is a working clipboard, so a round-trip inside one test still holds.
+        clipboard.setText("https://example.com/a.zip")
+        self.assertEqual(clipboard.text(), "https://example.com/a.zip")
+        self.assertEqual(clipboard.text(), "https://example.com/a.zip")
+
+    def test_the_ui_marker_is_registered(self):
+        # An unregistered marker makes `-m ui` emit a warning and silently select everything,
+        # which would quietly turn the two tiers back into one.
+        import tomllib
+        from pathlib import Path as _Path
+
+        pyproject = _Path(__file__).resolve().parent.parent / "pyproject.toml"
+        with open(pyproject, "rb") as handle:
+            config = tomllib.load(handle)
+        markers = config["tool"]["pytest"]["ini_options"]["markers"]
+        self.assertTrue(
+            any(marker.startswith("ui:") for marker in markers),
+            f"the 'ui' marker is not registered: {markers}",
+        )
+
+    def test_every_declared_interactive_module_actually_exists(self):
+        # A typo in the name would leave a real UI module unmarked, which is the failure that
+        # matters: it puts window-popping tests back into the unattended tier.
+        from tests import conftest
+
+        tests_dir = Path(__file__).resolve().parent
+        for name in conftest._INTERACTIVE_MODULES:
+            with self.subTest(module=name):
+                self.assertTrue(
+                    (tests_dir / f"{name}.py").is_file(),
+                    f"{name} is listed as interactive but tests/{name}.py does not exist",
+                )
+
+    def test_the_interactive_modules_are_not_vacuous(self):
+        # The other direction: a name that matches nothing would be a silently dead entry.
+        from tests import conftest
+
+        self.assertGreaterEqual(len(conftest._INTERACTIVE_MODULES), 8)
+
+    def test_the_taskbar_repaint_is_gated_on_ui_tests_being_present(self):
+        # `_cleanup_windows_tray_ghosts` posts WM_MOUSEMOVE across Shell_TrayWnd, which makes
+        # a real taskbar flicker. It must not run for the basic tier.
+        from tests import conftest
+
+        source = inspect.getsource(conftest.suppress_system_tray_notifications)
+        self.assertIn("if _HAS_UI_TESTS:", source)
+        # ...and the gate must come *before* the call, not after it.
+        self.assertLess(
+            source.index("if _HAS_UI_TESTS:"),
+            source.index("_cleanup_windows_tray_ghosts()"),
+        )
 
 
 if __name__ == "__main__":

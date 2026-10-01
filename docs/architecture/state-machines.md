@@ -49,7 +49,7 @@ While HTTP and BitTorrent transfers share a common representation in the GUI (`D
 
 ## HTTP Download State Machine
 
-The HTTP engine manages file transfers over HTTP/1.1 and HTTP/2 using `aiohttp` on a dedicated asyncio background thread (`idm-async`). It supports dynamic probe negotiation, automatic multi-segment chunking, fallback to single-stream download, exponential backoff retries, and post-download security inspection.
+The HTTP engine manages file transfers over HTTP/1.1 using `aiohttp` on a dedicated asyncio background thread (`idm-async`), falling back to `curl_cffi` with browser impersonation for hosts behind bot protection. It supports dynamic probe negotiation, automatic multi-segment chunking, fallback to single-stream download, exponential backoff retries, and post-download security inspection.
 
 ### HTTP State Diagram
 

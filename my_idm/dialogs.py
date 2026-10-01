@@ -2,29 +2,37 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
+from my_idm.clipboard_monitor import looks_like_download_url
 from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR, TorConfig
+from my_idm.database import DEFAULT_QUEUE_COLOR, normalize_queue_color
 from my_idm.youtube_tool import detect_youtube_url
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
@@ -266,15 +274,9 @@ class AddDownloadDialog(QDialog):
 
     @staticmethod
     def _is_valid_download_url(text: str) -> bool:
-        if not text or len(text) > 4096:
-            return False
-        trimmed = text.strip()
-        lower = trimmed.lower()
-        if lower.startswith(("http://", "https://", "ftp://", "magnet:?")):
-            return True
-        if lower.endswith(".torrent") and (os.path.isfile(trimmed) or lower.startswith("file://")):
-            return True
-        return False
+        # Shared with clipboard capture so the pre-fill gate and the auto-capture gate cannot
+        # drift: the same string must be offered here and captured there, or neither.
+        return looks_like_download_url(text)
 
     def _prefill_url(self, initial_url: str = ""):
         candidates: list[str] = []
@@ -579,3 +581,296 @@ class RenameDialog(QDialog):
     @property
     def new_name(self) -> str:
         return self._new_name
+
+
+class QueueManagerDialog(QDialog):
+    """Create, rename, reorder, limit and delete named queues.
+
+    The limit is edited in place in the "Max at once" column itself, for every queue including
+    Default. A limit of 0 means **Global**: the queue adds no cap of its own and simply follows
+    the global concurrency limit. It does *not* mean "unlimited" - the global limit always
+    applies on top, which is why the note under the table spells that out.
+
+    Deleting a queue never deletes downloads - the manager moves them to Default and this
+    dialog says how many, rather than making the user discover it afterwards.
+    """
+
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Queues")
+        self.setMinimumSize(660, 420)
+        self._manager = manager
+        self._result_message = ""
+        # True only while _reload() rebuilds the widgets, so the rebuild cannot itself be read
+        # as the user editing a limit.
+        self._loading = False
+
+        layout = QVBoxLayout(self)
+
+        self._table = QTableWidget(0, 3, self)
+        self._table.setHorizontalHeaderLabels(
+            ["Queue", "Downloads", "Max at once  (0 = Global)"]
+        )
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self._table)
+
+        # The note the TODO asked for. Shows the live global value rather than describing it
+        # abstractly, because "Global" in the spin box is otherwise a word with no number
+        # attached to it.
+        self._note = QLabel()
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet("color: #8fa0b5;")
+        layout.addWidget(self._note)
+
+        btn_row = QHBoxLayout()
+        self._up_btn = QPushButton("↑ Move Up")
+        self._down_btn = QPushButton("↓ Move Down")
+        self._add_btn = QPushButton("Add…")
+        self._rename_btn = QPushButton("Rename…")
+        self._delete_btn = QPushButton("Delete…")
+        self._up_btn.clicked.connect(lambda: self._move_selected(-1))
+        self._down_btn.clicked.connect(lambda: self._move_selected(+1))
+        self._add_btn.clicked.connect(self._on_add)
+        self._rename_btn.clicked.connect(self._on_rename)
+        self._delete_btn.clicked.connect(self._on_delete)
+        for btn in (self._up_btn, self._down_btn, self._add_btn, self._rename_btn, self._delete_btn):
+            btn_row.addWidget(btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+        self._reload()
+        self._on_selection_changed()
+
+    def _refresh_note(self):
+        """Explain how a queue limit interacts with the global limit, with the live value."""
+        global_max = self._manager.general_config.effective_max_concurrent
+        self._note.setText(
+            "A queue's limit caps how many of its own downloads run at once. "
+            "Leave it at 0 for Global: the queue adds no cap of its own and follows the "
+            f"global limit, currently {global_max} at a time "
+            "(Tools → Preferences → General & Downloads).\n"
+            "A download starts only when both its queue's limit and the global limit allow "
+            "it, so a queue limit is a ceiling and never a reservation. Default holds every "
+            "download that no other queue claims."
+        )
+
+    @property
+    def result_message(self) -> str:
+        return self._result_message
+
+    def _reload(self):
+        queues = self._manager.get_queues()
+        counts = self._manager._db.get_queue_download_counts()
+        selected_id = self._selected_queue_id()
+
+        self._loading = True
+        self._table.blockSignals(True)
+        self._table.setRowCount(0)
+        for queue in queues:
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            # The colour swatch sits in the same cell as the name, so the queue is
+            # identifiable by colour without a column of its own.
+            name_item = QTableWidgetItem(queue.name)
+            name_item.setData(Qt.ItemDataRole.UserRole, queue.id)
+            if queue.is_default:
+                name_item.setToolTip(
+                    "The default queue. Every download starts here unless another queue "
+                    "claims it. Its limit and colour are editable like any other."
+                )
+            self._table.setItem(row, 0, name_item)
+            self._table.setCellWidget(row, 0, self._name_cell(queue))
+            self._table.setItem(
+                row, 1, QTableWidgetItem(str(counts.get(queue.id, 0)))
+            )
+            # The editor lives in the "Max at once" column itself. There is no separate
+            # edit column: a blank fourth column with a control floating in it read as two
+            # unrelated things, and it made the Default queue look un-editable because it was
+            # the only row without a control there.
+            self._table.setCellWidget(row, 2, self._limit_editor(queue))
+        self._table.blockSignals(False)
+        self._loading = False
+
+        self._refresh_note()
+        if selected_id:
+            self._select_queue_id(selected_id)
+        self._on_selection_changed()
+
+    def _limit_editor(self, queue):
+        spin = QSpinBox(self._table)
+        # No setSpecialValueText here, deliberately. It substitutes a word for the number, so
+        # typing 0 shows "Global" and typing "Global" is rejected - the field stops agreeing
+        # with itself, and "what I typed" is no longer "what I see". The meaning of 0 lives in
+        # the column header, the cell tooltip and the note instead, none of which are edited.
+        spin.setRange(0, 99)
+        spin.setValue(max(0, queue.max_concurrent))
+        spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        spin.setToolTip(
+            "How many of this queue's downloads may run at once.\n"
+            "0 = follow the global limit (no limit of its own)."
+        )
+        spin.valueChanged.connect(
+            lambda value, qid=queue.id: self._on_limit_changed(qid, value)
+        )
+        return spin
+
+    def _name_cell(self, queue):
+        """The swatch plus the queue name, as one cell.
+
+        A cell widget covers its whole cell, so the swatch cannot simply be dropped on top of a
+        name item - it would hide it. Hence a small container holding both. The name is *also*
+        written to the underlying item, because that is what selection, ``_selected_queue_id``
+        and the column-width logic read; the label here is only what gets painted.
+        """
+        holder = QWidget(self._table)
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(4, 0, 4, 0)
+        row.setSpacing(6)
+
+        button = QPushButton(holder)
+        button.setFixedSize(16, 16)
+        button.setFlat(True)
+        colour = normalize_queue_color(queue.color) or DEFAULT_QUEUE_COLOR
+        button.setStyleSheet(
+            f"QPushButton {{ background-color: {colour}; border: 1px solid #555; "
+            f"border-radius: 3px; }}"
+            f"QPushButton:hover {{ border: 1px solid #999; }}"
+        )
+        button.setToolTip(f"Colour for '{queue.name}'. Click to change it.")
+        button.clicked.connect(
+            lambda _checked=False, qid=queue.id: self._on_pick_color(qid)
+        )
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        label = QLabel(queue.name, holder)
+        label.setToolTip(
+            f"'{queue.name}' - click the swatch to change its colour."
+        )
+        row.addWidget(label, 1)
+        return holder
+
+    def _on_pick_color(self, queue_id: str):
+        from PySide6.QtWidgets import QColorDialog
+
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        current = QColor(normalize_queue_color(queue.color) or DEFAULT_QUEUE_COLOR)
+        chosen = QColorDialog.getColor(current, self, f"Colour for '{queue.name}'")
+        if not chosen.isValid():
+            return
+        ok, message = self._manager.set_queue_color(queue_id, chosen.name())
+        if not ok and message:
+            self._result_message = message
+        self._reload()
+
+    def _selected_queue_id(self) -> str:
+        row = self._table.currentRow()
+        if row < 0:
+            return ""
+        item = self._table.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else ""
+
+    def _select_queue_id(self, queue_id: str):
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == queue_id:
+                self._table.selectRow(row)
+                return
+
+    def _on_selection_changed(self):
+        queue_id = self._selected_queue_id()
+        queue = self._manager.get_queue(queue_id) if queue_id else None
+        is_default = bool(queue and queue.is_default)
+        self._rename_btn.setEnabled(bool(queue) and not is_default)
+        self._delete_btn.setEnabled(bool(queue) and not is_default)
+        rows = self._table.rowCount()
+        idx = self._table.currentRow()
+        # The default queue is pinned first and never moves, so the buttons are disabled when
+        # the selection is at either end of the movable run.
+        movable = rows - 1 if rows else 0
+        position = idx if idx > 0 else 0
+        self._up_btn.setEnabled(bool(queue) and not is_default and position > 0)
+        self._down_btn.setEnabled(bool(queue) and not is_default and position < movable - 1)
+
+    def _on_limit_changed(self, queue_id: str, value: int):
+        if self._loading:
+            return
+        self._manager.set_queue_max_concurrent(queue_id, value)
+        # A limit change can change what the toolbar combo shows, so keep the two in step.
+        self._refresh_note()
+
+    def _move_selected(self, delta: int):
+        queue_id = self._selected_queue_id()
+        if not queue_id:
+            return
+        self._manager.move_queue_in_list(queue_id, delta)
+        self._reload()
+        self._select_queue_id(queue_id)
+
+    def _on_add(self):
+        name, ok = QInputDialog.getText(
+            self, "New Queue", "Queue name:", QLineEdit.Normal, ""
+        )
+        if not ok:
+            return
+        created, message = self._manager.create_queue(name.strip(), 3)
+        self._result_message = message
+        if created:
+            self._reload()
+
+    def _on_rename(self):
+        queue_id = self._selected_queue_id()
+        if not queue_id:
+            return
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        name, ok = QInputDialog.getText(
+            self, "Rename Queue", "Queue name:", QLineEdit.Normal, queue.name
+        )
+        if not ok:
+            return
+        renamed, message = self._manager.rename_queue(queue_id, name.strip())
+        self._result_message = message
+        if renamed:
+            self._reload()
+            self._select_queue_id(queue_id)
+
+    def _on_delete(self):
+        queue_id = self._selected_queue_id()
+        if not queue_id:
+            return
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        moved = len(self._manager._db.get_all_downloads(queue_id))
+        if moved:
+            text = (
+                f"Delete '{queue.name}'?\n\n"
+                f"{moved} download(s) will move to the Default queue. Downloads are never "
+                "deleted with their queue."
+            )
+        else:
+            text = f"Delete the empty queue '{queue.name}'?"
+        if QMessageBox.question(self, "Delete Queue", text) != QMessageBox.StandardButton.Yes:
+            return
+        deleted, message = self._manager.delete_queue(queue_id)
+        self._result_message = message
+        if deleted:
+            self._reload()

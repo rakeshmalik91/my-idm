@@ -155,6 +155,19 @@ class BrowserServer:
                 status=403,
                 headers=self._cors_headers(),
             )
+        if not self._config.intercept_all:
+            # Capture is paused - by the tray toggle or the global hotkey. Answering 200 with
+            # `ignored` rather than an error is deliberate: the extension treats a non-ok
+            # status as "My-IDM is broken" and falls back to a browser download, whereas
+            # `ignored` is the shape it already understands for "handled, not queued".
+            return web.json_response(
+                {
+                    "status": "ignored",
+                    "reason": "capture_paused",
+                    "message": "Download capture is paused in My-IDM.",
+                },
+                headers=self._cors_headers(),
+            )
         try:
             body = await request.json()
         except Exception as e:

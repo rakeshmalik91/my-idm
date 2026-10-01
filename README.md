@@ -125,6 +125,24 @@ All settings and runtime data are persisted in the user profile:
 
 ---
 
+## 🧪 Running the Tests
+
+```cmd
+run_all_tests.bat basic
+run_all_tests.bat
+```
+
+There are two tiers, because the UI tests interfere with the desktop if you are using the
+machine while they run.
+
+| Command | What it runs | Time |
+| :--- | :--- | :---: |
+| `run_all_tests.bat basic` | Everything **except** the UI, system-tray and clipboard tests. Opens no window, steals no focus, and never touches your real clipboard — so you can leave it running in the background. | ~52 s |
+| `run_all_tests.bat` or `run_all_tests.bat full` | The whole suite. **Run this before committing.** | ~3.5 min |
+| `run_all_tests.bat ui` | Only the UI, tray and clipboard tests. | ~2 min 20 s |
+
+---
+
 ## 📚 Documentation
 
 - [**User Guide**](docs/user-guide.md) — Complete user manual: GUI navigation, download management, and troubleshooting.
@@ -135,15 +153,16 @@ All settings and runtime data are persisted in the user profile:
 - [**Antivirus & Security**](docs/architecture/antivirus.md) — Pre-download checks, Defender/custom scanning, and quarantine.
 - [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
 - [**Browser Integration (Chrome & Firefox)**](docs/architecture/browser-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
+- [**Capture (Hotkey & Clipboard)**](docs/architecture/capture.md) — System-wide hotkey that toggles download capture, clipboard URL capture with an all-or-nothing gate, and the shared `intercept_all` switch.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**YouTube Scraper**](docs/architecture/youtube-scraper.md) — yt-dlp integration, Mode A (direct URL) vs Mode B (ffmpeg merge), dialog, and rate-limit budgeting.
 - [**Table Views & Segregation**](docs/architecture/table-views.md) — Column definitions and ordering, delegates, date-segregation algorithms, and the size/status/type header filters.
 - [**Window Lifecycle & System Tray**](docs/architecture/window-system-tray.md) — Window geometry persistence, close-to-tray behaviour, and the tray context menu.
 - [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
-- [**Bandwidth Statistics**](docs/architecture/statistics.md) — Today / week / month / year / all-time totals from the existing `downloads` table, a `📊 Statistics` toolbar action beside Preferences, a per-day volume chart and a live speed sparkline.
+- [**Bandwidth Statistics**](docs/architecture/statistics.md) — Today / week / month / year / all-time totals from the existing `downloads` table, a `📊 Statistics` toolbar action beside Preferences, a per-day volume chart and a live speed sparkline. Buckets are the user's **local** calendar days; rows are stamped in UTC and converted per row.
+- [**Named Queues & Concurrency Budgets**](docs/architecture/queues.md) — Every download belongs to a named queue with its own concurrency ceiling, on top of the global limit. Scope the list with the toolbar combo or View → Queues; AnimePahe and YouTube get their own queues automatically; backlog files can assign queues with `queue=`.
 - [**User Guide**](docs/user-guide.md) — End-user walkthrough of every feature, settings tab, and keyboard shortcut.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
-- [**TODO & Roadmap**](docs/TODO.md) — Active development backlog, feature checklist, and tracked bug fixes.
 
 ---
 

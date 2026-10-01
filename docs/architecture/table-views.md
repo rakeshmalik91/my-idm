@@ -57,13 +57,14 @@ The main download table exposes 13 columns indexed by the `Col` class:
 | `SAVE_PATH` | 12 | `Save Path` | 200 px | Left | Target destination path shortened with leaf-node priority. |
 | `LAST_SEEDED` | 14 | `Last Seeded` | 130 px | Center | When the torrent last started or completed a seed. `—` for non-torrents. |
 | `SOURCE` | 15 | `Source` | 100 px | Left | Where the download originated: `Chrome`, `Firefox`, `Edge`, `AnimePahe`, or `YouTube`. Blank for manually added and legacy rows. |
+| `QUEUE_NAME` | 17 | `Queue` | 120 px | Left | The named queue the download belongs to, painted by `QueueColumnDelegate` as a colour swatch plus the name — **collapsing to the swatch alone when the column is too narrow**, because the colour still identifies the queue whereas an elided name does not. Colours live on the `queues` row and reach the model via `set_queue_colors`; the delegate reads them from a dedicated `QUEUE_COLOR_ROLE`, not `UserRole` (already column-specific) and not by decoding the cell text. See [`queues.md`](queues.md). |
 
 ### Column Tail & Upgrades
 
-Four columns are pinned to the right-hand tail, in this display order:
+Five columns are pinned to the right-hand tail, in this display order:
 
 ```
-… SAVE_PATH, SOURCE_DOMAIN, FILE_NAME, LAST_SEEDED, SOURCE
+… SAVE_PATH, SOURCE_DOMAIN, FILE_NAME, LAST_SEEDED, SOURCE, SEEDING_STARTED_AT, QUEUE_NAME
 ```
 
 The order is defined once, in `_DEFAULT_TAIL_COLUMNS` (`main_window.py`), and applied by
@@ -72,9 +73,9 @@ heal described below. That helper sweeps slots in ascending order, because `move
 everything between the source and the target — placing a tail column that currently sits *left* of
 its slot would otherwise push an already-placed neighbour back out of position.
 
-`LAST_SEEDED` and `SOURCE` were **appended** (indices 14 and 15) rather than inserted, so every
-pre-existing logical index is unchanged and the persisted `column_widths`, `header_state`, and
-`sort_column` in `ui_state` keep addressing the same columns.
+`LAST_SEEDED`, `SOURCE`, `SEEDING_STARTED_AT` and `QUEUE_NAME` were **appended** (indices 14–17)
+rather than inserted, so every pre-existing logical index is unchanged and the persisted
+`column_widths`, `header_state`, and `sort_column` in `ui_state` keep addressing the same columns.
 
 `ui_state` also records `column_count`. On restore, if the stored count differs from `Col.COUNT`, the
 state predates an append: `QHeaderView.restoreState()` only describes the sections that existed
@@ -198,7 +199,7 @@ All table view configuration and segregation states are persisted in the SQLite 
 | Key | Type | Description |
 | :--- | :---: | :--- |
 | `segregated_view_enabled` | `bool` | Whether segregated view partitioning is enabled (`True`) or flat list is active (`False`). |
-| `segregated_view_mode` | `str` | Active grouping mode: `"status"` or `"date"`. |
+| `segregated_view_mode` | `str` | Active grouping mode: `"status"`, `"date"` or `"type"`. Validated against `SEGREGATED_MODES` on read; anything else degrades to `DEFAULT_SEGREGATED_MODE`. |
 | `segregated_active_collapsed` | `bool` | Status mode: Active section collapsed state. |
 | `segregated_seeding_collapsed` | `bool` | Status mode: Seeding section collapsed state. |
 | `segregated_inactive_collapsed` | `bool` | Status mode: Inactive section collapsed state. |
@@ -215,6 +216,37 @@ On application launch:
 2. Restores collapsed status for all status and date section keys.
 3. Configures `DownloadTableModel.set_segregated_view(enabled, mode=mode)`.
 4. Invokes `_apply_table_spans()` to paint section headers immediately.
+
+> **The mode whitelist must be `SEGREGATED_MODES`, not a local tuple.** When the `"type"`
+> mode was added, `MainWindow.__init__` kept its own `("status", "date")` check, so
+> choosing File Type and restarting silently grouped the table by Status again — and
+> because the menu entry's checked state is derived from that same value,
+> `_act_seg_by_type` came back unticked and nothing looked wrong.
+>
+> `_on_toggle_segregated_view()` also syncs `_act_segregated_view`'s checkmark (under
+> `blockSignals`, to avoid re-entry). Without that, the View-menu checkmark and the table
+> drift apart, and it matters mechanically rather than cosmetically:
+> `_set_segregation_mode()` enables segregation by calling `setChecked(True)` on that
+> action, and `setChecked` emits nothing when the action is *already* checked — so a
+> desynchronised action made the enable silently do nothing.
+
+### Preferences ▸ Views & Columns
+
+The Views tab (`settings_dialog.py`) drives the same state through
+`_apply_views_tab()`, which applies the enable checkbox **before** the mode:
+
+```python
+parent._on_toggle_segregated_view(enabled)          # canonical: applies + persists
+if enabled:
+    parent._set_segregation_mode(mode)             # only when it should stay on
+```
+
+The order is load-bearing. `_set_segregation_mode()` force-*enables* segregation when it is
+currently off (choosing a mode from the View menu implies turning it on), so calling it
+first meant that saving with the checkbox **unticked** turned segregation back on and
+overwrote the `False` the dialog had just written — while the branch that actually applied
+the checkbox sat behind an `elif` that could never run, so unticking it did nothing until
+the next restart.
 
 ---
 
@@ -285,6 +317,23 @@ the table by free text via `set_search_query()`:
 - `is_filtered()` reports the search as a filter too, which keeps the "filters active"
   indicator honest.
 - Empty input is a no-op, so clearing the box restores the previous view without a rebuild.
+
+### 5. Named-Queue Scope & Filter
+Added 2026-10-01. The **Queue** column narrows the view to one queue, or to every queue when
+blank (the startup default, and what a deleted queue falls back to), and is also a filterable
+header column. See [`queues.md`](queues.md) for the feature itself.
+
+- It is a **filter, not a tab bar**. A scope has to compose with the search box, the header
+  chips and segregated view at the same time, so it lives in the model rather than in a widget.
+- The gate is `DownloadTableModel._in_queue_scope(entry)`, its own method rather than a line
+  inside `_matches_filter`, because `get_size_counts`, `get_status_counts` and `get_type_counts`
+  each hand-roll their own filter chain over `_all_entries`. A scope applied in only one of them
+  would make the header chip counts disagree with the rows they filter.
+- The header filter is a second, independent gate — `_in_queue_filter` — keyed on **queue ids**
+  so a rename cannot silently empty the view. `is_filtered()` includes both, so the "filters
+  active" indicator and **Reset** account for them.
+- Selected via a toolbar combo (`MainWindow._queue_combo`) or **Edit → Queues**; persisted in
+  `ui_state` under `active_queue_id`.
 
 ---
 

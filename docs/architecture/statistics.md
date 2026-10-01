@@ -97,35 +97,66 @@ progress total and the wrong number for a throughput graph - see §2.3.
 New read-only methods on `Database` (`database.py`). They follow the existing pattern:
 `_conn.execute(...)` under `_LOCK`, returning plain data.
 
-> Use `substr(ts, 1, 10)` / `substr(ts, 1, 7)`, **not** `strftime()`. `strftime` would need
-> SQLite ≥ 3.38 to accept the `T` separator and `+00:00` suffix that `_now_iso()` emits, and
-> a silent parse failure returns `NULL` — i.e. a statistics view that quietly shows zero.
-> `substr` is exact regardless of version, and these are string slices on a fixed-width
-> ISO prefix.
+> **Buckets are local calendar days, rows are stamped in UTC.** `added_at` is written by
+> `_now_iso()` as UTC, while the cut-offs are built from a **local** `today`, because the
+> buckets are labelled in the user's own calendar. A bare `substr(added_at,1,10)` therefore
+> compares a *UTC* date against a *local* one, and it is wrong for part of every day: at
+> 02:00 in UTC+05:30 a download added two minutes ago is stamped `2026-09-29T20:30` and
+> lands in **Yesterday**. The shipped query re-bases each row first —
+> `substr(datetime(added_at, 'localtime'), 1, 10)` — which is exactly the conversion
+> `download_model.get_entry_date_category()` performs with `astimezone()`, so the table's
+> "Today" section and the popup's "Today" figure finally agree. `localtime` goes through
+> the C library, so it is DST-correct per row and needs no offset plumbed in from Python.
 >
-> **Implemented with one addition the design did not anticipate.** The cut-off predicate is
-> a *string* comparison (`substr(added_at,1,10) >= ?`), so a row whose timestamp was
-> hand-edited to something unparseable sorts into a bucket by accident: `'not-a-date' >=
-> '2026-09-24'` is true, because `'n'` sorts after `'2'`. The shipped query adds a `GLOB`
-> guard requiring a `YYYY-MM-DD` prefix, so such a row appears only in the lifetime total,
-> where an undatable download honestly belongs. Without it, one corrupt row reads as a
-> large download today.
+> This is the one place the doc's "no date functions" rule below was **not** followed, and
+> deliberately so: a `substr` slice cannot express a timezone conversion at all. The
+> version concern that motivated the rule does not apply, because `localtime` operates on
+> an already-accepted ISO value and the acceptance is verified by the `IS NOT NULL` guard
+> below rather than assumed.
+>
+> **Two additions the design did not anticipate.**
+>
+> 1. *Corrupt timestamps must not sort into a bucket.* The cut-off predicate is a string
+>    comparison, and a hand-edited `'not-a-date' >= '2026-09-24'` is **true**, because `'n'`
+>    sorts after `'2'`. A `GLOB` guard requiring a `YYYY-MM-DD` prefix keeps such a row out
+>    of every dated bucket; it still counts towards the lifetime total, where an undatable
+>    download honestly belongs.
+> 2. *`GLOB` alone is not enough.* `2026-13-45T00:00:00+00:00` **matches** the shape but
+>    makes `datetime()` return `NULL`, and `GROUP BY` on a NULL expression still forms a
+>    group — which surfaced on the chart as a bucket literally labelled `"None"`. The guard
+>    therefore also requires `datetime(added_at, 'localtime') IS NOT NULL`. This only bites
+>    the **All time** range: the bounded ranges carry a `day >= ?` comparison and
+>    `NULL >= x` is `NULL`, i.e. false, so those rows already dropped out on their own.
 
 ```sql
 -- lifetime / all-time
 SELECT COUNT(*), COALESCE(SUM(total_size), 0), COALESCE(SUM(uploaded_size), 0)
 FROM downloads;
 
--- bucketed, one row per day (or month, with substr(ts,1,7))
-SELECT substr(added_at, 1, 10)          AS bucket,
+-- bucketed, one row per local day (or month, with width 7)
+SELECT substr(datetime(added_at, 'localtime'), 1, 10)   AS bucket,
        COUNT(*),
        COALESCE(SUM(total_size), 0),
        COALESCE(SUM(uploaded_size), 0)
 FROM downloads
-WHERE added_at != '' AND substr(added_at, 1, 10) >= ?   -- 'YYYY-MM-DD' cutoff
+WHERE added_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
+  AND datetime(added_at, 'localtime') IS NOT NULL
+  AND substr(datetime(added_at, 'localtime'), 1, 10) >= ?   -- 'YYYY-MM-DD' cutoff
 GROUP BY bucket
 ORDER BY bucket;
 ```
+
+The two constants in `Database` — `_STATS_LOCAL_DAY` (width 10) and
+`_STATS_LOCAL_MONTH` (width 7) — are written out verbatim in both the SELECT list and the
+WHERE clause. SQLite will not let a `WHERE` reference a `SELECT` alias, so the expressions
+are duplicated by necessity; keep them identical or the filter and the group key diverge.
+
+Because the conversion reads the host timezone, injecting `today` alone cannot make the
+SQL deterministic across machines. Tests must compute expectations with
+`datetime.fromisoformat(stamp).astimezone()` rather than hard-coding a UTC date, and one
+test asserts directly that `_STATS_LOCAL_DAY` contains `localtime` — a whitebox pin, so the
+bug still fails the suite on a machine that happens to sit on UTC+00:00 where it would
+otherwise be invisible.
 
 Proposed shape — one call, all buckets, so the popup needs a single round trip:
 
@@ -166,7 +197,7 @@ the first cut.
 
 | Graph | Data source | Verdict |
 | --- | --- | --- |
-| Daily volume (down / up) | `GROUP BY substr(added_at,1,10)` — already in §3 | **Build now** |
+| Daily volume (down / up) | `GROUP BY` on the local day (§3) — already there | **Build now** |
 | Live speed while open | in-memory samples from the manager's speed label | **Build now** |
 | Speed / volume across past sessions | not recorded anywhere | Needs a new table — §4.4 |
 
@@ -188,7 +219,14 @@ change and a deliberate one, not something to discover at runtime.
 
 ### 4.2 Tier 1 — daily volume chart
 
-Data comes from a `GROUP BY` on `substr(added_at, 1, 10)` (day) or `substr(added_at, 1, 7)` (month). Two independent pickers drive it — **Range** (last 7 days / 30 days / 12 months / all time) and **Group by** (per day / per month) — because they are independent questions: “the last year” and “per month” have to be combinable, or the chart is useless at both extremes. `Database.get_download_stats(today, since=..., bucket=...)` takes both explicitly, and the fixed summary rows are deliberately unaffected, so a chart range cannot silently redefine “this week”.
+Data comes from a `GROUP BY` on the **local** day (`_STATS_LOCAL_DAY`) or local month
+(`_STATS_LOCAL_MONTH`) — see §3 for why the stored UTC stamp has to be converted first. Two
+independent pickers drive it — **Range** (last 7 days / 30 days / 12 months / all time) and
+**Group by** (per day / per month) — because they are independent questions: “the last year”
+and “per month” have to be combinable, or the chart is useless at both extremes.
+`Database.get_download_stats(today, since=..., bucket=...)` takes both explicitly, and the
+fixed summary rows are deliberately unaffected, so a chart range cannot silently redefine
+“this week”.
 
 ```
 Downloads per day — last 30 days
@@ -303,6 +341,32 @@ what the details panel shows.
 re-queries on a timer would need to be closed on shutdown to avoid touching a deleted
 `Database`, and the numbers move slowly enough not to need it.
 
+#### 5.2.1 Ownership — one popup at a time
+
+`MainWindow._on_show_statistics()` is the only creator, and the popup is modeless
+(`show()`, not `exec()`). Two consequences that had to be handled explicitly:
+
+* **The reference must be held.** The `QAction.triggered` connection discards the
+  handler's return value, so a popup whose only reference is a local variable is
+  collectable — and its 1 Hz `QTimer` with it. `_stats_dialog` holds it for the window's
+  lifetime, and `MainWindow.closeEvent` closes it before the manager stops, so the timer can
+  never fire against a torn-down model.
+* **A second click must raise, not duplicate.** Nothing deleted the dialog on close, so
+  every toolbar click used to leave another live `QDialog` — widgets and a timer each — on
+  screen for the rest of the session, and re-opening showed a *second* window rather than
+  the existing one. The popup is now marked `WA_DeleteOnClose` and `_stats_dialog` is
+  cleared from `finished`, so the next click starts clean. A `RuntimeError` from an
+  already-destroyed C++ object is treated as "build a fresh one" rather than propagated.
+
+#### 5.2.2 Failure is logged, never silent
+
+`refresh()` catches everything around `get_download_stats()` and renders an em-dash in each
+cell, because a statistics view must not be able to take the app down. It **logs at
+`warning` with `exc_info=True`** — swallowing it silently leaves the user with an empty
+dialog and nothing for a bug report to work from, and the unused `except ... as exc` binding
+was the only sign that logging had been intended. A failed speed sample logs at `debug` and
+reads as `0 B/s`; a transient failure recovers on the next `refresh()`.
+
 ### 5.3 Status bar (optional, cheap)
 
 The status bar already has a speed label (`_status_label`, `main_window.py:947`). Adding a
@@ -335,19 +399,36 @@ All hermetic, in the style of `tests/test_database.py`. `tmp_path`-equivalent te
 | --- | --- |
 | `test_empty_database_reports_all_zeroes` | A fresh install shows zeros, not `None` or a crash |
 | `test_lifetime_totals_sum_every_row` | One row, exact byte counts |
-| `test_today_excludes_yesterday` | The `substr` cutoff is inclusive of today only |
-| `test_a_row_added_at_midnight_utc_counts_for_that_day` | The boundary case, pinned exactly |
+| `test_today_excludes_yesterday` | The cut-off is inclusive of today only |
+| `test_a_file_added_at_local_midnight_is_today` | The boundary case the UTC bug lived on |
+| `test_sqlite_and_python_agree_on_the_converted_day` | SQLite `localtime` ≡ Python `astimezone()` |
+| `test_the_day_expression_converts_to_local_time` | Whitebox pin: catches the bug on a UTC host too |
 | `test_a_row_with_no_added_at_is_excluded` | `''` must not bucket into the epoch |
+| `test_a_corrupt_timestamp_never_lands_in_a_dated_bucket` | Skipped, not crash-prone |
+| `test_a_corrupt_timestamp_still_counts_towards_lifetime` | An undatable row is still the user's download |
+| `test_a_corrupt_timestamp_never_produces_a_none_bucket_on_the_chart` | The `IS NOT NULL` guard, on the All-time range |
+| `test_the_today_headline_agrees_with_the_table_today_section` | The popup and the table cannot disagree |
 | `test_month_and_year_buckets_span_the_right_range` | Off-by-one on the cutoffs |
 | `test_completed_counts_seeding_rows` | Seeding is a completed payload that is still uploading |
 | `test_null_sums_become_zero` | A row with `NULL` size cannot produce `None` in the UI |
 | `test_unicode_and_very_long_filenames_do_not_affect_totals` | Only byte columns are summed |
-| `test_bucketing_survives_a_malformed_timestamp` | A hand-edited `added_at` is skipped, not crash-prone |
 | `test_stats_popup_renders_every_bucket` | Widget test: five rows, correct text |
-| `test_stats_action_is_in_the_toolbar_before_preferences` | The placement is a real requirement |
+| `test_a_broken_query_is_logged_at_warning` | Degrades to dashes *and* stays diagnosable |
+| `test_a_second_click_reuses_the_open_popup` | Modeless + no deletion used to stack dialogs |
+| `test_the_popup_is_marked_for_deletion_on_close` | Otherwise the C++ dialog outlives every click |
+| `test_the_grid_is_defined_exactly_once` | `_populate_grid` was defined twice; the first was dead |
+| `test_the_action_is_in_the_toolbar_immediately_before_preferences` | The placement is a real requirement |
 
-The last one matters more than it looks: "beside Preferences" is the requirement, and
-without a test the next toolbar edit silently moves it.
+The toolbar placement matters more than it looks: "beside Preferences" is the requirement,
+and without a test the next toolbar edit silently moves it.
+
+Timezone note: the conversion reads the host clock, so these fixtures are built as **UTC
+instants that resolve to a chosen local moment** (local noon → `.astimezone(utc)`), and
+expectations are computed with `datetime.fromisoformat(...).astimezone()` rather than
+hard-coded. A naive `datetime(...).isoformat()` reads as UTC in SQLite and is shifted a
+second time, which drifts past midnight on any machine far enough from Greenwich — the
+fixtures would then assert the wrong day on someone else's machine while passing on the
+author's.
 
 ---
 

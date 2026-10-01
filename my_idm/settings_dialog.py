@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QUrl, QSettings
-from PySide6.QtGui import QDesktopServices, QFontMetrics, QIcon
+from PySide6.QtGui import QDesktopServices, QFontMetrics, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -28,7 +29,9 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
-    QScrollArea,
+QScrollArea,
+    QLayout,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QVBoxLayout,
@@ -48,6 +51,7 @@ from my_idm.config import (
     DEFAULT_DOWNLOADS_DIR,
 )
 from my_idm.database import Database, APP_DIR
+from my_idm.download_model import Col
 from my_idm.external_tools import (
     launch_animepahe_cli,
     launch_animepahe_gui,
@@ -70,6 +74,164 @@ from my_idm.security import (
 
 log = logging.getLogger(__name__)
 
+#: Symbolic indices for the Preferences pages, in the order ``_setup_ui`` adds them.
+#:
+#: Every caller that wants to open a *specific* page - the six "…Settings…" Tools-menu
+#: entries in `MainWindow` - must pass one of these names, never a bare integer. A bare
+#: integer silently rots the moment a tab is inserted or split: the 6 -> 9 tab split in
+#: commit 9202ec8 left six menu items pointing at valid but wrong pages, and
+#: ``SettingsDialog.__init__`` clamps with ``0 <= initial_tab < count()`` so nothing raised
+#: and the failure was invisible. A name that does not exist is a loud ``KeyError``.
+TAB_GENERAL = "general"
+TAB_VIEWS = "views"
+TAB_TORRENT = "torrent"
+TAB_BROWSER = "browser"
+TAB_VPN = "vpn"
+TAB_TOR = "tor"
+TAB_SECURITY = "security"
+TAB_EXTERNAL_TOOLS = "external_tools"
+TAB_YOUTUBE = "youtube"
+
+#: Name -> insertion index. Order here *is* the tab order; ``SettingsDialog._setup_ui``
+#: adds the pages in exactly this sequence and the tests pin the two against each other.
+TAB_ORDER: tuple[str, ...] = (
+    TAB_GENERAL,
+    TAB_VIEWS,
+    TAB_TORRENT,
+    TAB_BROWSER,
+    TAB_VPN,
+    TAB_TOR,
+    TAB_SECURITY,
+    TAB_EXTERNAL_TOOLS,
+    TAB_YOUTUBE,
+)
+
+#: Titles as shown in the sidebar, keyed by the same names. Used by the tests and by
+#: ``MainWindow`` when it reports which page a menu item will open.
+TAB_TITLES: dict[str, str] = {
+    TAB_GENERAL: "📁 General & Downloads",
+    TAB_VIEWS: "👁️ Views & Columns",
+    TAB_TORRENT: "🧲 BitTorrent",
+    TAB_BROWSER: "🌐 Browser Integration",
+    TAB_VPN: "🛡️ VPN & Proxy",
+    TAB_TOR: "🧅 Tor",
+    TAB_SECURITY: "🛡️ Antivirus & Security",
+    TAB_EXTERNAL_TOOLS: "🌐 AnimePahe Scraper",
+    TAB_YOUTUBE: "▶️ YouTube (yt-dlp)",
+}
+
+
+from my_idm.styles import (
+    DEFAULT_THEME,
+    THEME_LABELS,
+    THEME_NAMES,
+    apply_theme,
+    normalize_theme,
+)
+
+
+def tab_index(name: str) -> int:
+    """Index of the Preferences page called *name*.
+
+    Raises ``KeyError`` for an unknown page rather than returning a plausible default: a
+    menu item pointed at the wrong page is a bug that is invisible to the user until they
+    click it, so it must not be something that compiles.
+    """
+    return TAB_ORDER.index(name)
+
+
+class _WholeRowListWidget(QListWidget):
+    """A ``QListWidget`` that owns its own height, so it always ends on a row boundary.
+
+    The downloads-table column list was laid out with a stretch, so its height was whatever
+    the dialog had left over. That lands on an arbitrary pixel value and the last visible row
+    ends up **bisected** by the bottom of the frame - a half-height checkbox and a name cut
+    through the middle.
+
+    Snapping the viewport afterwards was not enough, because it depends on
+    ``sizeHintForRow(0)`` agreeing with the height Qt actually paints. Two earlier attempts
+    were wrong in different ways: one clamped the viewport and so could never grow back, and
+    one shrank the list to make room on the page, which hid half the columns instead. Both
+    were pixel-snapping a height the layout still owned.
+
+    So the widget fixes its own height instead: ``Fixed`` vertical policy plus an explicit
+    multiple of the measured row height. The layout can no longer hand it a height that
+    bisects a row, whatever the font, DPI or window size. The remainder goes to the group box
+    and the page, which is what the surrounding scroll area is for.
+    """
+
+    #: Rows to show at the dialog's minimum height: the whole column set, which fits at the font
+    #: size this ships with. The list scrolls if a user's font makes them taller.
+    #:
+    #: Derived from ``Col.COUNT`` rather than written as a number. It used to be a literal 17,
+    #: and adding a column left the list one row short - which the existing test caught, but
+    #: only because it happened to compare against the column count.
+    DEFAULT_VISIBLE_ROWS = Col.COUNT
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._visible_rows = self.DEFAULT_VISIBLE_ROWS
+        self._clamp_to_whole_rows()
+
+    def setVisibleRows(self, rows: int) -> None:
+        """Show *rows* whole rows, dropping any partial one."""
+        self._visible_rows = max(1, int(rows))
+        self._clamp_to_whole_rows()
+
+    def _clamp_to_whole_rows(self) -> None:
+        row = self.sizeHintForRow(0)
+        if not row or row <= 0:
+            # No items yet, so the real row height is unknown. Guessing one is worse than
+            # waiting: a fallback derived from the font runs ~28px against a real ~17px, and
+            # seventeen of those inflates the page by hundreds of pixels. Leave the height to
+            # the layout until the items exist, then `relayout_rows()` fixes it.
+            self.setMinimumHeight(120)
+            return
+        self.setMinimumHeight(0)
+        # The widget is taller than its viewport by the frame plus the viewport margins, so
+        # sizing it to `row * n` cuts the last row: 17 rows of 17px is 289px of content in a
+        # 281px viewport. Add the chrome back, otherwise the fix reproduces the defect it
+        # was written for.
+        margins = self.viewportMargins()
+        chrome = 2 * self.frameWidth() + margins.top() + margins.bottom()
+        self.setFixedHeight(row * self._visible_rows + chrome)
+
+    def relayout_rows(self) -> None:
+        """Re-fix the height from the measured row height. Call after populating items."""
+        self._clamp_to_whole_rows()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Row height is only knowable once there are items and a resolved font.
+        self._clamp_to_whole_rows()
+
+    def rows_that_fit(self) -> int:
+        """How many whole rows are currently visible."""
+        row = self.sizeHintForRow(0)
+        # `sizeHintForRow` returns -1 when there are no items, and -1 is truthy, so the
+        # guard has to be `<= 0` rather than a bare truthiness check.
+        if row is None or row <= 0:
+            return 0
+        return self.viewport().height() // row
+
+    def has_partially_visible_row(self) -> bool:
+        """True when the viewport cuts a row instead of ending cleanly between two."""
+        row = self.sizeHintForRow(0)
+        if not row or row <= 0 or self.count() == 0:
+            return False
+        viewport = self.viewport().rect()
+        for index in range(self.count()):
+            rect = self.visualItemRect(self.item(index))
+            if viewport.contains(rect):
+                continue
+            if viewport.intersects(rect):
+                return True
+        return False
+
 
 class SettingsDialog(QDialog):
     """Preferences / Settings dialog for general downloads, torrent, network, Tor, security, and browser."""
@@ -85,13 +247,24 @@ class SettingsDialog(QDialog):
         browser_config: Optional[BrowserIntegrationConfig] = None,
         db: Optional[Database] = None,
         parent=None,
-        initial_tab: int = 0,
+        initial_tab=0,
         manager=None,
     ):
+        """*initial_tab* is either an index (legacy) or a ``TAB_*`` name (preferred).
+
+        A name is resolved through ``tab_index()``, which raises on an unknown page. That
+        is deliberate: an out-of-range integer is clamped away and silently shows the wrong
+        page, which is exactly the bug this parameter had.
+        """
         super().__init__(parent)
         self.setWindowTitle("Preferences & Settings")
         self.setMinimumWidth(740)
-        self.setMinimumHeight(560)
+        # 668, not 560: every page sits in a QScrollArea, and the Views page - the tallest -
+        # overflowed it at 560, so the dialog scrolled at its own minimum size. Scrolling a
+        # preferences page is legitimate; scrolling it because the minimum is too small to
+        # hold the content is not, and the symptom is the page looking cropped. 668 is
+        # measured, not guessed: see `test_the_views_page_never_needs_to_scroll`.
+        self.setMinimumHeight(668)
         self.setModal(True)
         self._db = db
         self._manager = manager if manager is not None else getattr(parent, "_manager", None)
@@ -156,8 +329,16 @@ class SettingsDialog(QDialog):
         self._populate_fields()
         self._restore_size_from_db()
 
-        if 0 <= initial_tab < self._tabs.count():
-            self._tabs.setCurrentIndex(initial_tab)
+        self._initial_tab = tab_index(initial_tab) if isinstance(initial_tab, str) else int(initial_tab)
+        if 0 <= self._initial_tab < self._tabs.count():
+            self._tabs.setCurrentIndex(self._initial_tab)
+
+    def current_tab_name(self) -> str:
+        """Name of the page currently shown, e.g. ``"tor"``. ``""`` if there are none."""
+        index = self._tabs.currentIndex()
+        if 0 <= index < len(self._tab_names):
+            return self._tab_names[index]
+        return ""
 
     def _get_db(self) -> Optional[Database]:
         if self._db is not None:
@@ -259,36 +440,6 @@ class SettingsDialog(QDialog):
             finally:
                 self._tab_sidebar.blockSignals(False)
 
-    def _size_sidebar_to_titles(self) -> None:
-        """Give the vertical tab bar a width that actually shows the titles.
-
-        A ``QTabWidget`` in the West position collapses to icon width (24 px) on its own:
-        the bar has no intrinsic width from a vertical layout, so every title is clipped
-        away and the sidebar becomes nine identical icons. Sizing it from the widest
-        measured title keeps all nine readable, and ``setExpanding(False)`` stops one long
-        entry from stretching the sidebar and squeezing the content pane.
-        """
-        bar = self._tabs.tabBar()
-        try:
-            bar.setExpanding(False)
-            # The dialog's own font, not bar.font(): a freshly created QTabBar has no
-            # resolved font until it is polished, and asking for one here raised.
-            metrics = QFontMetrics(self.font())
-            widest = max(
-                (metrics.horizontalAdvance(self._tabs.tabText(i))
-                 for i in range(self._tabs.count())),
-                default=0,
-            )
-            icon = self._tabs.iconSize().width()
-            # icon + spacing + text, plus room for the rounded frame and the selection
-            # indicator. Qt enforces its own ~200px floor for rounded vertical tabs, so
-            # anything under that is silently ignored - hence the generous padding.
-            bar.setMinimumWidth(widest + icon + 44)
-            bar.setMaximumWidth(widest + icon + 52)
-        except Exception:
-            # Purely cosmetic: never let a sidebar measurement stop Preferences opening.
-            bar.setMinimumWidth(200)
-
     def _restore_size_from_db(self):
         """Restore preferences window dimensions from database or QSettings."""
         try:
@@ -359,16 +510,23 @@ class SettingsDialog(QDialog):
         root_layout.setSpacing(14)
         root_layout.setContentsMargins(18, 18, 18, 18)
 
-        # Tabs
-        self._tabs.addTab(self._wrap_scrollable(self._create_general_tab()), "📁 General & Downloads")
-        self._tabs.addTab(self._wrap_scrollable(self._create_views_tab()), "👁️ Views & Columns")
-        self._tabs.addTab(self._wrap_scrollable(self._create_torrent_tab()), "🧲 BitTorrent")
-        self._tabs.addTab(self._wrap_scrollable(self._create_browser_tab()), "🌐 Browser Integration")
-        self._tabs.addTab(self._wrap_scrollable(self._create_vpn_tab()), "🛡️ VPN & Proxy")
-        self._tabs.addTab(self._wrap_scrollable(self._create_tor_tab()), "🧅 Tor")
-        self._tabs.addTab(self._wrap_scrollable(self._create_security_tab()), "🛡️ Antivirus & Security")
-        self._tabs.addTab(self._wrap_scrollable(self._create_external_tools_tab()), "🌐 AnimePahe Scraper")
-        self._tabs.addTab(self._wrap_scrollable(self._create_youtube_tab()), "▶️ YouTube (yt-dlp)")
+        # Tabs. The builder list, the insertion order and the sidebar titles all come from
+        # TAB_ORDER / TAB_TITLES, so `tab_index()` cannot point at the wrong page.
+        self._tab_builders = (
+            (TAB_GENERAL, self._create_general_tab),
+            (TAB_VIEWS, self._create_views_tab),
+            (TAB_TORRENT, self._create_torrent_tab),
+            (TAB_BROWSER, self._create_browser_tab),
+            (TAB_VPN, self._create_vpn_tab),
+            (TAB_TOR, self._create_tor_tab),
+            (TAB_SECURITY, self._create_security_tab),
+            (TAB_EXTERNAL_TOOLS, self._create_external_tools_tab),
+            (TAB_YOUTUBE, self._create_youtube_tab),
+        )
+        self._tab_names: list[str] = []
+        for name, builder in self._tab_builders:
+            self._tab_names.append(name)
+            self._tabs.addTab(self._wrap_scrollable(builder()), TAB_TITLES[name])
         root_layout.addWidget(self._build_tab_body())
 
         # Dialog Buttons
@@ -406,6 +564,29 @@ class SettingsDialog(QDialog):
         layout.setSpacing(14)
         layout.setContentsMargins(14, 16, 14, 14)
 
+        # -- Appearance --------------------------------------------------------
+        # Its own group, because it repaints the app and is not a table-section setting.
+        #
+        # Kept deliberately compact. This is the tallest page in the dialog, so a group box
+        # with the default spacing costs ~78px of vertical space - and every pixel it takes
+        # comes out of the column list below, which then hides columns and grows a scrollbar.
+        # That is the same defect as the cropping it was meant to avoid, so the margins and
+        # spacing are squeezed rather than the list being shrunk.
+        theme_group = QGroupBox("Appearance")
+        theme_layout = QHBoxLayout(theme_group)
+        theme_layout.setContentsMargins(8, 0, 8, 0)
+        theme_layout.setSpacing(8)
+        self._theme_combo = QComboBox()
+        for theme_id in THEME_NAMES:
+            self._theme_combo.addItem(THEME_LABELS[theme_id], theme_id)
+        self._theme_combo.setToolTip(
+            "Applies immediately - no need to restart. The Dark theme is the app's "
+            "original appearance."
+        )
+        theme_layout.addWidget(QLabel("Theme:"))
+        theme_layout.addWidget(self._theme_combo, 1)
+        layout.addWidget(theme_group)
+
         # -- Segregated view ---------------------------------------------------
         seg_group = QGroupBox("Segregated View")
         seg_layout = QVBoxLayout(seg_group)
@@ -431,16 +612,32 @@ class SettingsDialog(QDialog):
         # -- Columns -----------------------------------------------------------
         col_group = QGroupBox("Downloads Table Columns")
         col_layout = QVBoxLayout(col_group)
-        col_layout.addWidget(QLabel(
+        # The list sizes itself (Fixed height, a whole number of rows), so it cannot absorb
+        # spare space the way a stretched widget does. A QVBoxLayout with nothing stretchable
+        # *centres* its items in the leftover, which put a ~46px gap above the first row and
+        # ~37px below the last, with the group frame drawn around the empty space.
+        # SetAlignment(AlignTop) packs everything to the top, and SetMinimumSize makes the
+        # layout report its minimum as its preferred size so the group hugs its content.
+        col_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        col_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        col_group.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
+        )
+        # Word-wrap the hint. A plain QLabel in a QVBoxLayout never wraps, so in a narrow
+        # dialog the sentence is clipped at the right edge mid-word ("Use the arrow…"),
+        # which reads as a cropped control rather than as a truncated line of help text.
+        col_hint = QLabel(
             "Tick a column to show it. Use the arrows to change the left-to-right order."
-        ))
+        )
+        col_hint.setWordWrap(True)
+        col_layout.addWidget(col_hint)
 
         # List on the left, actions stacked on the right. The horizontal layout matters:
         # with the buttons underneath, the list inherited the group's full stretch and the
         # long names ("Seeding Started At", "File / Folder Name") either overflowed the row
         # or forced a horizontal scrollbar, which read as a broken control.
         col_body = QHBoxLayout()
-        self._column_list = QListWidget()
+        self._column_list = _WholeRowListWidget()
         self._column_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self._column_list.setUniformItemSizes(True)
         # Elide rather than scroll sideways or clip mid-glyph: a column name that cannot
@@ -454,8 +651,9 @@ class SettingsDialog(QDialog):
         )
         # Enough room for the longest header plus the checkbox, so nothing is elided at a
         # normal window width.
+        # Fixed height: the widget sizes itself to a whole multiple of the row height, so
+        # there is no minimum to set and nothing here can trade rows away for space.
         self._column_list.setMinimumWidth(260)
-        self._column_list.setMinimumHeight(300)
         # The first row was clipped against the viewport edge. `uniformItemSizes` makes Qt
         # size every row from the first one it measures, so without a margin the top row
         # renders half a line high and "#" reads as a smudge.
@@ -520,6 +718,14 @@ class SettingsDialog(QDialog):
             self._seg_mode_combo.setCurrentIndex(max(0, index))
         self._seg_mode_combo.setEnabled(self._seg_enabled_cb.isChecked())
 
+        # The combo, not the running palette, is the source of truth for what the user
+        # picked: reading `current_theme()` back would report the *applied* theme and so
+        # could never show a selection that is pending.
+        stored = db.get_ui_state("theme", DEFAULT_THEME) if db is not None else DEFAULT_THEME
+        self._theme_combo.setCurrentIndex(
+            max(0, self._theme_combo.findData(normalize_theme(stored)))
+        )
+
         self._column_list.clear()
         table = self._table_view()
         header = table.horizontalHeader() if table is not None else None
@@ -545,6 +751,10 @@ class SettingsDialog(QDialog):
                 Qt.CheckState.Unchecked if hidden else Qt.CheckState.Checked
             )
             self._column_list.addItem(item)
+
+        # Now that the items exist the real row height is known, so the list can size
+        # itself to a whole number of rows.
+        self._column_list.relayout_rows()
 
     def _move_selected_column(self, delta: int) -> None:
         row = self._column_list.currentRow()
@@ -581,39 +791,68 @@ class SettingsDialog(QDialog):
         section near the front, which then shifts every subsequent position - the same trap
         ``MainWindow._on_reset_view`` documents.
         """
-        from my_idm.download_model import Col
+        from my_idm.download_model import (
+            DEFAULT_SEGREGATED_MODE,
+            SEGREGATED_MODES,
+            Col,
+        )
 
+        enabled = self._seg_enabled_cb.isChecked()
+        mode = self._seg_mode_combo.currentData()
+        if mode not in SEGREGATED_MODES:
+            mode = DEFAULT_SEGREGATED_MODE
+        theme = normalize_theme(self._theme_combo.currentData())
+
+        # The database write comes first and is unconditional, because the dialog is also
+        # constructed standalone (that is how the tests use it) where there is no parent to
+        # apply anything live.
         db = self._db
         if db is not None:
-            db.set_ui_state("segregated_view_enabled", self._seg_enabled_cb.isChecked())
-            db.set_ui_state("segregated_view_mode", self._seg_mode_combo.currentData())
-
-        table = self._table_view()
-        if table is None:
-            return
-        header = table.horizontalHeader()
-
-        wanted_hidden = set()
-        order: list[int] = []
-        for position in range(self._column_list.count()):
-            item = self._column_list.item(position)
-            logical = int(item.data(Qt.ItemDataRole.UserRole))
-            order.append(logical)
-            if item.checkState() == Qt.CheckState.Unchecked:
-                wanted_hidden.add(logical)
-
-        for logical in range(Col.COUNT):
-            header.setSectionHidden(logical, logical in wanted_hidden)
-        for slot, logical in enumerate(order):
-            visual = header.visualIndex(logical)
-            if visual != slot:
-                header.moveSection(visual, slot)
+            db.set_ui_state("segregated_view_enabled", enabled)
+            db.set_ui_state("segregated_view_mode", mode)
+            db.set_ui_state("theme", theme)
 
         parent = self.parent()
-        if hasattr(parent, "_set_segregation_mode"):
-            parent._set_segregation_mode(self._seg_mode_combo.currentData())
-        elif hasattr(parent, "_on_toggle_segregated_view"):
-            parent._on_toggle_segregated_view(self._seg_enabled_cb.isChecked())
+        # Applied, not just recorded, so the choice is visible before Save and the combo
+        # cannot drift from what is on screen. Persisting first means the preference
+        # survives even if the repaint fails.
+        applied = apply_theme(QApplication.instance(), theme)
+        if hasattr(parent, "_on_theme_applied"):
+            parent._on_theme_applied(applied)
+
+        table = self._table_view()
+        if table is not None:
+            header = table.horizontalHeader()
+
+            wanted_hidden = set()
+            order: list[int] = []
+            for position in range(self._column_list.count()):
+                item = self._column_list.item(position)
+                logical = int(item.data(Qt.ItemDataRole.UserRole))
+                order.append(logical)
+                if item.checkState() == Qt.CheckState.Unchecked:
+                    wanted_hidden.add(logical)
+
+            for logical in range(Col.COUNT):
+                header.setSectionHidden(logical, logical in wanted_hidden)
+            for slot, logical in enumerate(order):
+                visual = header.visualIndex(logical)
+                if visual != slot:
+                    header.moveSection(visual, slot)
+
+        # `_on_toggle_segregated_view` is the canonical handler for the enable flag: it
+        # applies it to the model, syncs the View-menu checkmark, and owns the
+        # `segregated_view_enabled` DB write. It must run *before* the mode change, because
+        # `_set_segregation_mode` force-enables segregation when it is currently off - the
+        # previous order meant (a) saving with the box unticked silently turned segregation
+        # back on and overwrote the `False` just written, and (b) unticking it did nothing
+        # at all until the next restart, because `_set_segregation_mode` was checked first
+        # and the `_on_toggle_segregated_view` branch behind it was unreachable.
+        parent = self.parent()
+        if hasattr(parent, "_on_toggle_segregated_view"):
+            parent._on_toggle_segregated_view(enabled)
+        if enabled and hasattr(parent, "_set_segregation_mode"):
+            parent._set_segregation_mode(mode)
         if hasattr(parent, "_save_ui_state_to_db"):
             parent._save_ui_state_to_db()
 
@@ -784,6 +1023,67 @@ class SettingsDialog(QDialog):
 
         self._enable_system_tray_cb.toggled.connect(self._on_system_tray_toggled)
         layout.addWidget(tray_group)
+
+        # 6. Capture (clipboard monitoring + global hotkey)
+        capture_group = QGroupBox("Capture")
+        capture_layout = QVBoxLayout(capture_group)
+        capture_layout.setSpacing(10)
+
+        self._clipboard_monitor_cb = QCheckBox(
+            "Add downloads automatically when you copy one or more URLs"
+        )
+        self._clipboard_monitor_cb.setToolTip(
+            "Watches the clipboard and adds any text whose every line is a link. "
+            "Copying a single URL anywhere in My-IDM is ignored, so this never re-adds a "
+            "download you just copied out of the list.\n"
+            "Off by default: reading the clipboard without being asked is not something to "
+            "switch on behind a user's back."
+        )
+        capture_layout.addWidget(self._clipboard_monitor_cb)
+
+        clipboard_limit_row = QHBoxLayout()
+        clipboard_limit_row.addSpacing(24)
+        self._clipboard_max_urls_spin = QSpinBox()
+        self._clipboard_max_urls_spin.setRange(1, 200)
+        self._clipboard_max_urls_spin.setSuffix(" URLs")
+        self._clipboard_max_urls_spin.setToolTip(
+            "How many URLs one copy can add. A pasted list longer than this is truncated, so a "
+            "generated list cannot become thousands of rows at once."
+        )
+        clipboard_limit_row.addWidget(QLabel("Maximum per copy:"))
+        clipboard_limit_row.addWidget(self._clipboard_max_urls_spin)
+        clipboard_limit_row.addStretch(1)
+        capture_layout.addLayout(clipboard_limit_row)
+
+        hotkey_row = QHBoxLayout()
+        self._capture_hotkey_cb = QCheckBox("Global hotkey toggles download capture")
+        self._capture_hotkey_cb.setToolTip(
+            "Bind a system-wide key combination that turns browser interception and clipboard "
+            "capture on and off, so capture can be silenced from any application."
+        )
+        hotkey_row.addWidget(self._capture_hotkey_cb)
+
+        self._capture_hotkey_edit = QKeySequenceEdit()
+        self._capture_hotkey_edit.setMaximumWidth(160)
+        self._capture_hotkey_edit.setToolTip(
+            "The key combination to claim system-wide. It must include Ctrl, Alt or Win — a "
+            "bare key would swallow that key in every other application."
+        )
+        hotkey_row.addStretch(1)
+        hotkey_row.addWidget(self._capture_hotkey_edit)
+        capture_layout.addLayout(hotkey_row)
+
+        self._capture_hotkey_status_lbl = QLabel("")
+        self._capture_hotkey_status_lbl.setWordWrap(True)
+        self._capture_hotkey_status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        capture_layout.addWidget(self._capture_hotkey_status_lbl)
+
+        self._clipboard_monitor_cb.toggled.connect(self._on_clipboard_monitor_toggled)
+        self._capture_hotkey_cb.toggled.connect(self._on_capture_hotkey_toggled)
+        self._capture_hotkey_edit.editingFinished.connect(
+            self._on_capture_hotkey_edited
+        )
+        layout.addWidget(capture_group)
 
         # 4. Backlog Auto-Processing Locations
         backlog_group = QGroupBox("Backlog Files Auto-Processing")
@@ -1801,8 +2101,12 @@ class SettingsDialog(QDialog):
         port_row.addWidget(self._browser_status_lbl, 1)
         server_layout.addLayout(port_row)
 
-        self._browser_intercept_cb = QCheckBox("Automatically intercept downloads from Chrome")
-        self._browser_intercept_cb.setToolTip("When enabled, browser downloads are cancelled in Chrome and handed to My-IDM.")
+        self._browser_intercept_cb = QCheckBox("Take downloads from the browser")
+        self._browser_intercept_cb.setToolTip(
+            "When off, My-IDM declines every capture from the browser: automatic interception "
+            "is cancelled and a right-click capture is declined too. Same switch as the "
+            "🎯 Download Capture tray item and the global hotkey."
+        )
         server_layout.addWidget(self._browser_intercept_cb)
 
         self._browser_intercept_torrent_cb = QCheckBox("Intercept .torrent files from browser")
@@ -2056,6 +2360,20 @@ class SettingsDialog(QDialog):
         self._minimize_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
         self._close_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
         self._start_minimized_cb.setEnabled(self._general_cfg.enable_system_tray)
+        self._clipboard_monitor_cb.setChecked(
+            self._general_cfg.clipboard_monitor_enabled
+        )
+        self._clipboard_max_urls_spin.setValue(
+            self._general_cfg.clipboard_monitor_max_urls
+        )
+        self._capture_hotkey_cb.setChecked(self._general_cfg.capture_hotkey_enabled)
+        self._capture_hotkey_edit.setKeySequence(
+            QKeySequence(self._general_cfg.capture_hotkey_sequence or "Ctrl+Alt+D")
+        )
+        self._on_clipboard_monitor_toggled(
+            self._general_cfg.clipboard_monitor_enabled
+        )
+        self._on_capture_hotkey_toggled(self._general_cfg.capture_hotkey_enabled)
 
         # BitTorrent tab
         self._seeding_after_complete_cb.setChecked(self._torrent_cfg.seeding_after_complete)
@@ -2494,6 +2812,41 @@ class SettingsDialog(QDialog):
         self._close_to_tray_cb.setEnabled(checked)
         self._start_minimized_cb.setEnabled(checked)
 
+    def _on_clipboard_monitor_toggled(self, checked: bool):
+        self._clipboard_max_urls_spin.setEnabled(checked)
+
+    def _on_capture_hotkey_toggled(self, checked: bool):
+        self._capture_hotkey_edit.setEnabled(checked)
+        if checked:
+            self._validate_capture_hotkey()
+
+    def _on_capture_hotkey_edited(self):
+        self._validate_capture_hotkey()
+
+    def _validate_capture_hotkey(self) -> bool:
+        """Report whether the chosen chord is usable, inline and without a modal dialog.
+
+        Inline because this is a live-editable field, not a submit-and-wait one: a ``QMessageBox``
+        per keystroke would be hostile, and ``QKeySequenceEdit`` commits on every ``editingFinished``.
+        The validation itself is shared with the runtime registration path so the dialog cannot
+        accept a chord the hotkey layer will later refuse.
+        """
+        from my_idm.hotkey import parse_hotkey
+
+        text = self._capture_hotkey_edit.keySequence().toString()
+        if parse_hotkey(text) is None:
+            self._capture_hotkey_status_lbl.setStyleSheet("color: #e06c75; font-size: 11px;")
+            self._capture_hotkey_status_lbl.setText(
+                f"'{text}' is not a usable global hotkey — it needs Ctrl, Alt or Win."
+                if text else "Pick a key combination."
+            )
+            return False
+        self._capture_hotkey_status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        self._capture_hotkey_status_lbl.setText(
+            f"'{text}' will toggle download capture from any application."
+        )
+        return True
+
     def _on_retry_exp_toggled(self, checked: bool):
         self._retry_factor_lbl.setEnabled(checked)
         self._retry_factor_spin.setEnabled(checked)
@@ -2683,6 +3036,12 @@ class SettingsDialog(QDialog):
         self._general_cfg.minimize_to_tray = self._minimize_to_tray_cb.isChecked()
         self._general_cfg.close_to_tray = self._close_to_tray_cb.isChecked()
         self._general_cfg.start_minimized = self._start_minimized_cb.isChecked()
+        self._general_cfg.clipboard_monitor_enabled = self._clipboard_monitor_cb.isChecked()
+        self._general_cfg.clipboard_monitor_max_urls = self._clipboard_max_urls_spin.value()
+        self._general_cfg.capture_hotkey_enabled = self._capture_hotkey_cb.isChecked()
+        self._general_cfg.capture_hotkey_sequence = (
+            self._capture_hotkey_edit.keySequence().toString() or "Ctrl+Alt+D"
+        )
         self._general_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
         self._general_cfg.disk_space_check = self._disk_space_check_cb.isChecked()
         self._general_cfg.disk_space_headroom_mb = self._disk_space_headroom_spin.value()

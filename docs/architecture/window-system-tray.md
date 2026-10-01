@@ -45,6 +45,14 @@ System tray behavior is managed via [`my_idm.config.GeneralConfig`](file:///d:/P
 | `close_to_tray` | `bool` | `True` | Intercepts window close (`X` button), keeping background downloads, seeding, and browser interception active. |
 | `start_minimized` | `bool` | `False` | Launches My-IDM silently to the system tray on startup without presenting the main window. |
 | `notify_on_completion`| `bool` | `True` | Fires Windows desktop toast notifications when transfers successfully complete. |
+| `capture_hotkey_enabled` | `bool` | `False` | Binds a system-wide chord that toggles download capture. Off by default: a global hotkey claims a key combination on the whole desktop. |
+| `capture_hotkey_sequence` | `str` | `"Ctrl+Alt+D"` | The chord. Must include Ctrl, Alt or Win — a bare key would be swallowed in every other application. |
+| `clipboard_monitor_enabled` | `bool` | `False` | Adds downloads when one or more URLs are copied. Off by default: reading the clipboard without being asked is surveillance. |
+| `clipboard_monitor_max_urls` | `int` | `20` | Ceiling on URLs added by a single copy. |
+
+The last four live in a **Capture** group on the same page and are documented in
+[Capture Subsystem](capture.md), which also explains why a failed chord registration is reported
+in the status bar instead of being swallowed.
 
 ---
 
@@ -63,10 +71,31 @@ System tray behavior is managed via [`my_idm.config.GeneralConfig`](file:///d:/P
      dialog would open unreachable behind the hidden window.
    - `⏸️ Pause All Downloads`: Pauses all active, queued, and stalled transfers.
    - `▶️ Resume All Downloads`: Resumes all paused and stopped transfers.
-   - `⚙️ Preferences…`: Opens the Preferences modal directly to tab 0 (General & Downloads).
+   - `🎯 Download Capture` and `📋 Clipboard Capture`: The only **checkable** entries in the menu.
+     They show live state rather than describing an action, because a row that reads "Enable
+     capture" while capture is on is a lie the user has to guess about. `MainWindow._sync_capture_actions()`
+     mirrors the real state onto them with `blockSignals`, and is called from the tray, the
+     global hotkey and both config-changed signals, so the menu cannot drift from what capture is
+     actually doing. See [Capture Subsystem](capture.md).
+   - `⚙️ Preferences…`: Opens the Preferences modal on the General & Downloads page (`TAB_GENERAL`).
    - `🔄 Restart My-IDM`: Restarts the application in place.
    - `🚪 Exit My-IDM`: Sets `_force_exit = True` and triggers clean application termination.
-4. **Activation Handling (`_on_tray_activated`)**:
+4. **Right-Click Guard (`_RightClickGuard`)**:
+   - `QMenu` treats a right-button press + release as an **ordinary activation** of whatever
+     item is under the cursor. On this menu the bottom two rows are **Restart** and **Exit**, so
+     a reflexive right-click — the gesture people reach for after a fumbled left-click — shut
+     My-IDM down mid-download, with no confirmation.
+   - An event filter consumes `MouseButtonPress`, `MouseButtonRelease` and
+     `MouseButtonDblClick` when the button is `Qt.MouseButton.RightButton`, so a right-click can
+     only dismiss the menu. **All three** must be swallowed: filtering only the release still
+     lets the press reach `QMenu`'s activation logic, so a partial guard looks installed and
+     changes nothing.
+   - Left, middle and back, plus every non-mouse event, pass through untouched.
+   - `QMenu` has no `viewport()` in Qt 6 (it paints its own items), so the menu itself is the only
+     object that needs the filter.
+   - The guard is held in `self._tray_right_click_guard`: a filter with no Python reference would
+     be garbage-collected and silently stop filtering.
+5. **Activation Handling (`_on_tray_activated`)**:
    - Left-click (`Trigger`) or double-click (`DoubleClick`) toggles the main window (`_toggle_show_window`).
    - If the window is currently hidden or minimized, it is restored via `showNormal()`, raised, and focused with `activateWindow()`.
 
@@ -115,13 +144,61 @@ My-IDM integrates deeply with the native Windows Action Center and notification 
 
 ## 6. Reorganized Preferences Hierarchy
 
-To simplify settings discovery and reduce tab clutter, preferences tabs are structured as follows:
+To simplify settings discovery and reduce tab clutter, preferences pages are registered in
+`settings_dialog.py` as **named** constants. `TAB_ORDER` *is* the insertion order, and
+`TAB_TITLES` holds the sidebar captions:
 
-| Index | Tab Title | Contents |
-| :---: | :--- | :--- |
-| **0** | **⚙️ General & Downloads** | Default save path, segments, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, system tray behavior, and backlog auto-processing locations. |
-| **1** | **🧲 BitTorrent** | Post-download seeding switches, seeding time & ratio ceilings, upload speed throttling, torrent-to-HTTP ratio, and DHT/tracker timeout. |
-| **2** | **🌐 Browser Integration** | Loopback REST server (127.0.0.1:19582), minimum file size threshold (KB), bypassed file extensions, Chromium (Chrome/Edge/Brave) unpacked loader, and Mozilla Firefox `.xpi` packaging & guide. |
-| **3** | **🛡️ Network & Privacy** | **Unified VPN & Tor tab**: Network interface adapter binding, instant VPN Kill Switch loop, HTTP/SOCKS5 proxy settings, and Tor Onion Routing (daemon lifecycle, traffic routing switches, executable discovery). |
-| **4** | **🛡️ Antivirus & Security** | Pre-download URL extension inspection, double-extension heuristic detection, post-download Windows Defender / custom AV command execution, and quarantine. |
-| **5** | **🧰 External Tools** | AnimePahe scraper integration (CLI & GUI paths, repository root, video quality, audio language), default video player assignment, and command preview. |
+| `TAB_*` name | Index | Title | Contents |
+| :--- | :---: | :--- | :--- |
+| `TAB_GENERAL` | **0** | 📁 General & Downloads | Default save path, segments, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, free-disk-space gate, system tray behavior, and backlog auto-processing locations. |
+| `TAB_VIEWS` | **1** | 👁️ Views & Columns | Segregated-view mode (Status / Date / File Type) with its enable checkbox, plus column select and ordering for the downloads table. |
+| `TAB_TORRENT` | **2** | 🧲 BitTorrent | Post-download seeding switches, seeding time & ratio ceilings, upload speed throttling, torrent-to-HTTP ratio, and DHT/tracker timeout. |
+| `TAB_BROWSER` | **3** | 🌐 Browser Integration | Loopback REST server (127.0.0.1:19582), minimum file size threshold (KB), bypassed file extensions, Chromium (Chrome/Edge/Brave) unpacked loader, and Mozilla Firefox `.xpi` packaging & guide. |
+| `TAB_VPN` | **4** | 🛡️ VPN & Proxy | Network interface adapter binding, instant VPN Kill Switch loop, and HTTP/SOCKS5 proxy settings. |
+| `TAB_TOR` | **5** | 🧅 Tor | Tor Onion Routing: daemon lifecycle, traffic routing switches, and executable discovery. |
+| `TAB_SECURITY` | **6** | 🛡️ Antivirus & Security | Pre-download URL extension inspection, double-extension heuristic detection, post-download Windows Defender / custom AV command execution, and quarantine. |
+| `TAB_EXTERNAL_TOOLS` | **7** | 🌐 AnimePahe Scraper | AnimePahe scraper integration (CLI & GUI paths, repository root, video quality, audio language), default video player assignment, and command preview. |
+| `TAB_YOUTUBE` | **8** | ▶️ YouTube (yt-dlp) | yt-dlp integration, playlist limits, and preferred video quality. |
+
+### 6.1 Callers pass a name, never an index
+
+`MainWindow` has six Tools-menu entries that open Preferences on a *specific* page
+(`_on_open_torrent_settings`, `_on_open_browser_settings`, `_on_open_network_settings`,
+`_on_open_tor_settings`, `_on_open_security_settings`, `_on_open_external_tools_settings`),
+plus a toolbar and tray entry that open it on General.
+
+All of them pass a `TAB_*` name, resolved by `tab_index()`.
+
+> **Why this is not a style preference.** `SettingsDialog.__init__` accepted an integer and
+> clamped it with `0 <= initial_tab < self._tabs.count()`. Every index a caller could hold
+> was in range, so when a page was inserted the dialog raised nothing and simply opened
+> the **wrong page** — no exception, no log line, nothing for the user to notice until they
+> clicked. The 6 → 9 tab change left all six Tools-menu entries one or two pages off:
+> BitTorrent Settings opened Views & Columns, External Tools opened Tor, and so on.
+>
+> `tab_index()` raises `ValueError` for an unknown name instead. That converts a silent
+> wrong-page click into a loud failure the moment a page is renamed, which is the only
+> version of this bug that can be caught before release.
+>
+> `SettingsDialog` still accepts an integer (legacy, and the two no-argument callers), but
+> `initial_tab=5` meaning "AnimePahe" now means "Tor" — so anything that names a page must
+> pass the name. Tests pin the registry against the dialog's actual page order, titles and
+> count, so the two cannot drift.
+
+### 6.2 Both engines get the same `GeneralConfig`
+
+`DownloadManager.set_general_config()` pushes the new object to **both** engines:
+
+```python
+self._http.set_general_config_sync(config)
+self._torrent.set_general_config(config)
+```
+
+`SettingsDialog` hands back a *copy* of the config (`GeneralConfig.from_dict(cfg.to_dict())`),
+so an engine that is not updated keeps the object it was built with at startup and keeps
+enforcing the old settings until the next launch. That is not hypothetical: the free-disk
+space gate and `metadata_fetch_timeout_days` both live on `GeneralConfig`, so with only the
+HTTP engine wired, unticking "check free disk space" stopped HTTP downloads being checked
+while torrents carried on being refused with the previous headroom. A half-applied
+preference is the hardest kind to spot from the UI — nothing looks wrong, one subsystem
+just quietly disagrees with the setting the user can see.

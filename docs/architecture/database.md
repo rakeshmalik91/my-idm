@@ -27,7 +27,17 @@ POSIX:   ~/.my-idm/downloads.db
 ```mermaid
 erDiagram
     DOWNLOADS ||--o{ SEGMENTS : "1-to-N (Cascade Delete)"
-    
+    QUEUES ||--o{ DOWNLOADS : "1-to-N (Reassign on delete)"
+
+    QUEUES {
+        TEXT id PK "Queue id ('default' is the pinned default)"
+        TEXT name UK "Unique display name"
+        INTEGER max_concurrent "Local concurrency ceiling (0 = unlimited)"
+        INTEGER position "Order in the switcher"
+        INTEGER is_default "1 for the single default queue"
+        TEXT created_at "ISO-8601 UTC creation timestamp"
+    }
+
     DOWNLOADS {
         TEXT id PK "UUIDv4 identifier"
         TEXT url "Download source URL or magnet link"
@@ -51,7 +61,8 @@ erDiagram
         TEXT content_hash "Integrity hash (SHA-256 / MD5)"
         TEXT torrent_info_hash "BitTorrent 40-char hex info-hash"
         TEXT metadata_json "Extensible JSON attributes blob"
-        INTEGER queue_order "Priority order in active queue"
+        INTEGER queue_order "Priority order within its queue"
+        TEXT queue_id "Named queue membership (no FK; see queues.md)"
         TEXT fetching_metadata_since "ISO-8601 UTC magnet resolution start"
     }
 
@@ -105,11 +116,15 @@ The primary entity table storing download tasks, progress state, connection para
 | `queue_order`             | `INTEGER` | **NO**   | `0`        | Sequential order position in the active download queue (`1` = highest).                      |
 | `fetching_metadata_since` | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp when magnet metadata fetching began.                                  |
 | `last_seeded_at`          | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp of the most recent seed. Stamped when a seed session begins — on `TorrentEngine.start_seeding()` and on the completion→seeding transition — and backfilled from libtorrent's `last_seen_complete` only when that is strictly newer. Torrents only; empty for HTTP/YouTube rows and for every row that predates this column. |
+| `queue_id`                | `TEXT`    | **NO**   | `''`       | Membership of a named queue — see [`queues.md`](queues.md). Distinct from `queue_order`, which is priority *within* the queue. `''` is resolved to the default queue by `Database.resolve_queue_id` on every write, so this column is never observably empty. |
 
-> `last_seeded_at` was **appended** as the final column, never inserted, so every pre-existing
-> logical index is unchanged. The migration is the usual idempotent `PRAGMA table_info` guard:
-> `ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''` runs only when the
-> column is absent, so existing rows are left untouched and read back with `''`.
+> `last_seeded_at` and `queue_id` were both **appended**, never inserted, so every pre-existing
+> logical index is unchanged. The migrations are the usual idempotent `PRAGMA table_info` guard
+> (`ALTER TABLE downloads ADD COLUMN <name> ... NOT NULL DEFAULT ''`), so existing rows are left
+> untouched and read back with the default.
+> `queue_id` additionally needs a **backfill**, because `ALTER TABLE ADD COLUMN` can only take a
+> constant and never a subquery. `Database._seed_default_queue` runs it on every `open()` —
+> idempotently, and cheap — and also re-homes any row pointing at a queue that no longer exists.
 > There is deliberately **no** `source` column — the Source table column is derived from
 > `metadata_json` at display time (see [`table-views.md`](table-views.md#source-derivation)), which
 > classifies existing rows with no backfill.
@@ -166,6 +181,46 @@ A lightweight key-value store used to preserve desktop GUI layout, window coordi
 | :--- | :--- | :--- |
 | `'window_state'` | JSON Object | Stores window geometry and visual configuration: `x`, `y`, `width`, `height`, `is_maximized`, `column_widths` (mapping of column index to pixel width), `header_state` (hex-encoded QHeaderView state), `splitter_sizes` (vertical splitter proportions), `details_visible` (bool), `details_height` (int height in pixels), `details_state` (JSON object storing `current_tab`), `sort_column` (int), and `sort_order` (int Qt.SortOrder). |
 | `'preferences_dialog_size'` | JSON Object | Stores `{"width": int, "height": int}` for restoring resized preferences dialog window dimensions. |
+| `'active_queue_id'` | String | The named queue the downloads list is scoped to; `''` means **all queues**, which is the startup default. See [`queues.md`](queues.md). |
+
+---
+
+### 4. `queues` Table
+
+Added 2026-10-01. Holds each named download queue and its local concurrency budget.
+
+| Column | Type | Nullable | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `TEXT` | **NO** | *None* | **PRIMARY KEY**. UUID, except the default queue which uses the constant `DEFAULT_QUEUE_ID` so the backfill is idempotent. |
+| `name` | `TEXT` | **NO** | *None* | **UNIQUE**, case-insensitive. The default queue cannot be renamed. |
+| `max_concurrent` | `INTEGER` | **NO** | `3` | Local ceiling on simultaneous transfers. `<= 0` means **unlimited within this queue**, resolved by `QueueInfo.effective_max_concurrent`. |
+| `position` | `INTEGER` | **NO** | `0` | User-defined order in the switcher. |
+| `is_default` | `INTEGER` | **NO** | `0` | Exactly one row has `1`. Pinned first by `get_queues()`, and protected from rename/delete. |
+| `color` | `TEXT` | **NO** | `''` | Swatch colour as `#rrggbb`, appended 2026-10-01. Drives the swatch in the downloads list. Seeded distinctly per queue and never overwritten once set; `normalize_queue_color` rejects junk so an unparseable value cannot paint as an invisible swatch. See [`queues.md`](queues.md). |
+| `created_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC creation timestamp. |
+
+Deliberately **no foreign key** from `downloads.queue_id`: `downloads` is created earlier in the
+same `executescript`, SQLite resolves a forward `REFERENCES` only for a `DEFERRABLE` constraint,
+and deletion is handled transactionally by `Database.delete_queue` anyway (reassign to default,
+then delete). Full rationale in [`queues.md`](queues.md).
+
+Three rows are seeded on every open (`_seed_default_queue`), all with `INSERT OR IGNORE` and fixed
+ids so the `queue_id = ''` backfill stays idempotent:
+
+| `id` | `name` | `max_concurrent` | Deletable? |
+| :--- | :--- | :---: | :--- |
+| `default` | `Default` | `0` | No |
+| `queue-animepahe` | `AnimePahe` | `0` | No |
+| `queue-youtube` | `YouTube` | `0` | No |
+
+The two source queues exist so AnimePahe and YouTube downloads are separable with no setup; see
+[Source queues](queues.md#source-queues). `max_concurrent = 0` means unlimited within the queue —
+they are for organisation, not capping. They can be renamed and re-limited, but deleting one
+would silently send that whole source to Default and look like the routing had stopped working.
+
+`queues.color` is added by its own `PRAGMA table_info(queues)` guard rather than by the
+`CREATE TABLE IF NOT EXISTS` above it: that statement will not add a column to a table that
+already exists, so a database created before queues had a colour needs the guard.
 
 ---
 
@@ -185,6 +240,10 @@ CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash
 
 -- Fast retrieval and sorting of active queue ordering
 CREATE INDEX IF NOT EXISTS idx_downloads_queue_order ON downloads(queue_order);
+
+-- Per-queue active-count aggregation for the dispatch gate. Without this the manager's
+-- grouped COUNT(*) scans the whole table on every queue tick.
+CREATE INDEX IF NOT EXISTS idx_downloads_queue ON downloads(queue_id);
 ```
 
 ---
@@ -329,13 +388,29 @@ if "uploaded_size" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN uploaded_size INTEGER NOT NULL DEFAULT 0")
 if "last_seeded_at" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''")
+if "queue_id" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN queue_id TEXT NOT NULL DEFAULT ''")
 ```
 
 Every guard is **additive and idempotent** — it runs only when the column is missing, and a `NOT NULL
 DEFAULT` keeps existing rows valid without a backfill. New columns are always **appended** (never
 inserted mid-table) so that logical column indices stay stable for the UI state persisted in
 `ui_state`.
+
+`queue_id` is the one column that needs a **second statement**. `ALTER TABLE ADD COLUMN` accepts
+only a constant default, never a subquery, so `''` stands in for "the default queue" and the
+real id is written afterwards by `Database._seed_default_queue`:
+
+```sql
+INSERT OR IGNORE INTO queues (id, name, ...) VALUES ('default', 'Default', ...);
+UPDATE downloads SET queue_id = 'default' WHERE queue_id = '' OR queue_id IS NULL;
+UPDATE downloads SET queue_id = 'default' WHERE queue_id NOT IN (SELECT id FROM queues);
 ```
+
+All four statements are idempotent, so `_seed_default_queue` runs on **every** `open()` rather
+than behind a one-shot migration flag. The third statement is the repair path: it re-homes rows
+whose queue was deleted out from under them, which would otherwise be invisible to every
+queue-scoped read.
 
 ### 2. Orphaned Segment Pruning
 Cleans up any dangling segment records whose parent download was removed:
@@ -370,7 +445,7 @@ db.open()
 
 ### Download Operations
 
-- `add_download(entry: DownloadEntry) -> DownloadEntry`: Inserts a new record, generates a UUID if missing, sets `added_at`, and assigns the next queue order position.
+- `add_download(entry: DownloadEntry) -> DownloadEntry`: Inserts a new record, generates a UUID if missing, sets `added_at`, normalises `queue_id` to a real queue, and assigns the next queue order position within that queue.
 - `update_download(entry: DownloadEntry)`: Persists all mutable columns for the given entry ID.
 - `update_progress(download_id: str, downloaded_size: int, status: str | None = None)`: Efficient single-query progress update.
 - `update_status(download_id: str, status: str, error_message: str = "")`: Updates status, sets `completed_at` (if completed) or `last_tried_at` (if downloading), and commits.
@@ -379,14 +454,34 @@ db.open()
 - `move_download(download_id: str, new_save_path: str, new_file_path: str)`: Updates directory and full path locations for relocated files.
 - `get_recent_save_paths(limit: int = 5) -> list[str]`: Retrieves distinct recent save paths ordered by usage recency.
 - `get_download(download_id: str) -> Optional[DownloadEntry]`: Retrieves a single download by ID.
-- `get_all_downloads() -> list[DownloadEntry]`: Retrieves all downloads ordered by `added_at DESC`.
+- `get_all_downloads(queue_id: str = ALL_QUEUES) -> list[DownloadEntry]`: All downloads ordered by `added_at DESC`. **The default is every queue** — history is the product, so a caller that did not ask for a scope must not silently get a subset.
 - `find_by_url(url: str) -> Optional[DownloadEntry]`: Searches for an existing entry with matching URL.
 - `find_by_info_hash(info_hash: str) -> Optional[DownloadEntry]`: Searches for an existing entry with matching BitTorrent info-hash.
 
 ### Queue Ordering
 
-- `get_next_queue_order() -> int`: Returns `MAX(queue_order) + 1`.
+- `get_next_queue_order(queue_id: str = "") -> int`: Returns `MAX(queue_order) + 1` **within one queue**, so promoting a row to position 1 of its own queue does not push everything in Default down by one.
 - `update_queue_order(download_id: str, new_order: int)`: Sets an explicit queue order position.
+
+### Named Queues
+
+Full semantics in [`queues.md`](queues.md).
+
+- `get_queues() -> list[QueueInfo]`: Default first, then by user `position`.
+- `get_queue(queue_id: str) -> Optional[QueueInfo]`: Blank or unknown resolves to the default queue, never `None`.
+- `get_queue_by_name(name: str) -> Optional[QueueInfo]`: Case-insensitive lookup by display name. Backlog files name queues rather than ids, because a uuid in a hand-editable text file would be unusable. Returns `None` for an unknown name rather than creating one.
+- `get_default_queue() -> QueueInfo`.
+- `create_queue(name: str, max_concurrent: int = 3) -> tuple[bool, str]`: Refuses a blank or case-insensitively duplicate name.
+- `rename_queue(queue_id: str, name: str) -> tuple[bool, str]`: The default queue cannot be renamed.
+- `set_queue_max_concurrent(queue_id: str, max_concurrent: int)`: `<= 0` means unlimited within the queue.
+- `set_queue_color(queue_id: str, color: str) -> tuple[bool, str]`: Normalises via `normalize_queue_color` and refuses a value that is not a colour, so an unparseable swatch cannot be stored.
+- `create_queue(name, max_concurrent=3, color="")`: A blank `color` takes the first unused entry from `QUEUE_COLOR_PALETTE`, so a new queue is never invisible in the downloads list.
+- `move_queue_position(queue_id: str, delta: int)`: Reorder in the switcher; the default stays pinned.
+- `delete_queue(queue_id: str) -> tuple[bool, str]`: Re-homes the queue's downloads to Default **in the same transaction as the delete**, then deletes. Downloads are never deleted with their queue. The default queue cannot be deleted.
+- `reassign_queue(download_ids: list[str], queue_id: str) -> int`: Preserves the caller's order and **continues** the target queue's numbering rather than restarting at 1, which would collide with rows already there.
+- `get_active_counts_by_queue() -> dict[str, int]`: One `GROUP BY` over the transferring statuses. Queues with nothing active are absent from the mapping; a missing key means `0`, not "unknown".
+- `get_queue_download_counts() -> dict[str, int]`: Total rows per queue, for the switcher's per-queue counts.
+- `resolve_queue_id(queue_id: str) -> str`: Maps blank or dangling onto the default queue. Called from `add_download` / `update_download`, which is why no reader ever has to treat `''` as meaningful.
 - `swap_queue_order(id1: str, id2: str)`: Swaps queue order positions between two entries.
 
 ### Segment Operations

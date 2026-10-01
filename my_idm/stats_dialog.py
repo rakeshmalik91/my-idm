@@ -11,6 +11,7 @@ everything else in this codebase draws its own widgets the same way.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from typing import Optional, Sequence
 
@@ -31,6 +32,9 @@ from PySide6.QtWidgets import (
 
 from my_idm.database import Database, DownloadStats, StatsSnapshot
 from my_idm.styles import Colors
+
+log = logging.getLogger(__name__)
+
 
 def _fmt_bytes(value: int) -> str:
     """Short human size for the grid: '1.2 GB'. Exact counts live in the tooltip."""
@@ -405,6 +409,10 @@ class StatisticsPopup(QDialog):
         Qt thread. If that ever stops being true the fix is to move this onto a
         ``QThreadPool`` job - the API below would not change, because ``today`` is already
         injected.
+
+        A failure renders an em-dash in every cell rather than propagating, but it is
+        *logged*: swallowing a broken query silently leaves the user with an empty dialog
+        and nothing to report, which is how a stats view becomes impossible to diagnose.
         """
         since = self._since_for_range()
         bucket = self.bucket_selection()
@@ -412,7 +420,8 @@ class StatisticsPopup(QDialog):
             snap = self._db.get_download_stats(
                 self._resolve_today(), since=since, bucket=bucket
             )
-        except Exception as exc:  # a stats view must never be able to break the app
+        except Exception:
+            log.warning("Could not read download statistics", exc_info=True)
             snap = None
         self._snapshot = snap
         self._populate_grid()
@@ -455,49 +464,15 @@ class StatisticsPopup(QDialog):
         total.setStyleSheet(f"color: {Colors.ACCENT};")
         self._grid.addWidget(total, len(rows), 0, 1, 1)
 
-    def _populate_grid(self) -> None:
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-        snap = self._snapshot
-        rows = (
-            ("Today", snap.today if snap else None),
-            ("This week", snap.week if snap else None),
-            ("This month", snap.month if snap else None),
-            ("This year", snap.year if snap else None),
-            ("All time", snap.lifetime if snap else None),
-        )
-        for index, (label, stats) in enumerate(rows):
-            name = QLabel(label)
-            name.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
-            self._grid.addWidget(name, index, 0)
-            if stats is None:
-                self._grid.addWidget(QLabel("—"), index, 1)
-                continue
-            value = QLabel(f"{_fmt_bytes(stats.downloaded)} down  ·  {_fmt_bytes(stats.uploaded)} up")
-            value.setToolTip(
-                f"downloaded: {stats.downloaded:,} bytes\n"
-                f"uploaded: {stats.uploaded:,} bytes\n"
-                f"files: {stats.count}  ·  completed: {stats.completed}"
-            )
-            self._grid.addWidget(value, index, 1)
-
-        total = QLabel(
-            f"<b>{snap.lifetime.completed:,} files completed</b>"
-            if snap else "<b>—</b>"
-        )
-        total.setStyleSheet(f"color: {Colors.ACCENT};")
-        self._grid.addWidget(total, len(rows), 0, 1, 1)
-
     def _sample_speed(self) -> None:
         if self._speed_provider is None:
             return
         try:
             self._sparkline.add_sample(int(self._speed_provider() or 0))
         except Exception:
+            # One dropped sample is not worth a dialog or a stack trace; the next tick
+            # samples again. A permanently broken provider shows as a flat line at zero.
+            log.debug("Speed sample failed", exc_info=True)
             self._sparkline.add_sample(0)
 
     # -- live speed timer ----------------------------------------------------

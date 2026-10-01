@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +26,7 @@ from my_idm.database import (
     DownloadStats,
     StatsSnapshot,
 )
+from my_idm.settings_dialog import TAB_GENERAL
 from my_idm.stats_dialog import (
     SparklineWidget,
     StatisticsPopup,
@@ -42,8 +43,27 @@ GB = 1024 ** 3
 MB = 1024 ** 2
 
 
+def local_day(days_back: int) -> date:
+    """The *local* calendar day ``days_back`` days before :data:`TODAY`."""
+    return TODAY - timedelta(days=days_back)
+
+
 def iso(days_back: int) -> str:
-    return (datetime(2026, 9, 30, 12, 0, 0) - timedelta(days=days_back)).isoformat()
+    """A timestamp ``days_back`` days back, in the format production actually writes.
+
+    ``added_at`` is written by ``Database._now_iso()`` in **UTC**, and the statistics
+    queries re-base each row to local time with ``datetime(added_at, 'localtime')``
+    before bucketing. These fixtures therefore have to be UTC instants too, otherwise the
+    suite asserts against the wrong day on every host that is not itself on UTC.
+
+    Local *noon* on the target day is converted to UTC here, so the round trip lands back
+    on exactly that local calendar day on any host, whatever the offset and whatever DST
+    is doing that week. A plain naive ``datetime(...).isoformat()`` reads as UTC in SQLite
+    and is then shifted a second time, which drifts past midnight on any machine far
+    enough east or west of Greenwich.
+    """
+    local_noon = datetime.combine(local_day(days_back), time(12, 0))
+    return local_noon.astimezone(timezone.utc).isoformat()
 
 
 # ===========================================================================
@@ -298,6 +318,303 @@ class TestStatsBuckets(StatsTestCase):
             TODAY, since=datetime(2026, 9, 29, 12, 0), bucket="day"
         )
         self.assertEqual(len(snap.series), 1)
+
+
+class TestStatsBucketByLocalDay(StatsTestCase):
+    """The buckets are labelled in the user's calendar; the rows are stamped in UTC.
+
+    ``added_at`` comes from ``_now_iso()``, which is UTC, while the cut-offs are built
+    from a local ``today``. Slicing the stored string therefore compared a **UTC** date
+    against a **local** one, so "Today" was a day out for part of every day east of UTC:
+    at 02:00 in UTC+05:30 a file added two minutes earlier is stamped ``2026-09-29T20:30``
+    and landed in *Yesterday*. The queries now re-base each row with SQLite's
+    ``localtime`` - the same conversion ``download_model.get_entry_date_category`` does
+    with ``astimezone()`` - before bucketing.
+
+    Because the conversion reads the host's timezone, expectations here are computed in
+    Python from the same stored value rather than hard-coded. That keeps every test valid
+    on any machine while still failing if the conversion is removed.
+    """
+
+    def _local_day_of(self, stored: str) -> str:
+        return datetime.fromisoformat(stored).astimezone().date().isoformat()
+
+    def _sql_day_of(self, db, stored: str) -> str:
+        return db._conn.execute(
+            f"SELECT {Database._STATS_LOCAL_DAY} FROM downloads WHERE added_at = ?",
+            (stored,),
+        ).fetchone()[0]
+
+    def _sql_month_of(self, db, stored: str) -> str:
+        return db._conn.execute(
+            f"SELECT {Database._STATS_LOCAL_MONTH} FROM downloads WHERE added_at = ?",
+            (stored,),
+        ).fetchone()[0]
+
+    def add_at(self, eid, local_day, hour=12, minute=0, total=1 * GB):
+        stored = datetime.combine(local_day, time(hour, minute)).astimezone(
+            timezone.utc
+        ).isoformat()
+        self.add(eid, (TODAY - local_day).days, total=total)
+        self.db._conn.execute(
+            "UPDATE downloads SET added_at = ? WHERE id = ?", (stored, eid)
+        )
+        return stored
+
+    def test_the_day_expression_converts_to_local_time(self):
+        """Guards the regression on hosts where a UTC clock would hide it.
+
+        A bare ``substr(added_at, 1, 10)`` comparison *is* the defect; requiring the
+        conversion in the expression makes the test fail even at UTC+00:00.
+        """
+        expr = Database._STATS_LOCAL_DAY
+        self.assertIn(
+            "localtime", expr,
+            "the day bucket must re-base the stored UTC stamp to local time",
+        )
+        self.assertNotIn(
+            "added_at, 1, 10", expr,
+            "a bare slice of the stored string compares a UTC date to a local cut-off",
+        )
+
+    def test_the_month_expression_converts_too(self):
+        self.assertIn("localtime", Database._STATS_LOCAL_MONTH)
+
+    def test_sqlite_and_python_agree_on_the_converted_day(self):
+        """Pins the conversion contract whatever the host offset is."""
+        for day in (TODAY, TODAY - timedelta(days=1), TODAY - timedelta(days=40)):
+            for hour in (0, 6, 12, 18, 23):
+                with self.subTest(day=day, hour=hour):
+                    stored = self.add_at(f"agree-{day}-{hour}", day, hour, total=1)
+                    self.assertEqual(
+                        self._sql_day_of(self.db, stored),
+                        self._local_day_of(stored),
+                        "SQLite's localtime and Python's astimezone must agree",
+                    )
+
+    def test_the_day_and_month_expressions_share_a_prefix(self):
+        stored = self.add_at("prefix", TODAY, 12, total=1)
+        self.assertEqual(
+            self._sql_day_of(self.db, stored)[:7], self._sql_month_of(self.db, stored)
+        )
+
+    def test_moments_across_today_all_count_in_today(self):
+        stamps = [
+            self.add_at(f"t{hour}", TODAY, hour, total=1 * GB)
+            for hour in (0, 6, 12, 18, 23)
+        ]
+        snap = self.stats()
+        expected = sum(
+            1 * GB for stamp in stamps
+            if self._local_day_of(stamp) == TODAY.isoformat()
+        )
+        self.assertEqual(snap.today.downloaded, expected)
+        self.assertEqual(snap.today.count, expected // (1 * GB))
+
+    def test_a_file_added_at_local_midnight_is_today(self):
+        """The boundary case the bug was about: local 00:05, stored as the previous UTC day."""
+        stored = self.add_at("midnight", TODAY, 0, 5, total=4096)
+        snap = self.stats()
+        self.assertEqual(
+            snap.today.count, 1,
+            "a file added at 00:05 local is Today whatever its UTC stamp says "
+            f"(stored {stored}, local day {self._local_day_of(stored)})",
+        )
+
+    def test_a_file_added_at_2355_the_previous_local_day_is_not_today(self):
+        stored = self.add_at("late", TODAY - timedelta(days=1), 23, 55, total=2048)
+        snap = self.stats()
+        self.assertEqual(
+            snap.today.count, 0,
+            f"23:55 local on the previous day is not Today (stored {stored})",
+        )
+        self.assertEqual(snap.week.count, 1, "it is still inside the rolling week")
+
+    def test_the_series_buckets_by_the_local_day(self):
+        morning = self.add_at("morning", TODAY, 6, total=1 * GB)
+        evening = self.add_at(
+            "evening", TODAY - timedelta(days=1), 23, total=1 * GB
+        )
+        snap = self.stats(since=TODAY - timedelta(days=5))
+        self.assertEqual(
+            {label for label, _ in snap.series},
+            {self._local_day_of(morning), self._local_day_of(evening)},
+        )
+
+    def test_the_month_series_buckets_by_the_local_month(self):
+        self.add_at("sep", TODAY, 12, total=1 * GB)
+        self.add_at("aug", date(2026, 8, 31), 12, total=1 * GB)
+        snap = self.stats(since=date(2026, 7, 1), bucket="month")
+        labels = [label for label, _ in snap.series]
+        self.assertTrue(all(len(label) == 7 for label in labels), labels)
+        self.assertEqual(len(labels), 2, labels)
+
+    def test_the_month_series_is_chronological_and_complete(self):
+        for day in (date(2026, 7, 1), date(2026, 8, 15), date(2026, 9, 15)):
+            self.add_at(f"m{day}", day, 12, total=1 * GB)
+        snap = self.stats(since=date(2026, 1, 1), bucket="month")
+        labels = [label for label, _ in snap.series]
+        self.assertEqual(labels, sorted(labels), "the chart series must be chronological")
+        self.assertEqual(sum(s.count for _l, s in snap.series), 3)
+
+    def test_the_today_headline_agrees_with_the_table_today_section(self):
+        """End to end: two features answer "what is today?" and must agree.
+
+        ``DownloadTableModel`` in date mode converts through ``astimezone()``; the
+        statistics queries convert through SQLite's ``localtime``. Nothing else in the
+        suite would notice if only one of them stopped converting.
+        """
+        from my_idm.download_model import SECTION_DATE_TODAY, DownloadTableModel
+
+        now = datetime.now().astimezone()
+        day = now.date()
+        for index, hour in enumerate((0, 8, 13, 22)):
+            stored = datetime.combine(day, time(hour)).astimezone(
+                timezone.utc
+            ).isoformat()
+            self.db.add_download(DownloadEntry(
+                id=f"real{index}", url=f"https://example.com/{index}",
+                filename=f"{index}.bin", save_path="C:/t",
+                total_size=1024, downloaded_size=1024, status="completed",
+                added_at=stored,
+            ))
+        yesterday = datetime.combine(
+            day - timedelta(days=1), time(12)
+        ).astimezone(timezone.utc).isoformat()
+        self.db.add_download(DownloadEntry(
+            id="old", url="https://example.com/old", filename="old.bin",
+            save_path="C:/t", total_size=999, downloaded_size=999,
+            status="completed", added_at=yesterday,
+        ))
+
+        model = DownloadTableModel()
+        try:
+            model.load_entries(self.db.get_all_downloads())
+            model.set_segregated_view(True, "date")
+            in_today, current = 0, None
+            for row in range(model.rowCount()):
+                header = model.get_section_header(row)
+                if header is not None:
+                    current = header.section_id
+                elif current == SECTION_DATE_TODAY:
+                    in_today += 1
+            self.assertGreater(
+                in_today, 0, "precondition: rows landed in the table's Today section"
+            )
+        finally:
+            model.deleteLater()
+
+        snap = self.db.get_download_stats(now.date())
+        self.assertEqual(
+            snap.today.count, in_today,
+            "the statistics 'Today' count and the table's Today section must match",
+        )
+        self.assertEqual(snap.today.downloaded, in_today * 1024)
+
+
+class TestStatsRejectsUnbucketableTimestamps(StatsTestCase):
+    """A row that cannot be placed on a calendar must not fabricate a bucket.
+
+    Values are written straight through SQL on purpose: ``Database.add_download`` backfills
+    a blank ``added_at`` with the current time - correct for a new download - so a corrupt
+    stamp can only reach the table from an older build or by hand, which is the case here.
+    """
+
+    BAD = ("", "not-a-date", "2026-13-45T00:00:00+00:00", "0000-00-00", "x" * 40)
+
+    def fresh_db_with(self, eid, added_at):
+        db = Database(":memory:")
+        self.addCleanup(db.close)
+        db.open()
+        db.add_download(DownloadEntry(
+            id=eid, url=f"https://example.com/{eid}", filename=f"{eid}.bin",
+            save_path="C:/t", total_size=1024,
+        ))
+        db._conn.execute(
+            "UPDATE downloads SET added_at = ? WHERE id = ?", (added_at, eid)
+        )
+        return db
+
+    def test_a_corrupt_timestamp_never_lands_in_a_dated_bucket(self):
+        for index, stamp in enumerate(self.BAD):
+            with self.subTest(stamp=stamp):
+                snap = self.fresh_db_with(f"bad{index}", stamp).get_download_stats(TODAY)
+                for name in ("today", "week", "month", "year"):
+                    self.assertEqual(
+                        getattr(snap, name).count, 0,
+                        f"{stamp!r} was bucketed into {name!r}",
+                    )
+
+    def test_a_corrupt_timestamp_still_counts_towards_lifetime(self):
+        for index, stamp in enumerate(self.BAD):
+            with self.subTest(stamp=stamp):
+                snap = self.fresh_db_with(f"badl{index}", stamp).get_download_stats(TODAY)
+                self.assertEqual(
+                    snap.lifetime.count, 1,
+                    "a hand-written row is still a download the user has",
+                )
+                self.assertEqual(snap.lifetime.downloaded, 1024)
+
+    def test_a_corrupt_timestamp_never_produces_a_none_bucket_on_the_chart(self):
+        """A ``GROUP BY`` on a NULL expression still forms a group, labelled "None".
+
+        ``since=None`` - the **All time** range - is the only case that regresses. The
+        bounded ranges carry a ``day >= ?`` comparison and ``NULL >= x`` is NULL, which is
+        false, so those rows drop out on their own; All time has no comparison to exclude
+        them, so only the explicit parse check keeps them out.
+        """
+        for index, stamp in enumerate(self.BAD):
+            with self.subTest(stamp=stamp):
+                db = self.fresh_db_with(f"bads{index}", stamp)
+                for bucket in ("day", "month"):
+                    snap = db.get_download_stats(TODAY, since=None, bucket=bucket)
+                    labels = [label for label, _ in snap.series]
+                    self.assertNotIn(
+                        "None", labels,
+                        f"{stamp!r} produced a literal 'None' bucket on the "
+                        f"{bucket} chart: {labels}",
+                    )
+                    self.assertNotIn("", labels)
+
+    def test_a_corrupt_timestamp_is_excluded_from_a_bounded_chart_too(self):
+        for index, stamp in enumerate(self.BAD):
+            with self.subTest(stamp=stamp):
+                db = self.fresh_db_with(f"badsb{index}", stamp)
+                for bucket in ("day", "month"):
+                    snap = db.get_download_stats(
+                        TODAY, since=date(2020, 1, 1), bucket=bucket
+                    )
+                    labels = [label for label, _ in snap.series]
+                    self.assertNotIn("None", labels)
+                    self.assertNotIn("", labels)
+
+    def test_a_corrupt_timestamp_does_not_hide_a_valid_one(self):
+        db = self.fresh_db_with("mixed-bad", "not-a-date")
+        stored = datetime.combine(TODAY, time(12)).astimezone(
+            timezone.utc
+        ).isoformat()
+        db.add_download(DownloadEntry(
+            id="mixed-good", url="https://example.com/y", filename="y.bin",
+            save_path="C:/t", total_size=2048, added_at=stored,
+        ))
+        snap = db.get_download_stats(TODAY)
+        self.assertEqual(snap.today.count, 1)
+        self.assertEqual(snap.today.downloaded, 2048)
+        self.assertEqual(snap.lifetime.count, 2)
+        self.assertEqual(
+            [label for label, _ in snap.series],
+            [datetime.fromisoformat(stored).astimezone().date().isoformat()],
+        )
+
+    def test_the_lifetime_total_counts_every_row(self):
+        db = self.fresh_db_with("bad-only", "not-a-date")
+        db.add_download(DownloadEntry(
+            id="good", url="https://example.com/g", filename="g.bin",
+            save_path="C:/t", total_size=1024, added_at=iso(0),
+        ))
+        snap = db.get_download_stats(TODAY)
+        self.assertEqual(snap.lifetime.count, 2)
+        self.assertEqual(snap.lifetime.downloaded, 2048)
 
 
 class TestStatsValueObjects(unittest.TestCase):
@@ -677,6 +994,103 @@ class TestStatisticsPopup(PopupTestCase):
         self.assertIsNone(popup._timer)
 
 
+class TestStatisticsPopupFailureHandling(PopupTestCase):
+    """A stats view must never take the app down - but it must stay diagnosable.
+
+    ``refresh()`` catches everything so a broken query cannot crash the app. That is only
+    safe if the failure is *logged*: swallowing it silently leaves the user with a dialog
+    full of em-dashes and nothing to report, which is how a stats view becomes impossible
+    to diagnose after the fact.
+    """
+
+    @staticmethod
+    def _broken_db():
+        def boom(*_a, **_kw):
+            raise RuntimeError("no such column: downloads.gone")
+
+        return type("Broken", (), {"get_download_stats": staticmethod(boom)})()
+
+    def test_a_broken_query_is_logged_at_warning(self):
+        popup = self.popup()
+        popup._db = self._broken_db()
+        with self.assertLogs("my_idm.stats_dialog", level="WARNING"):
+            popup.refresh()
+        self.assertIsNone(popup.snapshot())
+
+    def test_a_broken_query_renders_dashes_rather_than_raising(self):
+        popup = self.popup()
+        popup._db = self._broken_db()
+        with self.assertLogs("my_idm.stats_dialog", level="WARNING"):
+            popup.refresh()
+        self.assertEqual(popup._chart.days(), ())
+        self.assertEqual(
+            popup._grid.itemAtPosition(0, 1).widget().text(), "—",
+            "an unreadable bucket must be visibly empty, not silently wrong",
+        )
+
+    def test_recovery_after_a_transient_failure(self):
+        """The next refresh must repopulate once the database is readable again."""
+        popup = self.popup()
+        broken = self._broken_db()
+        popup._db = broken
+        with self.assertLogs("my_idm.stats_dialog", level="WARNING"):
+            popup.refresh()
+        self.assertIsNone(popup.snapshot())
+        popup._db = self.db
+        popup.refresh()
+        self.assertIsInstance(popup.snapshot(), StatsSnapshot)
+
+    def test_a_broken_speed_provider_logs_and_samples_zero(self):
+        def _boom():
+            raise RuntimeError("engine gone")
+
+        popup = self.popup(speed_provider=_boom)
+        before = len(popup._sparkline.samples())
+        with self.assertLogs("my_idm.stats_dialog", level="DEBUG"):
+            popup._sample_speed()
+        after = popup._sparkline.samples()
+        self.assertEqual(len(after), before + 1, "one sample per call, always")
+        self.assertEqual(after[-1], 0, "a failed sample reads as zero, not a crash")
+
+    def test_a_speed_provider_returning_junk_samples_zero(self):
+        popup = self.popup(speed_provider=lambda: "not a number")
+        before = len(popup._sparkline.samples())
+        with self.assertLogs("my_idm.stats_dialog", level="DEBUG"):
+            popup._sample_speed()
+        self.assertEqual(popup._sparkline.samples()[-1], 0)
+        self.assertGreater(len(popup._sparkline.samples()), before)
+
+    def test_a_speed_provider_returning_none_samples_zero(self):
+        popup = self.popup(speed_provider=lambda: None)
+        popup._sample_speed()
+        self.assertEqual(popup._sparkline.samples()[-1], 0)
+
+    def test_a_working_speed_provider_records_the_real_value(self):
+        popup = self.popup(speed_provider=lambda: 4096)
+        popup._sample_speed()
+        self.assertIn(4096, popup._sparkline.samples())
+
+    def test_a_degenerate_geometry_does_not_raise(self):
+        """Width/height of zero would divide by zero in the paint code."""
+        popup = self.popup()
+        popup.resize(0, 0)
+        popup.refresh()
+        QApplication.processEvents()
+        self.assertEqual(popup.snapshot(), popup.snapshot())
+
+    def test_the_grid_is_defined_exactly_once(self):
+        """A duplicated method shadows the first silently; see the module docstring."""
+        import inspect
+
+        from my_idm.stats_dialog import StatisticsPopup
+
+        source = inspect.getsource(StatisticsPopup)
+        self.assertEqual(
+            source.count("def _populate_grid"), 1,
+            "_populate_grid was defined twice; the first copy was dead code",
+        )
+
+
 class TestToolbarAction(unittest.TestCase):
     """The Statistics button sits beside Preferences, which is the stated requirement."""
 
@@ -702,7 +1116,53 @@ class TestToolbarAction(unittest.TestCase):
 
     def test_the_action_exists(self):
         self.assertTrue(hasattr(self.window, "_act_stats"))
-        self.assertIn("Statistics", self.window._act_stats.text())
+        self.assertIn("Stats", self.window._act_stats.text())
+
+    def test_the_toolbar_spells_the_label_out_in_full(self):
+        """Statistics stays abbreviated; Preferences does not.
+
+        "Statistics…" was shortened to "Stats…" because the button sat next to the playback
+        controls and ate a third of the strip. "Preferences…" was abbreviated to "Prefs…" for
+        the same reason but has since been spelled out in full - the toolbar has the room, and
+        the terse form read as a different feature from the Tools menu entry of the same name.
+        """
+        self.assertEqual(self.window._act_stats.text(), "Stats…")
+        self.assertEqual(self.window._act_preferences.text(), "Preferences…")
+
+    def test_the_tools_menu_keeps_the_long_label(self):
+        tools = next(
+            top.menu() for top in self.window.menuBar().actions()
+            if top.menu() is not None and top.text().replace("&", "") == "Tools"
+        )
+        texts = [a.text() for a in tools.actions()]
+        self.assertIn("Preferences…", texts)
+        self.assertIsNot(
+            tools.actions()[0], self.window._act_preferences,
+            "the Tools menu must use its own action, not the toolbar's, so that Ctrl,+ "
+            "is registered exactly once",
+        )
+
+    def test_both_preferences_actions_open_the_same_page(self):
+        """Two actions, one feature: they must not drift apart."""
+        recorded = []
+        original = self.window._on_open_preferences
+        self.window._on_open_preferences = lambda tab: recorded.append(tab)
+        try:
+            self.window._act_preferences.trigger()
+            self.window._act_tools_preferences.trigger()
+        finally:
+            self.window._on_open_preferences = original
+        self.assertEqual(recorded, [TAB_GENERAL, TAB_GENERAL])
+
+    def test_the_short_label_still_carries_the_full_name_in_its_tooltip(self):
+        for action in (self.window._act_stats, self.window._act_preferences):
+            with self.subTest(action=action.text()):
+                self.assertTrue(
+                    action.toolTip().strip(),
+                    f"{action.text()!r} is now too terse to stand alone",
+                )
+        self.assertIn("Statistics", self.window._act_stats.toolTip())
+        self.assertIn("Configure", self.window._act_preferences.toolTip())
 
     def test_it_is_in_the_toolbar_immediately_before_preferences(self):
         """A test, because the next toolbar edit silently moves it otherwise."""
@@ -733,10 +1193,102 @@ class TestToolbarAction(unittest.TestCase):
             total_size=2 * GB, downloaded_size=2 * GB, status="completed",
             added_at=iso(0),
         ))
-        popup = self.window._on_show_statistics()
-        self.addCleanup(popup.deleteLater)
+        popup = self._open()
         self.assertGreaterEqual(popup.snapshot().lifetime.count, 1)
         popup.close()
+
+    def _open(self):
+        """Open the popup and register a cleanup that tolerates its own deletion.
+
+        ``_on_show_statistics`` sets ``WA_DeleteOnClose``, so closing the popup destroys
+        the C++ object - a plain ``addCleanup(popup.deleteLater)`` would then raise
+        "Internal C++ object already deleted" and mask the real assertion.
+        """
+        popup = self.window._on_show_statistics()
+        self.addCleanup(self._safely_close, popup)
+        return popup
+
+    @staticmethod
+    def _safely_close(popup):
+        try:
+            popup.close()
+            popup.deleteLater()
+        except RuntimeError:
+            pass  # already destroyed by WA_DeleteOnClose
+
+    def test_the_window_holds_a_reference_to_the_open_popup(self):
+        """A popup whose only reference is a local is collectable, timer and all."""
+        popup = self._open()
+        self.assertIs(self.window._stats_dialog, popup)
+        popup.close()
+
+    def test_a_second_click_reuses_the_open_popup(self):
+        """It is modeless and nothing deleted it, so clicks used to stack dialogs."""
+        first = self._open()
+        second = self.window._on_show_statistics()
+        self.assertIs(
+            second, first,
+            "a second click built another dialog instead of raising the first",
+        )
+        first.close()
+
+    def test_clicking_many_times_never_stacks_dialogs(self):
+        seen = [self._open() for _ in range(5)]
+        self.assertEqual(
+            len({id(p) for p in seen}), 1,
+            "five clicks produced more than one popup",
+        )
+        seen[0].close()
+
+    def test_the_popup_is_marked_for_deletion_on_close(self):
+        popup = self._open()
+        self.assertTrue(
+            popup.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose),
+            "without this the C++ dialog outlives every click",
+        )
+        popup.close()
+
+    def test_closing_the_popup_releases_the_reference(self):
+        popup = self._open()
+        popup.close()
+        QApplication.processEvents()
+        self.assertIsNone(self.window._stats_dialog)
+
+    def test_a_fresh_popup_is_built_after_the_first_was_closed(self):
+        first = self._open()
+        first.close()
+        QApplication.processEvents()
+        second = self._open()
+        self.assertIsNot(second, first)
+        self.assertIs(self.window._stats_dialog, second)
+        second.close()
+
+    def test_a_destroyed_popup_does_not_wedge_the_toolbar(self):
+        """A dangling C++ object must be replaced, not raised into."""
+        first = self._open()
+        first.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        first.close()
+        # Deliberately keep the reference: `finished` cleared the window's, so this walks
+        # the path where a stale wrapper is still reachable.
+        self.window._stats_dialog = first
+        first.deleteLater()
+        QApplication.processEvents()
+        fresh = self._open()
+        self.assertIsNot(fresh, first)
+        self.assertIs(self.window._stats_dialog, fresh)
+        fresh.close()
+
+    def test_shutting_the_window_closes_the_popup(self):
+        """Its 1 Hz timer must not outlive the manager it samples."""
+        popup = self._open()
+        popup.start_speed_timer()
+        self.assertIsNotNone(popup._timer)
+        self.window._force_exit = True
+        self.window.close()
+        QApplication.processEvents()
+        self.assertIsNone(self.window._stats_dialog)
+        self.assertIsNone(popup._timer, "the popup timer survived the shutdown")
+        self.window._force_exit = False
 
 
 class TestChartSelectors(PopupTestCase):

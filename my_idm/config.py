@@ -69,6 +69,16 @@ class GeneralConfig:
     minimize_to_tray: bool = True
     close_to_tray: bool = True
     start_minimized: bool = False
+    # Clipboard capture watches what the user copies, so it is opt-in: reading the clipboard
+    # without being asked is surveillance, and a user who is surprised by it turns it off and
+    # does not turn it on again.
+    clipboard_monitor_enabled: bool = False
+    # Ceiling on one copy event. A pasted generated list must not become thousands of rows.
+    clipboard_monitor_max_urls: int = 20
+    # A global hotkey claims a chord system-wide, so it is also opt-in and needs a real
+    # modifier: a bare key would swallow that key in every other application on the desktop.
+    capture_hotkey_enabled: bool = False
+    capture_hotkey_sequence: str = "Ctrl+Alt+D"
 
     def get_retry_delay(self, attempt: int) -> float:
         """Calculate retry delay in seconds for a given attempt index (0-indexed)."""
@@ -85,6 +95,20 @@ class GeneralConfig:
         if self.default_save_path and os.path.isdir(self.default_save_path):
             return self.default_save_path
         return DEFAULT_DOWNLOADS_DIR
+
+    @property
+    def effective_max_concurrent(self) -> int:
+        """The global concurrency ceiling, with the legacy ``<= 0`` meaning resolved.
+
+        ``max_concurrent_downloads`` has always treated 0 as "use the default of 3", but that
+        fallback was retyped at four separate call sites and had already drifted once. It is a
+        property so there is exactly one answer.
+
+        Note this is a *global* ceiling only. Per-queue ``max_concurrent`` lives on the
+        ``queues`` row because a queue's limit is data, not a preference — see
+        ``docs/architecture/queues.md``.
+        """
+        return self.max_concurrent_downloads if self.max_concurrent_downloads > 0 else 3
 
     def get_effective_backlog_locations(self) -> list[str]:
         """Returns the list of places (folders or files) to scan for backlog files."""
@@ -141,6 +165,10 @@ class GeneralConfig:
             "minimize_to_tray": self.minimize_to_tray,
             "close_to_tray": self.close_to_tray,
             "start_minimized": self.start_minimized,
+            "clipboard_monitor_enabled": self.clipboard_monitor_enabled,
+            "clipboard_monitor_max_urls": self.clipboard_monitor_max_urls,
+            "capture_hotkey_enabled": self.capture_hotkey_enabled,
+            "capture_hotkey_sequence": self.capture_hotkey_sequence,
         }
 
     @classmethod
@@ -177,6 +205,14 @@ class GeneralConfig:
             minimize_to_tray=bool(data.get("minimize_to_tray", True)),
             close_to_tray=bool(data.get("close_to_tray", True)),
             start_minimized=bool(data.get("start_minimized", False)),
+            clipboard_monitor_enabled=bool(data.get("clipboard_monitor_enabled", False)),
+            clipboard_monitor_max_urls=max(
+                1, int(data.get("clipboard_monitor_max_urls", 20))
+            ),
+            capture_hotkey_enabled=bool(data.get("capture_hotkey_enabled", False)),
+            capture_hotkey_sequence=str(
+                data.get("capture_hotkey_sequence", "Ctrl+Alt+D")
+            ) or "Ctrl+Alt+D",
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -207,6 +243,10 @@ class GeneralConfig:
         settings.setValue("minimize_to_tray", self.minimize_to_tray)
         settings.setValue("close_to_tray", self.close_to_tray)
         settings.setValue("start_minimized", self.start_minimized)
+        settings.setValue("clipboard_monitor_enabled", self.clipboard_monitor_enabled)
+        settings.setValue("clipboard_monitor_max_urls", self.clipboard_monitor_max_urls)
+        settings.setValue("capture_hotkey_enabled", self.capture_hotkey_enabled)
+        settings.setValue("capture_hotkey_sequence", self.capture_hotkey_sequence)
         settings.endGroup()
 
     @classmethod
@@ -245,6 +285,18 @@ class GeneralConfig:
         minimize_to_tray = settings.value("minimize_to_tray", True, type=bool)
         close_to_tray = settings.value("close_to_tray", True, type=bool)
         start_minimized = settings.value("start_minimized", False, type=bool)
+        clipboard_monitor_enabled = settings.value(
+            "clipboard_monitor_enabled", False, type=bool
+        )
+        clipboard_monitor_max_urls = max(
+            1, settings.value("clipboard_monitor_max_urls", 20, type=int)
+        )
+        capture_hotkey_enabled = settings.value(
+            "capture_hotkey_enabled", False, type=bool
+        )
+        capture_hotkey_sequence = settings.value(
+            "capture_hotkey_sequence", "Ctrl+Alt+D", type=str
+        )
         settings.endGroup()
 
         return cls(
@@ -271,6 +323,10 @@ class GeneralConfig:
             minimize_to_tray=bool(minimize_to_tray),
             close_to_tray=bool(close_to_tray),
             start_minimized=bool(start_minimized),
+            clipboard_monitor_enabled=bool(clipboard_monitor_enabled),
+            clipboard_monitor_max_urls=int(clipboard_monitor_max_urls),
+            capture_hotkey_enabled=bool(capture_hotkey_enabled),
+            capture_hotkey_sequence=str(capture_hotkey_sequence or "Ctrl+Alt+D"),
         )
 
 

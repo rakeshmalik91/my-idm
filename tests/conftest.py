@@ -24,9 +24,17 @@ Additional session-wide hermeticity guards (see `AGENTS.md` conventions 4 and 8)
 * Tests that call a destructive filesystem helper run with the working directory moved
   into their own temp tree, so a blank path (which resolves to ``.``) cannot reach the
   repository.
-* The system clipboard is snapshotted, cleared, and restored around every test, so a
-  leftover developer clipboard cannot trigger production code that prefills from it
-  (``YouTubeDialog._prefill`` would otherwise fire a real yt-dlp network request).
+* The system clipboard is never touched. Tests that are not marked ``ui`` get a *fake*
+  clipboard patched in-process, so a leftover developer clipboard cannot trigger production
+  code that prefills from it (``YouTubeDialog._prefill`` would otherwise fire a real yt-dlp
+  network request) **and** running the suite cannot disturb the developer's own clipboard.
+  Only ``ui`` tests round-trip the real one, and they restore it.
+
+Two tiers
+---------
+``pytest -m "not ui"`` is the **basic sanity** tier and is safe to run unattended: it touches
+no window, no tray and no real clipboard. Plain ``pytest`` is the **full** tier. See
+``.agents/workflows/testing.md``.
 """
 
 import os
@@ -37,6 +45,46 @@ import threading
 from unittest.mock import MagicMock, patch
 import pytest
 from PySide6.QtCore import QSettings
+
+# Test modules that construct real Qt windows/dialogs, drive the system tray, or round-trip
+# the real system clipboard. Everything here is marked `ui` automatically, which keeps the
+# basic sanity tier free of desktop interaction without needing a decorator on every test.
+#
+# Keep this list declarative and coarse on purpose: marking a module wholesale is honest, and
+# an unmarked stray widget is what makes an unattended run disruptive. Individual tests inside
+# otherwise-safe modules can opt in with `@pytest.mark.ui`.
+_INTERACTIVE_MODULES = frozenset({
+    "test_capture",            # MainWindow integration, real RegisterHotKey
+    "test_delegates",          # needs a live QAbstractItemView
+    "test_details_panel",      # DetailsPanel widget tree
+    "test_dialogs",            # modal dialogs
+    "test_entrypoint_and_notifications",  # toast / tray notification paths
+    "test_main_window",        # MainWindow + system tray
+    "test_settings",           # SettingsDialog
+    "test_splash",             # splash window
+    "test_ui_tor_and_utils",   # widgets + real file moves
+    "test_views_tab",          # MainWindow + SettingsDialog + apply_theme
+    "test_youtube_ui",         # YouTube dialog widgets
+})
+
+#: Set during collection: does this run include any `ui` test? Read by the session-scoped tray
+#: fixture so the basic sanity tier never disturbs the real taskbar.
+_HAS_UI_TESTS = False
+
+
+def pytest_collection_modifyitems(items):
+    """Apply the `ui` marker to every test in an interactive module.
+
+    Done here rather than with per-test decorators so the interactive set is one list a
+    reviewer can read, and so a new UI test module is opted out of unattended runs by
+    default rather than by default *into* them.
+    """
+    global _HAS_UI_TESTS
+    _HAS_UI_TESTS = any(item.get_closest_marker("ui") is not None for item in items)
+    for item in items:
+        module_name = (item.module.__name__ or "").rsplit(".", 1)[-1]
+        if module_name in _INTERACTIVE_MODULES:
+            item.add_marker(pytest.mark.ui)
 
 # Global session fixture to isolate QSettings away from the host OS registry / config
 _orig_qsettings_init = QSettings.__init__
@@ -340,31 +388,99 @@ def isolate_implicit_user_database():
             pass
 
 
+class _FakeClipboard:
+    """An in-process clipboard: reads and writes never leave the test.
+
+    A `QObject` because `ClipboardMonitor` subscribes to `dataChanged`, so the fake has to be
+    one for the connect/disconnect to have production semantics. Returning this instead of the
+    OS clipboard is strictly better than snapshot-and-restore for a non-interactive test: it
+    cannot clobber what the developer copied, and it cannot be defeated by a lock or by
+    another application owning the clipboard mid-run.
+    """
+
+    def __init__(self):
+        from PySide6.QtCore import QObject, Signal
+
+        class _Signals(QObject):
+            dataChanged = Signal()
+            selectionChanged = Signal()
+
+        self._signals = _Signals()
+        self._text = ""
+        self._image = None
+        self._mime = None
+
+    def __getattr__(self, name):
+        # Anything not modelled here (ownsClipboard, supportsSelection, ...) must behave like
+        # an empty clipboard rather than raising AttributeError from production code.
+        if name.startswith("set"):
+            return lambda *a, **k: None
+        return lambda *a, **k: None
+
+    @property
+    def dataChanged(self):
+        return self._signals.dataChanged
+
+    def text(self, mode=None):
+        return self._text
+
+    def setText(self, text, mode=None):
+        self._text = text or ""
+        self._signals.dataChanged.emit()
+
+    def clear(self, mode=None):
+        self._text = ""
+        self._image = None
+        self._mime = None
+        self._signals.dataChanged.emit()
+
+    def image(self, mode=None):
+        return self._image
+
+    def setImage(self, image, mode=None):
+        self._image = image
+
+    def mimeData(self, formats=None):
+        return self._mime
+
+    def setMimeData(self, data, mode=None):
+        self._mime = data
+
+
 @pytest.fixture(autouse=True)
-def isolate_system_clipboard():
-    """Snapshot, clear, and restore the real system clipboard around each test.
+def isolate_system_clipboard(request, monkeypatch):
+    """Guarantee the test never reads or writes the developer's real clipboard.
 
-    Two problems this removes:
+    Two tiers:
 
-    * Production code that prefills a URL field from the clipboard (YouTubeDialog)
-      would otherwise read whatever the developer happened to have copied and fire a
-      real yt-dlp network request from a test.
-    * Clipboard round-trip tests sharing one QClipboard are order-dependent and clobber
-      the developer's clipboard for the rest of the session.
+    * **non-`ui` tests** get a `_FakeClipboard` patched over `QGuiApplication.clipboard`. The OS
+      clipboard is never touched at all, so running the suite in the background cannot disturb
+      it - which the previous snapshot/clear/restore implementation did on every one of 2400+
+      tests. The original problem it solved still cannot happen: production code prefilling
+      from the clipboard reads `""`, so it can never fire a real network request off the
+      developer's copy history.
+    * **`ui` tests** round-trip the genuine clipboard, because that is the behaviour under
+      test. They still snapshot and restore it, so they leave it as they found it.
     """
     from PySide6.QtGui import QGuiApplication
 
+    if "ui" not in request.keywords:
+        app = QGuiApplication.instance()
+        if app is not None:
+            monkeypatch.setattr(
+                QGuiApplication, "clipboard", staticmethod(lambda: _FakeClipboard())
+            )
+        yield
+        return
+
     app = QGuiApplication.instance()
     if app is None:
-        yield
         return
     try:
         clipboard = QGuiApplication.clipboard()
     except Exception:
-        yield
         return
     if clipboard is None:
-        yield
         return
 
     try:
@@ -489,7 +605,14 @@ def suppress_system_tray_notifications():
                 pass
         return False
 
-    _cleanup_windows_tray_ghosts()
+    # Repainting the *real* Explorer taskbar is desktop interference: it walks
+    # Shell_TrayWnd's ToolbarWindow32 posting WM_MOUSEMOVE on a 5px grid, which visibly
+    # flickers the taskbar. Only needed to clear ghosts left by an actual tray test, so the
+    # basic sanity tier skips it entirely. The QSystemTrayIcon patching below still runs
+    # unconditionally - it is in-process and harmless, and some non-ui test may construct an
+    # icon.
+    if _HAS_UI_TESTS:
+        _cleanup_windows_tray_ghosts()
 
     with patch.object(QSystemTrayIcon, 'showMessage', mock_show_message), \
          patch.object(QSystemTrayIcon, 'show', mock_show), \

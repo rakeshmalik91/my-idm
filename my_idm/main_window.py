@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF, QEvent, QItemSelectionModel, Signal
+from PySide6.QtCore import Qt, QSize, QPoint, QSettings, QPointF, QTimer, QByteArray, QRect, QRectF, QEvent, QItemSelectionModel, Signal, QObject
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -27,6 +27,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
@@ -51,13 +52,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from my_idm.database import Database, DownloadEntry
-from my_idm.delegates import DownloadNameDelegate, ProgressBarDelegate, SavePathDelegate
+from my_idm.database import ALL_QUEUES, DEFAULT_QUEUE_ID, DEFAULT_QUEUE_NAME, Database, DownloadEntry
+from my_idm.delegates import (
+    DownloadNameDelegate,
+    ProgressBarDelegate,
+    QueueColumnDelegate,
+    SavePathDelegate,
+)
 from my_idm.details_panel import DetailsPanel
 from my_idm.dialogs import (
     AddDownloadDialog,
     DeleteConfirmDialog,
     MoveDownloadDialog,
+    QueueManagerDialog,
     RenameDialog,
 )
 from my_idm.download_model import (
@@ -74,7 +81,16 @@ from my_idm.network_dialog import NetworkSettingsDialog
 from my_idm.security import SecurityConfig
 from my_idm.config import TorConfig
 from my_idm.security_dialog import SecuritySettingsDialog
-from my_idm.settings_dialog import SettingsDialog
+from my_idm.settings_dialog import (
+    TAB_BROWSER,
+    TAB_EXTERNAL_TOOLS,
+    TAB_GENERAL,
+    TAB_SECURITY,
+    TAB_TOR,
+    TAB_TORRENT,
+    TAB_VPN,
+    SettingsDialog,
+)
 from my_idm.external_tools import launch_animepahe_gui
 from my_idm.styles import Colors
 
@@ -90,6 +106,29 @@ _DEFAULT_TAIL_COLUMNS = (
     Col.LAST_SEEDED,
     Col.SOURCE,
     Col.SEEDING_STARTED_AT,
+    Col.QUEUE_NAME,
+)
+
+#: Columns hidden on a **fresh profile only**, when no header state has been saved yet.
+#: Eighteen columns is too many to scan at a glance, and these are the ones a user reaches
+#: for occasionally rather than watches. They stay listed in the Preferences column picker,
+#: so nothing is unreachable - this is a starting arrangement, not a restriction.
+#:
+#: ``Col.ADDED`` is deliberately **not** here: it is the default sort column, and hiding it
+#: hides the sort indicator with it, leaving the table looking unsorted.
+#:
+#: ``Col.QUEUE_NAME`` is deliberately **not** here either: which queue a download belongs to is
+#: not incidental detail, and a queue is invisible in the list without this column.
+#:
+#: Deliberately not applied when a saved header state exists: a user who has arranged their
+#: own columns must not have them overridden because a default changed. Change this tuple and
+#: existing profiles are untouched; "Reset View" picks the new defaults up.
+DEFAULT_HIDDEN_COLUMNS = (
+    Col.SEEDING_STARTED_AT,
+    Col.LAST_SEEDED,
+    Col.SAVE_PATH,
+    Col.SOURCE,
+    Col.FILE_NAME,
 )
 
 
@@ -312,6 +351,39 @@ def _create_pause_all_seeding_icon(size: int = 32) -> QIcon:
     return QIcon(pix)
 
 
+class _RightClickGuard(QObject):
+    """Event filter that makes a ``QMenu`` ignore the right mouse button entirely.
+
+    ``QMenu`` treats a right-button press followed by a release as an ordinary activation
+    of whatever item is under the cursor. On the tray menu that is genuinely dangerous:
+    the bottom two rows are **Restart My-IDM** and **Exit My-IDM**, so a reflexive
+    right-click - the gesture people reach for when they miss a left-click - shut the
+    application down, mid-download, with no confirmation.
+
+    Swallowing the button events means a right-click can only ever dismiss the menu. Left,
+    middle and back pass through, so the menu stays usable.
+
+    Only the *button* is filtered. Press, release and double-click must all be swallowed or
+    the press/release pair still reaches ``QMenu``'s activation logic, so a partial guard
+    would look installed and change nothing. ``QMenu`` has no ``viewport()`` in Qt 6 - it
+    paints its own items - so the menu itself is the only object that needs the filter.
+    """
+
+    _BLOCKED = (
+        QEvent.Type.MouseButtonPress,
+        QEvent.Type.MouseButtonRelease,
+        QEvent.Type.MouseButtonDblClick,
+    )
+
+    def eventFilter(self, watched, event):
+        if (
+            event.type() in self._BLOCKED
+            and event.button() == Qt.MouseButton.RightButton
+        ):
+            return True  # consume: QMenu never sees it, so nothing activates
+        return super().eventFilter(watched, event)
+
+
 class MainWindow(QMainWindow):
     """The main My-IDM window."""
 
@@ -327,9 +399,18 @@ class MainWindow(QMainWindow):
         self._manager = manager
         self._show_exit_splash = show_exit_splash
         self._tray_icon: Optional[QSystemTrayIcon] = None
+        self._tray_act_capture: Optional[QAction] = None
+        self._tray_act_clipboard: Optional[QAction] = None
+        # Created in _setup_capture, which always runs; held here so the clipboard
+        # subscription and the OS hotkey registration cannot be garbage collected.
+        self._clipboard_monitor = None
+        self._hotkey = None
         self._force_exit: bool = False
         self._close_to_tray_notified: bool = False
         self._completed_notified: set[str] = set()
+        # The live statistics popup, if open. Held so a second toolbar click raises it
+        # instead of building another, and dropped when it closes.
+        self._stats_dialog = None
 
         self.setWindowTitle("My-IDM — Download Manager")
         self.setMinimumSize(1100, 600)
@@ -339,12 +420,19 @@ class MainWindow(QMainWindow):
         # Model
         self._model = DownloadTableModel(self)
 
+        # Apply the persisted theme **before** anything is built. `main.py` sets the dark
+        # sheet as a default before the window exists; doing it here means a user who chose
+        # Light gets no flash of dark on startup, and it covers entry points that do not go
+        # through `main.py`.
+        self._apply_persisted_theme()
+
         self._setup_ui()
         self._setup_actions()
         self._setup_toolbar()
         self._setup_menubar()
         self._setup_statusbar()
         self._setup_system_tray()
+        self._setup_capture()
         self._connect_signals()
 
         # Restore window geometry, location, column lengths, and splitter from DB
@@ -352,6 +440,11 @@ class MainWindow(QMainWindow):
 
         # Load existing downloads from DB
         self._load_history()
+
+        # Apply the persisted queue scope and populate the switcher. After `_load_history`,
+        # not before: narrowing the scope is a filter, and a filtered-out download must never
+        # flash on screen during startup.
+        self._init_queue_scope()
 
     # -- UI setup ------------------------------------------------------------
 
@@ -400,6 +493,12 @@ class MainWindow(QMainWindow):
             Col.FILE_NAME, self._file_name_delegate
         )
 
+        # Queue column: colour swatch beside the name, collapsing to the swatch when narrow.
+        self._queue_delegate = QueueColumnDelegate(self._table)
+        self._table.setItemDelegateForColumn(
+            Col.QUEUE_NAME, self._queue_delegate
+        )
+
         # Filterable and movable column header with sort indicators
         self._header_view = FilterHeaderView(self._table)
         self._table.setHorizontalHeader(self._header_view)
@@ -433,8 +532,11 @@ class MainWindow(QMainWindow):
         # Segregated view: disabled by default, state and mode persisted in db
         self._segregated_view_enabled = bool(self._manager.db.get_ui_state("segregated_view_enabled", False))
         self._segregated_view_mode = str(self._manager.db.get_ui_state("segregated_view_mode", "status"))
-        if self._segregated_view_mode not in ("status", "date"):
-            self._segregated_view_mode = "status"
+        # Use the shared mode list, not a local pair: the old two-value whitelist left here
+        # when the "type" mode was added, so choosing File Type and restarting silently
+        # grouped the table by Status instead.
+        if self._segregated_view_mode not in SEGREGATED_MODES:
+            self._segregated_view_mode = DEFAULT_SEGREGATED_MODE
 
         all_sec_ids = (
             "active", "seeding", "inactive",
@@ -476,6 +578,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.LAST_SEEDED, 130)
         self._table.setColumnWidth(Col.SOURCE, 100)
         self._table.setColumnWidth(Col.SEEDING_STARTED_AT, 150)
+        self._table.setColumnWidth(Col.QUEUE_NAME, 120)
 
         # Row height
         self._table.verticalHeader().setDefaultSectionSize(36)
@@ -634,9 +737,10 @@ class MainWindow(QMainWindow):
         self._act_move_down.setToolTip("Move selected download down in queue order")
         self._act_move_down.triggered.connect(self._on_move_queue_down)
 
-        self._act_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
+        self._act_stats = QAction(_create_emoji_icon("📊"), "Stats…", self)
         self._act_stats.setToolTip(
-            "Download and upload totals for today, this week, this month and this year"
+            "Statistics: download and upload totals for today, this week, this month "
+            "and this year"
         )
         self._act_stats.triggered.connect(self._on_show_statistics)
 
@@ -646,7 +750,7 @@ class MainWindow(QMainWindow):
             "Configure default download folder, performance, network, and security (Ctrl+,)"
         )
         self._act_preferences.triggered.connect(
-            lambda: self._on_open_preferences(0)
+            lambda: self._on_open_preferences(TAB_GENERAL)
         )
 
         self._act_torrent_settings = QAction(_create_emoji_icon("🧲"), "BitTorrent Settings…", self)
@@ -758,6 +862,21 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self._tor_toolbar_container)
         toolbar.addSeparator()
 
+        # Queue switcher. A combo rather than tabs: a queue is a *scope* that has to compose with
+        # search, the header filter chips and segregated view at the same time, which is the
+        # model's job, not a widget's. Tabs replace the model; this narrows it.
+        self._queue_combo = QComboBox()
+        self._queue_combo.setObjectName("toolbar_queue_combo")
+        self._queue_combo.setToolTip(
+            "Show one queue's downloads. 'All Queues' keeps the whole history visible, which "
+            "is where it starts and where a deleted queue's downloads land."
+        )
+        self._queue_combo.setMinimumWidth(120)
+        self._queue_combo.setMaximumWidth(200)
+        self._queue_combo.setFixedHeight(26)
+        self._queue_combo.currentIndexChanged.connect(self._on_queue_combo_changed)
+        toolbar.addWidget(self._queue_combo)
+
         # Expanding gap between the action groups and the search box.
         self._toolbar_gap = QWidget()
         self._toolbar_gap.setObjectName("toolbar_gap")
@@ -781,6 +900,10 @@ class MainWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
+        # Separate the search field from the two buttons after it. Without it the pair reads
+        # as one control - a filter box with two trailing widgets - rather than as search,
+        # then Stats and Preferences. The playback block above is already split the same way.
+        toolbar.addSeparator()
         toolbar.addAction(self._act_stats)
         toolbar.addAction(self._act_preferences)
 
@@ -832,15 +955,52 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_start_seeding)
         edit_menu.addAction(self._act_stop_all_seeding)
         edit_menu.addSeparator()
-        edit_menu.addAction(self._act_move_up)
-        edit_menu.addAction(self._act_move_down)
-        edit_menu.addSeparator()
         edit_menu.addAction(self._act_copy_url)
         edit_menu.addAction(self._act_rename)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_delete)
         edit_menu.addAction(self._act_move)
         edit_menu.addAction(self._act_recheck)
+        edit_menu.addSeparator()
+
+        # Queues live under Edit, not View. Every one of these operations acts on the selected
+        # downloads - re-home them, change their order, create a group for them - which is what
+        # this menu is for; View is for changing how the list is *drawn*. **Move Up** / **Move
+        # Down** sit in this same trailing group rather than up with the transport controls,
+        # because they are ordering commands, not playback ones.
+        self._menu_queues = edit_menu.addMenu(_create_emoji_icon("🗃️"), "Queues")
+        self._act_queue_all = QAction("All Queues", self)
+        self._act_queue_all.setCheckable(True)
+        self._act_queue_all.setChecked(True)
+        self._act_queue_all.triggered.connect(lambda: self._on_select_queue(ALL_QUEUES))
+        self._queue_scope_group = QActionGroup(self)
+        self._queue_scope_group.setExclusive(True)
+        self._queue_scope_group.addAction(self._act_queue_all)
+        self._menu_queues.addAction(self._act_queue_all)
+        self._menu_queues.addSeparator()
+        # Rebuilt on every change rather than populated once, so a queue created or deleted
+        # anywhere (the manager dialog, the row context menu) cannot leave a dead entry.
+        self._queue_actions: list[QAction] = []
+
+        # Held as fields because _refresh_queue_ui clears and re-adds the menu wholesale.
+        self._act_new_queue = QAction(_create_emoji_icon("➕"), "New Queue…", self)
+        self._act_new_queue.triggered.connect(self._on_new_queue)
+        self._act_manage_queues = QAction(_create_emoji_icon("⚙️"), "Manage Queues…", self)
+        self._act_manage_queues.triggered.connect(self._on_manage_queues)
+        self._menu_queues.addAction(self._act_new_queue)
+        self._menu_queues.addAction(self._act_manage_queues)
+
+        # The Edit-menu twin of the row context menu's **Move to Queue**, for keyboard and
+        # menu-only use. Plain actions rather than checkmarks: a multi-row selection can span
+        # queues, so there is no single current queue to tick.
+        self._menu_move_to_queue = edit_menu.addMenu(
+            _create_emoji_icon("➡️"), "Move to Queue"
+        )
+        self._move_to_queue_actions: list[QAction] = []
+
+        # Priority ordering belongs with queue membership, not with the transport controls.
+        edit_menu.addAction(self._act_move_up)
+        edit_menu.addAction(self._act_move_down)
 
         # View menu
         view_menu = menubar.addMenu("&View")
@@ -925,7 +1085,17 @@ class MainWindow(QMainWindow):
 
         # Tools menu
         tools_menu = menubar.addMenu("&Tools")
-        tools_menu.addAction(self._act_preferences)
+        # Tools menu gets its own Preferences action rather than reusing the toolbar's:
+        # the shortcut belongs to exactly one QAction, and the toolbar copy is the one that
+        # carries it, so the menu keeps a separate action rather than a second registration
+        # of Ctrl+,. Both spell the label out in full now that the toolbar strip has the room.
+        self._act_tools_preferences = QAction(
+            _create_emoji_icon("⚙️"), "Preferences…", self
+        )
+        self._act_tools_preferences.triggered.connect(
+            lambda: self._on_open_preferences(TAB_GENERAL)
+        )
+        tools_menu.addAction(self._act_tools_preferences)
         self._act_export_csv = QAction(_create_emoji_icon("📄"), "Export Selected as CSV…", self)
         self._act_export_csv.triggered.connect(self._on_export_selected_csv)
         tools_menu.addAction(self._act_export_csv)
@@ -978,6 +1148,15 @@ class MainWindow(QMainWindow):
 
         self._speed_label.mousePressEvent = _speed_label_mouse_press
         self._count_label = QLabel("0 Downloads, 0 Active")
+
+        # Queue of the current selection. Its own label rather than a write to
+        # _status_label, which carries transient action messages ("Copied URL", "Created
+        # queue") that a selection change would immediately wipe.
+        self._queue_status_label = QLabel("")
+        self._queue_status_label.setToolTip(
+            "Queue of the selected download. Use the toolbar combo or View → Queues to "
+            "switch which queue is listed."
+        )
 
         # Tor footer widget with button and embedded progress bar
         self._tor_footer_container = QWidget()
@@ -1064,6 +1243,7 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self._details_status_btn)
         status_bar.addPermanentWidget(self._console_status_btn)
         status_bar.addPermanentWidget(self._speed_label)
+        status_bar.addPermanentWidget(self._queue_status_label)
         status_bar.addPermanentWidget(self._count_label)
         self.setStatusBar(status_bar)
 
@@ -1107,8 +1287,34 @@ class MainWindow(QMainWindow):
         tray_menu.addAction(act_resume_all)
         tray_menu.addSeparator()
 
+        # Checkable, so the row shows the live state rather than describing an action. This is
+        # the only checkable tray action in the menu; the rest mutate text in
+        # `_update_tray_menu_text` because their state is not a simple on/off.
+        self._tray_act_capture = QAction("🎯 Download Capture", self)
+        self._tray_act_capture.setCheckable(True)
+        self._tray_act_capture.setToolTip(
+            "Turn download capture on or off. The browser is told within its poll interval; "
+            "the same toggle is bound to your global hotkey."
+        )
+        self._tray_act_capture.setChecked(self._manager.browser_config.intercept_all)
+        self._tray_act_capture.toggled.connect(self._on_capture_toggled)
+        tray_menu.addAction(self._tray_act_capture)
+
+        self._tray_act_clipboard = QAction("📋 Clipboard Capture", self)
+        self._tray_act_clipboard.setCheckable(True)
+        self._tray_act_clipboard.setToolTip(
+            "Automatically add downloads when you copy one or more URLs. "
+            "Only text where every line is a link is captured."
+        )
+        self._tray_act_clipboard.setChecked(
+            self._manager.general_config.clipboard_monitor_enabled
+        )
+        self._tray_act_clipboard.toggled.connect(self._on_clipboard_capture_toggled)
+        tray_menu.addAction(self._tray_act_clipboard)
+        tray_menu.addSeparator()
+
         act_prefs = QAction("⚙️ Preferences…", self)
-        act_prefs.triggered.connect(lambda: self._on_open_preferences(0))
+        act_prefs.triggered.connect(lambda: self._on_open_preferences(TAB_GENERAL))
         tray_menu.addAction(act_prefs)
 
         act_about = QAction("ℹ️ About My-IDM", self)
@@ -1125,6 +1331,10 @@ class MainWindow(QMainWindow):
         tray_menu.addAction(act_exit)
 
         self._tray_icon.setContextMenu(tray_menu)
+        # A right-click on a tray item must never activate it: the bottom two rows are
+        # Restart and Exit, so a mis-landed right-click used to shut My-IDM down.
+        self._tray_right_click_guard = _RightClickGuard(tray_menu)
+        tray_menu.installEventFilter(self._tray_right_click_guard)
         self._tray_icon.activated.connect(self._on_tray_activated)
         self._tray_icon.messageClicked.connect(self._on_tray_message_clicked)
 
@@ -1136,6 +1346,154 @@ class MainWindow(QMainWindow):
         if self._manager.general_config.enable_system_tray:
             self._tray_icon.show()
         self._update_tray_menu_text()
+
+    # -- capture: global hotkey + clipboard ----------------------------------
+
+    def _setup_capture(self):
+        """Create the capture subsystem and bring it in line with the stored preferences.
+
+        Both halves are optional and both default to off, so this is a no-op unless the user
+        has enabled something. The objects are held on the window (not created locally) because
+        the clipboard subscription and the OS hotkey registration must outlive the call that
+        set them up — a ``QObject`` with no Python reference can be collected, taking its
+        timer or its registration with it.
+        """
+        from my_idm.clipboard_monitor import ClipboardMonitor
+        from my_idm.hotkey import HotkeyRegistration
+
+        self._clipboard_monitor = ClipboardMonitor(
+            self._manager,
+            max_urls=self._manager.general_config.clipboard_monitor_max_urls,
+            parent=self,
+            queue_provider=self._manager.get_active_queue,
+        )
+        self._clipboard_monitor.urls_captured.connect(self._on_clipboard_urls_captured)
+
+        self._hotkey = HotkeyRegistration(self)
+        self._hotkey.triggered.connect(self._on_global_hotkey)
+
+        if self._manager.general_config.clipboard_monitor_enabled:
+            self._clipboard_monitor.start()
+        if self._manager.general_config.capture_hotkey_enabled:
+            self._register_hotkey()
+
+    def _register_hotkey(self) -> tuple[bool, str]:
+        """Bind the configured chord, reporting rather than swallowing a failure.
+
+        A chord another application already owns fails here; saying nothing would leave the
+        user pressing a key that does nothing.
+        """
+        sequence = self._manager.general_config.capture_hotkey_sequence
+        ok, message = self._hotkey.register(sequence)
+        if not ok:
+            log.warning("Global hotkey not registered: %s", message)
+            self._status_label.setText(message)
+        return ok, message
+
+    def _apply_capture_preferences(self):
+        """Re-apply both capture toggles after the user edits Preferences.
+
+        Called from the ``general_config_changed`` and ``browser_config_changed`` handlers, so
+        a Preferences save takes effect without a restart.
+        """
+        cfg = self._manager.general_config
+
+        wanted_clipboard = bool(cfg.clipboard_monitor_enabled)
+        if wanted_clipboard and not self._clipboard_monitor.is_active:
+            self._clipboard_monitor.start()
+        elif not wanted_clipboard and self._clipboard_monitor.is_active:
+            self._clipboard_monitor.stop()
+
+        # Asked for unconditionally, so this is the same path as "enable" and a changed
+        # sequence takes effect. `HotkeyRegistration.register` short-circuits when the chord is
+        # unchanged, so this is cheap and does not drop and re-claim the binding every save.
+        if cfg.capture_hotkey_enabled:
+            self._register_hotkey()
+        else:
+            self._hotkey.unregister()
+
+        self._sync_capture_actions()
+
+    def _sync_capture_actions(self):
+        """Mirror the real capture state onto the tray checkboxes.
+
+        Called after anything that can change the state, including the hotkey, so the menu can
+        never disagree with what capture is actually doing.
+        """
+        for action, checked in (
+            (
+                getattr(self, "_tray_act_capture", None),
+                bool(self._manager.browser_config.intercept_all),
+            ),
+            (
+                getattr(self, "_tray_act_clipboard", None),
+                bool(self._manager.general_config.clipboard_monitor_enabled),
+            ),
+        ):
+            if action is None or action.isChecked() == checked:
+                continue
+            was_blocked = action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(was_blocked)
+
+    def _on_capture_toggled(self, checked: bool):
+        """Tray checkbox, tray item or global hotkey: flip browser capture."""
+        changed, message = self._manager.set_capture_enabled(checked)
+        self._status_label.setText(message)
+        self._sync_capture_actions()
+        return changed
+
+    def _on_clipboard_capture_toggled(self, checked: bool):
+        """Tray checkbox for clipboard capture only."""
+        cfg = self._manager.general_config
+        cfg.clipboard_monitor_enabled = bool(checked)
+        self._apply_capture_preferences()
+        self._status_label.setText(
+            f"Clipboard capture {'enabled' if checked else 'disabled'}."
+        )
+
+    def _on_global_hotkey(self):
+        """The system-wide chord was pressed: flip capture and say so."""
+        self._on_capture_toggled(not self._manager.browser_config.intercept_all)
+
+    def _on_clipboard_urls_captured(self, urls: list, skipped: int = 0):
+        """Report what clipboard capture added, so it is never silent.
+
+        A status-bar line is easy to miss and gone in seconds; the download appeared on its own
+        with nothing else to explain it. A Windows toast is the same courtesy the browser
+        capture already extends, and it names **Clipboard** as the source so it is obvious where
+        the row came from.
+        """
+        what = urls[0] if len(urls) == 1 else f"{len(urls)} URLs"
+        message = f"📋 Clipboard capture added {what}"
+        if skipped:
+            message += f" ({skipped} over the per-copy limit were skipped)"
+        self._status_label.setText(message)
+        self._update_count_label()
+        self._notify_clipboard_captured(urls, skipped)
+
+    def _notify_clipboard_captured(self, urls: list, skipped: int):
+        from my_idm.notifications import notify_clipboard_download_captured
+
+        filenames = []
+        for url in urls:
+            entry = self._manager.find_by_url(url)
+            filenames.append((entry.filename or entry.url) if entry else url)
+        notify_clipboard_download_captured(filenames, skipped)
+
+    def _release_capture(self):
+        """Drop both capture halves. Called from ``closeEvent`` and app shutdown.
+
+        A global hotkey left registered outlives the process that asked for it: Windows keeps
+        the chord bound and the next launch then fails to claim it. Unregistering is therefore
+        not optional, and it must happen even when the window is only being hidden.
+        """
+        monitor = getattr(self, "_clipboard_monitor", None)
+        if monitor is not None:
+            monitor.stop()
+        hotkey = getattr(self, "_hotkey", None)
+        if hotkey is not None:
+            hotkey.unregister()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason):
         """Handles user clicking or double-clicking the system tray icon."""
@@ -1259,6 +1617,8 @@ class MainWindow(QMainWindow):
         self._manager.tor_status_changed.connect(self._on_tor_status_changed)
         self._manager.threat_detected.connect(self._on_threat_detected)
         self._manager.queue_order_changed.connect(self._on_queue_order_changed)
+        self._manager.queues_changed.connect(self._on_queues_changed)
+        self._manager.queue_scope_changed.connect(self._on_queue_scope_changed)
         self._manager.bandwidth_limits_changed.connect(self._on_bandwidth_limits_changed)
         self._manager.animepahe_status_changed.connect(
             self._on_animepahe_status_changed
@@ -1268,6 +1628,15 @@ class MainWindow(QMainWindow):
                 self._on_animepahe_queue_changed
             )
         self._details_panel.mode_changed.connect(lambda _: self._sync_panel_buttons())
+
+        # A Preferences save hands the manager a *copy* of the config, so the window has to
+        # re-derive both capture toggles from the new values rather than assume anything.
+        for signal in (
+            getattr(self._manager, "general_config_changed", None),
+            getattr(self._manager, "browser_config_changed", None),
+        ):
+            if signal is not None:
+                signal.connect(self._apply_capture_preferences)
 
         # Connect table selection to bottom details panel
         self._table.selectionModel().selectionChanged.connect(
@@ -1413,9 +1782,12 @@ class MainWindow(QMainWindow):
             return
 
         urls = getattr(dlg, "urls", [dlg.url] if dlg.url else [])
+        # New downloads join whichever queue the view is scoped to. With "All Queues" selected
+        # that is the default queue, so the common case is unchanged.
+        queue_id = self._manager.get_active_queue()
         for u in urls:
             self._manager.add_download(
-                u, dlg.save_path, dlg.num_segments
+                u, dlg.save_path, dlg.num_segments, queue_id=queue_id
             )
 
     def _on_add_youtube(self):
@@ -1585,6 +1957,17 @@ class MainWindow(QMainWindow):
             return
         self._on_open_file()
 
+    def _segregation_mode_label(self, mode: str) -> str:
+        """Short human name of a segregation mode, for the status bar.
+
+        Shares one dict with ``_set_segregation_mode``'s label: the View-menu handler and the
+        Preferences tab both drive the same state, and they previously used two different
+        lookups, so the "type" mode was announced as "Date".
+        """
+        return {"status": "Status", "date": "Date", "type": "File Type"}.get(
+            mode, "Status"
+        )
+
     def _set_segregation_mode(self, mode: str):
         if mode not in SEGREGATED_MODES:
             mode = DEFAULT_SEGREGATED_MODE
@@ -1600,24 +1983,40 @@ class MainWindow(QMainWindow):
                 action.setChecked(mode == value)
 
         if not self._segregated_view_enabled:
+            # Turning a mode on implies turning segregation on. This is the behaviour the
+            # View menu wants, so it stays here - but it must never run while a caller is
+            # deliberately applying the user's *unchecked* box, which is why
+            # SettingsDialog._apply_views_tab calls _on_toggle_segregated_view first.
             self._act_segregated_view.setChecked(True)
         else:
             self._model.set_segregated_mode(mode)
             self._apply_table_spans()
-            mode_str = {"status": "Status", "date": "Date", "type": "File Type"}.get(
-                mode, "Status"
+            self._status_label.setText(
+                f"Segregated view grouped by {self._segregation_mode_label(mode)}"
             )
-            self._status_label.setText(f"Segregated view grouped by {mode_str}")
 
     def _on_toggle_segregated_view(self, checked: bool):
         self._segregated_view_enabled = checked
         self._manager.db.set_ui_state("segregated_view_enabled", checked)
+        # Keep the View-menu checkmark in step. This handler is driven by the action's
+        # own `toggled` signal *and* called programmatically (state restore, and the
+        # Preferences checkbox), so without this the menu can disagree with the table - and
+        # a disagreement is worse than useless: `_set_segregation_mode` turns segregation
+        # on by checking the action, which emits nothing when it is already checked, so
+        # the enable silently did not happen. blockSignals keeps this from re-entering.
+        action = getattr(self, "_act_segregated_view", None)
+        if action is not None and action.isChecked() != checked:
+            action.blockSignals(True)
+            try:
+                action.setChecked(checked)
+            finally:
+                action.blockSignals(False)
         selected = self._selected_ids()
         self._model.set_segregated_view(checked, mode=self._segregated_view_mode)
         self._restore_selection(selected)
         self._apply_table_spans()
-        mode_str = "Status" if self._segregated_view_mode == "status" else "Date"
         if checked:
+            mode_str = self._segregation_mode_label(self._segregated_view_mode)
             self._status_label.setText(f"Segregated view enabled ({mode_str})")
         else:
             self._status_label.setText("Segregated view disabled")
@@ -1729,9 +2128,16 @@ class MainWindow(QMainWindow):
             if entry and entry.url:
                 urls.append(entry.url)
         if urls:
+            text = "\n".join(urls)
+            # Tell the clipboard monitor this text is ours. Deduping in add_download is not
+            # enough: re-adding a *paused* download resumes it, so Ctrl+C on a paused row would
+            # silently start it.
+            monitor = getattr(self, "_clipboard_monitor", None)
+            if monitor is not None:
+                monitor.suppress(text)
             clipboard = QGuiApplication.clipboard()
             if clipboard:
-                clipboard.setText("\n".join(urls))
+                clipboard.setText(text)
                 if len(urls) == 1:
                     kind = "Magnet link" if urls[0].startswith("magnet:") else "URL"
                     self._status_label.setText(f"Copied {kind} to clipboard")
@@ -1856,6 +2262,23 @@ class MainWindow(QMainWindow):
             act.setCheckable(True)
             act.setChecked(curr_alloc == val)
             act.triggered.connect(lambda checked=False, a=val: self._on_set_bandwidth_allocation(a))
+        menu.addSeparator()
+
+        # Move to Queue. Lists real queues rather than asking for a name, so a typo cannot
+        # create a queue the user did not mean. Built fresh per invocation for the same reason
+        # the Tor submenu above is.
+        queue_menu = menu.addMenu("Move to Queue")
+        current_queue = (entry.queue_id or DEFAULT_QUEUE_ID) if entry else DEFAULT_QUEUE_ID
+        for queue in self._manager.get_queues():
+            q_act = queue_menu.addAction(queue.name)
+            q_act.setCheckable(True)
+            q_act.setChecked(queue.id == current_queue)
+            q_act.triggered.connect(
+                lambda checked=False, qid=queue.id: self._on_move_selected_to_queue(qid)
+            )
+        queue_menu.addSeparator()
+        q_new = queue_menu.addAction("New Queue…")
+        q_new.triggered.connect(self._on_new_queue)
         menu.addSeparator()
 
         # Per-download Tor routing. Built fresh on each invocation because the
@@ -1993,6 +2416,157 @@ class MainWindow(QMainWindow):
             self._model.add_entry(entry)
             self._update_count_label()
 
+    # -- queues ---------------------------------------------------------------
+
+    def _init_queue_scope(self):
+        """Restore the persisted queue scope and populate the switcher, once, at startup.
+
+        Without this the combo is empty until some event repopulates it, and the model keeps
+        whatever scope it happened to be constructed with.
+        """
+        active = self._manager.get_active_queue()
+        self._model.set_queue_scope(active)
+        self._refresh_queue_ui()
+
+    def _refresh_queue_ui(self):
+        """Rebuild the queue combo and the View > Queues menu from the manager's state.
+
+        Rebuilt wholesale rather than diffed: the list is small, and a diff is where a queue
+        renamed elsewhere would keep showing its old name until a restart.
+
+        The menu is rebuilt by clearing it and re-adding the same ``QAction`` objects in order.
+        The earlier version removed and re-inserted actions individually, and `list.clear()`
+        inside the removal loop ended the iteration after one action - so every refresh left a
+        stale duplicate behind and shuffled "All Queues" down the menu.
+
+        Also refreshes the model's queue_id -> name map: a rename changes what every row of that
+        queue shows in ``Col.QUEUE_NAME`` at once, so the two must not drift.
+        """
+        queues = self._manager.get_queues()
+        active = self._manager.get_active_queue()
+        self._model.set_queue_names({q.id: q.name for q in queues})
+        self._model.set_queue_colors({q.id: q.color for q in queues})
+
+        self._queue_combo.blockSignals(True)
+        self._queue_combo.clear()
+        self._queue_combo.addItem("All Queues", ALL_QUEUES)
+        for queue in queues:
+            label = queue.name
+            if not queue.is_default:
+                label = (
+                    f"{queue.name}  (max {queue.max_concurrent})"
+                    if queue.max_concurrent > 0
+                    else f"{queue.name}  (Global)"
+                )
+            self._queue_combo.addItem(label, queue.id)
+        self._queue_combo.setCurrentIndex(max(0, self._queue_combo.findData(active)))
+        self._queue_combo.blockSignals(False)
+
+        # Retire the previous per-queue actions from the exclusive group before dropping them,
+        # so the group does not accumulate dead actions holding their lambdas alive.
+        for action in self._queue_actions:
+            self._queue_scope_group.removeAction(action)
+        self._queue_actions = []
+        self._move_to_queue_actions = []
+
+        self._act_queue_all.setChecked(active == ALL_QUEUES)
+        self._menu_queues.clear()
+        self._menu_queues.addAction(self._act_queue_all)
+        self._menu_queues.addSeparator()
+        for queue in queues:
+            action = QAction(queue.name, self)
+            action.setCheckable(True)
+            action.setChecked(queue.id == active)
+            action.triggered.connect(
+                lambda _checked=False, qid=queue.id: self._on_select_queue(qid)
+            )
+            self._queue_scope_group.addAction(action)
+            self._menu_queues.addAction(action)
+            self._queue_actions.append(action)
+        self._menu_queues.addSeparator()
+        self._menu_queues.addAction(self._act_new_queue)
+        self._menu_queues.addAction(self._act_manage_queues)
+
+        self._menu_move_to_queue.clear()
+        for queue in queues:
+            action = QAction(queue.name, self)
+            action.triggered.connect(
+                lambda _checked=False, qid=queue.id: self._on_move_selected_to_queue(qid)
+            )
+            self._menu_move_to_queue.addAction(action)
+            self._move_to_queue_actions.append(action)
+        # Nothing selected means nothing to move. The actions grey out rather than the whole
+        # submenu, so the menu does not change shape under the user's cursor.
+        self._update_move_to_queue_enabled()
+
+    def _update_move_to_queue_enabled(self):
+        """Grey out **Move to Queue**'s actions when there is nothing selected.
+
+        The actions rather than the submenu: disabling the submenu itself is what made it look
+        "not clickable", because a disabled submenu gives no hint that selecting a row would
+        enable it. Called on every selection change, not only when the menu is rebuilt — nothing
+        else re-ran it between clicking a row and reaching for the menu.
+        """
+        enabled = bool(self._selected_ids())
+        for action in getattr(self, "_move_to_queue_actions", []):
+            action.setEnabled(enabled)
+        menu = getattr(self, "_menu_move_to_queue", None)
+        if menu is not None:
+            menu.setEnabled(enabled)
+
+    def _on_queue_combo_changed(self, index: int):
+        if index < 0:
+            return
+        self._on_select_queue(self._queue_combo.itemData(index) or ALL_QUEUES)
+
+    def _on_select_queue(self, queue_id: str):
+        """Scope the downloads list to *queue_id* (``""`` for all queues)."""
+        self._manager.set_active_queue(queue_id)
+        self._refresh_queue_ui()
+
+    def _on_queue_scope_changed(self, queue_id: str):
+        """The scope changed from anywhere (menu, combo, a deleted queue)."""
+        self._model.set_queue_scope(queue_id)
+        self._load_history()
+        self._refresh_queue_ui()
+        self._update_count_label()
+
+    def _on_queues_changed(self):
+        self._refresh_queue_ui()
+        self._load_history()
+        self._update_count_label()
+
+    def _on_new_queue(self):
+        name, ok = QInputDialog.getText(
+            self, "New Queue", "Queue name:", QLineEdit.Normal, ""
+        )
+        if not ok:
+            return
+        # 3 matches the global default, so a new queue behaves like the old single queue until
+        # the user narrows it.
+        created, message = self._manager.create_queue(name.strip(), 3)
+        self._status_label.setText(message)
+        if created:
+            self._refresh_queue_ui()
+
+    def _on_manage_queues(self):
+        dialog = QueueManagerDialog(self._manager, self)
+        if dialog.exec():
+            self._refresh_queue_ui()
+            self._load_history()
+            self._update_count_label()
+        self._status_label.setText(dialog.result_message or "")
+
+    def _on_move_selected_to_queue(self, queue_id: str):
+        ids = self._selected_ids()
+        if not ids:
+            self._status_label.setText("Select one or more downloads first.")
+            return
+        moved, message = self._manager.move_downloads_to_queue(ids, queue_id)
+        self._status_label.setText(message)
+        if moved:
+            self._load_history()
+
     def _on_download_removed(self, download_id: str):
         self._model.remove_entry(download_id)
         self._update_count_label()
@@ -2112,23 +2686,82 @@ class MainWindow(QMainWindow):
         if ok:
             self._set_speed_limit(val_kb * 1024, is_upload)
 
+    def _apply_persisted_theme(self) -> str:
+        """Apply the theme stored in ``ui_state``, returning the id actually applied.
+
+        An unknown or corrupt value falls back to the default rather than raising: this runs
+        inside ``__init__``, so an exception here would leave no window at all.
+        """
+        from my_idm.styles import DEFAULT_THEME, apply_theme, normalize_theme
+
+        try:
+            stored = self._manager.db.get_ui_state("theme", DEFAULT_THEME)
+        except Exception:
+            log.warning("Could not read the persisted theme", exc_info=True)
+            stored = DEFAULT_THEME
+        return apply_theme(QApplication.instance(), normalize_theme(stored))
+
+    def _on_theme_applied(self, theme: str) -> None:
+        """React to the Preferences ▸ Views theme selector applying a theme.
+
+        ``styles.apply_theme`` has already set the application stylesheet, so the only thing
+        left is anything this window caches in palette colours.
+        """
+        self._save_ui_state_to_db()
+
     def _on_show_statistics(self):
-        """Open the read-only statistics popup, beside Preferences in the toolbar.
+        """Raise the statistics popup, beside Preferences in the toolbar, or open it.
 
         The speed sparkline reads the same aggregate the status bar shows, so the chart and
         the status bar can never disagree - see ``docs/architecture/statistics.md``.
+
+        One popup at a time: it is modeless (``show()``, not ``exec()``) and nothing
+        ``WA_DeleteOnClose``s it, so without this guard every toolbar click would leave
+        another live dialog - each with its own widgets and 1 Hz QTimer - on screen for
+        the rest of the session, and the user would have to hunt for the one they wanted.
         """
         from my_idm.stats_dialog import StatisticsPopup
+
+        existing = self._stats_dialog
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.activateWindow()
+                    return existing
+            except RuntimeError:
+                # The C++ side is already gone (closed and destroyed); fall through and
+                # build a fresh one rather than raising into a dangling wrapper.
+                self._stats_dialog = None
 
         dlg = StatisticsPopup(
             self._manager._db,
             parent=self,
             speed_provider=lambda: self._model.get_aggregate_speeds()[0],
         )
+        # Qt deletes the dialog on close, and we drop our reference at the same time, so a
+        # session's worth of toolbar clicks cannot pile up hidden dialogs and their timers.
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self._stats_dialog = dlg
+        dlg.finished.connect(self._on_statistics_closed)
         dlg.show()
         return dlg
 
-    def _on_open_preferences(self, initial_tab: int = 0):
+    def _on_statistics_closed(self, _result: int) -> None:
+        """Drop our reference once the popup is gone, so the next click rebuilds it.
+
+        ``finished`` fires before the ``WA_DeleteOnClose`` teardown, and again for the
+        modal path's ``accept``/``reject``, so either way the next click starts clean.
+        """
+        self._stats_dialog = None
+
+    def _on_open_preferences(self, initial_tab=TAB_GENERAL):
+        """Open Preferences, optionally on a named page (``TAB_*``).
+
+        Pass the name rather than an index. ``SettingsDialog`` clamps an out-of-range
+        integer away and opens the wrong page without a word, which is how six Tools-menu
+        items ended up pointing one or two pages off after the 6 -> 9 tab split.
+        """
         dlg = SettingsDialog(
             general_config=self._manager.general_config,
             torrent_config=self._manager.torrent_config,
@@ -2159,22 +2792,22 @@ class MainWindow(QMainWindow):
                     self._tray_icon.hide()
 
     def _on_open_torrent_settings(self):
-        self._on_open_preferences(1)
+        self._on_open_preferences(TAB_TORRENT)
 
     def _on_open_browser_settings(self):
-        self._on_open_preferences(2)
+        self._on_open_preferences(TAB_BROWSER)
 
     def _on_open_network_settings(self):
-        self._on_open_preferences(3)
+        self._on_open_preferences(TAB_VPN)
 
     def _on_open_tor_settings(self):
-        self._on_open_preferences(3)
+        self._on_open_preferences(TAB_TOR)
 
     def _on_open_security_settings(self):
-        self._on_open_preferences(4)
+        self._on_open_preferences(TAB_SECURITY)
 
     def _on_open_external_tools_settings(self):
-        self._on_open_preferences(5)
+        self._on_open_preferences(TAB_EXTERNAL_TOOLS)
 
     def _on_launch_animepahe_gui(self):
         cfg = self._manager.external_tools_config
@@ -2687,6 +3320,7 @@ class MainWindow(QMainWindow):
         self._table.setColumnWidth(Col.LAST_SEEDED, 130)
         self._table.setColumnWidth(Col.SOURCE, 100)
         self._table.setColumnWidth(Col.SEEDING_STARTED_AT, 150)
+        self._table.setColumnWidth(Col.QUEUE_NAME, 120)
 
     # 2. Show all columns (reset column visibility)
         header = self._header_view
@@ -2722,6 +3356,39 @@ class MainWindow(QMainWindow):
     def _on_table_selection_changed(self, *args):
         entry = self._first_selected_entry()
         self._details_panel.set_download_id(entry.id if entry else None)
+        self._update_queue_status(entry)
+        self._update_move_to_queue_enabled()
+
+    def _update_queue_status(self, entry):
+        """Show which queue the selected download belongs to.
+
+        A queue is otherwise invisible in the list: nothing in the row says where it lives,
+        so the only way to find out was to open the row's context menu and read the checkmark
+        in **Move to Queue**. With a single row selected this puts it in plain sight; with
+        several, the queues are summarised, since a per-row answer would not fit.
+        """
+        if entry is None:
+            self._queue_status_label.setText("")
+            return
+        name = self._queue_display_name(entry.queue_id)
+        selected = len(self._selected_ids())
+        if selected > 1:
+            queues = sorted({
+                self._queue_display_name(e.queue_id)
+                for e in self._manager.get_all_entries()
+                if e.id in set(self._selected_ids())
+            })
+            if len(queues) == 1:
+                self._queue_status_label.setText(f"🗃️ {queues[0]}")
+            else:
+                self._queue_status_label.setText(f"🗃️ {len(queues)} queues")
+            return
+        self._queue_status_label.setText(f"🗃️ {name}")
+
+    def _queue_display_name(self, queue_id: str) -> str:
+        """The queue's name, or Default for a blank or dangling id."""
+        queue = self._manager.get_queue(queue_id)
+        return queue.name if queue else DEFAULT_QUEUE_NAME
 
     def _on_details_timer_tick(self):
         if self._details_panel.isVisible() and self._details_panel.current_download_id:
@@ -2814,6 +3481,14 @@ class MainWindow(QMainWindow):
                 header_state = settings.value("header_state")
                 if header_state:
                     self._table.horizontalHeader().restoreState(header_state)
+                else:
+                    # Genuinely fresh profile: nothing saved anywhere, so start from the
+                    # default arrangement. Only on this path - a user who has already chosen
+                    # their columns must not have them overridden because a default changed.
+                    # No early return: the tail pinning, default widths and default sort
+                    # below still have to run.
+                    for col in DEFAULT_HIDDEN_COLUMNS:
+                        self._table.horizontalHeader().setSectionHidden(col, True)
                 splitter_state = settings.value("splitter_state")
                 if splitter_state:
                     self._splitter.restoreState(splitter_state)
@@ -2904,6 +3579,12 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     pass
+            else:
+                # No saved header state: a fresh profile. Apply the default hidden set here
+                # too, for the case where the DB holds window geometry from an older build
+                # but no header state.
+                for col in DEFAULT_HIDDEN_COLUMNS:
+                    self._table.horizontalHeader().setSectionHidden(col, True)
 
             # Ensure sections remain movable and flags are not overwritten by saved state
             header = self._table.horizontalHeader()
@@ -3045,6 +3726,22 @@ class MainWindow(QMainWindow):
             event.accept()
             return
         self._is_closing = True
+
+        # Release the OS hotkey and the clipboard subscription on the way out. A hotkey left
+        # registered outlives the process: Windows keeps the chord claimed and the next launch
+        # cannot take it, with no way for the user to tell why.
+        self._release_capture()
+
+        # Close the statistics popup explicitly. It is a child window with its own 1 Hz
+        # QTimer, and shutting the manager down underneath it would let that timer fire
+        # against a stopped model for the remainder of the teardown.
+        stats_dlg = getattr(self, "_stats_dialog", None)
+        if stats_dlg is not None:
+            try:
+                stats_dlg.close()
+            except RuntimeError:
+                pass
+            self._stats_dialog = None
 
         try:
             from my_idm.notifications import unregister_notification_handler

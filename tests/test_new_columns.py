@@ -132,12 +132,18 @@ class TestNewColumnDefinitions(unittest.TestCase):
         self.assertEqual(Col.LAST_SEEDED, 14)
         self.assertEqual(Col.SOURCE, 15)
         self.assertEqual(Col.SEEDING_STARTED_AT, 16)
-        self.assertEqual(Col.COUNT, 17)
+        self.assertEqual(Col.QUEUE_NAME, 17)
+        self.assertEqual(Col.COUNT, 18)
 
     def test_headers(self):
         self.assertEqual(Col.HEADERS[Col.LAST_SEEDED], "Last Seeded")
         self.assertEqual(Col.HEADERS[Col.SOURCE], "Source")
         self.assertEqual(Col.HEADERS[Col.SEEDING_STARTED_AT], "Seeding Started At")
+        self.assertEqual(Col.HEADERS[Col.QUEUE_NAME], "Queue")
+
+    def test_the_queue_column_is_the_last_one(self):
+        """Append-only: an existing profile's persisted column indices must not shift."""
+        self.assertEqual(Col.QUEUE_NAME, Col.COUNT - 1)
 
     def test_last_seeded_not_in_date_columns(self):
         """Kept out of DATE_COLUMNS so the existing date-sort contract is unchanged."""

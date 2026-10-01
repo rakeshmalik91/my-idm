@@ -327,6 +327,96 @@ class _LockedConnection:
 # Data classes
 # ---------------------------------------------------------------------------
 
+#: Fixed id of the queue every download lands in unless the user says otherwise. A constant
+#: rather than a generated uuid so the ``queue_id = ''`` backfill is idempotent across launches
+#: - a fresh uuid each open would re-home every default download on every start.
+DEFAULT_QUEUE_ID = "default"
+DEFAULT_QUEUE_NAME = "Default"
+
+#: Sentinel for "show every queue" in the UI and in scope filters. Not a valid queue id.
+ALL_QUEUES = ""
+
+#: Queues seeded for the two ingestion paths that produce a recognisable source, so a user's
+#: AnimePahe and YouTube downloads are separable without any setup. Fixed ids for the same
+#: idempotency reason as DEFAULT_QUEUE_ID. ``source_key`` is matched against a download's
+#: metadata by ``DownloadManager._infer_queue_for_source``.
+SOURCE_QUEUES = (
+    ("queue-animepahe", "AnimePahe", "animepahe"),
+    ("queue-youtube", "YouTube", "youtube"),
+)
+
+#: Seeded colour per queue, as `#rrggbb`. Distinct hues rather than shades of one, because a
+#: queue is identified by colour at a glance in the downloads list and "slightly different
+#: grey" is not an identifier. Readable against both light and dark row backgrounds.
+DEFAULT_QUEUE_COLOR = "#4a9eff"
+SOURCE_QUEUE_COLORS = {
+    "queue-animepahe": "#ff7b72",
+    "queue-youtube": "#ff5c8a",
+}
+
+#: Offered for new queues and by the colour picker. Chosen to stay distinguishable from the two
+#: source-queue colours above and to have enough contrast to read as a filled shape against both
+#: the light and dark row backgrounds.
+QUEUE_COLOR_PALETTE = (
+    "#4a9eff",  # blue
+    "#3fb950",  # green
+    "#d29922",  # amber
+    "#a371f7",  # purple
+    "#db6d28",  # orange
+    "#39c5cf",  # teal
+    "#e05561",  # red
+    "#8b949e",  # grey
+)
+
+
+def normalize_queue_color(color: str) -> str:
+    """Return *color* as a lowercase ``#rrggbb`` string, or ``""`` if it is not a colour.
+
+    Accepts ``#rgb`` and expands it, so a value typed by hand or produced by another tool
+    cannot end up as an unparseable value that paints as an invisible swatch. Returns ``""``
+    rather than raising, because this runs on values that came from a database which may have
+    been written by a future version.
+    """
+    text = (color or "").strip().lower()
+    if not text.startswith("#"):
+        text = "#" + text
+    digits = text[1:]
+    if len(digits) == 3 and all(c in "0123456789abcdef" for c in digits):
+        digits = "".join(c * 2 for c in digits)
+    if len(digits) != 6 or any(c not in "0123456789abcdef" for c in digits):
+        return ""
+    return "#" + digits
+
+#: Queues that exist from the start and cannot be deleted. Deleting "YouTube" would silently
+#: break the routing below and send every YouTube download to Default instead.
+SOURCE_QUEUE_IDS = frozenset(qid for qid, _name, _key in SOURCE_QUEUES)
+
+
+@dataclass
+class QueueInfo:
+    """A named download queue and its own concurrency budget.
+
+    ``max_concurrent`` is a *local* ceiling; the global ``max_concurrent_downloads`` still
+    applies on top. ``<= 0`` means unlimited *within this queue* rather than zero, because a
+    queue exists precisely to say "this one is special" - and a user who set it to 0 would be
+    expressing the opposite of what they mean.
+    """
+    id: str = DEFAULT_QUEUE_ID
+    name: str = DEFAULT_QUEUE_NAME
+    max_concurrent: int = 3
+    position: int = 0
+    is_default: bool = True
+    #: `#rrggbb`, or "" when unset. Drives the swatch in the downloads list, so an unset colour
+    #: must degrade to something visible rather than to an invisible cell.
+    color: str = DEFAULT_QUEUE_COLOR
+    created_at: str = ""
+
+    @property
+    def effective_max_concurrent(self) -> int:
+        """The local ceiling, with ``<= 0`` resolved to unlimited."""
+        return self.max_concurrent if self.max_concurrent > 0 else 0
+
+
 @dataclass
 class DownloadEntry:
     """Represents a single download in the database."""
@@ -351,6 +441,10 @@ class DownloadEntry:
     torrent_info_hash: str = ""
     metadata_json: str = "{}"
     queue_order: int = 0
+    # Named queue membership. Distinct from queue_order, which is *priority within* a queue and
+    # whose 0 is a meaningful "not in the active queue" sentinel. Empty means the default queue
+    # until the backfill runs; every reader normalises through QueueInfo.resolve().
+    queue_id: str = ""
     fetching_metadata_since: str = ""  # ISO timestamp when fetching_metadata started
     uploaded_size: int = 0             # Total cumulative seeded/uploaded bytes
     last_seeded_at: str = ""           # ISO timestamp of the most recent completed seed (torrents only)
@@ -473,7 +567,7 @@ _DOWNLOAD_DB_COLUMNS = [
     "added_at", "last_tried_at", "completed_at",
     "etag", "content_hash", "torrent_info_hash", "metadata_json",
     "queue_order", "fetching_metadata_since", "uploaded_size", "last_seeded_at",
-    "seeding_started_at",
+    "seeding_started_at", "queue_id",
 ]
 
 _SEGMENT_DB_COLUMNS = [
@@ -544,18 +638,35 @@ class Database:
                 fetching_metadata_since TEXT NOT NULL DEFAULT '',
                 uploaded_size   INTEGER NOT NULL DEFAULT 0,
                 last_seeded_at  TEXT NOT NULL DEFAULT '',
-                seeding_started_at TEXT NOT NULL DEFAULT ''
+                seeding_started_at TEXT NOT NULL DEFAULT '',
+                queue_id        TEXT NOT NULL DEFAULT ''
             );
 
-            CREATE TABLE IF NOT EXISTS segments (
+CREATE TABLE IF NOT EXISTS segments (
                 id              TEXT PRIMARY KEY,
                 download_id     TEXT NOT NULL,
                 idx             INTEGER NOT NULL,
                 start_byte      INTEGER NOT NULL DEFAULT 0,
-                end_byte        INTEGER NOT NULL DEFAULT 0,
+                end_byte         INTEGER NOT NULL DEFAULT 0,
                 downloaded_bytes INTEGER NOT NULL DEFAULT 0,
                 status          TEXT NOT NULL DEFAULT 'pending',
                 FOREIGN KEY (download_id) REFERENCES downloads(id) ON DELETE CASCADE
+            );
+
+            -- Declared before `downloads` deliberately, even though `downloads` is created
+            -- first above. SQLite only resolves a forward REFERENCES for a DEFERRABLE
+            -- constraint, so a non-deferred FK from `downloads` to `queues` cannot be added by
+            -- ALTER either. Queue deletion is a manager-level operation that reassigns rows
+            -- before deleting, so the FK would buy nothing anyway. See
+            -- docs/architecture/queues.md.
+            CREATE TABLE IF NOT EXISTS queues (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL UNIQUE,
+                max_concurrent  INTEGER NOT NULL DEFAULT 3,
+                position        INTEGER NOT NULL DEFAULT 0,
+                is_default      INTEGER NOT NULL DEFAULT 0,
+                color           TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL DEFAULT ''
             );
 
             CREATE INDEX IF NOT EXISTS idx_segments_download ON segments(download_id);
@@ -584,10 +695,25 @@ class Database:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''")
         if "seeding_started_at" not in cols:
             self._conn.execute("ALTER TABLE downloads ADD COLUMN seeding_started_at TEXT NOT NULL DEFAULT ''")
+        if "queue_id" not in cols:
+            # DEFAULT '' rather than the default queue's real id: ALTER TABLE ADD COLUMN can
+            # only take a constant, never a subquery, so the backfill below is a second
+            # statement. It is idempotent, so running it on every open is harmless.
+            self._conn.execute("ALTER TABLE downloads ADD COLUMN queue_id TEXT NOT NULL DEFAULT ''")
+
+        # Same guard for `queues`: CREATE TABLE IF NOT EXISTS will not add a column to a table
+        # that already exists, so a database created before queues had a colour needs this.
+        cursor = self._conn.execute("PRAGMA table_info(queues)")
+        queue_cols = [r["name"] for r in cursor.fetchall()]
+        if queue_cols and "color" not in queue_cols:
+            self._conn.execute("ALTER TABLE queues ADD COLUMN color TEXT NOT NULL DEFAULT ''")
 
         # Create indexes after ensuring columns exist
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_queue_order ON downloads(queue_order)")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_queue ON downloads(queue_id)")
+
+        self._seed_default_queue()
 
         # Clean up any orphaned segment rows from deleted downloads
         self._conn.execute("DELETE FROM segments WHERE download_id NOT IN (SELECT id FROM downloads)")
@@ -600,6 +726,293 @@ class Database:
 
         self._conn.commit()
 
+    # -- queues ---------------------------------------------------------------
+
+    def _seed_default_queue(self):
+        """Create the default queue and home any unqueued download in it.
+
+        Idempotent on both halves, so this runs on every open rather than behind a one-shot
+        migration flag. The backfill is what makes the ``queue_id = ''`` default invisible: a
+        migrated database reads back as though the column had always been there.
+        """
+        self._conn.execute(
+            "INSERT OR IGNORE INTO queues (id, name, max_concurrent, position, is_default, color, created_at) "
+            "VALUES (?, ?, ?, 0, 1, ?, ?)",
+            # max_concurrent 0 = "Global": the default queue adds no cap of its own and follows
+            # the global concurrency limit, which is what a user expects of the queue that
+            # holds everything unclaimed. Note INSERT OR IGNORE, so an existing profile keeps
+            # whatever it already had rather than being reset by this change.
+            (DEFAULT_QUEUE_ID, DEFAULT_QUEUE_NAME, 0, DEFAULT_QUEUE_COLOR, _now_iso()),
+        )
+        # Colours are backfilled separately from the row seed, because an existing profile has
+        # a Default queue already and INSERT OR IGNORE would leave it colourless. Only rows with
+        # no colour are touched, so a colour the user chose is never overwritten.
+        self._conn.execute(
+            "UPDATE queues SET color = ? WHERE id = ? AND (color IS NULL OR color = '')",
+            (DEFAULT_QUEUE_COLOR, DEFAULT_QUEUE_ID),
+        )
+        # Also re-assert is_default: a user who deleted every other queue and recreated one by
+        # hand should still resolve to a single, unambiguous default.
+        self._conn.execute(
+            "UPDATE queues SET is_default = 0 WHERE id != ?", (DEFAULT_QUEUE_ID,)
+        )
+        self._conn.execute(
+            "UPDATE downloads SET queue_id = ? WHERE queue_id = '' OR queue_id IS NULL",
+            (DEFAULT_QUEUE_ID,),
+        )
+        # A queue deleted out from under its downloads (e.g. by hand in the DB) would otherwise
+        # leave rows pointing at nothing, invisible to any queue-scoped view.
+        self._conn.execute(
+            "UPDATE downloads SET queue_id = ? WHERE queue_id NOT IN (SELECT id FROM queues)",
+            (DEFAULT_QUEUE_ID,),
+        )
+        # The two source queues are seeded the same idempotent way. max_concurrent 0 = unlimited
+        # within the queue: these are for organisation, not for capping, and a user who wants a
+        # limit sets one in the queue manager.
+        for queue_id, name, _key in SOURCE_QUEUES:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO queues (id, name, max_concurrent, position, is_default, color, created_at) "
+                "VALUES (?, ?, 0, 0, 0, ?, ?)",
+                (queue_id, name, SOURCE_QUEUE_COLORS.get(queue_id, ""), _now_iso()),
+            )
+            self._conn.execute(
+                "UPDATE queues SET color = ? WHERE id = ? AND (color IS NULL OR color = '')",
+                (SOURCE_QUEUE_COLORS.get(queue_id, ""), queue_id),
+            )
+
+    def get_queues(self) -> list[QueueInfo]:
+        """All queues, default first then by user position."""
+        rows = self._conn.execute(
+            "SELECT * FROM queues ORDER BY is_default DESC, position ASC, name COLLATE NOCASE ASC"
+        ).fetchall()
+        return [self._row_to_queue(r) for r in rows]
+
+    def get_queue(self, queue_id: str) -> Optional[QueueInfo]:
+        if not queue_id:
+            return self.get_default_queue()
+        row = self._conn.execute(
+            "SELECT * FROM queues WHERE id = ?", (queue_id,)
+        ).fetchone()
+        return self._row_to_queue(row) if row else None
+
+    def get_default_queue(self) -> QueueInfo:
+        row = self._conn.execute(
+            "SELECT * FROM queues WHERE id = ?", (DEFAULT_QUEUE_ID,)
+        ).fetchone()
+        if row:
+            return self._row_to_queue(row)
+        # Unreachable via open()/_seed_default_queue, but a caller may hold a Database whose
+        # schema was created by a future version; return a usable object rather than None.
+        return QueueInfo()
+
+    def get_queue_by_name(self, name: str) -> Optional[QueueInfo]:
+        """Find a queue by its display name, case-insensitively.
+
+        Backlog files name queues rather than ids, because a uuid in a hand-editable text file
+        would be unusable. Returns ``None`` for an unknown name rather than creating one: a
+        backlog can be machine-generated, and auto-creating from generated content is how you
+        end up with "Queue1", "Queue2".
+        """
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return None
+        row = self._conn.execute(
+            "SELECT * FROM queues WHERE name = ? COLLATE NOCASE", (cleaned,)
+        ).fetchone()
+        return self._row_to_queue(row) if row else None
+
+    def create_queue(self, name: str, max_concurrent: int = 3,
+                     color: str = "") -> tuple[bool, str]:
+        """Create a queue. Returns ``(ok, message)``; a blank or duplicate name is refused.
+
+        A blank *color* is assigned from a small rotating palette so a new queue is visible in
+        the downloads list immediately rather than being an invisible swatch the user has to
+        think to go and colour.
+        """
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return False, "Queue name cannot be empty."
+        existing = self._conn.execute(
+            "SELECT id FROM queues WHERE name = ? COLLATE NOCASE", (cleaned,)
+        ).fetchone()
+        if existing:
+            return False, f"A queue named '{cleaned}' already exists."
+        row = self._conn.execute(
+            "SELECT MAX(position) AS max_pos FROM queues"
+        ).fetchone()
+        next_pos = (row["max_pos"] + 1) if row and row["max_pos"] is not None else 0
+        self._conn.execute(
+            "INSERT INTO queues (id, name, max_concurrent, position, is_default, color, created_at) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (
+                str(uuid.uuid4()), cleaned, int(max_concurrent), next_pos,
+                normalize_queue_color(color) or self._next_queue_color(), _now_iso(),
+            ),
+        )
+        self._conn.commit()
+        return True, f"Created queue '{cleaned}'."
+
+    def _next_queue_color(self) -> str:
+        """The first palette colour not already in use, so a new queue is distinguishable."""
+        used = {
+            (r["color"] or "").lower()
+            for r in self._conn.execute("SELECT color FROM queues").fetchall()
+        }
+        for candidate in QUEUE_COLOR_PALETTE:
+            if candidate.lower() not in used:
+                return candidate
+        return QUEUE_COLOR_PALETTE[len(used) % len(QUEUE_COLOR_PALETTE)]
+
+    def set_queue_color(self, queue_id: str, color: str) -> tuple[bool, str]:
+        """Set a queue's swatch colour. Returns ``(ok, message)``."""
+        if not self.get_queue(queue_id):
+            return False, "That queue no longer exists."
+        cleaned = normalize_queue_color(color)
+        if not cleaned:
+            return False, "Pick a colour for the queue."
+        self._conn.execute(
+            "UPDATE queues SET color = ? WHERE id = ?", (cleaned, queue_id)
+        )
+        self._conn.commit()
+        return True, ""
+
+    def rename_queue(self, queue_id: str, name: str) -> tuple[bool, str]:
+        """Rename a queue. The default queue cannot be renamed away."""
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return False, "Queue name cannot be empty."
+        queue = self.get_queue(queue_id)
+        if not queue:
+            return False, "That queue no longer exists."
+        if queue_id == DEFAULT_QUEUE_ID:
+            return False, "The default queue cannot be renamed."
+        clash = self._conn.execute(
+            "SELECT id FROM queues WHERE name = ? COLLATE NOCASE AND id != ?",
+            (cleaned, queue_id),
+        ).fetchone()
+        if clash:
+            return False, f"A queue named '{cleaned}' already exists."
+        self._conn.execute(
+            "UPDATE queues SET name = ? WHERE id = ?", (cleaned, queue_id)
+        )
+        self._conn.commit()
+        return True, f"Renamed to '{cleaned}'."
+
+    def set_queue_max_concurrent(self, queue_id: str, max_concurrent: int) -> None:
+        """Set a queue's local concurrency ceiling. ``<= 0`` means unlimited within the queue."""
+        self._conn.execute(
+            "UPDATE queues SET max_concurrent = ? WHERE id = ?",
+            (int(max_concurrent), queue_id),
+        )
+        self._conn.commit()
+
+    def move_queue_position(self, queue_id: str, delta: int) -> None:
+        """Shift a queue up or down in the switcher, keeping `position` dense."""
+        queues = [q for q in self.get_queues() if q.id != DEFAULT_QUEUE_ID]
+        if not queues:
+            return
+        idx = next((i for i, q in enumerate(queues) if q.id == queue_id), -1)
+        if idx == -1:
+            return
+        target = idx + (-1 if delta < 0 else 1)
+        if target < 0 or target >= len(queues):
+            return
+        queues[idx], queues[target] = queues[target], queues[idx]
+        for position, queue in enumerate(queues):
+            self._conn.execute(
+                "UPDATE queues SET position = ? WHERE id = ?", (position, queue.id)
+            )
+        self._conn.commit()
+
+    def delete_queue(self, queue_id: str) -> tuple[bool, str]:
+        """Delete a queue, moving its downloads to the default one first.
+
+        Downloads are **never** deleted with their queue: a queue is a view onto history, and
+        history is the product. The reassignment and the delete run in one transaction so a
+        concurrent insert cannot land a row in the queue between them.
+        """
+        queue = self.get_queue(queue_id)
+        if not queue:
+            return False, "That queue no longer exists."
+        if queue_id == DEFAULT_QUEUE_ID:
+            return False, "The default queue cannot be deleted."
+        if queue_id in SOURCE_QUEUE_IDS:
+            # These exist to route AnimePahe / YouTube downloads. Deleting one would not break
+            # anything, but it would silently send that whole source to Default and look like
+            # the routing had stopped working.
+            return False, (
+                f"'{queue.name}' is a built-in source queue and cannot be deleted. "
+                "You can rename it or set its limit."
+            )
+        with self._conn:
+            self._conn.execute(
+                "UPDATE downloads SET queue_id = ? WHERE queue_id = ?",
+                (DEFAULT_QUEUE_ID, queue_id),
+            )
+            self._conn.execute("DELETE FROM queues WHERE id = ?", (queue_id,))
+        return True, f"Deleted '{queue.name}'; its downloads moved to {DEFAULT_QUEUE_NAME}."
+
+    def reassign_queue(self, download_ids: list[str], queue_id: str) -> int:
+        """Move downloads into *queue_id*, continuing the target queue's numbering.
+
+        One transaction, and it does **not** renumber from 1: the target queue already has rows
+        numbered 1..n, so restarting would give the incoming rows priorities that collide with
+        rows already there. The caller's order is preserved, so a multi-row move produces the
+        order the user picked rather than whatever order the rows came back from a SELECT in.
+
+        Returns how many rows changed.
+        """
+        if not download_ids:
+            return 0
+        if not self.get_queue(queue_id):
+            return 0
+        base = self.get_next_queue_order(queue_id)
+        with self._conn:
+            for offset, download_id in enumerate(download_ids):
+                self._conn.execute(
+                    "UPDATE downloads SET queue_id = ?, queue_order = ? WHERE id = ?",
+                    (queue_id, base + offset, download_id),
+                )
+        return len(download_ids)
+
+    def get_active_counts_by_queue(self) -> dict[str, int]:
+        """Active transfers per queue, keyed by queue id.
+
+        One grouped query instead of a row scan per candidate. Queues with nothing active are
+        absent from the mapping; callers must treat a missing key as 0 rather than as unknown.
+        """
+        rows = self._conn.execute(
+            "SELECT queue_id, COUNT(*) AS n FROM downloads "
+            "WHERE status IN ('downloading','checking','fetching_metadata','stalled') "
+            "GROUP BY queue_id"
+        ).fetchall()
+        return {(r["queue_id"] or DEFAULT_QUEUE_ID): int(r["n"]) for r in rows}
+
+    def get_queue_download_counts(self) -> dict[str, int]:
+        """Total rows per queue, for the switcher's per-queue counts."""
+        rows = self._conn.execute(
+            "SELECT queue_id, COUNT(*) AS n FROM downloads GROUP BY queue_id"
+        ).fetchall()
+        return {(r["queue_id"] or DEFAULT_QUEUE_ID): int(r["n"]) for r in rows}
+
+    @staticmethod
+    def _row_to_queue(row: sqlite3.Row) -> QueueInfo:
+        # `color` is read defensively: a row created before the migration, or a future schema
+        # that drops it, must not make every queue unreadable.
+        try:
+            color = row["color"] or ""
+        except (IndexError, KeyError):
+            color = ""
+        return QueueInfo(
+            id=row["id"],
+            name=row["name"],
+            max_concurrent=int(row["max_concurrent"]),
+            position=int(row["position"]),
+            is_default=bool(row["is_default"]),
+            color=color or DEFAULT_QUEUE_COLOR,
+            created_at=row["created_at"] or "",
+        )
+
     # -- downloads -----------------------------------------------------------
 
     def add_download(self, entry: DownloadEntry) -> DownloadEntry:
@@ -611,8 +1024,9 @@ class Database:
             entry.id = str(uuid.uuid4())
         if not entry.added_at:
             entry.added_at = _now_iso()
+        entry.queue_id = self.resolve_queue_id(entry.queue_id)
         if entry.queue_order <= 0:
-            entry.queue_order = self.get_next_queue_order()
+            entry.queue_order = self.get_next_queue_order(entry.queue_id)
 
         cols = ", ".join(_DOWNLOAD_DB_COLUMNS)
         placeholders = ", ".join(["?"] * len(_DOWNLOAD_DB_COLUMNS))
@@ -625,6 +1039,7 @@ class Database:
         return entry
 
     def update_download(self, entry: DownloadEntry):
+        entry.queue_id = self.resolve_queue_id(entry.queue_id)
         sets = ", ".join(f"{c} = ?" for c in _DOWNLOAD_DB_COLUMNS if c != "id")
         values = [getattr(entry, c) for c in _DOWNLOAD_DB_COLUMNS if c != "id"]
         values.append(entry.id)
@@ -632,6 +1047,21 @@ class Database:
             f"UPDATE downloads SET {sets} WHERE id = ?", values
         )
         self._conn.commit()
+
+    def resolve_queue_id(self, queue_id: str) -> str:
+        """Map a possibly-blank or dangling queue id onto one that exists.
+
+        Callers legitimately pass ``""`` to mean "the default queue", so the write paths cannot
+        simply reject it. Nor can they blindly write it through: an empty ``queue_id`` would be
+        invisible to every queue-scoped read until the next open() re-ran the backfill. This is
+        the one place that turns the intent into a real id.
+        """
+        if not queue_id:
+            return DEFAULT_QUEUE_ID
+        row = self._conn.execute(
+            "SELECT id FROM queues WHERE id = ?", (queue_id,)
+        ).fetchone()
+        return queue_id if row else DEFAULT_QUEUE_ID
 
     def update_progress(self, download_id: str, downloaded_size: int,
                         status: str | None = None):
@@ -713,22 +1143,62 @@ class Database:
         ).fetchone()
         return self._row_to_entry(row) if row else None
 
-    def get_all_downloads(self) -> list[DownloadEntry]:
-        rows = self._conn.execute(
-            "SELECT * FROM downloads ORDER BY added_at DESC"
-        ).fetchall()
+    def get_all_downloads(self, queue_id: str = ALL_QUEUES) -> list[DownloadEntry]:
+        """Every download, newest first, or only those in one queue.
+
+        The default is *all* queues: most callers want the whole history and history is the
+        product. Only the queue-scoped view passes a real id.
+        """
+        if queue_id:
+            rows = self._conn.execute(
+                "SELECT * FROM downloads WHERE queue_id = ? ORDER BY added_at DESC",
+                (queue_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM downloads ORDER BY added_at DESC"
+            ).fetchall()
         return [self._row_to_entry(r) for r in rows]
 
     # -- statistics ---------------------------------------------------------
 
-    #: One bucket per cut-off, in the order the popup shows them. `added_at` is stored as
-    #: an ISO string by ``_now_iso()``, so ``substr(..., 1, 10)`` is the UTC date and
-    #: ``substr(..., 1, 7)`` the month.
+    #: One bucket per cut-off, in the order the popup shows them, as (name, days back).
+    #: 0/6/29/364 gives inclusive 1/7/30/365-day rolling windows - note that "This week"
+    #: is a rolling week, not a calendar one.
     _STATS_BUCKETS = (
         ("today", 0),
         ("week", 6),
         ("month", 29),
         ("year", 364),
+    )
+
+    #: The calendar-day expression every statistics query groups and compares on.
+    #:
+    #: ``added_at`` is written by ``_now_iso()`` in **UTC** (``database.py`` top), while the
+    #: cut-offs are built from a **local** date, because the buckets are labelled in the
+    #: user's own calendar ("Today"). Slicing the raw string therefore compares a UTC date
+    #: against a local one and is wrong for part of every day: at 02:00 local in UTC+05:30,
+    #: a file added two minutes ago carries ``2026-09-29T20:30`` and lands in *yesterday*.
+    #:
+    #: ``datetime(added_at, 'localtime')`` re-bases each row into the machine's local zone
+    #: before slicing, which is the same conversion ``download_model.get_entry_date_category``
+    #: performs with ``astimezone()`` - so the two views of "today" finally agree. SQLite's
+    #: ``localtime`` goes through the C library, so it is DST-correct per row rather than
+    #: needing an offset plumbed in from Python.
+    _STATS_LOCAL_DAY = "substr(datetime(added_at, 'localtime'), 1, 10)"
+
+    #: Month expression, same reasoning, width 7. Also a *group key*, so it must be
+    #: written identically in the SELECT list and the WHERE clause.
+    _STATS_LOCAL_MONTH = "substr(datetime(added_at, 'localtime'), 1, 7)"
+
+    #: Excludes rows that cannot be bucketed by date: blank, hand-edited garbage, and
+    #: well-shaped but impossible dates like ``2026-13-45`` (which passes the GLOB shape
+    #: check but makes ``datetime()`` return NULL). Without the second clause such a row
+    #: would produce a NULL group on the chart, surfacing as a literal "None" bucket.
+    #: The GLOB is the cheap shape pre-filter; the ``IS NOT NULL`` is the semantic one.
+    _STATS_PARSABLE = (
+        "added_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"
+        " AND datetime(added_at, 'localtime') IS NOT NULL"
     )
 
     def _stats_row_to_bucket(self, row) -> DownloadStats:
@@ -745,11 +1215,11 @@ class Database:
         )
 
     def _stats_sum_for(self, since: Optional[str]) -> DownloadStats:
-        """Totals for every row whose ``added_at`` date is on or after *since*.
+        """Totals for every row whose local calendar day is on or after *since*.
 
         *since* is an ISO date prefix (``YYYY-MM-DD``). ``None`` means all time. A row with
-        an empty ``added_at`` never matches a cut-off, but does count towards the
-        lifetime: a hand-written row is still a download the user has.
+        an empty or unparseable ``added_at`` never matches a cut-off, but does count towards
+        the lifetime: a hand-written row is still a download the user has.
         """
         completed_sql = (
             f"SUM(CASE WHEN status IN ({','.join('?' * len(COMPLETE_STATUSES))}) "
@@ -758,15 +1228,13 @@ class Database:
         params: list[Any] = list(COMPLETE_STATUSES)
         where = ""
         if since is not None:
-            # The GLOB guard matters: `substr(added_at,1,10) >= ?` is a *string* compare,
-            # and a hand-edited 'not-a-date' sorts after '2026-09-24' ('n' > '2'), so a
-            # corrupt timestamp would silently land in the today bucket. Requiring a
-            # YYYY-MM-DD prefix keeps unparseable rows out of every dated bucket; they
-            # still count towards the lifetime total.
-            where = (
-                " WHERE added_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
-                "AND substr(added_at, 1, 10) >= ?"
-            )
+            # Both guards matter. `_STATS_PARSABLE` keeps unparseable rows out of every
+            # dated bucket, because a string comparison would otherwise sort them *in*:
+            # a hand-edited 'not-a-date' is greater than '2026-09-24' ('n' > '2'), so a
+            # corrupt timestamp silently landed in the today bucket. And the comparison has
+            # to be on the converted day, not the stored UTC prefix, or "today" is off by a
+            # day for everyone east of UTC until lunchtime.
+            where = f" WHERE {self._STATS_PARSABLE} AND {self._STATS_LOCAL_DAY} >= ?"
             params.append(since)
         row = self._conn.execute(
             "SELECT COUNT(*) AS count, "
@@ -788,16 +1256,23 @@ class Database:
 
         *today* is injected rather than read from the clock, which is what makes the whole
         aggregation testable without freezing time - the same convention the date-based
-        segregation uses. It is interpreted as a local date, matching ``added_at`` being
-        written in UTC but bucketed by the calendar day the user sees.
+        segregation uses. It is a **local** date, and so are the buckets the rows are
+        grouped into: ``added_at`` is stored in UTC and converted per row (see
+        ``_STATS_LOCAL_DAY``). Mixing the two was the off-by-one-day bug this fixes.
+
+        Injecting only the *cut-off* cannot make the SQL itself deterministic across
+        machines - the local conversion necessarily reads the host's timezone - so a test
+        must compute its expectations with ``datetime.fromisoformat(...).astimezone()``
+        rather than hard-coding a UTC date. That keeps the test meaningful on any host
+        while still failing if the conversion is removed.
 
         *since* and *bucket* drive the chart series: the range to plot (None = all time)
-        and whether to group by day (``substr(...,1,10)``) or month
-        (``substr(...,1,7)``). The summary buckets above are fixed and unaffected - they
-        are the headline numbers, and a chart range should not silently redefine them.
+        and whether to group by day or month. The summary buckets above are fixed and
+        unaffected - they are the headline numbers, and a chart range should not silently
+        redefine them.
         """
         if today is None:
-            today = datetime.now().date()
+            today = datetime.now().astimezone().date()
         elif isinstance(today, datetime):
             today = today.date()
         if isinstance(since, datetime):
@@ -823,26 +1298,27 @@ class Database:
     def _stats_series(
         self, since: Optional[date], bucket: str
     ) -> tuple[tuple[str, DownloadStats], ...]:
-        """The chart series, grouped by day or month and clipped to *since*.
+        """The chart series, grouped by local day or local month and clipped to *since*.
 
-        The same ``GLOB`` guard as the cut-off buckets applies: without it a corrupt
-        ``added_at`` sorts into a bucket by string comparison, so a hand-edited
-        ``not-a-date`` would appear on the chart and in whatever bucket it sorted into.
+        Same ``_STATS_PARSABLE`` guard and same local conversion as the cut-off buckets.
+        The group expression is repeated verbatim in the WHERE clause - SQLite will not let
+        a WHERE reference a SELECT alias, so the two must be written out identically.
         """
-        width = 10 if bucket == "day" else 7
+        if bucket == "day":
+            width, day_expr = 10, self._STATS_LOCAL_DAY
+        else:
+            width, day_expr = 7, self._STATS_LOCAL_MONTH
         completed_sql = (
             f"SUM(CASE WHEN status IN ({','.join('?' * len(COMPLETE_STATUSES))}) "
             f"THEN 1 ELSE 0 END)"
         )
         params: list[Any] = [*COMPLETE_STATUSES]
-        where = (
-            " WHERE added_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'"
-        )
+        where = f" WHERE {self._STATS_PARSABLE}"
         if since is not None:
-            where += f" AND substr(added_at, 1, {width}) >= ?"
+            where += f" AND {day_expr} >= ?"
             params.append(since.isoformat()[:width])
         rows = self._conn.execute(
-            f"SELECT substr(added_at, 1, {width}) AS bucket, "
+            f"SELECT {day_expr} AS bucket, "
             "       COUNT(*) AS count, "
             "       COALESCE(SUM(total_size), 0) AS downloaded, "
             "       COALESCE(SUM(uploaded_size), 0) AS uploaded, "
@@ -853,11 +1329,17 @@ class Database:
         ).fetchall()
         return tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
 
-    def get_next_queue_order(self) -> int:
+    def get_next_queue_order(self, queue_id: str = "") -> int:
+        """Next priority value *within* a queue.
+
+        Scoped because priority is queue-local: a user who puts a torrent at position 1 of its
+        own queue must not push everything else in the default queue down by one.
+        """
         row = self._conn.execute(
             "SELECT MAX(queue_order) AS max_order FROM downloads "
             "WHERE status IN ('queued', 'downloading', 'checking', 'fetching_metadata', 'stalled') "
-            "AND queue_order > 0"
+            "AND queue_order > 0 AND queue_id = ?",
+            (queue_id or DEFAULT_QUEUE_ID,),
         ).fetchone()
         if row and row["max_order"] is not None:
             return int(row["max_order"]) + 1

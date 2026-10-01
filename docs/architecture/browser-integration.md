@@ -82,9 +82,27 @@ Receives intercepted download payloads from the browser extension.
     "message": "Download added to queue"
   }
   ```
+- **Declines (`200 OK` with `status: "ignored"`)**: A decline is deliberately *not* an error
+  status. The extension reads a non-ok status as "My-IDM is broken" and falls back to a browser
+  download, whereas `ignored` is the shape it already understands for "handled, not queued".
+  Each carries a distinct `reason`:
+  - `unsupported_url_scheme` — `blob:`, `data:`, `javascript:` and friends have no external
+    transport, so queuing one only makes the user wait out the retry ladder.
+  - `file_size_below_minimum` — probed size is below `min_file_size_kb`.
+  - `capture_paused` — `intercept_all` is off, i.e. the **🎯 Download Capture** tray row or the
+    [global hotkey](capture.md) turned capture off. This gate runs *after* the `enabled` check
+    and *before* body parsing, the scheme allow-list and the size probe, so a paused capture
+    costs no work.
 - **Error Responses**:
+  - `403 Forbidden`: Browser integration is disabled entirely (`enabled` is false), so the
+    server is not even running to answer.
   - `400 Bad Request`: Missing or invalid `url`.
   - `500 Internal Error`: Engine failed to queue download.
+
+> `intercept_all` is authoritative on **both** sides: `GET /config` publishes it to the
+> extension, and `_handle_add` enforces it locally. That symmetry is what makes the capture hotkey
+> take effect immediately rather than after the extension's 30 s config poll. See
+> [Capture Subsystem](capture.md).
 
 #### 3. `GET /config`
 Returns active user preferences for browser interception.

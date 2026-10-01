@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Set
+from typing import Iterable, Optional, Set, Tuple
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
 from PySide6.QtGui import (
@@ -49,6 +49,7 @@ class MultiselectFilterPopup(QFrame):
         selected_keys: Optional[Set[str]],
         counts: dict[str, int],
         parent: Optional[QWidget] = None,
+        items: Optional[Iterable[Tuple[str, str]]] = None,
     ):
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self._column = column
@@ -122,6 +123,7 @@ class MultiselectFilterPopup(QFrame):
             Col.STATUS: "Filter by Status",
             Col.NAME: "Filter by Download Type",
             Col.SIZE: "Filter by Size",
+            Col.QUEUE_NAME: "Filter by Queue",
         }
         title_lbl = QLabel(popup_titles.get(column, "Filter"))
         layout.addWidget(title_lbl)
@@ -158,14 +160,19 @@ class MultiselectFilterPopup(QFrame):
 
         # Each filterable column has its own key -> label map. Falling back to
         # the type labels here made the Size popup list HTTP/BitTorrent.
-        if column == Col.STATUS:
-            items = STATUS_FILTER_LABELS.items()
+        # `items` overrides all of them, which is how the Queue column lists live queue
+        # names while the filter itself keeps the stable queue ids.
+        if items is not None:
+            entries = list(items)
+        elif column == Col.STATUS:
+            entries = list(STATUS_FILTER_LABELS.items())
         elif column == Col.SIZE:
-            items = SIZE_FILTER_LABELS.items()
+            entries = list(SIZE_FILTER_LABELS.items())
         else:
-            items = TYPE_FILTER_LABELS.items()
+            entries = list(TYPE_FILTER_LABELS.items())
+        items = entries
 
-        for key, label in items:
+        for key, label in entries:
             count = counts.get(key, 0)
             cb = QCheckBox(f"{label}  ({count})")
             cb.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -253,6 +260,7 @@ class FilterHeaderView(QHeaderView):
         Col.NAME: "Download Type",
         Col.STATUS: "Status",
         Col.SIZE: "Size",
+        Col.QUEUE_NAME: "Queue",
     }
 
     def _get_filter_btn_rect(self, logical_index: int) -> QRect:
@@ -280,6 +288,8 @@ class FilterHeaderView(QHeaderView):
                     is_filtered = getattr(model, "is_type_filtered", lambda: False)()
                 elif logical_index == Col.SIZE:
                     is_filtered = getattr(model, "is_size_filtered", lambda: False)()
+                elif logical_index == Col.QUEUE_NAME:
+                    is_filtered = getattr(model, "is_queue_filtered", lambda: False)()
 
             painter.save()
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -370,17 +380,26 @@ class FilterHeaderView(QHeaderView):
         if model is None:
             return
 
+        items = None
         if logical_index == Col.STATUS:
             current_selection = getattr(model, "status_filter", lambda: None)()
             counts = getattr(model, "get_status_counts", lambda: {})()
         elif logical_index == Col.SIZE:
             current_selection = getattr(model, "size_filter", lambda: None)()
             counts = getattr(model, "get_size_counts", lambda: {})()
+        elif logical_index == Col.QUEUE_NAME:
+            current_selection = getattr(model, "queue_filter", lambda: None)()
+            counts = getattr(model, "get_queue_counts", lambda: {})()
+            # Queue ids are the filter keys but names are what a person recognises, so the
+            # popup gets the live id -> name mapping from the model.
+            items = getattr(model, "queue_filter_items", lambda: [])()
         else:
             current_selection = getattr(model, "type_filter", lambda: None)()
             counts = getattr(model, "get_type_counts", lambda: {})()
 
-        popup = MultiselectFilterPopup(logical_index, current_selection, counts, self)
+        popup = MultiselectFilterPopup(
+            logical_index, current_selection, counts, self, items=items
+        )
         popup.filter_changed.connect(self._on_filter_changed)
 
         # Position popup below the filter button
@@ -404,5 +423,8 @@ class FilterHeaderView(QHeaderView):
             elif column == Col.SIZE:
                 if hasattr(model, "set_size_filter"):
                     model.set_size_filter(selected_keys)
+            elif column == Col.QUEUE_NAME:
+                if hasattr(model, "set_queue_filter"):
+                    model.set_queue_filter(selected_keys)
         self.filter_requested.emit(column, selected_keys)
         self.viewport().update()

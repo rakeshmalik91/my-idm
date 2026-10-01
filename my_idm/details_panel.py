@@ -48,7 +48,7 @@ from my_idm.database import DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
 from my_idm.external_tools import find_chrome_hwnd
 from my_idm.manager import DownloadManager
-from my_idm.styles import Colors
+from my_idm.styles import Colors, themed, themed_widget
 from my_idm.utils import send_to_trash, to_int, unlock_path
 
 
@@ -188,11 +188,16 @@ class SideTabBar(QWidget):
         layout.addStretch(1)
 
         self.setFixedWidth(112)
-        self.setStyleSheet(f"""
-            SideTabBar {{
-                background-color: {Colors.BG_DARK};
-                border-right: 1px solid {Colors.BORDER};
-            }}
+        # `themed`, not an f-string: a QSS rule body is `SideTabBar { ... }` and in an
+        # f-string those braces are replacement fields. Storing the literal `Colors.*` names
+        # also lets `apply_theme` re-resolve this sheet on a theme switch - an f-string is
+        # resolved once, at construction, which left the sidebar white after switching from
+        # light back to dark.
+        themed_widget(self, """
+            SideTabBar {
+                background-color: Colors.BG_DARK;
+                border-right: 1px solid Colors.BORDER;
+            }
         """)
 
         self.setCurrentIndex(0)
@@ -209,10 +214,10 @@ class SideTabBar(QWidget):
         btn.setCheckable(True)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setFixedHeight(34)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.BG_DARK};
-                color: {Colors.TEXT_SECONDARY};
+        themed_widget(btn, """
+            QPushButton {
+                background-color: Colors.BG_DARK;
+                color: Colors.TEXT_SECONDARY;
                 border: none;
                 border-left: 3px solid transparent;
                 border-radius: 0px;
@@ -220,28 +225,28 @@ class SideTabBar(QWidget):
                 font-size: 12px;
                 font-weight: 500;
                 text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.BG_HOVER};
-                color: {Colors.TEXT};
+            }
+            QPushButton:hover {
+                background-color: Colors.BG_HOVER;
+                color: Colors.TEXT;
                 border: none;
                 border-left: 3px solid transparent;
                 border-radius: 0px;
-            }}
-            QPushButton:checked {{
-                background-color: {Colors.BG_MID};
-                color: {Colors.ACCENT};
+            }
+            QPushButton:checked {
+                background-color: Colors.BG_MID;
+                color: Colors.ACCENT;
                 border: none;
-                border-left: 3px solid {Colors.ACCENT};
+                border-left: 3px solid Colors.ACCENT;
                 border-radius: 0px;
                 font-weight: bold;
-            }}
-            QPushButton:pressed {{
-                background-color: {Colors.BG_LIGHT};
+            }
+            QPushButton:pressed {
+                background-color: Colors.BG_LIGHT;
                 border: none;
-                border-left: 3px solid {Colors.ACCENT};
+                border-left: 3px solid Colors.ACCENT;
                 border-radius: 0px;
-            }}
+            }
         """)
         btn.clicked.connect(lambda: self.setCurrentIndex(index))
         self._btn_group.addButton(btn, index)
@@ -315,11 +320,11 @@ class SessionTabList(QWidget):
         self._btn_group.setExclusive(True)
 
         self.setFixedWidth(118)
-        self.setStyleSheet(f"""
-            SessionTabList {{
-                background-color: {Colors.BG_DARK};
-                border-right: 1px solid {Colors.BORDER};
-            }}
+        themed_widget(self, """
+            SessionTabList {
+                background-color: Colors.BG_DARK;
+                border-right: 1px solid Colors.BORDER;
+            }
         """)
 
     # -- population ---------------------------------------------------------
@@ -626,11 +631,11 @@ class DetailsPanel(QWidget):
     # -- UI Setup -------------------------------------------------------------
 
     def _setup_ui(self):
-        self.setStyleSheet(f"""
-            DetailsPanel {{
-                background-color: {Colors.BG_DARK};
-                border-top: 1px solid {Colors.BORDER};
-            }}
+        themed_widget(self, """
+            DetailsPanel {
+                background-color: Colors.BG_DARK;
+                border-top: 1px solid Colors.BORDER;
+            }
         """)
         outer_layout = QHBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -1118,7 +1123,9 @@ class DetailsPanel(QWidget):
         elif meta.get("antivirus_scanned"):
             self._ov_security.setText(f"<span style='color: {Colors.GREEN}; font-weight: bold;'>✔ Clean (Scanned)</span>")
         else:
-            self._ov_security.setText("<span style='color: {Colors.TEXT_SECONDARY};'>Not scanned yet</span>")
+            self._ov_security.setText(
+                f"<span style='color: {Colors.TEXT_SECONDARY};'>Not scanned yet</span>"
+            )
 
         # URL
         url_text = entry.url

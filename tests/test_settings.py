@@ -16,7 +16,21 @@ from my_idm.dialogs import AddDownloadDialog
 from my_idm.manager import DownloadManager
 from my_idm.network import NetworkConfig
 from my_idm.security import SecurityConfig
-from my_idm.settings_dialog import SettingsDialog
+from my_idm.settings_dialog import (
+    TAB_BROWSER,
+    TAB_EXTERNAL_TOOLS,
+    TAB_GENERAL,
+    TAB_ORDER,
+    TAB_SECURITY,
+    TAB_TOR,
+    TAB_TORRENT,
+    TAB_TITLES,
+    TAB_VIEWS,
+    TAB_VPN,
+    TAB_YOUTUBE,
+    SettingsDialog,
+    tab_index,
+)
 
 app = QApplication.instance() or QApplication(sys.argv)
 
@@ -599,7 +613,10 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.addCleanup(dlg.close)
         self.assertGreaterEqual(dlg.minimumWidth(), 740)
         self.assertEqual(dlg.width(), 820)
-        self.assertEqual(dlg.height(), 600)
+        # 668, not 600: the Views page is the tallest and has to fit without the dialog
+        # scrolling at its own minimum size. `resize(820, 600)` is clamped up to it.
+        self.assertEqual(dlg.height(), 668)
+        self.assertEqual(dlg.height(), dlg.minimumHeight())
 
         # Resize the dialog and simulate closing
         dlg.resize(960, 700)
@@ -614,6 +631,217 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.addCleanup(dlg2.close)
         self.assertEqual(dlg2.width(), 960)
         self.assertEqual(dlg2.height(), 700)
+
+
+class TestPreferencesPageRegistry(unittest.TestCase):
+    """``TAB_ORDER`` / ``TAB_TITLES`` are the single source of truth for page identity.
+
+    ``SettingsDialog`` used to take an ``initial_tab`` *index* and clamp it with
+    ``0 <= initial_tab < count()``. Every index was in range, so when a page was inserted
+    the dialog raised nothing and simply opened the wrong one - the 6 -> 9 tab split left
+    six live Tools-menu items one or two pages off. A name that does not resolve is now a
+    loud ``ValueError`` instead of a plausible wrong page.
+    """
+
+    def test_every_tab_name_is_distinct(self):
+        self.assertEqual(
+            len(set(TAB_ORDER)), len(TAB_ORDER),
+            "a duplicated name would make tab_index() ambiguous",
+        )
+
+    def test_every_tab_has_a_non_empty_title(self):
+        for name in TAB_ORDER:
+            with self.subTest(tab=name):
+                self.assertIn(name, TAB_TITLES)
+                self.assertTrue(TAB_TITLES[name].strip())
+
+    def test_no_title_exists_without_a_tab(self):
+        self.assertEqual(
+            set(TAB_TITLES), set(TAB_ORDER),
+            "an orphan title is a page that was renamed but never registered",
+        )
+
+    def test_tab_index_returns_the_position_in_tab_order(self):
+        for position, name in enumerate(TAB_ORDER):
+            with self.subTest(tab=name):
+                self.assertEqual(tab_index(name), position)
+
+    def test_an_unknown_page_raises_rather_than_guessing(self):
+        """The whole point of the registry: a typo must not become a wrong page."""
+        with self.assertRaises(ValueError):
+            tab_index("no-such-tab")
+        with self.assertRaises(ValueError):
+            tab_index("")
+
+    def test_the_generic_tab_is_first(self):
+        """Two menu items point at General with no argument; it must stay index 0."""
+        self.assertEqual(tab_index(TAB_GENERAL), 0)
+
+    def test_the_views_tab_sits_immediately_after_general(self):
+        self.assertEqual(
+            tab_index(TAB_VIEWS), tab_index(TAB_GENERAL) + 1,
+            "the Views tab is documented as second",
+        )
+
+
+class TestPreferencesDialogOpensTheNamedPage(ConfigIsolationMixin, unittest.TestCase):
+    """``SettingsDialog`` must honour the page it is handed."""
+
+    def setUp(self):
+        super().setUp()
+        self.db = Database(":memory:")
+        self.db.open()
+        self.addCleanup(self.db.close)
+
+    def dialog(self, **kw):
+        dlg = SettingsDialog(db=self.db, **kw)
+        self.addCleanup(dlg.close)
+        self.addCleanup(dlg.deleteLater)
+        QApplication.processEvents()
+        return dlg
+
+    def test_each_name_opens_its_own_page(self):
+        for name in TAB_ORDER:
+            with self.subTest(tab=name):
+                dlg = self.dialog(initial_tab=name)
+                self.assertEqual(
+                    dlg.current_tab_name(), name,
+                    f"asked for {name!r}, landed on {dlg.current_tab_name()!r} "
+                    f"({dlg._tabs.tabText(dlg._tabs.currentIndex())!r})",
+                )
+                dlg.close()
+                dlg.deleteLater()
+
+    def test_the_page_order_matches_the_registry(self):
+        self.assertEqual(
+            self.dialog()._tab_names, list(TAB_ORDER),
+            "the insertion order and TAB_ORDER have drifted apart",
+        )
+
+    def test_the_page_titles_match_the_registry(self):
+        dlg = self.dialog()
+        self.assertEqual(
+            [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())],
+            [TAB_TITLES[n] for n in TAB_ORDER],
+        )
+
+    def test_the_tab_count_matches_the_registry(self):
+        self.assertEqual(self.dialog()._tabs.count(), len(TAB_ORDER))
+
+    def test_an_unknown_page_name_is_rejected_loudly(self):
+        with self.assertRaises(ValueError):
+            SettingsDialog(db=self.db, initial_tab="nope")
+
+    def test_a_legacy_integer_index_still_works(self):
+        """Existing callers pass 0; that must not become a hard error."""
+        self.assertEqual(self.dialog(initial_tab=0).current_tab_name(), TAB_GENERAL)
+
+    def test_an_out_of_range_integer_is_clamped_rather_than_crashing(self):
+        """Documented legacy behaviour; the point is that it must not raise."""
+        self.assertEqual(self.dialog(initial_tab=9999)._tabs.currentIndex(), 0)
+
+    def test_opening_with_no_page_defaults_to_general(self):
+        self.assertEqual(self.dialog().current_tab_name(), TAB_GENERAL)
+
+    def test_current_tab_name_is_empty_without_any_pages(self):
+        """Must not IndexError on a dialog whose tab widget was never built."""
+        from PySide6.QtWidgets import QTabWidget
+
+        stub = SettingsDialog.__new__(SettingsDialog)
+        stub._tabs = QTabWidget()
+        stub._tab_names = []
+        self.assertEqual(stub.current_tab_name(), "")
+
+    def test_current_tab_name_is_empty_for_a_negative_index(self):
+        from PySide6.QtWidgets import QTabWidget
+
+        stub = SettingsDialog.__new__(SettingsDialog)
+        stub._tabs = QTabWidget()
+        stub._tab_names = list(TAB_ORDER)
+        stub._tabs.setCurrentIndex(-1)
+        self.assertEqual(stub.current_tab_name(), "")
+
+
+class TestGeneralConfigReachesBothEngines(ConfigIsolationMixin, unittest.TestCase):
+    """``GeneralConfig`` is read by *both* engines, so both must be updated together.
+
+    The disk-space gate and ``metadata_fetch_timeout_days`` both live on
+    ``GeneralConfig``, and ``TorrentEngine`` reads them from there. ``SettingsDialog``
+    works on a **copy**, so before this was wired, unticking "check free disk space" in
+    Preferences stopped HTTP downloads being checked while torrents carried on being
+    refused with the settings as they were at startup - a half-applied preference that is
+    impossible to spot from the UI.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.db = Database(":memory:")
+        self.db.open()
+        self.addCleanup(self.db.close)
+        self.manager = DownloadManager(self.db)
+        self.addCleanup(self.manager.stop)
+
+    def replacement(self, **overrides):
+        from my_idm.config import GeneralConfig
+
+        replacement = GeneralConfig.from_dict(self.manager.general_config.to_dict())
+        for key, value in overrides.items():
+            setattr(replacement, key, value)
+        return replacement
+
+    def test_the_torrent_engine_receives_the_new_config_object(self):
+        replacement = self.replacement(disk_space_check=False)
+        self.manager.set_general_config(replacement)
+        self.assertIs(
+            self.manager._torrent._general_config, replacement,
+            "TorrentEngine kept the config it was built with",
+        )
+
+    def test_the_http_engine_receives_the_same_object(self):
+        replacement = self.replacement()
+        self.manager.set_general_config(replacement)
+        self.assertIs(self.manager._http._general_config, replacement)
+        self.assertIs(
+            self.manager._http._general_config,
+            self.manager._torrent._general_config,
+            "the two engines must never read different settings",
+        )
+
+    def test_turning_the_disk_space_gate_off_reaches_the_torrent_engine(self):
+        self.manager.set_general_config(self.replacement(disk_space_check=False))
+        self.assertFalse(self.manager._torrent._general_config.disk_space_check)
+
+    def test_turning_the_disk_space_gate_on_reaches_the_torrent_engine(self):
+        self.manager.set_general_config(
+            self.replacement(disk_space_check=True, disk_space_headroom_mb=4096)
+        )
+        self.assertTrue(self.manager._torrent._general_config.disk_space_check)
+        self.assertEqual(
+            self.manager._torrent._general_config.disk_space_headroom_mb, 4096
+        )
+
+    def test_the_metadata_timeout_reaches_the_torrent_engine_too(self):
+        """The same stale object silently governed this setting already."""
+        self.manager.set_general_config(
+            self.replacement(metadata_fetch_timeout_days=9)
+        )
+        self.assertEqual(
+            self.manager._torrent._general_config.metadata_fetch_timeout_days, 9
+        )
+
+    def test_the_engine_object_itself_is_not_replaced(self):
+        """The push must be a config swap, not a re-instantiation mid-session."""
+        before = self.manager._torrent
+        self.manager.set_general_config(self.manager.general_config)
+        self.assertIs(self.manager._torrent, before)
+
+    def test_the_concurrency_limit_reaches_the_torrent_engine(self):
+        self.manager.set_general_config(
+            self.replacement(max_concurrent_downloads=3)
+        )
+        self.assertEqual(
+            self.manager._torrent._general_config.max_concurrent_downloads, 3
+        )
 
 
 class TestManagerGeneralConfigIntegration(ConfigIsolationMixin, unittest.TestCase):
@@ -810,8 +1038,14 @@ class TestExternalToolsSettings(ConfigIsolationMixin, unittest.TestCase):
             animepahe_repo_path="/path/to/repo",
             animepahe_launch_on_startup=False,
         )
-        dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5)
-        self.assertEqual(dlg._tabs.currentIndex(), 5)
+        # By name, not by index: `initial_tab=5` used to mean AnimePahe and quietly became
+        # Tor when the 6 -> 9 tab split landed, and the assertion below - which only
+        # checked the index it had just passed in - did not notice.
+        dlg = SettingsDialog(
+            external_tools_config=cfg, initial_tab=TAB_EXTERNAL_TOOLS
+        )
+        self.assertEqual(dlg._tabs.currentIndex(), tab_index(TAB_EXTERNAL_TOOLS))
+        self.assertEqual(dlg.current_tab_name(), TAB_EXTERNAL_TOOLS)
         self.assertEqual(dlg._animepahe_repo_edit.text(), "/path/to/repo")
         self.assertFalse(dlg._animepahe_startup_cb.isChecked())
 

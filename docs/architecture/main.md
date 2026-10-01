@@ -309,22 +309,39 @@ stateDiagram-v2
 
 ## Concurrency & Queue Prioritization
 
-My-IDM enforces concurrency limits and strict queue priority ordering:
+My-IDM enforces concurrency limits and strict queue priority ordering. **Downloads belong to
+named queues, each with its own budget** — see
+[**Named Queues & Concurrency Budgets**](queues.md) for the feature in full.
 
-1. **Active Concurrency Counting**:
+1. **Named Queues**:
+   - Every download has a `queue_id`; a queue carries a `max_concurrent` budget, where `<= 0` means *unlimited within that queue*.
+   - `GeneralConfig.max_concurrent_downloads` remains a **global ceiling over everything**, so a per-queue budget is a local ceiling and not a reservation.
+   - Selecting a queue in the toolbar (or **View → Queues**) scopes the downloads list to it. **"All Queues" is the startup default** — history is the product, so a user must never find existing downloads missing because a queue is selected.
+   - Deleting a queue re-homes its downloads to Default; downloads are never deleted with their queue.
+2. **Active Concurrency Counting**:
    - Downloads in `downloading`, `checking`, `fetching_metadata`, and `stalled` states consume concurrency slots.
-   - Any currently dispatching entries (`_starting_downloads`) are counted to prevent race conditions during rapid batch additions.
-2. **Queue Slot Allocation**:
-   - If active downloads reach `max_concurrent_downloads`, newly added or resumed downloads remain in `queued`.
-   - When an active download finishes (`completed`, `seeding`), pauses, stops, errors, or is deleted—or when the user increases the concurrency limit—`_process_queue()` automatically starts the next queued item.
-3. **Priority Ordering Rules**:
+   - Any currently dispatching entries (`_starting_downloads`) are counted to prevent race conditions during rapid batch additions — per queue, so a queue's first start cannot overshoot its own budget.
+   - Counted by a single `GROUP BY` on `queue_id` (`Database.get_active_counts_by_queue`), which replaced a full table scan per candidate.
+3. **Queue Slot Allocation**:
+   - A download starts only when **both** the global ceiling and its queue's own budget allow it (`DownloadManager._may_start`). The check is one method because three call sites reach the engines without passing through each other — `_process_queue`, `add_download` and `resume_download`.
+   - If either limit is reached, newly added or resumed downloads remain in `queued`.
+   - When an active download finishes (`completed`, `seeding`), pauses, stops, errors, or is deleted—or when the user increases a limit—`_process_queue()` automatically starts the next queued item on the next 1 Hz tick.
+   - `force_start_download` deliberately bypasses both limits: it is the user's "I know, just start it".
+4. **Priority Ordering Rules**:
+   - `queue_order` is priority **within** a queue (`0` is a meaningful "not queued" sentinel, pushed last by every sort key). `move_queue_up`/`move_queue_down` are queue-scoped and renumber the queue densely, so two downloads can never share a priority.
    - Queued downloads are sorted by `(queue_order if queue_order > 0 else 999999, added_at or "")`.
    - Lower order numbers represent higher priority (`order 1` starts first).
    - Among items with equal or unassigned queue order, earlier additions are prioritized; the latest added download is processed last.
+   - Across queues, a queue that still has budget is served before one that is saturated; ties break on the user's switcher order, **never** on the queue id (ids are UUIDs, which would make dispatch order differ between identical runs).
    - On application startup, downloads are auto-resumed in strict ascending queue order.
-4. **Strict Pause State Protection**:
+5. **Strict Pause State Protection**:
    - Paused, stopped, and suspended downloads are fully halted at the engine level (`lt.torrent_flags.auto_managed` unset and handle paused).
    - In-flight or lingering progress callbacks for paused/stopped/suspended tasks are immediately discarded and never emitted to the GUI or database.
+
+> [!NOTE]
+> Named queues with per-queue concurrency budgets are **implemented**. Two designs that live in
+> the same document are **not**: an off-peak scheduler and absolute per-download bandwidth caps
+> — see [Not implemented](queues.md#not-implemented).
 
 ---
 
@@ -332,8 +349,9 @@ My-IDM enforces concurrency limits and strict queue priority ordering:
 
 My-IDM relies on SQLite configured with Write-Ahead Logging (`journal_mode=WAL`) and `check_same_thread=False` for atomic, concurrent local persistence across application sessions.
 
-The persistence layer models three primary entities:
-- **`downloads`**: Primary download records, status values, cryptographic hashes, queue order positions, and extensible attributes stored in `metadata_json`.
+The persistence layer models four primary entities:
+- **`downloads`**: Primary download records, status values, cryptographic hashes, queue order positions, named-queue membership, and extensible attributes stored in `metadata_json`.
+- **`queues`**: Named download queues and their per-queue concurrency budgets. The default queue is pinned, cannot be renamed or deleted, and every download belongs to one.
 - **`segments`**: Parallel HTTP chunk ranges, byte offsets, downloaded totals, and per-segment states.
 - **`ui_state`**: Key-value store persisting window geometries, splitter proportions, details panel visibility, and header column widths.
 
@@ -734,6 +752,8 @@ My-IDM provides a zero-install-friction browser extension workflow using an unpa
 1. **Loopback Server (`browser_server.py`)**: Runs on `http://127.0.0.1:19582` within the asyncio thread.
    - `GET /health` — Heartbeat verification and status reporting.
    - `POST /add` — Ingests download URLs with target filename, cookies, referrer, and user-agent.
+     Declines an unsupported URL scheme, a file below the minimum size, and — when capture is
+     paused — everything, each as `200 OK` with a distinct `status: "ignored"` `reason`.
    - `GET /config` — Queries user settings (e.g. bypass extensions or auto-download toggles).
 2. **Manifest V3 Extension (`browser_extension/`)**:
    - Intercepts browser download initiations, cancels Chrome's built-in download, queries exact session cookies for the domain via `chrome.cookies.getAll()`, and posts to My-IDM.
@@ -794,13 +814,15 @@ Video-site downloads are delegated entirely to `yt-dlp` (library mode). My-IDM i
 My-IDM supports persistent background operations through Windows system tray integration, window minimize/close event interception, desktop completion notifications, and one-click global queue controls.
 
 1. **System Tray Integration (`QSystemTrayIcon`)**:
-   - Resides in the Windows notification area with dynamic Show/Hide window toggling, Pause All Downloads, Resume All Downloads, Preferences, and Exit controls.
+   - Resides in the Windows notification area with dynamic Show/Hide window toggling, Pause All Downloads, Resume All Downloads, Preferences, and Exit controls, plus two **checkable** capture rows (browser capture, clipboard capture) whose state is mirrored from the real config by `_sync_capture_actions()`.
 2. **Minimize & Close Interceptions**:
    - `changeEvent` intercepts window minimization and routes it to the tray without taskbar clutter.
    - `closeEvent` intercepts window close (`X` button), ignoring termination and keeping downloads and swarm seeding running in the background.
 3. **Clean Teardown**:
    - `MainWindow._exit_app()` bypasses close-to-tray, gracefully flushes SQLite states, halts background threads (`HTTPEngine`, `TorrentEngine`, `TorServiceManager`), and closes cleanly.
-4. For exhaustive details, see [**Window Lifecycle & System Tray Architecture**](window-system-tray.md).
+   - `closeEvent` calls `_release_capture()` first: a system-wide hotkey left registered outlives the process, and Windows keeps the chord claimed so the next launch cannot take it.
+4. **Capture Sources**: a system-wide hotkey (`RegisterHotKey`, picked out of the native event stream by a `QAbstractNativeEventFilter`) and a debounced clipboard monitor. Both are opt-in, both share the `intercept_all` toggle, and both are released on teardown.
+5. For exhaustive details, see [**Window Lifecycle & System Tray Architecture**](window-system-tray.md) and [**Capture Subsystem**](capture.md).
 
 ---
 

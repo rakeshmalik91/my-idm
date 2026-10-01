@@ -6,7 +6,15 @@ import os
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QRect, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QLinearGradient,
+    QPainter,
+    QPalette,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -237,3 +245,98 @@ class SavePathDelegate(QStyledItemDelegate):
         size = super().sizeHint(option, index)
         size.setHeight(max(size.height(), 28))
         return size
+
+
+class QueueColumnDelegate(QStyledItemDelegate):
+    """Renders a queue's colour swatch beside its name.
+
+    Falls back to **swatch only** when the column is too narrow for both. That is the point of
+    the fallback: a half-elided name next to a swatch is worse than the swatch alone, because
+    the colour still identifies the queue whereas "Torr..." does not. The decision is made
+    against the measured text width, so a short queue name keeps its label at the same column
+    width at which a long one collapses to the swatch.
+
+    **The tooltip is not optional.** A narrow column shows the swatch and nothing else, and a
+    coloured square with no legend is not readable — the same reason the fallback exists applies
+    to hover. Qt draws the tooltip for the whole cell, so it is the name plus the swatch hex.
+    """
+
+    #: Swatch edge length, the gap to the text, and the padding either side of the swatch.
+    SWATCH = 12
+    GAP = 6
+    PADDING = 4
+    #: Narrower than this and the name is dropped rather than elided into uselessness.
+    MIN_TEXT_WIDTH = 28
+
+    def _swatch_rect(self, option: QStyleOptionViewItem) -> QRect:
+        return QRect(
+            option.rect.left() + self.PADDING,
+            option.rect.top() + (option.rect.height() - self.SWATCH) // 2,
+            self.SWATCH,
+            self.SWATCH,
+        )
+
+    def _text_colour(self, option: QStyleOptionViewItem) -> QColor:
+        """Swatch-visible foreground: highlighted text on a selection, plain text otherwise."""
+        if option.state & QStyle.StateFlag.State_Selected:
+            return option.palette.color(QPalette.ColorRole.HighlightedText)
+        return option.palette.color(QPalette.ColorRole.Text)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+              index: QModelIndex):
+        from my_idm.download_model import QUEUE_COLOR_ROLE
+
+        colour = index.data(QUEUE_COLOR_ROLE)
+        name = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        metrics = QFontMetrics(option.font)
+
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        elif option.features & QStyleOptionViewItem.ViewItemFeature.HasDisplay:
+            painter.fillRect(option.rect, option.palette.base())
+
+        if not colour:
+            # No swatch to draw (a queue with no colour): fall back to plain text so the row is
+            # still identifiable rather than blank.
+            painter.setPen(self._text_colour(option))
+            painter.drawText(
+                option.rect.adjusted(self.PADDING, 0, -self.PADDING, 0),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                metrics.elidedText(name, Qt.TextElideMode.ElideRight,
+                                  max(0, option.rect.width() - 8)),
+            )
+            painter.restore()
+            return
+
+        swatch = self._swatch_rect(option)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(QColor(colour))
+        # A translucent dark outline keeps a dark swatch visible against a dark row.
+        painter.setPen(QPen(QColor(0, 0, 0, 140)))
+        painter.drawRoundedRect(swatch, 3, 3)
+
+        text_left = swatch.right() + self.GAP
+        available = option.rect.right() - self.PADDING - text_left
+        if name and available >= self.MIN_TEXT_WIDTH:
+            painter.setPen(self._text_colour(option))
+            painter.drawText(
+                QRect(text_left, option.rect.top(), available, option.rect.height()),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                metrics.elidedText(name, Qt.TextElideMode.ElideRight, available),
+            )
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex):
+        """Wide enough for the swatch plus the name, but no wider than the name needs."""
+        size = super().sizeHint(option, index)
+        name = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        if name:
+            metrics = QFontMetrics(option.font)
+            needed = (
+                self.PADDING * 2 + self.SWATCH + self.GAP
+                + metrics.horizontalAdvance(name)
+            )
+            size.setWidth(min(size.width(), needed))
+        return size
+
