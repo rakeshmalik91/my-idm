@@ -12,10 +12,10 @@ Two tiers. **Use basic sanity by default** — it is safe to leave running in th
 
 | Tier | Command | Scope | Time |
 | :--- | :--- | :--- | :--- |
-| **Basic sanity** | `run_all_tests.bat basic` | 1599 tests. No window, no tray, no real clipboard. | **~54 s** |
-| **Full** | `run_all_tests.bat` | All 2546 tests, including UI. | ~4–7 min |
+| **Basic sanity** | `run_all_tests.bat basic` | 1616 tests. No window, no tray, no real clipboard. | **~52 s** |
+| **Full** | `run_all_tests.bat` | All 2576 tests, including UI. | ~4–7 min |
 
-All three measured on 2026-10-02 via the wrapper. The tiers are **not** proportional: the 945
+All three measured on 2026-10-02 via the wrapper. The tiers are **not** proportional: the 959
 `ui` tests alone take ~2 min 20 s, because each builds and tears down real Qt widget trees —
 roughly 10x the per-test cost of everything else. A full run's slowest single test is
 `TestThemeSelector` at ~1 s in isolation but ~14 s in a full run, which points at cross-file
@@ -37,7 +37,7 @@ venv, switches to its own directory, and prints the result. Prefer it over calli
 directly. There is no `sync.bat`, no `webapp/` and no Android project — ignore runbooks that
 mention them. The suite is pure Python + PySide6 and needs no build step.
 
-**Current state: full `2546 passed, 1 skipped`; basic `1599 passed, 1 skipped, 947 deselected`.**
+**Current state: full `2575 passed, 1 skipped`; basic `1616 passed, 1 skipped, 959 deselected`.**
 The single skip is the opt-in real Windows Defender scan (`MYIDM_RUN_AV_TESTS=1`). Update these
 numbers when you add or remove tests, and treat a *sudden* drop as a signal that a module failed
 to import.

@@ -150,7 +150,7 @@ To simplify settings discovery and reduce tab clutter, preferences pages are reg
 
 | `TAB_*` name | Index | Title | Contents |
 | :--- | :---: | :--- | :--- |
-| `TAB_GENERAL` | **0** | 📁 General & Downloads | Default save path, segments, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, free-disk-space gate, system tray behavior, and backlog auto-processing locations. |
+| `TAB_GENERAL` | **0** | 📁 General & Downloads | Default save path, segments, segment start stagger, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, free-disk-space gate, system tray behavior, and backlog auto-processing locations. |
 | `TAB_VIEWS` | **1** | 👁️ Views & Columns | Segregated-view mode (Status / Date / File Type) with its enable checkbox, plus column select and ordering for the downloads table. |
 | `TAB_TORRENT` | **2** | 🧲 BitTorrent | Post-download seeding switches, seeding time & ratio ceilings, upload speed throttling, torrent-to-HTTP ratio, and DHT/tracker timeout. |
 | `TAB_BROWSER` | **3** | 🌐 Browser Integration | Loopback REST server (127.0.0.1:19582), minimum file size threshold (KB), bypassed file extensions, Chromium (Chrome/Edge/Brave) unpacked loader, and Mozilla Firefox `.xpi` packaging & guide. |

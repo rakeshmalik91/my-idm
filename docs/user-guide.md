@@ -328,6 +328,7 @@ The settings popup is organized into six tabs:
   - **Remember last used folder when adding downloads**: When enabled, if you select a different directory in the Add Download dialog, My-IDM remembers that folder for subsequent downloads.
 - **Download Performance & Engine Defaults**:
   - **Default parallel connections (segments)**: Configure the default number of HTTP segments (1–32, default 8).
+  - **Delay between starting each segment**: Spacing between segment connections, 0–2000 ms (default 0 = every segment starts at once). Raise it only if a host rate-limits connection bursts and answers a starting download with 429/503 — the last of N segments then waits (N-1) × this before its first request, and the step is scaled down to keep the total under 2 s.
   - **Maximum concurrent active downloads**: Limit simultaneous active downloads (1–20, default 3) to prevent saturating bandwidth.
   - **Maximum automatic retries**: Number of automatic reconnection attempts before marking a download as errored (1–20, default 5).
   - **Exponential backoff**: Toggle between exponential multiplier backoff and constant linear retry delay.
@@ -751,6 +752,7 @@ python -m my_idm.main -b urls.txt -v
 4. If a segmented download fails (e.g. server returns 416 or 403 on a range request), the engine automatically falls back to a single-stream download
 5. Each segment retries up to 5 times with exponential backoff (1s, 2s, 4s, 8s, 16s)
 6. The file is pre-allocated to its full size on disk so segments can write to their respective offsets
+7. By default all segments open their connections at once. If **Delay between starting each segment** is raised in Preferences → General, segment *n* waits *n* × that delay before its first request, so a host that rate-limits connection bursts is not hit with every connection at once
 
 ### Torrent Downloads
 

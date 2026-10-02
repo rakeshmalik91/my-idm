@@ -12,6 +12,7 @@ Both engines are orchestrated by [`DownloadManager`](file:///d:/Projects/my-idm/
 
 - [Overview](#overview)
 - [HTTP Download State Machine](#http-download-state-machine)
+  - [Segment launch](#segment-launch)
   - [HTTP State Diagram](#http-state-diagram)
   - [HTTP State Definitions](#http-state-definitions)
   - [HTTP State Transition Matrix](#http-state-transition-matrix)
@@ -50,6 +51,24 @@ While HTTP and BitTorrent transfers share a common representation in the GUI (`D
 ## HTTP Download State Machine
 
 The HTTP engine manages file transfers over HTTP/1.1 using `aiohttp` on a dedicated asyncio background thread (`idm-async`), falling back to `curl_cffi` with browser impersonation for hosts behind bot protection. It supports dynamic probe negotiation, automatic multi-segment chunking, fallback to single-stream download, exponential backoff retries, and post-download security inspection.
+
+### Segment launch
+
+`chunk_streaming` starts one task per **pending** segment in a single `asyncio.gather`, so by
+default every connection is opened in the same event-loop iteration. That is the fastest
+option and the right one for a server that does not care, so it is the default
+(`GeneralConfig.segment_start_delay_ms = 0`).
+
+When the preference is raised, `_segmented_download` ranks the pending segments in `idx` order
+and hands segment *n* a start delay of *n* × the configured step; `_download_one_segment`
+sleeps for that slice **before** its retry ladder, so the wait is paid once on the initial
+request and is never charged again on a retry. Two consequences worth knowing:
+
+- the rank runs over *pending* segments, so a resume that already has 6 of 8 done spreads its
+  remaining 2 instead of idling the last one for 7 delays;
+- the step is scaled down so the last segment still starts within
+  `MAX_SEGMENT_STAGGER_TOTAL_S` (2 s). Clamping the tail instead of the step would bunch the
+  tail back up at the ceiling, which is the burst the feature exists to avoid.
 
 ### HTTP State Diagram
 

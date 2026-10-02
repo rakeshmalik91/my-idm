@@ -151,6 +151,7 @@ Synchronous SQLite wrapper for download persistence.
 | Name | Value | Description |
 |------|-------|-------------|
 | `DEFAULT_SEGMENTS` | `8` | Default parallel connections |
+| `MAX_SEGMENT_STAGGER_TOTAL_S` | `2.0` | Ceiling on the total `segment_start_delay_ms` stagger before a download's last segment starts |
 | `CHUNK_SIZE` | `65536` | 64 KiB read buffer |
 | `MAX_RETRIES_PER_SEGMENT` | `5` | Max retries per segment |
 | `RETRY_BASE_DELAY` | `1.0` | Base delay for exponential backoff (seconds) |

@@ -397,6 +397,7 @@ _run_download(entry)
 | Constant | Value | Purpose |
 |----------|-------|---------|
 | `DEFAULT_SEGMENTS` | 8 | Number of parallel connections |
+| `MAX_SEGMENT_STAGGER_TOTAL_S` | 2.0s | Ceiling on the `segment_start_delay_ms` stagger before the last segment starts |
 | `CHUNK_SIZE` | 64 KiB | Read buffer per iteration |
 | `MAX_RETRIES_PER_SEGMENT` | 5 | Retry limit per segment |
 | `RETRY_BASE_DELAY` | 1.0s | Exponential backoff base |

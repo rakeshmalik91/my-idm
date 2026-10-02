@@ -49,6 +49,7 @@ from my_idm.config import (
     clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
+    MAX_SEGMENT_START_DELAY_MS,
     normalize_extension_list,
 )
 from my_idm.database import Database, APP_DIR
@@ -916,6 +917,22 @@ class SettingsDialog(QDialog):
         self._segments_spin.setToolTip("Number of parallel connection streams per HTTP download")
         seg_row.addWidget(self._segments_spin)
         perf_layout.addLayout(seg_row)
+
+        stagger_row = QHBoxLayout()
+        stagger_lbl = QLabel("Delay between starting each segment:")
+        stagger_row.addWidget(stagger_lbl, 1)
+        self._segment_stagger_spin = QSpinBox()
+        self._segment_stagger_spin.setRange(0, MAX_SEGMENT_START_DELAY_MS)
+        self._segment_stagger_spin.setSingleStep(25)
+        self._segment_stagger_spin.setSuffix(" ms")
+        self._segment_stagger_spin.setToolTip(
+            "0 starts every segment at once, which is fastest and is what most servers "
+            "expect. Raise it only if a host rate-limits connection bursts and answers a "
+            "starting download with 429/503: the last of N segments then waits (N-1) x this "
+            "before its first request, and the step is scaled down to keep that under 2 s."
+        )
+        stagger_row.addWidget(self._segment_stagger_spin)
+        perf_layout.addLayout(stagger_row)
 
         concurrent_row = QHBoxLayout()
         concurrent_lbl = QLabel("Maximum concurrent active downloads:")
@@ -2412,6 +2429,7 @@ class SettingsDialog(QDialog):
         self._save_path_edit.setText(self._general_cfg.default_save_path)
         self._remember_last_cb.setChecked(self._general_cfg.remember_last_save_path)
         self._segments_spin.setValue(self._general_cfg.default_segments)
+        self._segment_stagger_spin.setValue(self._general_cfg.segment_start_delay_ms)
         self._concurrent_spin.setValue(self._general_cfg.max_concurrent_downloads)
         self._retries_spin.setValue(self._general_cfg.max_retries)
         self._retry_exp_cb.setChecked(self._general_cfg.retry_exponential_backoff)
@@ -3106,6 +3124,7 @@ class SettingsDialog(QDialog):
         self._general_cfg.last_save_path = save_path
         self._general_cfg.remember_last_save_path = self._remember_last_cb.isChecked()
         self._general_cfg.default_segments = self._segments_spin.value()
+        self._general_cfg.segment_start_delay_ms = self._segment_stagger_spin.value()
         self._general_cfg.max_concurrent_downloads = self._concurrent_spin.value()
         self._general_cfg.max_retries = self._retries_spin.value()
         self._general_cfg.retry_exponential_backoff = self._retry_exp_cb.isChecked()

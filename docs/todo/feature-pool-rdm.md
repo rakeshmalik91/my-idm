@@ -10,7 +10,7 @@ to build any of it.
   README. That was still not sufficient — two verdicts had to be reversed on re-audit, so see
   [Re-audit notes](#re-audit-notes) before trusting any single entry here.
 - **Date:** first pass 2026-09-30 (suite then 1724 tests, 85% coverage); **re-audited
-  2026-10-01** against 2335 tests.
+  2026-10-01** against 2335 tests; §12 implemented 2026-10-02.
 
 ## Re-audit notes
 
@@ -44,9 +44,9 @@ missing in the table while §3 documented them as done.
 | Verdict | Count | Features |
 | --- | --- | --- |
 | **HAVE** | 6 | duplicate detection, history + search, exponential backoff, Firefox extension, resume *detection*, **categories / file-type segregation** |
-| **DONE** | 5 | **disk-space check** (2026-09-30), **bandwidth stats**, **global hotkey** (2026-10-01), **clipboard monitoring** (2026-10-01), **named queues** (2026-10-01) |
+| **DONE** | 6 | **disk-space check** (2026-09-30), **bandwidth stats**, **global hotkey** (2026-10-01), **clipboard monitoring** (2026-10-01), **named queues** (2026-10-01), **segment start staggering** (2026-10-02) |
 | **PARTIAL** | 7 | resume UI gating, CLI, keep-alive reuse, per-download limits, segment sizing, memory-mapped merge\*, CLI subcommands\* |
-| **MISSING** | 5 | HTTP/2, mmap merge, scheduler, URL editing, segment staggering |
+| **MISSING** | 4 | HTTP/2, mmap merge, scheduler, URL editing |
 
 ---
 
@@ -307,12 +307,44 @@ merge would be an extra full-file pass, not a faster one.
 Worth noting in the pool so it is not re-proposed: the design RDM optimises for is not the
 design we have.
 
-### 12. Segment start staggering — MISSING
+### 12. Segment start staggering — DONE
 RDM: "Staggered segment starts" (`segment_start_delay_ms: 150`).
 
-All pending segments are created in one burst (`http_engine.py:762-769`). A per-segment
-`asyncio.sleep` before the first request would be a few lines. Low risk, mild benefit —
-matters for servers that rate-limit connection bursts.
+**Implemented 2026-10-02.** `GeneralConfig.segment_start_delay_ms`, read by the engine through
+the config object `set_general_config_sync` already passes, and exposed in Preferences →
+General beside the segment count.
+
+- `_segmented_download` ranks the **pending** segments in `idx` order and hands segment *n* a
+  start delay of *n* × the step; `_download_one_segment` sleeps for that slice *before* its
+  retry ladder. Both transports get it for free — the curl path is called from inside the
+  same method.
+- **Rank 0 does not sleep at all**, not even `asyncio.sleep(0)`. A 0 ms preference has to
+  leave the request pattern byte-for-byte what it always was, including costing no
+  event-loop turn.
+- **The step is scaled down, not the tail truncated**, so the last segment still starts
+  within `MAX_SEGMENT_STAGGER_TOTAL_S` (2 s). Truncating the tail would bunch the remaining
+  segments back up at the ceiling — the exact burst the feature exists to remove. The
+  scaling is logged, not silent.
+- **Default is 0, not RDM's 150 ms.** The benefit is speculative and unobserved in this
+  codebase; the cost is certain — the last of N segments waits (N-1) × delay before its
+  first byte, which is a large fraction of a small download. Raise it when a host actually
+  answers a starting download with 429/503.
+- A pause landing during the wait is honoured: the retry ladder's `cancel_evt` check that
+  already opens each attempt covers it, so a waiting segment never issues its request.
+  The un-delayed first segment is the documented exception — it has no wait to interrupt.
+- **The wait sits outside the retry ladder on purpose.** Two traps fall out of that: a retry
+  is not charged the stagger twice, and a cancel during the wait stays a `CancelledError`
+  instead of being caught as a transport failure. It is also what keeps the 416/403
+  single-stream fallback from waiting out the stagger — the parked tasks are cancelled while
+  parked, which `tests/fake_http.py`'s one-turn sleep could not have proven, so that test
+  parks for real.
+
+Covered by `TestSegmentStagger` in `tests/test_http_engine_download.py` (12 tests).
+
+Its own MISSING entry cited `http_engine.py:762-769` for the create_task burst; re-checked
+against the tree before writing this, the launch is `http_engine.py:857-861` and the wait is
+`:963`. The verdict's *behaviour* claim held; the line number had drifted, as so many in this
+file did.
 
 ### 13. Segment count adapted to file size — PARTIAL
 RDM: `max_segments_per_file`.

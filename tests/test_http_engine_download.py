@@ -40,13 +40,14 @@ import aiohttp
 from PySide6.QtWidgets import QApplication
 
 from my_idm import http_engine as http_engine_module
-from my_idm.config import GeneralConfig, TorConfig
+from my_idm.config import GeneralConfig, TorConfig, MAX_SEGMENT_START_DELAY_MS
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm import http_engine as te_module
 from my_idm.http_engine import (
     CHUNK_SIZE,
     DEFAULT_SEGMENTS,
     HTTPEngine,
+    MAX_SEGMENT_STAGGER_TOTAL_S,
     _FallbackToSingle,
     _requires_curl_impersonation,
 )
@@ -153,11 +154,12 @@ class EngineTestCase(unittest.TestCase):
     def status_trail(self, entry_id="d1"):
         return [s for s in self.statuses if s[0] == entry_id]
 
-    def run_segment(self, entry, seg, cancel_evt=None, start_downloaded=0):
+    def run_segment(self, entry, seg, cancel_evt=None, start_downloaded=0,
+                     start_delay=0.0):
         return run_async(
             self.engine._download_one_segment(
                 entry, seg, {seg.index: seg.downloaded_bytes}, time.monotonic(),
-                start_downloaded, cancel_evt or asyncio.Event(),
+                start_downloaded, cancel_evt or asyncio.Event(), start_delay,
             )
         )
 
@@ -600,6 +602,242 @@ class TestSegmentedDownload(EngineTestCase):
         with self.assertRaises(Exception):
             run_async(self.engine._segmented_download(entry, asyncio.Event()))
         self.assertIsNone(self.engine.get_live_segments("d1"))
+
+
+class TestSegmentStagger(EngineTestCase):
+    """Spacing out the segment requests instead of opening every connection at once.
+
+    ``setUp`` replaces ``asyncio.sleep`` with a recorder that yields, so the suite never
+    sits through a stagger and the requested delays stay assertable. A 0 ms preference is
+    the default and must leave the request pattern byte-for-byte what it always was.
+    """
+
+    def _entry(self, total=40, segments=4):
+        return self.add_entry(total_size=total, num_segments=segments)
+
+    def _scripted(self, entry, count, size=10):
+        session = self.use_session()
+        for _ in range(count):
+            session.queue_get(FakeResponse(206, chunks=[b"x" * size], url=entry.url))
+        return session
+
+    def test_the_default_starts_every_segment_at_once(self):
+        """A 0 ms preference must not touch the request pattern at all."""
+        self.assertEqual(GeneralConfig().segment_start_delay_ms, 0)
+        entry = self._entry()
+        session = self._scripted(entry, 4)
+        run_async(self.engine._segmented_download(entry, asyncio.Event()))
+        self.assertEqual(self.sleeps, [], "an unstaggered download must not sleep")
+        self.assertEqual(len(session.get_calls), 4, "every segment still runs")
+
+    def test_the_stagger_ranks_the_segments_by_start_order(self):
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=100))
+        entry = self._entry()
+        self._scripted(entry, 4)
+        run_async(self.engine._segmented_download(entry, asyncio.Event()))
+        # Rank 0 has no wait at all: it must not even yield, or a 0 ms preference would
+        # still cost every download a full event-loop turn before the first byte.
+        self.assertEqual([round(d, 3) for d in self.sleeps], [0.1, 0.2, 0.3])
+
+    def test_each_request_is_issued_after_its_own_stagger_slice(self):
+        """The wait has to precede the request; a sleep appended afterwards is a no-op."""
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=100))
+        entry = self._entry()
+        session = self.use_session()
+        trace: list = []
+        real_sleep = asyncio.sleep
+
+        async def _traced_sleep(delay, *args, **kwargs):
+            trace.append(("sleep", round(delay, 3)))
+            await real_sleep(0)
+
+        def _script():
+            trace.append(("get", session.get_calls[-1]["headers"].get("Range")))
+            return FakeResponse(206, chunks=[b"x" * 10], url=entry.url)
+
+        for _ in range(4):
+            session.queue_get(_script)
+
+        with patch("asyncio.sleep", new=_traced_sleep):
+            run_async(self.engine._segmented_download(entry, asyncio.Event()))
+
+        self.assertEqual(
+            trace[0], ("get", "bytes=0-9"),
+            f"the un-delayed first segment must go first: {trace}",
+        )
+        for rank, rng in enumerate(
+            ("bytes=0-9", "bytes=10-19", "bytes=20-29", "bytes=30-39")
+        ):
+            if rank == 0:
+                continue
+            self.assertGreater(
+                trace.index(("get", rng)), trace.index(("sleep", round(rank * 0.1, 3))),
+                f"{rng} must be requested after its own stagger slice: {trace}",
+            )
+
+    def test_the_step_is_scaled_down_so_the_last_segment_still_starts_in_time(self):
+        """8 segments at the maximum preference must still start inside the 2 s ceiling.
+
+        At the 32 segments the preference also allows, the unscaled 2000 ms would add a full
+        minute of dead time before the last connection was even opened.
+        """
+        self.engine.set_general_config_sync(
+            GeneralConfig(segment_start_delay_ms=MAX_SEGMENT_START_DELAY_MS)
+        )
+        entry = self._entry(total=8 * 10, segments=8)
+        self._scripted(entry, 8)
+        run_async(self.engine._segmented_download(entry, asyncio.Event()))
+        self.assertEqual(len(self.sleeps), 7, "one wait per segment after the first")
+        self.assertLessEqual(
+            max(self.sleeps), MAX_SEGMENT_STAGGER_TOTAL_S + 1e-9,
+            f"the whole stagger must fit in {MAX_SEGMENT_STAGGER_TOTAL_S}s: {self.sleeps}",
+        )
+        self.assertAlmostEqual(max(self.sleeps), MAX_SEGMENT_STAGGER_TOTAL_S, places=6)
+        spread = [round(d, 3) for d in self.sleeps]
+        self.assertEqual(
+            spread, sorted(spread),
+            "the segments must still be spread, not bunched back up at the cap",
+        )
+
+    def test_ranks_run_over_pending_segments_only(self):
+        """A resume must not pay for the segments it already finished."""
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=100))
+        entry = self._entry()
+        segs = HTTPEngine._create_segments("d1", 40, 4)
+        for seg in segs[:2]:
+            seg.downloaded_bytes = 10
+            seg.status = "completed"
+        self.db.add_segments(segs)
+        self._scripted(entry, 2)
+        run_async(self.engine._segmented_download(entry, asyncio.Event()))
+        self.assertEqual(
+            [round(d, 3) for d in self.sleeps], [0.1],
+            "two pending segments are two ranks, not ranks 2 and 3",
+        )
+
+    def test_a_lone_pending_segment_is_not_delayed(self):
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=250))
+        entry = self._entry()
+        segs = HTTPEngine._create_segments("d1", 40, 4)
+        for seg in segs[:3]:
+            seg.downloaded_bytes = 10
+            seg.status = "completed"
+        self.db.add_segments(segs)
+        self._scripted(entry, 1)
+        run_async(self.engine._segmented_download(entry, asyncio.Event()))
+        self.assertEqual(self.sleeps, [], "there is nothing to stagger against")
+
+    def test_a_pause_during_the_stagger_spares_every_waiting_segment(self):
+        """The wait must not turn a pause into requests sent after the user stopped it.
+
+        The first segment is the deliberate exception: its slice is 0, so there is no wait
+        to interrupt and it has already issued its request by the time the pause lands. The
+        three that *were* waiting must never reach the network.
+        """
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=100))
+        entry = self._entry()
+        session = self._scripted(entry, 4)
+        evt = asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        async def _cancel_on_third(delay, *args, **kwargs):
+            if delay >= 0.2:
+                evt.set()
+            await real_sleep(0)
+
+        with patch("asyncio.sleep", new=_cancel_on_third):
+            run_async(self.engine._segmented_download(entry, evt))
+
+        self.assertEqual(
+            session.pending, 3,
+            "only the un-delayed first segment may reach the server: "
+            f"fetches={[c['headers'].get('Range') for c in session.get_calls]}",
+        )
+        waiting = [s for s in self.db.get_segments("d1") if s.index]
+        self.assertEqual([s.index for s in waiting], [1, 2, 3], "three segments were waiting")
+        for seg in waiting:
+            self.assertEqual(
+                (seg.status, seg.downloaded_bytes), ("pending", 0),
+                f"segment {seg.index} waited and must not have touched the network",
+            )
+
+    def test_the_stagger_is_paid_once_per_segment_not_once_per_attempt(self):
+        """A retry is already delayed by the backoff ladder; charging it twice is a tax."""
+        entry = self.add_entry(total_size=10, num_segments=1)
+        Path(entry.file_path).write_bytes(b"\x00" * 10)
+        seg = SegmentEntry(
+            id="seg0", download_id="d1", index=0, start_byte=0, end_byte=9,
+            status="pending",
+        )
+        self.db.add_segments([seg])
+        entry.max_retries = 3
+        self.db.update_download(entry)
+        self.use_session(gets=[
+            FakeResponse(raise_on_enter=aiohttp.ClientError("reset")),
+            FakeResponse(206, chunks=[b"0123456789"]),
+        ])
+        self.run_segment(entry, seg, start_delay=0.5)
+        self.assertEqual(seg.status, "completed")
+        self.assertEqual(
+            self.sleeps.count(0.5), 1,
+            f"the stagger must not be repeated on the retry: {self.sleeps}",
+        )
+        self.assertEqual(self.sleeps[0], 0.5, "it is paid before the first request")
+
+    def test_a_fallback_tears_down_the_segments_still_waiting(self):
+        """Cancelling a task parked in its stagger slice must not hang the single-stream path.
+
+        The wait sits *outside* the retry ladder, so a cancel during it stays a
+        `CancelledError` instead of being caught as a transport failure and retried. The
+        recorder parks for real rather than yielding, because a one-turn sleep would let the
+        other segments finish their requests before the 416 was even raised.
+        """
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=500))
+        entry = self._entry()
+        session = self.use_session()
+        session.queue_get(FakeResponse(416))
+        for _ in range(3):
+            session.queue_get(FakeResponse(206, chunks=[b"x" * 10], url=entry.url))
+        release = asyncio.Event()
+
+        async def _park(delay, *args, **kwargs):
+            if delay > 0:
+                try:
+                    await asyncio.wait_for(release.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+
+        with patch("asyncio.sleep", new=_park):
+            with self.assertRaises(_FallbackToSingle):
+                run_async(self.engine._segmented_download(entry, asyncio.Event()))
+
+        self.assertIsNone(self.engine.get_live_segments("d1"))
+        self.assertEqual(
+            session.pending, 3, "a cancelled wait must not go on to fetch its range"
+        )
+
+    def test_the_step_is_zero_without_a_general_config(self):
+        self.engine._general_config = None
+        self.assertEqual(self.engine._segment_stagger_step(8), 0.0)
+
+    def test_the_step_honours_the_configured_value(self):
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=150))
+        self.assertAlmostEqual(self.engine._segment_stagger_step(4), 0.15, places=6)
+
+    def test_an_out_of_range_preference_cannot_outlast_the_total_ceiling(self):
+        """A hand-edited QSettings value must not become a 16-minute wait before segment 8.
+
+        The ms clamp itself is `clamp_segment_start_delay`'s job and is pinned in
+        `tests/test_settings.py`; what the engine owes is that whatever arrives, the whole
+        stagger still fits `MAX_SEGMENT_STAGGER_TOTAL_S`.
+        """
+        self.engine.set_general_config_sync(GeneralConfig(segment_start_delay_ms=10**6))
+        for pending in (2, 8, 32):
+            with self.subTest(pending=pending):
+                self.assertLessEqual(
+                    self.engine._segment_stagger_step(pending) * (pending - 1),
+                    MAX_SEGMENT_STAGGER_TOTAL_S + 1e-9,
+                )
 
 
 class TestDownloadOneSegment(EngineTestCase):

@@ -10,7 +10,15 @@ from unittest.mock import patch
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from my_idm.config import GeneralConfig, TorrentConfig, ExternalToolsConfig, DEFAULT_DOWNLOADS_DIR
+from my_idm.config import (
+    GeneralConfig,
+    TorrentConfig,
+    ExternalToolsConfig,
+    DEFAULT_DOWNLOADS_DIR,
+    DEFAULT_SEGMENT_START_DELAY_MS,
+    MAX_SEGMENT_START_DELAY_MS,
+    clamp_segment_start_delay,
+)
 from my_idm.database import Database
 from my_idm.dialogs import AddDownloadDialog
 from my_idm.manager import DownloadManager
@@ -125,6 +133,7 @@ class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
         self.assertEqual(cfg.default_save_path, DEFAULT_DOWNLOADS_DIR)
         self.assertFalse(cfg.remember_last_save_path)
         self.assertEqual(cfg.default_segments, 8)
+        self.assertEqual(cfg.segment_start_delay_ms, DEFAULT_SEGMENT_START_DELAY_MS)
         self.assertEqual(cfg.max_concurrent_downloads, 3)
         self.assertEqual(cfg.max_retries, 5)
         self.assertEqual(cfg.retry_delay, 2.0)
@@ -224,6 +233,31 @@ class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
             # When remember_last_save_path is False
             cfg.remember_last_save_path = False
             self.assertEqual(cfg.get_effective_save_path(), default_dir)
+
+    def test_segment_start_delay_round_trips(self):
+        cfg = GeneralConfig(segment_start_delay_ms=250)
+        cfg.save(self.test_settings)
+        self.assertEqual(GeneralConfig.load(self.test_settings).segment_start_delay_ms, 250)
+        self.assertEqual(
+            GeneralConfig.from_dict(cfg.to_dict()).segment_start_delay_ms, 250
+        )
+
+    def test_segment_start_delay_is_clamped_on_the_way_in(self):
+        self.assertEqual(clamp_segment_start_delay(-5), 0)
+        self.assertEqual(clamp_segment_start_delay(10**6), MAX_SEGMENT_START_DELAY_MS)
+        self.assertEqual(
+            clamp_segment_start_delay("nonsense"), DEFAULT_SEGMENT_START_DELAY_MS,
+            "a corrupt value must not silently disable a stagger the user asked for",
+        )
+        self.assertEqual(
+            GeneralConfig.from_dict({"segment_start_delay_ms": -1}).segment_start_delay_ms, 0
+        )
+        self.test_settings.setValue("General/segment_start_delay_ms", 10**6)
+        self.test_settings.sync()
+        self.assertEqual(
+            GeneralConfig.load(self.test_settings).segment_start_delay_ms,
+            MAX_SEGMENT_START_DELAY_MS,
+        )
 
 
 class TestAddDownloadDialogSettings(ConfigIsolationMixin, unittest.TestCase):
@@ -415,6 +449,7 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
                 default_save_path=custom_dir,
                 default_segments=12,
                 max_concurrent_downloads=5,
+                segment_start_delay_ms=150,
             )
             net_cfg = NetworkConfig(proxy_enabled=True, proxy_port=9050)
             sec_cfg = SecurityConfig(warn_high_risk_extensions=False)
@@ -428,6 +463,7 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
             # Check populated fields
             self.assertEqual(dlg._save_path_edit.text(), custom_dir)
             self.assertEqual(dlg._segments_spin.value(), 12)
+            self.assertEqual(dlg._segment_stagger_spin.value(), 150)
             self.assertEqual(dlg._concurrent_spin.value(), 5)
             self.assertTrue(dlg._proxy_enable_cb.isChecked())
             self.assertEqual(dlg._proxy_port_spin.value(), 9050)
@@ -437,6 +473,7 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
             with tempfile.TemporaryDirectory() as new_dir:
                 dlg._save_path_edit.setText(new_dir)
                 dlg._segments_spin.setValue(16)
+                dlg._segment_stagger_spin.setValue(75)
                 dlg._concurrent_spin.setValue(8)
 
                 # Save
@@ -446,12 +483,14 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
                 saved_gen = dlg.general_config
                 self.assertEqual(saved_gen.default_save_path, new_dir)
                 self.assertEqual(saved_gen.default_segments, 16)
+                self.assertEqual(saved_gen.segment_start_delay_ms, 75)
                 self.assertEqual(saved_gen.max_concurrent_downloads, 8)
 
                 # Check persistence in QSettings
                 persisted = GeneralConfig.load()
                 self.assertEqual(persisted.default_save_path, new_dir)
                 self.assertEqual(persisted.default_segments, 16)
+                self.assertEqual(persisted.segment_start_delay_ms, 75)
 
     def test_system_tray_settings_ui(self):
         cfg = GeneralConfig(
@@ -905,6 +944,18 @@ class TestGeneralConfigReachesBothEngines(ConfigIsolationMixin, unittest.TestCas
         )
         self.assertEqual(
             self.manager._torrent._general_config.max_concurrent_downloads, 3
+        )
+
+    def test_the_segment_stagger_reaches_the_http_engine(self):
+        """A `GeneralConfig` field the engine never reads is a preference that does nothing."""
+        self.manager.set_general_config(
+            self.replacement(segment_start_delay_ms=120)
+        )
+        self.assertEqual(
+            self.manager._http._general_config.segment_start_delay_ms, 120
+        )
+        self.assertAlmostEqual(
+            self.manager._http._segment_stagger_step(4), 0.12, places=6
         )
 
 

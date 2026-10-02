@@ -27,6 +27,14 @@ DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS = [
     ".txt", ".htm", ".html", ".jpg", ".jpeg", ".png", ".gif", ".webp"
 ]
 
+# Gap inserted between the starts of a segmented download's segment requests, in ms.
+# 0 = disabled, which is also the default: the segments then open their connections in one
+# burst, the behaviour this app has always had.
+DEFAULT_SEGMENT_START_DELAY_MS = 0
+# Ceiling for the stored preference. The *total* the stagger may add before the last segment
+# starts is capped separately, in `http_engine.MAX_SEGMENT_STAGGER_TOTAL_S`.
+MAX_SEGMENT_START_DELAY_MS = 2000
+
 
 def normalize_extension_list(extensions: Any) -> list[str]:
     """Parse comma/space/semicolon separated string or list of extensions into cleaned list with leading dots."""
@@ -66,6 +74,19 @@ def clamp_ytdlp_playlist_limit(value: Any) -> int:
     return max(MIN_YTDLP_PLAYLIST_LIMIT, min(MAX_YTDLP_PLAYLIST_LIMIT, limit))
 
 
+def clamp_segment_start_delay(value: Any) -> int:
+    """Coerce a stored segment stagger into ``[0, MAX_SEGMENT_START_DELAY_MS]``.
+
+    Unparseable input falls back to the default rather than to zero-by-accident: a corrupt
+    preference must not silently turn a stagger the user asked for back off.
+    """
+    try:
+        delay = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_SEGMENT_START_DELAY_MS
+    return max(0, min(delay, MAX_SEGMENT_START_DELAY_MS))
+
+
 @dataclass
 class GeneralConfig:
     """Stores user preferences for downloads and application behavior."""
@@ -74,6 +95,11 @@ class GeneralConfig:
     remember_last_save_path: bool = False
     last_save_path: str = ""
     default_segments: int = 8
+    # Gap between one segment's first request and the previous one's, in ms (0 = no stagger).
+    # Off by default: the last of N segments waits (N-1) x this before its first byte, so on a
+    # server that does not care about connection bursts it is a certain latency cost for no
+    # benefit. Raise it when a host rate-limits them - a 429 the moment a download starts.
+    segment_start_delay_ms: int = DEFAULT_SEGMENT_START_DELAY_MS
     max_concurrent_downloads: int = 3
     max_retries: int = 5
     retry_delay: float = 2.0
@@ -180,6 +206,7 @@ class GeneralConfig:
             "remember_last_save_path": self.remember_last_save_path,
             "last_save_path": self.last_save_path,
             "default_segments": self.default_segments,
+            "segment_start_delay_ms": self.segment_start_delay_ms,
             "max_concurrent_downloads": self.max_concurrent_downloads,
             "max_retries": self.max_retries,
             "retry_delay": self.retry_delay,
@@ -222,6 +249,9 @@ class GeneralConfig:
             remember_last_save_path=bool(data.get("remember_last_save_path", False)),
             last_save_path=str(data.get("last_save_path", "")),
             default_segments=int(data.get("default_segments", 8)),
+            segment_start_delay_ms=clamp_segment_start_delay(
+                data.get("segment_start_delay_ms", DEFAULT_SEGMENT_START_DELAY_MS)
+            ),
             max_concurrent_downloads=int(data.get("max_concurrent_downloads", 3)),
             max_retries=int(data.get("max_retries", 5)),
             retry_delay=float(data.get("retry_delay", 2.0)),
@@ -266,6 +296,7 @@ class GeneralConfig:
         settings.setValue("remember_last_save_path", self.remember_last_save_path)
         settings.setValue("last_save_path", self.last_save_path)
         settings.setValue("default_segments", self.default_segments)
+        settings.setValue("segment_start_delay_ms", self.segment_start_delay_ms)
         settings.setValue("max_concurrent_downloads", self.max_concurrent_downloads)
         settings.setValue("max_retries", self.max_retries)
         settings.setValue("retry_delay", self.retry_delay)
@@ -303,6 +334,10 @@ class GeneralConfig:
         remember_last_save_path = settings.value("remember_last_save_path", False, type=bool)
         last_save_path = settings.value("last_save_path", "") or ""
         default_segments = settings.value("default_segments", 8, type=int)
+        segment_start_delay_ms = clamp_segment_start_delay(
+            settings.value("segment_start_delay_ms",
+                           DEFAULT_SEGMENT_START_DELAY_MS, type=int)
+        )
         max_concurrent_downloads = settings.value("max_concurrent_downloads", 3, type=int)
         max_retries = settings.value("max_retries", 5, type=int)
         retry_delay = settings.value("retry_delay", 2.0, type=float)
@@ -355,6 +390,7 @@ class GeneralConfig:
             remember_last_save_path=bool(remember_last_save_path),
             last_save_path=str(last_save_path),
             default_segments=int(default_segments),
+            segment_start_delay_ms=int(segment_start_delay_ms),
             max_concurrent_downloads=int(max_concurrent_downloads),
             max_retries=int(max_retries),
             retry_delay=float(retry_delay),

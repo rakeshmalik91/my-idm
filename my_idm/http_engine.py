@@ -21,7 +21,11 @@ except ImportError:
     CurlAsyncSession = None
     _HAS_CURL_CFFI = False
 
-from my_idm.config import TorConfig, GeneralConfig
+from my_idm.config import (
+    TorConfig,
+    GeneralConfig,
+    clamp_segment_start_delay,
+)
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.utils import check_disk_space, get_unique_filename
@@ -34,6 +38,11 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 DEFAULT_SEGMENTS = 8
+# Ceiling on the *total* stagger a segmented download may add before its last segment issues
+# its first request. The per-segment step is scaled down to fit this rather than the tail
+# truncated, because bunching the tail back up at the ceiling recreates exactly the connection
+# burst the feature exists to avoid.
+MAX_SEGMENT_STAGGER_TOTAL_S = 2.0
 CHUNK_SIZE = 64 * 1024          # 64 KiB per read
 MAX_RETRIES_PER_SEGMENT = 5
 RETRY_BASE_DELAY = 1.0          # seconds, exponential backoff base
@@ -99,6 +108,33 @@ class HTTPEngine:
     def get_live_segments(self, download_id: str) -> Optional[list[SegmentEntry]]:
         """Return live in-memory segments for active downloading tasks."""
         return self._active_segments.get(download_id)
+
+    def _segment_stagger_step(self, pending_count: int) -> float:
+        """Seconds between one pending segment's first request and the previous one's.
+
+        ``0`` — the default — means every pending segment starts immediately, which is the
+        behaviour this app has always had. A non-zero step is scaled down so the *last* of
+        ``pending_count`` segments still starts within ``MAX_SEGMENT_STAGGER_TOTAL_S``: at the
+        maximum preference with 32 segments the step would otherwise add a full minute of
+        dead time before the last connection is even opened.
+        """
+        if pending_count <= 1 or not self._general_config:
+            return 0.0
+        step = clamp_segment_start_delay(
+            self._general_config.segment_start_delay_ms
+        ) / 1000.0
+        if step <= 0:
+            return 0.0
+        max_step = MAX_SEGMENT_STAGGER_TOTAL_S / (pending_count - 1)
+        if step > max_step:
+            log.info(
+                "Segment start stagger scaled from %d ms to %d ms so the last of %d "
+                "segments still starts within %.1f s",
+                self._general_config.segment_start_delay_ms,
+                round(max_step * 1000), pending_count, MAX_SEGMENT_STAGGER_TOTAL_S,
+            )
+            step = max_step
+        return step
 
     # -- public API ----------------------------------------------------------
 
@@ -795,13 +831,13 @@ class HTTPEngine:
 
         sem = asyncio.Semaphore(num_segments)
 
-        async def download_segment(seg: SegmentEntry):
+        async def download_segment(seg: SegmentEntry, start_delay: float):
             if seg.status == "completed":
                 return
             async with sem:
                 await self._download_one_segment(
                     entry, seg, seg_progress, start_time,
-                    start_downloaded, cancel_evt,
+                    start_downloaded, cancel_evt, start_delay,
                 )
 
         pending = [
@@ -813,8 +849,15 @@ class HTTPEngine:
             self._active_segments.pop(download_id, None)
             return  # All segments done
 
+        # Staggered starts. Every pending segment is a task created in one burst, so
+        # without this a download opens all N connections in the same event-loop
+        # iteration - which some hosts answer with a 429. The rank is over *pending*
+        # segments, not over `segments`, so a resume that already has 6 of 8 done
+        # spreads its remaining 2 rather than idling the last one for 7 delays.
+        stagger_step = self._segment_stagger_step(len(pending))
         tasks = [
-            asyncio.create_task(download_segment(s)) for s in pending
+            asyncio.create_task(download_segment(s, rank * stagger_step))
+            for rank, s in enumerate(pending)
         ]
 
         try:
@@ -902,11 +945,22 @@ class HTTPEngine:
         seg_progress: dict[int, int],
         start_time: float, start_downloaded: int,
         cancel_evt: asyncio.Event,
+        start_delay: float = 0.0,
     ):
         use_curl = _HAS_CURL_CFFI and (
             _requires_curl_impersonation(entry.url)
             or entry.metadata.get("use_curl_cffi")
         )
+
+        # This segment's slice of the launch stagger (see `_segment_stagger_step`). It waits
+        # *here*, ahead of the retry ladder, for two reasons: the wait is paid once on the
+        # initial request and a retry is not charged again on top of its own backoff, and a
+        # cancel arriving during the wait stays a CancelledError instead of being caught by
+        # the ladder as if it were a transport failure. The ladder's opening `cancel_evt`
+        # check also covers a pause that lands while waiting, so a segment cancelled before it
+        # transferred is never sent a request at all.
+        if start_delay > 0 and not cancel_evt.is_set():
+            await asyncio.sleep(start_delay)
 
         max_retries = self._get_max_retries(entry)
         # The most recent transport failure, carried into the terminal raise so the row's
