@@ -470,12 +470,21 @@ class HTTPEngine:
                 pass
             return True
 
-        reason = (
-            f"File size ({probed_total} bytes) is below the browser-capture minimum of "
-            f"{min_bytes} bytes. Raise or disable the minimum in "
-            f"Preferences -> Browser Integration to keep capturing files this small."
-        )
-        log.info("Skipping browser download %s: %s", entry.id, reason)
+        source = (entry.metadata.get("capture_source") if entry.metadata else "") or "browser"
+        if source == "clipboard":
+            reason = (
+                f"File size ({probed_total} bytes) is below the clipboard-capture minimum of "
+                f"{min_bytes} bytes. Raise, lower or disable the minimum in "
+                f"Preferences -> Clipboard Capture to keep capturing files this small."
+            )
+            log.info("Skipping clipboard download %s: %s", entry.id, reason)
+        else:
+            reason = (
+                f"File size ({probed_total} bytes) is below the browser-capture minimum of "
+                f"{min_bytes} bytes. Raise or disable the minimum in "
+                f"Preferences -> Browser Integration to keep capturing files this small."
+            )
+            log.info("Skipping browser download %s: %s", entry.id, reason)
         entry.error_message = reason
         # update_status persists both the status and the message. Do NOT follow it with
         # update_download(entry): that writes every column, and `entry.status` is still the

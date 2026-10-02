@@ -17,7 +17,9 @@ from my_idm.manager import DownloadManager
 from my_idm.network import NetworkConfig
 from my_idm.security import SecurityConfig
 from my_idm.settings_dialog import (
+    TAB_APP,
     TAB_BROWSER,
+    TAB_CLIPBOARD,
     TAB_EXTERNAL_TOOLS,
     TAB_GENERAL,
     TAB_ORDER,
@@ -135,6 +137,11 @@ class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
         self.assertTrue(cfg.minimize_to_tray)
         self.assertTrue(cfg.close_to_tray)
         self.assertFalse(cfg.start_minimized)
+        self.assertEqual(cfg.clipboard_min_file_size_kb, 1024)
+        self.assertEqual(
+            cfg.clipboard_ignored_extensions,
+            [".txt", ".htm", ".html", ".jpg", ".jpeg", ".png", ".gif", ".webp"],
+        )
 
     def test_get_retry_delay_exponential(self):
         cfg = GeneralConfig(
@@ -175,6 +182,10 @@ class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
             minimize_to_tray=False,
             close_to_tray=False,
             start_minimized=True,
+            clipboard_monitor_enabled=True,
+            clipboard_monitor_max_urls=50,
+            clipboard_min_file_size_kb=2048,
+            clipboard_ignored_extensions=[".pdf", ".docx"],
         )
         cfg.save(self.test_settings)
 
@@ -195,6 +206,10 @@ class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
         self.assertFalse(loaded.minimize_to_tray)
         self.assertFalse(loaded.close_to_tray)
         self.assertTrue(loaded.start_minimized)
+        self.assertTrue(loaded.clipboard_monitor_enabled)
+        self.assertEqual(loaded.clipboard_monitor_max_urls, 50)
+        self.assertEqual(loaded.clipboard_min_file_size_kb, 2048)
+        self.assertEqual(loaded.clipboard_ignored_extensions, [".pdf", ".docx"])
 
     def test_get_effective_save_path(self):
         with tempfile.TemporaryDirectory() as default_dir, tempfile.TemporaryDirectory() as last_dir:
@@ -473,6 +488,51 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.assertTrue(saved.start_minimized)
         dlg.close()
 
+    def test_clipboard_tab_settings_ui(self):
+        cfg = GeneralConfig(
+            clipboard_monitor_enabled=True,
+            clipboard_monitor_max_urls=25,
+            clipboard_min_file_size_kb=2048,
+            clipboard_ignored_extensions=[".txt", ".htm", ".html", ".jpg", ".jpeg"],
+        )
+        dlg = SettingsDialog(general_config=cfg)
+        self.assertTrue(dlg._clipboard_monitor_cb.isChecked())
+        self.assertEqual(dlg._clipboard_max_urls_spin.value(), 25)
+        self.assertEqual(dlg._clipboard_min_size_spin.value(), 2048)
+        self.assertEqual(dlg._clipboard_ignored_exts_edit.text(), ".txt, .htm, .html, .jpg, .jpeg")
+
+        # Disable monitor and verify controls are disabled
+        dlg._clipboard_monitor_cb.setChecked(False)
+        self.assertFalse(dlg._clipboard_max_urls_spin.isEnabled())
+        self.assertFalse(dlg._clipboard_min_size_spin.isEnabled())
+        self.assertFalse(dlg._clipboard_ignored_exts_edit.isEnabled())
+
+        # Re-enable and modify values
+        dlg._clipboard_monitor_cb.setChecked(True)
+        self.assertTrue(dlg._clipboard_max_urls_spin.isEnabled())
+        self.assertTrue(dlg._clipboard_min_size_spin.isEnabled())
+        self.assertTrue(dlg._clipboard_ignored_exts_edit.isEnabled())
+
+        dlg._clipboard_max_urls_spin.setValue(50)
+        dlg._clipboard_min_size_spin.setValue(0)
+        dlg._clipboard_ignored_exts_edit.setText(".zip, rar, 7z")
+        dlg._on_save()
+
+        saved = dlg.general_config
+        self.assertTrue(saved.clipboard_monitor_enabled)
+        self.assertEqual(saved.clipboard_monitor_max_urls, 50)
+        self.assertEqual(saved.clipboard_min_file_size_kb, 0)
+        self.assertEqual(saved.clipboard_ignored_extensions, [".zip", ".rar", ".7z"])
+
+        persisted = GeneralConfig.load()
+        self.assertTrue(persisted.clipboard_monitor_enabled)
+        self.assertEqual(persisted.clipboard_monitor_max_urls, 50)
+        self.assertEqual(persisted.clipboard_min_file_size_kb, 0)
+        self.assertEqual(persisted.clipboard_ignored_extensions, [".zip", ".rar", ".7z"])
+        dlg.close()
+
+
+
     def test_initial_tab(self):
         dlg_gen = SettingsDialog(initial_tab=0)
         self.assertEqual(dlg_gen._tabs.currentIndex(), 0)
@@ -677,10 +737,14 @@ class TestPreferencesPageRegistry(unittest.TestCase):
         """Two menu items point at General with no argument; it must stay index 0."""
         self.assertEqual(tab_index(TAB_GENERAL), 0)
 
-    def test_the_views_tab_sits_immediately_after_general(self):
+    def test_the_app_and_clipboard_tabs_sit_after_general(self):
+        self.assertEqual(tab_index(TAB_APP), 1)
+        self.assertEqual(tab_index(TAB_CLIPBOARD), 2)
+
+    def test_the_views_tab_sits_after_core_tabs(self):
         self.assertEqual(
-            tab_index(TAB_VIEWS), tab_index(TAB_GENERAL) + 1,
-            "the Views tab is documented as second",
+            tab_index(TAB_VIEWS), 3,
+            "the Views tab belongs after the core General, App, and Clipboard tabs",
         )
 
 

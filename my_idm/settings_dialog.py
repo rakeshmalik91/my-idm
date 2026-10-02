@@ -49,6 +49,7 @@ from my_idm.config import (
     clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
+    normalize_extension_list,
 )
 from my_idm.database import Database, APP_DIR
 from my_idm.download_model import Col
@@ -83,6 +84,8 @@ log = logging.getLogger(__name__)
 #: ``SettingsDialog.__init__`` clamps with ``0 <= initial_tab < count()`` so nothing raised
 #: and the failure was invisible. A name that does not exist is a loud ``KeyError``.
 TAB_GENERAL = "general"
+TAB_APP = "app"
+TAB_CLIPBOARD = "clipboard"
 TAB_VIEWS = "views"
 TAB_TORRENT = "torrent"
 TAB_BROWSER = "browser"
@@ -96,6 +99,8 @@ TAB_YOUTUBE = "youtube"
 #: adds the pages in exactly this sequence and the tests pin the two against each other.
 TAB_ORDER: tuple[str, ...] = (
     TAB_GENERAL,
+    TAB_APP,
+    TAB_CLIPBOARD,
     TAB_VIEWS,
     TAB_TORRENT,
     TAB_BROWSER,
@@ -109,7 +114,9 @@ TAB_ORDER: tuple[str, ...] = (
 #: Titles as shown in the sidebar, keyed by the same names. Used by the tests and by
 #: ``MainWindow`` when it reports which page a menu item will open.
 TAB_TITLES: dict[str, str] = {
-    TAB_GENERAL: "📁 General & Downloads",
+    TAB_GENERAL: "📁 Downloads & Retries",
+    TAB_APP: "🖥️ Application & Tray",
+    TAB_CLIPBOARD: "📋 Clipboard Capture",
     TAB_VIEWS: "👁️ Views & Columns",
     TAB_TORRENT: "🧲 BitTorrent",
     TAB_BROWSER: "🌐 Browser Integration",
@@ -514,6 +521,8 @@ class SettingsDialog(QDialog):
         # TAB_ORDER / TAB_TITLES, so `tab_index()` cannot point at the wrong page.
         self._tab_builders = (
             (TAB_GENERAL, self._create_general_tab),
+            (TAB_APP, self._create_app_tab),
+            (TAB_CLIPBOARD, self._create_clipboard_tab),
             (TAB_VIEWS, self._create_views_tab),
             (TAB_TORRENT, self._create_torrent_tab),
             (TAB_BROWSER, self._create_browser_tab),
@@ -972,119 +981,6 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(retry_group)
 
-        # 4. Application Startup & Notifications
-        app_group = QGroupBox("Application Behavior")
-        app_layout = QVBoxLayout(app_group)
-        app_layout.setSpacing(10)
-
-        self._auto_resume_cb = QCheckBox(
-            "Automatically resume incomplete downloads when application starts"
-        )
-        app_layout.addWidget(self._auto_resume_cb)
-
-        self._notify_cb = QCheckBox(
-            "Show desktop / status notification when a download completes"
-        )
-        app_layout.addWidget(self._notify_cb)
-
-        layout.addWidget(app_group)
-
-        # 5. System Tray & Window Behavior
-        tray_group = QGroupBox("System Tray && Window Behavior")
-        tray_layout = QVBoxLayout(tray_group)
-        tray_layout.setSpacing(10)
-
-        self._enable_system_tray_cb = QCheckBox("Enable Windows system tray icon")
-        self._enable_system_tray_cb.setToolTip(
-            "Show an icon in the Windows notification area (system tray) with quick controls and status."
-        )
-        tray_layout.addWidget(self._enable_system_tray_cb)
-
-        self._minimize_to_tray_cb = QCheckBox("Minimize window to system tray instead of taskbar")
-        self._minimize_to_tray_cb.setToolTip(
-            "When the window minimize button is clicked, hide the window to the system tray."
-        )
-        tray_layout.addWidget(self._minimize_to_tray_cb)
-
-        self._close_to_tray_cb = QCheckBox(
-            "Close window to system tray (keep downloads and seeding running in background)"
-        )
-        self._close_to_tray_cb.setToolTip(
-            "When the window close (X) button is clicked, hide to system tray instead of terminating the app.\n"
-            "Use File -> Exit or Tray Menu -> Exit to completely quit My-IDM."
-        )
-        tray_layout.addWidget(self._close_to_tray_cb)
-
-        self._start_minimized_cb = QCheckBox("Start My-IDM minimized to system tray")
-        self._start_minimized_cb.setToolTip(
-            "Launch My-IDM directly in the background/system tray without opening the main window."
-        )
-        tray_layout.addWidget(self._start_minimized_cb)
-
-        self._enable_system_tray_cb.toggled.connect(self._on_system_tray_toggled)
-        layout.addWidget(tray_group)
-
-        # 6. Capture (clipboard monitoring + global hotkey)
-        capture_group = QGroupBox("Capture")
-        capture_layout = QVBoxLayout(capture_group)
-        capture_layout.setSpacing(10)
-
-        self._clipboard_monitor_cb = QCheckBox(
-            "Add downloads automatically when you copy one or more URLs"
-        )
-        self._clipboard_monitor_cb.setToolTip(
-            "Watches the clipboard and adds any text whose every line is a link. "
-            "Copying a single URL anywhere in My-IDM is ignored, so this never re-adds a "
-            "download you just copied out of the list.\n"
-            "Off by default: reading the clipboard without being asked is not something to "
-            "switch on behind a user's back."
-        )
-        capture_layout.addWidget(self._clipboard_monitor_cb)
-
-        clipboard_limit_row = QHBoxLayout()
-        clipboard_limit_row.addSpacing(24)
-        self._clipboard_max_urls_spin = QSpinBox()
-        self._clipboard_max_urls_spin.setRange(1, 200)
-        self._clipboard_max_urls_spin.setSuffix(" URLs")
-        self._clipboard_max_urls_spin.setToolTip(
-            "How many URLs one copy can add. A pasted list longer than this is truncated, so a "
-            "generated list cannot become thousands of rows at once."
-        )
-        clipboard_limit_row.addWidget(QLabel("Maximum per copy:"))
-        clipboard_limit_row.addWidget(self._clipboard_max_urls_spin)
-        clipboard_limit_row.addStretch(1)
-        capture_layout.addLayout(clipboard_limit_row)
-
-        hotkey_row = QHBoxLayout()
-        self._capture_hotkey_cb = QCheckBox("Global hotkey toggles download capture")
-        self._capture_hotkey_cb.setToolTip(
-            "Bind a system-wide key combination that turns browser interception and clipboard "
-            "capture on and off, so capture can be silenced from any application."
-        )
-        hotkey_row.addWidget(self._capture_hotkey_cb)
-
-        self._capture_hotkey_edit = QKeySequenceEdit()
-        self._capture_hotkey_edit.setMaximumWidth(160)
-        self._capture_hotkey_edit.setToolTip(
-            "The key combination to claim system-wide. It must include Ctrl, Alt or Win — a "
-            "bare key would swallow that key in every other application."
-        )
-        hotkey_row.addStretch(1)
-        hotkey_row.addWidget(self._capture_hotkey_edit)
-        capture_layout.addLayout(hotkey_row)
-
-        self._capture_hotkey_status_lbl = QLabel("")
-        self._capture_hotkey_status_lbl.setWordWrap(True)
-        self._capture_hotkey_status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
-        capture_layout.addWidget(self._capture_hotkey_status_lbl)
-
-        self._clipboard_monitor_cb.toggled.connect(self._on_clipboard_monitor_toggled)
-        self._capture_hotkey_cb.toggled.connect(self._on_capture_hotkey_toggled)
-        self._capture_hotkey_edit.editingFinished.connect(
-            self._on_capture_hotkey_edited
-        )
-        layout.addWidget(capture_group)
-
         # 4. Backlog Auto-Processing Locations
         backlog_group = QGroupBox("Backlog Files Auto-Processing")
         backlog_layout = QVBoxLayout(backlog_group)
@@ -1155,6 +1051,178 @@ class SettingsDialog(QDialog):
         self._backlog_poll_cb.toggled.connect(self._backlog_poll_spin.setEnabled)
 
         layout.addWidget(backlog_group)
+        layout.addStretch()
+        return tab
+
+    def _create_app_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        # 1. Application Startup & Notifications
+        app_group = QGroupBox("Application Behavior")
+        app_layout = QVBoxLayout(app_group)
+        app_layout.setSpacing(10)
+
+        self._auto_resume_cb = QCheckBox(
+            "Automatically resume incomplete downloads when application starts"
+        )
+        app_layout.addWidget(self._auto_resume_cb)
+
+        self._notify_cb = QCheckBox(
+            "Show desktop / status notification when a download completes"
+        )
+        app_layout.addWidget(self._notify_cb)
+
+        layout.addWidget(app_group)
+
+        # 2. System Tray & Window Behavior
+        tray_group = QGroupBox("System Tray && Window Behavior")
+        tray_layout = QVBoxLayout(tray_group)
+        tray_layout.setSpacing(10)
+
+        self._enable_system_tray_cb = QCheckBox("Enable Windows system tray icon")
+        self._enable_system_tray_cb.setToolTip(
+            "Show an icon in the Windows notification area (system tray) with quick controls and status."
+        )
+        tray_layout.addWidget(self._enable_system_tray_cb)
+
+        self._minimize_to_tray_cb = QCheckBox("Minimize window to system tray instead of taskbar")
+        self._minimize_to_tray_cb.setToolTip(
+            "When the window minimize button is clicked, hide the window to the system tray."
+        )
+        tray_layout.addWidget(self._minimize_to_tray_cb)
+
+        self._close_to_tray_cb = QCheckBox(
+            "Close window to system tray (keep downloads and seeding running in background)"
+        )
+        self._close_to_tray_cb.setToolTip(
+            "When the window close (X) button is clicked, hide to system tray instead of terminating the app.\n"
+            "Use File -> Exit or Tray Menu -> Exit to completely quit My-IDM."
+        )
+        tray_layout.addWidget(self._close_to_tray_cb)
+
+        self._start_minimized_cb = QCheckBox("Start My-IDM minimized to system tray")
+        self._start_minimized_cb.setToolTip(
+            "Launch My-IDM directly in the background/system tray without opening the main window."
+        )
+        tray_layout.addWidget(self._start_minimized_cb)
+
+        self._enable_system_tray_cb.toggled.connect(self._on_system_tray_toggled)
+        layout.addWidget(tray_group)
+
+        # 3. Global Hotkey
+        hotkey_group = QGroupBox("Global Hotkey")
+        hotkey_layout = QVBoxLayout(hotkey_group)
+        hotkey_layout.setSpacing(10)
+
+        hotkey_row = QHBoxLayout()
+        self._capture_hotkey_cb = QCheckBox("Global hotkey toggles download capture")
+        self._capture_hotkey_cb.setToolTip(
+            "Bind a system-wide key combination that turns browser interception and clipboard "
+            "capture on and off, so capture can be silenced from any application."
+        )
+        hotkey_row.addWidget(self._capture_hotkey_cb)
+
+        self._capture_hotkey_edit = QKeySequenceEdit()
+        self._capture_hotkey_edit.setMaximumWidth(160)
+        self._capture_hotkey_edit.setToolTip(
+            "The key combination to claim system-wide. It must include Ctrl, Alt or Win — a "
+            "bare key would swallow that key in every other application."
+        )
+        hotkey_row.addStretch(1)
+        hotkey_row.addWidget(self._capture_hotkey_edit)
+        hotkey_layout.addLayout(hotkey_row)
+
+        self._capture_hotkey_status_lbl = QLabel("")
+        self._capture_hotkey_status_lbl.setWordWrap(True)
+        self._capture_hotkey_status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        hotkey_layout.addWidget(self._capture_hotkey_status_lbl)
+
+        self._capture_hotkey_cb.toggled.connect(self._on_capture_hotkey_toggled)
+        self._capture_hotkey_edit.editingFinished.connect(
+            self._on_capture_hotkey_edited
+        )
+        layout.addWidget(hotkey_group)
+        layout.addStretch()
+        return tab
+
+    def _create_clipboard_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        clip_group = QGroupBox("Clipboard Monitoring && Filtering")
+        clip_layout = QVBoxLayout(clip_group)
+        clip_layout.setSpacing(12)
+
+        self._clipboard_monitor_cb = QCheckBox(
+            "Add downloads automatically when you copy one or more URLs"
+        )
+        self._clipboard_monitor_cb.setToolTip(
+            "Watches the clipboard and adds any text whose every line is a link. "
+            "Copying a single URL anywhere in My-IDM is ignored, so this never re-adds a "
+            "download you just copied out of the list.\n"
+            "Off by default: reading the clipboard without being asked is not something to "
+            "switch on behind a user's back."
+        )
+        clip_layout.addWidget(self._clipboard_monitor_cb)
+
+        limit_row = QHBoxLayout()
+        limit_lbl = QLabel("Maximum URLs per copy:")
+        limit_row.addWidget(limit_lbl)
+        self._clipboard_max_urls_spin = QSpinBox()
+        self._clipboard_max_urls_spin.setRange(1, 200)
+        self._clipboard_max_urls_spin.setSuffix(" URLs")
+        self._clipboard_max_urls_spin.setToolTip(
+            "How many URLs one copy can add. A pasted list longer than this is truncated, so a "
+            "generated list cannot become thousands of rows at once."
+        )
+        limit_row.addWidget(self._clipboard_max_urls_spin)
+        limit_row.addStretch(1)
+        clip_layout.addLayout(limit_row)
+
+        size_row = QHBoxLayout()
+        size_lbl = QLabel("Minimum file size to capture:")
+        size_row.addWidget(size_lbl)
+        self._clipboard_min_size_spin = QSpinBox()
+        self._clipboard_min_size_spin.setRange(0, 1_048_576)
+        self._clipboard_min_size_spin.setSingleStep(256)
+        self._clipboard_min_size_spin.setSuffix(" KB")
+        self._clipboard_min_size_spin.setSpecialValueText("0 KB (No minimum / capture all sizes)")
+        self._clipboard_min_size_spin.setToolTip(
+            "Ignore captured download links whose content size is below this threshold (e.g. web pages, small images, scripts).\n"
+            "Downloads whose size cannot be determined beforehand will be checked during the initial HTTP probe."
+        )
+        size_row.addWidget(self._clipboard_min_size_spin)
+        size_row.addStretch(1)
+        clip_layout.addLayout(size_row)
+
+        ext_layout = QVBoxLayout()
+        ext_lbl = QLabel("File extensions to ignore (comma-separated):")
+        ext_layout.addWidget(ext_lbl)
+        self._clipboard_ignored_exts_edit = QLineEdit()
+        self._clipboard_ignored_exts_edit.setPlaceholderText("txt, htm, html, jpg, jpeg, png, gif, webp")
+        self._clipboard_ignored_exts_edit.setToolTip(
+            "Comma-separated list of file extensions to ignore when copying URLs (e.g. txt, htm, html, jpg, jpeg, png, gif, webp).\n"
+            "URLs ending with these extensions will be skipped immediately."
+        )
+        ext_layout.addWidget(self._clipboard_ignored_exts_edit)
+        clip_layout.addLayout(ext_layout)
+
+        helper_lbl = QLabel(
+            "💡 URLs matching ignored file extensions or files smaller than the minimum size threshold "
+            "will be automatically skipped to avoid capturing random web page links or assets."
+        )
+        helper_lbl.setWordWrap(True)
+        helper_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        clip_layout.addWidget(helper_lbl)
+
+        self._clipboard_monitor_cb.toggled.connect(self._on_clipboard_monitor_toggled)
+
+        layout.addWidget(clip_group)
         layout.addStretch()
         return tab
 
@@ -2351,41 +2419,10 @@ class SettingsDialog(QDialog):
         self._retry_factor_spin.setValue(self._general_cfg.retry_backoff_factor)
         self._retry_max_delay_spin.setValue(int(self._general_cfg.retry_max_delay))
         self._on_retry_exp_toggled(self._general_cfg.retry_exponential_backoff)
-        self._auto_resume_cb.setChecked(self._general_cfg.auto_resume_startup)
-        self._notify_cb.setChecked(self._general_cfg.notify_on_completion)
-        self._enable_system_tray_cb.setChecked(self._general_cfg.enable_system_tray)
-        self._minimize_to_tray_cb.setChecked(self._general_cfg.minimize_to_tray)
-        self._close_to_tray_cb.setChecked(self._general_cfg.close_to_tray)
-        self._start_minimized_cb.setChecked(self._general_cfg.start_minimized)
-        self._minimize_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
-        self._close_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
-        self._start_minimized_cb.setEnabled(self._general_cfg.enable_system_tray)
-        self._clipboard_monitor_cb.setChecked(
-            self._general_cfg.clipboard_monitor_enabled
-        )
-        self._clipboard_max_urls_spin.setValue(
-            self._general_cfg.clipboard_monitor_max_urls
-        )
-        self._capture_hotkey_cb.setChecked(self._general_cfg.capture_hotkey_enabled)
-        self._capture_hotkey_edit.setKeySequence(
-            QKeySequence(self._general_cfg.capture_hotkey_sequence or "Ctrl+Alt+D")
-        )
-        self._on_clipboard_monitor_toggled(
-            self._general_cfg.clipboard_monitor_enabled
-        )
-        self._on_capture_hotkey_toggled(self._general_cfg.capture_hotkey_enabled)
-
-        # BitTorrent tab
-        self._seeding_after_complete_cb.setChecked(self._torrent_cfg.seeding_after_complete)
-        self._resume_seeding_cb.setChecked(self._torrent_cfg.resume_seeding_on_startup)
-        self._seeding_time_spin.setValue(self._torrent_cfg.seeding_time_limit_minutes)
-        self._seeding_ratio_limit_spin.setValue(self._torrent_cfg.seeding_ratio_limit)
-        self._max_seeding_speed_spin.setValue(self._torrent_cfg.max_seeding_speed)
-        self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
-        self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
         self._disk_space_check_cb.setChecked(self._general_cfg.disk_space_check)
         self._disk_space_headroom_spin.setValue(self._general_cfg.disk_space_headroom_mb)
         self._disk_space_headroom_spin.setEnabled(self._general_cfg.disk_space_check)
+
 
         # Backlog locations
         self._backlog_list.clear()
@@ -2396,8 +2433,51 @@ class SettingsDialog(QDialog):
         self._backlog_poll_spin.setValue(self._general_cfg.backlog_poll_interval)
         self._backlog_poll_spin.setEnabled(self._general_cfg.backlog_poll_enabled)
 
+        # Application & Tray tab
+        self._auto_resume_cb.setChecked(self._general_cfg.auto_resume_startup)
+        self._notify_cb.setChecked(self._general_cfg.notify_on_completion)
+        self._enable_system_tray_cb.setChecked(self._general_cfg.enable_system_tray)
+        self._minimize_to_tray_cb.setChecked(self._general_cfg.minimize_to_tray)
+        self._close_to_tray_cb.setChecked(self._general_cfg.close_to_tray)
+        self._start_minimized_cb.setChecked(self._general_cfg.start_minimized)
+        self._minimize_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
+        self._close_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
+        self._start_minimized_cb.setEnabled(self._general_cfg.enable_system_tray)
+        self._capture_hotkey_cb.setChecked(self._general_cfg.capture_hotkey_enabled)
+        self._capture_hotkey_edit.setKeySequence(
+            QKeySequence(self._general_cfg.capture_hotkey_sequence or "Ctrl+Alt+D")
+        )
+        self._on_capture_hotkey_toggled(self._general_cfg.capture_hotkey_enabled)
+
+        # Clipboard tab
+        self._clipboard_monitor_cb.setChecked(
+            self._general_cfg.clipboard_monitor_enabled
+        )
+        self._clipboard_max_urls_spin.setValue(
+            self._general_cfg.clipboard_monitor_max_urls
+        )
+        self._clipboard_min_size_spin.setValue(
+            self._general_cfg.clipboard_min_file_size_kb
+        )
+        self._clipboard_ignored_exts_edit.setText(
+            ", ".join(self._general_cfg.clipboard_ignored_extensions)
+        )
+        self._on_clipboard_monitor_toggled(
+            self._general_cfg.clipboard_monitor_enabled
+        )
+
+        # BitTorrent tab
+        self._seeding_after_complete_cb.setChecked(self._torrent_cfg.seeding_after_complete)
+        self._resume_seeding_cb.setChecked(self._torrent_cfg.resume_seeding_on_startup)
+        self._seeding_time_spin.setValue(self._torrent_cfg.seeding_time_limit_minutes)
+        self._seeding_ratio_limit_spin.setValue(self._torrent_cfg.seeding_ratio_limit)
+        self._max_seeding_speed_spin.setValue(self._torrent_cfg.max_seeding_speed)
+        self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
+        self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
+
         # Network tab
         self._load_interfaces()
+
         self._kill_switch_cb.setChecked(self._network_cfg.kill_switch)
         self._proxy_enable_cb.setChecked(self._network_cfg.proxy_enabled)
         idx = 1 if self._network_cfg.proxy_type == "socks5" else 0
@@ -2814,6 +2894,8 @@ class SettingsDialog(QDialog):
 
     def _on_clipboard_monitor_toggled(self, checked: bool):
         self._clipboard_max_urls_spin.setEnabled(checked)
+        self._clipboard_min_size_spin.setEnabled(checked)
+        self._clipboard_ignored_exts_edit.setEnabled(checked)
 
     def _on_capture_hotkey_toggled(self, checked: bool):
         self._capture_hotkey_edit.setEnabled(checked)
@@ -3038,6 +3120,10 @@ class SettingsDialog(QDialog):
         self._general_cfg.start_minimized = self._start_minimized_cb.isChecked()
         self._general_cfg.clipboard_monitor_enabled = self._clipboard_monitor_cb.isChecked()
         self._general_cfg.clipboard_monitor_max_urls = self._clipboard_max_urls_spin.value()
+        self._general_cfg.clipboard_min_file_size_kb = self._clipboard_min_size_spin.value()
+        self._general_cfg.clipboard_ignored_extensions = normalize_extension_list(
+            self._clipboard_ignored_exts_edit.text()
+        )
         self._general_cfg.capture_hotkey_enabled = self._capture_hotkey_cb.isChecked()
         self._general_cfg.capture_hotkey_sequence = (
             self._capture_hotkey_edit.keySequence().toString() or "Ctrl+Alt+D"

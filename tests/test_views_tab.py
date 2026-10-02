@@ -319,8 +319,8 @@ class ViewsTabTestCase(unittest.TestCase):
         ]
         self.assertIn("👁️ Views & Columns", titles)
         self.assertEqual(
-            titles.index("👁️ Views & Columns"), 1,
-            "the Views tab belongs immediately after General",
+            titles.index("👁️ Views & Columns"), 3,
+            "the Views tab belongs after the core download, app, and clipboard tabs",
         )
         self.assertIsInstance(SettingsDialog, type)
 

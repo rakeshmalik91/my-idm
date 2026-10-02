@@ -320,7 +320,9 @@ class TestDialogsScrollable(unittest.TestCase):
             self.assertEqual(
                 [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())],
                 [
-                    "📁 General & Downloads",
+                    "📁 Downloads & Retries",
+                    "🖥️ Application & Tray",
+                    "📋 Clipboard Capture",
                     "👁️ Views & Columns",
                     "🧲 BitTorrent",
                     "🌐 Browser Integration",

@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Callable, Optional
+from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
@@ -52,6 +54,48 @@ _URL_PREFIXES = ("http://", "https://", "ftp://", "magnet:?")
 _TORRENT_SUFFIX = ".torrent"
 
 
+def extract_url_extension(url: str) -> str:
+    """Extract lowercase file extension with leading dot from a URL, or empty string.
+
+    Handles query parameters and fragments properly, e.g.
+    'https://example.com/path/file.HTML?key=val#frag' -> '.html'
+    """
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        path = unquote(parsed.path)
+        if not path:
+            return ""
+        name = Path(path).name
+        if "." in name:
+            _, ext = os.path.splitext(name)
+            return ext.lower()
+    except Exception:
+        pass
+    return ""
+
+
+def is_ignored_extension(
+    url: str, ignored_extensions: Optional[list[str] | set[str]] = None
+) -> bool:
+    """True when url's file extension matches one of the ignored extensions."""
+    if not url or not ignored_extensions:
+        return False
+    ext = extract_url_extension(url)
+    if not ext:
+        return False
+    for ign in ignored_extensions:
+        ign_clean = ign.strip().lower()
+        if not ign_clean:
+            continue
+        if not ign_clean.startswith("."):
+            ign_clean = f".{ign_clean}"
+        if ext == ign_clean:
+            return True
+    return False
+
+
 def looks_like_download_url(text: str) -> bool:
     """True when *text* is something ``DownloadManager.add_download`` can act on.
 
@@ -73,11 +117,16 @@ def looks_like_download_url(text: str) -> bool:
     return False
 
 
-def extract_download_urls(text: str, max_urls: int = DEFAULT_MAX_URLS) -> list[str]:
+def extract_download_urls(
+    text: str,
+    max_urls: int = DEFAULT_MAX_URLS,
+    ignored_extensions: Optional[list[str] | set[str]] = None,
+) -> list[str]:
     """Return the downloadable URLs in *text*, or ``[]`` unless every line qualifies.
 
     Blank lines are ignored. De-duplication is case-preserving and order-preserving: the same
     URL twice in one copy is one download, and ``add_download`` would resume the first anyway.
+    URLs matching ``ignored_extensions`` (e.g. .html, .jpg) are filtered out.
 
     The per-line length cap lives in :func:`looks_like_download_url`, deliberately *not* here:
     a cap on the whole payload would refuse a legitimate list of fifty links, which is exactly
@@ -98,6 +147,8 @@ def extract_download_urls(text: str, max_urls: int = DEFAULT_MAX_URLS) -> list[s
     seen: set[str] = set()
     urls: list[str] = []
     for line in lines:
+        if is_ignored_extension(line, ignored_extensions):
+            continue
         if len(urls) >= limit:
             break
         key = line.lower()
@@ -121,11 +172,15 @@ class ClipboardMonitor(QObject):
         debounce_ms: int = DEFAULT_DEBOUNCE_MS,
         parent: Optional[QObject] = None,
         queue_provider: Optional[Callable[[], str]] = None,
+        min_file_size_kb: int = 1024,
+        ignored_extensions: Optional[list[str]] = None,
     ):
         super().__init__(parent)
         self._manager = manager
         self._max_urls = max(1, min(int(max_urls or DEFAULT_MAX_URLS), ABSOLUTE_MAX_URLS))
         self._debounce_ms = max(0, int(debounce_ms))
+        self._min_file_size_kb = max(0, int(min_file_size_kb))
+        self._ignored_extensions = list(ignored_extensions) if ignored_extensions is not None else []
         self._active = False
         # Injected rather than read off the manager so the monitor stays testable against a
         # fake manager that has no queue concept at all.
@@ -150,6 +205,23 @@ class ClipboardMonitor(QObject):
     @property
     def max_urls(self) -> int:
         return self._max_urls
+
+    @property
+    def min_file_size_kb(self) -> int:
+        return self._min_file_size_kb
+
+    @property
+    def ignored_extensions(self) -> list[str]:
+        return list(self._ignored_extensions)
+
+    def set_max_urls(self, max_urls: int) -> None:
+        self._max_urls = max(1, min(int(max_urls or DEFAULT_MAX_URLS), ABSOLUTE_MAX_URLS))
+
+    def set_min_file_size_kb(self, size_kb: int) -> None:
+        self._min_file_size_kb = max(0, int(size_kb))
+
+    def set_ignored_extensions(self, exts: list[str]) -> None:
+        self._ignored_extensions = list(exts) if exts is not None else []
 
     def start(self) -> None:
         """Begin watching. Idempotent."""
@@ -235,7 +307,9 @@ class ClipboardMonitor(QObject):
             log.debug("Ignoring clipboard text this app just wrote")
             return []
 
-        urls = extract_download_urls(cleaned, self._max_urls)
+        urls = extract_download_urls(
+            cleaned, self._max_urls, ignored_extensions=self._ignored_extensions
+        )
         if not urls:
             return []
         # Counted against the cap, not against the returned list: a duplicate line was
@@ -250,7 +324,12 @@ class ClipboardMonitor(QObject):
         queue_id = self._queue_provider()
         for url in urls:
             try:
-                did = self._manager.add_download(url, queue_id=queue_id)
+                metadata = {"capture_source": "clipboard"}
+                if self._min_file_size_kb > 0:
+                    metadata["pending_min_bytes"] = int(self._min_file_size_kb * 1024)
+                did = self._manager.add_download(
+                    url, queue_id=queue_id, metadata=metadata
+                )
             except Exception as exc:
                 log.warning("Clipboard capture failed for %s: %s", url, exc)
                 continue

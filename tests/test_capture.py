@@ -26,6 +26,8 @@ from my_idm.clipboard_monitor import (
     ABSOLUTE_MAX_URLS,
     ClipboardMonitor,
     extract_download_urls,
+    extract_url_extension,
+    is_ignored_extension,
     looks_like_download_url,
 )
 from my_idm.config import BrowserIntegrationConfig, GeneralConfig
@@ -155,11 +157,13 @@ class _FakeManager:
 
     def __init__(self, result="id", raises_on=()):
         self.calls: list[str] = []
+        self.kwargs_calls: list[dict] = []
         self.result = result
         self.raises_on = set(raises_on)
 
     def add_download(self, url, *args, **kwargs):
         self.calls.append(url)
+        self.kwargs_calls.append(kwargs)
         if url in self.raises_on:
             raise RuntimeError("engine exploded")
         if callable(self.result):
@@ -272,6 +276,39 @@ class TestExtractDownloadUrls(unittest.TestCase):
         # The 4096 cap is per line, so one enormous line is refused rather than truncated
         # into something that looks like a URL.
         assert extract_download_urls("https://example.com/" + "a" * 5000) == []
+
+    def test_extract_url_extension(self):
+        assert extract_url_extension("https://example.com/file.txt") == ".txt"
+        assert extract_url_extension("https://example.com/file.HTML?foo=bar#baz") == ".html"
+        assert extract_url_extension("https://example.com/path/to/archive.tar.gz") == ".gz"
+        assert extract_url_extension("https://example.com/noextension") == ""
+        assert extract_url_extension("https://example.com/") == ""
+        assert extract_url_extension("magnet:?xt=urn:btih:abc123") == ""
+
+    def test_is_ignored_extension(self):
+        ignored = [".txt", ".htm", ".html", ".jpg", ".jpeg", ".png", ".gif", ".webp"]
+        assert is_ignored_extension("https://example.com/page.html", ignored) is True
+        assert is_ignored_extension("https://example.com/image.JPG", ignored) is True
+        assert is_ignored_extension("https://example.com/IMAGE.WEBP?query=1", ignored) is True
+        assert is_ignored_extension("https://example.com/setup.exe", ignored) is False
+        assert is_ignored_extension("https://example.com/archive.zip", ignored) is False
+        assert is_ignored_extension("https://example.com/no_ext", ignored) is False
+        assert is_ignored_extension("https://example.com/file.txt", []) is False
+        assert is_ignored_extension("https://example.com/file.txt", ["txt"]) is True
+
+    def test_filters_ignored_extensions(self):
+        text = (
+            "https://example.com/installer.exe\n"
+            "https://example.com/index.html\n"
+            "https://example.com/photo.jpg\n"
+            "https://example.com/archive.zip"
+        )
+        ignored = [".html", ".jpg"]
+        assert extract_download_urls(text, ignored_extensions=ignored) == [
+            "https://example.com/installer.exe",
+            "https://example.com/archive.zip",
+        ]
+
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +551,50 @@ class TestClipboardMonitor(ConfigIsolationMixin, unittest.TestCase):
         monitor = self.make(debounce_ms=0)
         self.clipboard.setText("https://example.com/a.zip")
         assert monitor.capture_now() == ["https://example.com/a.zip"]
+
+    # -- metadata & ignored extensions ------------------------------------
+
+    def test_passes_pending_min_bytes_metadata(self):
+        monitor = self.make(min_file_size_kb=1024)
+        self.clipboard.setText("https://example.com/file.iso")
+        monitor.capture_now()
+        assert len(self.manager.calls) == 1
+        assert self.manager.calls[0] == "https://example.com/file.iso"
+        assert len(self.manager.kwargs_calls) == 1
+        assert self.manager.kwargs_calls[0]["metadata"] == {
+            "capture_source": "clipboard",
+            "pending_min_bytes": 1024 * 1024,
+        }
+
+    def test_passes_no_pending_min_bytes_when_zero(self):
+        monitor = self.make(min_file_size_kb=0)
+        self.clipboard.setText("https://example.com/file.iso")
+        monitor.capture_now()
+        assert len(self.manager.kwargs_calls) == 1
+        assert self.manager.kwargs_calls[0]["metadata"] == {
+            "capture_source": "clipboard",
+        }
+
+
+    def test_skips_ignored_extensions(self):
+        monitor = self.make(ignored_extensions=[".html", ".jpg", ".txt"])
+        self.clipboard.setText("https://example.com/page.html")
+        assert monitor.capture_now() == []
+        assert self.manager.calls == []
+
+    def test_setters_update_configuration(self):
+        monitor = self.make(max_urls=5, min_file_size_kb=512, ignored_extensions=[".txt"])
+        monitor.set_max_urls(2)
+        monitor.set_min_file_size_kb(2048)
+        monitor.set_ignored_extensions([".zip"])
+
+        self.clipboard.setText("https://example.com/archive.zip")
+        assert monitor.capture_now() == []
+
+        self.clipboard.setText("https://example.com/doc.txt")
+        assert monitor.capture_now() == ["https://example.com/doc.txt"]
+        assert self.manager.kwargs_calls[-1]["metadata"]["pending_min_bytes"] == 2048 * 1024
+
 
 
 # ---------------------------------------------------------------------------

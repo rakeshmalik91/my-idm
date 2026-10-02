@@ -22,6 +22,34 @@ DEFAULT_YTDLP_PLAYLIST_LIMIT = 10
 MIN_YTDLP_PLAYLIST_LIMIT = 1
 MAX_YTDLP_PLAYLIST_LIMIT = 500
 
+DEFAULT_CLIPBOARD_MIN_FILE_SIZE_KB = 1024
+DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS = [
+    ".txt", ".htm", ".html", ".jpg", ".jpeg", ".png", ".gif", ".webp"
+]
+
+
+def normalize_extension_list(extensions: Any) -> list[str]:
+    """Parse comma/space/semicolon separated string or list of extensions into cleaned list with leading dots."""
+    import re
+
+    if isinstance(extensions, str):
+        raw_items = [x.strip() for x in re.split(r"[,;\s]+", extensions) if x.strip()]
+    elif isinstance(extensions, (list, tuple, set)):
+        raw_items = [str(x).strip() for x in extensions if str(x).strip()]
+    else:
+        raw_items = []
+
+    result = []
+    seen = set()
+    for item in raw_items:
+        ext = item.lower()
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        if ext not in seen:
+            seen.add(ext)
+            result.append(ext)
+    return result
+
 
 def clamp_ytdlp_playlist_limit(value: Any) -> int:
     """Coerce a stored playlist limit into a usable range.
@@ -75,6 +103,12 @@ class GeneralConfig:
     clipboard_monitor_enabled: bool = False
     # Ceiling on one copy event. A pasted generated list must not become thousands of rows.
     clipboard_monitor_max_urls: int = 20
+    # Minimum file size in KB to capture (default 1024 KB = 1 MB; 0 = no minimum).
+    clipboard_min_file_size_kb: int = DEFAULT_CLIPBOARD_MIN_FILE_SIZE_KB
+    # File extensions to ignore when capturing URLs from clipboard.
+    clipboard_ignored_extensions: list[str] = field(
+        default_factory=lambda: list(DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS)
+    )
     # A global hotkey claims a chord system-wide, so it is also opt-in and needs a real
     # modifier: a bare key would swallow that key in every other application on the desktop.
     capture_hotkey_enabled: bool = False
@@ -167,6 +201,8 @@ class GeneralConfig:
             "start_minimized": self.start_minimized,
             "clipboard_monitor_enabled": self.clipboard_monitor_enabled,
             "clipboard_monitor_max_urls": self.clipboard_monitor_max_urls,
+            "clipboard_min_file_size_kb": self.clipboard_min_file_size_kb,
+            "clipboard_ignored_extensions": list(self.clipboard_ignored_extensions),
             "capture_hotkey_enabled": self.capture_hotkey_enabled,
             "capture_hotkey_sequence": self.capture_hotkey_sequence,
         }
@@ -209,6 +245,12 @@ class GeneralConfig:
             clipboard_monitor_max_urls=max(
                 1, int(data.get("clipboard_monitor_max_urls", 20))
             ),
+            clipboard_min_file_size_kb=max(
+                0, int(data.get("clipboard_min_file_size_kb", DEFAULT_CLIPBOARD_MIN_FILE_SIZE_KB))
+            ),
+            clipboard_ignored_extensions=normalize_extension_list(
+                data.get("clipboard_ignored_extensions", DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS)
+            ),
             capture_hotkey_enabled=bool(data.get("capture_hotkey_enabled", False)),
             capture_hotkey_sequence=str(
                 data.get("capture_hotkey_sequence", "Ctrl+Alt+D")
@@ -245,6 +287,8 @@ class GeneralConfig:
         settings.setValue("start_minimized", self.start_minimized)
         settings.setValue("clipboard_monitor_enabled", self.clipboard_monitor_enabled)
         settings.setValue("clipboard_monitor_max_urls", self.clipboard_monitor_max_urls)
+        settings.setValue("clipboard_min_file_size_kb", self.clipboard_min_file_size_kb)
+        settings.setValue("clipboard_ignored_extensions", self.clipboard_ignored_extensions)
         settings.setValue("capture_hotkey_enabled", self.capture_hotkey_enabled)
         settings.setValue("capture_hotkey_sequence", self.capture_hotkey_sequence)
         settings.endGroup()
@@ -291,6 +335,13 @@ class GeneralConfig:
         clipboard_monitor_max_urls = max(
             1, settings.value("clipboard_monitor_max_urls", 20, type=int)
         )
+        clipboard_min_file_size_kb = max(
+            0, settings.value("clipboard_min_file_size_kb", DEFAULT_CLIPBOARD_MIN_FILE_SIZE_KB, type=int)
+        )
+        raw_ignored_exts = settings.value(
+            "clipboard_ignored_extensions", DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS
+        )
+        clipboard_ignored_extensions = normalize_extension_list(raw_ignored_exts)
         capture_hotkey_enabled = settings.value(
             "capture_hotkey_enabled", False, type=bool
         )
@@ -317,14 +368,16 @@ class GeneralConfig:
             backlog_poll_interval=int(backlog_poll_interval),
             backlog_poll_enabled=bool(backlog_poll_enabled),
             metadata_fetch_timeout_days=int(metadata_fetch_timeout_days),
-        disk_space_check=bool(disk_space_check),
-        disk_space_headroom_mb=int(disk_space_headroom_mb),
+            disk_space_check=bool(disk_space_check),
+            disk_space_headroom_mb=int(disk_space_headroom_mb),
             enable_system_tray=bool(enable_system_tray),
             minimize_to_tray=bool(minimize_to_tray),
             close_to_tray=bool(close_to_tray),
             start_minimized=bool(start_minimized),
             clipboard_monitor_enabled=bool(clipboard_monitor_enabled),
             clipboard_monitor_max_urls=int(clipboard_monitor_max_urls),
+            clipboard_min_file_size_kb=int(clipboard_min_file_size_kb),
+            clipboard_ignored_extensions=list(clipboard_ignored_extensions),
             capture_hotkey_enabled=bool(capture_hotkey_enabled),
             capture_hotkey_sequence=str(capture_hotkey_sequence or "Ctrl+Alt+D"),
         )

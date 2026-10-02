@@ -1368,6 +1368,8 @@ class MainWindow(QMainWindow):
         self._clipboard_monitor = ClipboardMonitor(
             self._manager,
             max_urls=self._manager.general_config.clipboard_monitor_max_urls,
+            min_file_size_kb=self._manager.general_config.clipboard_min_file_size_kb,
+            ignored_extensions=self._manager.general_config.clipboard_ignored_extensions,
             parent=self,
             queue_provider=self._manager.get_active_queue,
         )
@@ -1401,6 +1403,11 @@ class MainWindow(QMainWindow):
         a Preferences save takes effect without a restart.
         """
         cfg = self._manager.general_config
+
+        if hasattr(self, "_clipboard_monitor"):
+            self._clipboard_monitor.set_max_urls(cfg.clipboard_monitor_max_urls)
+            self._clipboard_monitor.set_min_file_size_kb(cfg.clipboard_min_file_size_kb)
+            self._clipboard_monitor.set_ignored_extensions(cfg.clipboard_ignored_extensions)
 
         wanted_clipboard = bool(cfg.clipboard_monitor_enabled)
         if wanted_clipboard and not self._clipboard_monitor.is_active:
