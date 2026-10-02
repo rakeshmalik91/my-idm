@@ -62,6 +62,7 @@ from my_idm.delegates import (
 from my_idm.details_panel import DetailsPanel
 from my_idm.dialogs import (
     AddDownloadDialog,
+    AddQueueDialog,
     DeleteConfirmDialog,
     MoveDownloadDialog,
     QueueManagerDialog,
@@ -2288,7 +2289,13 @@ class MainWindow(QMainWindow):
         queue_menu = menu.addMenu("Move to Queue")
         current_queue = (entry.queue_id or DEFAULT_QUEUE_ID) if entry else DEFAULT_QUEUE_ID
         for queue in self._manager.get_queues():
-            q_act = queue_menu.addAction(create_color_swatch_icon(queue.color), queue.name)
+            icon = create_color_swatch_icon(
+                queue.color,
+                size=18,
+                radius=4,
+                letter=(queue.name[:1].upper() if queue.name else ""),
+            )
+            q_act = queue_menu.addAction(icon, queue.name)
             q_act.setCheckable(True)
             q_act.setChecked(queue.id == current_queue)
             q_act.triggered.connect(
@@ -2476,7 +2483,12 @@ class MainWindow(QMainWindow):
                 if queue.max_concurrent > 0
                 else f"{queue.name}  (Global)"
             )
-            icon = create_color_swatch_icon(queue.color)
+            icon = create_color_swatch_icon(
+                queue.color,
+                size=18,
+                radius=4,
+                letter=(queue.name[:1].upper() if queue.name else ""),
+            )
             self._queue_combo.addItem(icon, label, queue.id)
         self._queue_combo.setCurrentIndex(max(0, self._queue_combo.findData(active)))
         self._queue_combo.blockSignals(False)
@@ -2493,7 +2505,12 @@ class MainWindow(QMainWindow):
         self._menu_queues.addAction(self._act_queue_all)
         self._menu_queues.addSeparator()
         for queue in queues:
-            icon = create_color_swatch_icon(queue.color)
+            icon = create_color_swatch_icon(
+                queue.color,
+                size=18,
+                radius=4,
+                letter=(queue.name[:1].upper() if queue.name else ""),
+            )
             action = QAction(icon, queue.name, self)
             action.setCheckable(True)
             action.setChecked(queue.id == active)
@@ -2509,7 +2526,12 @@ class MainWindow(QMainWindow):
 
         self._menu_move_to_queue.clear()
         for queue in queues:
-            icon = create_color_swatch_icon(queue.color)
+            icon = create_color_swatch_icon(
+                queue.color,
+                size=18,
+                radius=4,
+                letter=(queue.name[:1].upper() if queue.name else ""),
+            )
             action = QAction(icon, queue.name, self)
             action.triggered.connect(
                 lambda _checked=False, qid=queue.id: self._on_move_selected_to_queue(qid)
@@ -2636,14 +2658,12 @@ class MainWindow(QMainWindow):
         self._update_count_label()
 
     def _on_new_queue(self):
-        name, ok = QInputDialog.getText(
-            self, "New Queue", "Queue name:", QLineEdit.Normal, ""
-        )
-        if not ok:
+        dlg = AddQueueDialog(self, manager=self._manager)
+        if not dlg.exec():
             return
-        # 3 matches the global default, so a new queue behaves like the old single queue until
-        # the user narrows it.
-        created, message = self._manager.create_queue(name.strip(), 3)
+        created, message = self._manager.create_queue(
+            dlg.name.strip(), dlg.max_concurrent, dlg.color
+        )
         self._status_label.setText(message)
         if created:
             self._refresh_queue_ui()

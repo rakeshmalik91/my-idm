@@ -179,8 +179,10 @@ class MultiselectFilterPopup(QFrame):
             cb = QCheckBox(f"{label}  ({count})")
             cb.setCursor(Qt.CursorShape.PointingHandCursor)
             if colors and key in colors and colors[key]:
-                cb.setIcon(create_color_swatch_icon(colors[key], size=12))
-                cb.setIconSize(QSize(12, 12))
+                letter = label[:1].upper() if label else ""
+                cb.setIcon(create_color_swatch_icon(colors[key], size=18, radius=4, letter=letter))
+                cb.setIconSize(QSize(18, 18))
+
             is_checked = (selected_keys is None) or (key in selected_keys)
             cb.setChecked(is_checked)
             cb.stateChanged.connect(self._on_item_toggled)

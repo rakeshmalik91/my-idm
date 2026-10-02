@@ -2869,11 +2869,12 @@ class DownloadManager(QObject):
         self.queue_scope_changed.emit(resolved)
         self.queues_changed.emit()
 
-    def create_queue(self, name: str, max_concurrent: int = 3) -> tuple[bool, str]:
-        ok, message = self._db.create_queue(name, max_concurrent)
+    def create_queue(self, name: str, max_concurrent: int = 3, color: str = "") -> tuple[bool, str]:
+        ok, message = self._db.create_queue(name, max_concurrent, color)
         if ok:
             self.queues_changed.emit()
         return ok, message
+
 
     def rename_queue(self, queue_id: str, name: str) -> tuple[bool, str]:
         ok, message = self._db.rename_queue(queue_id, name)

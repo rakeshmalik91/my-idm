@@ -14,7 +14,14 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox, QSpinBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QInputDialog,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+)
+
 
 from my_idm.config import GeneralConfig
 from my_idm.database import (
@@ -27,9 +34,10 @@ from my_idm.database import (
     QueueInfo,
     normalize_queue_color,
 )
-from my_idm.dialogs import QueueManagerDialog
+from my_idm.dialogs import AddQueueDialog, QueueManagerDialog
 from my_idm.download_model import QUEUE_COLOR_ROLE, Col, DownloadTableModel
 from my_idm.manager import DownloadManager
+from my_idm.utils import create_color_swatch_icon
 from tests.test_main_window import _MainWindowTestCase
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -1676,22 +1684,57 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
         self.assertIn("9", dialog._note.text())
 
     def test_adding_a_queue_from_the_dialog_works(self):
-        # Regression: `_on_add` passed `QLineEdit.EditRole.Normal`, which does not exist.
-        # The AttributeError was raised inside a Qt slot, so Qt swallowed it and the button
-        # looked dead — and nothing in the suite called these handlers.
         dialog = self._dialog()
-        with patch.object(QInputDialog, "getText", return_value=("Staging", True)) as prompt:
+        class _FakeAddDlg:
+            name = "Staging"
+            max_concurrent = 4
+            color = "#3fb950"
+            def exec(self):
+                return True
+
+        with patch("my_idm.dialogs.AddQueueDialog", return_value=_FakeAddDlg()):
             dialog._on_add()
-        prompt.assert_called_once()
         self.assertIn("Staging", [q.name for q in self.manager.get_queues()])
+        st_q = next(q for q in self.manager.get_queues() if q.name == "Staging")
+        self.assertEqual(st_q.max_concurrent, 4)
+        self.assertEqual(st_q.color, "#3fb950")
         self.assertIn("Created queue", dialog.result_message)
 
     def test_cancelling_add_creates_nothing(self):
         dialog = self._dialog()
         before = len(self.manager.get_queues())
-        with patch.object(QInputDialog, "getText", return_value=("Staging", False)):
+        class _FakeAddDlg:
+            name = "Staging"
+            max_concurrent = 4
+            color = "#3fb950"
+            def exec(self):
+                return False
+
+        with patch("my_idm.dialogs.AddQueueDialog", return_value=_FakeAddDlg()):
             dialog._on_add()
         self.assertEqual(len(self.manager.get_queues()), before)
+
+    def test_color_button_and_cell_swatch_interactivity(self):
+        dialog = self._dialog()
+        # Default queue has color button enabled
+        dialog._table.selectRow(0)
+        self.assertTrue(dialog._color_btn.isEnabled())
+
+        # Check cell swatch button has uppercase letter
+        cell_widget = dialog._table.cellWidget(self._row_of(dialog, "Torrents"), 0)
+        swatch_btn = cell_widget.findChild(QPushButton)
+        self.assertIsNotNone(swatch_btn)
+        self.assertEqual(swatch_btn.text(), "T")
+
+        # Color picker updates queue color
+        with patch("PySide6.QtWidgets.QColorDialog.getColor") as mock_pick:
+            from PySide6.QtGui import QColor
+            mock_pick.return_value = QColor("#db6d28")
+            dialog._table.selectRow(self._row_of(dialog, "Torrents"))
+            dialog._on_change_color()
+
+        tor_q = next(q for q in self.manager.get_queues() if q.name == "Torrents")
+        self.assertEqual(tor_q.color, "#db6d28")
 
     def test_renaming_from_the_dialog_works(self):
         # Same bug, same slot-swallowing, in `_on_rename`.
@@ -1986,29 +2029,82 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.assertIn("Select one or more", self.win._status_label.text())
 
     def test_new_queue_from_the_window_works(self):
-        # Regression: `_on_new_queue` passed `QLineEdit.EditRole.Normal`, which does not exist.
-        # Raised inside a Qt slot, Qt swallowed it, so **New Queue** did nothing at all - which
-        # is also why no queue could be created from the row context menu.
-        with patch.object(QInputDialog, "getText", return_value=("Staging", True)) as prompt:
+        class _FakeAddDlg:
+            name = "Staging"
+            max_concurrent = 4
+            color = "#3fb950"
+            def exec(self):
+                return True
+
+        with patch("my_idm.main_window.AddQueueDialog", return_value=_FakeAddDlg()):
             self.win._on_new_queue()
-        prompt.assert_called_once()
         self.assertIn("Staging", [q.name for q in self.manager.get_queues()])
-        # The combo shows the limit alongside the name, so match on a substring.
+        st_q = next(q for q in self.manager.get_queues() if q.name == "Staging")
+        self.assertEqual(st_q.max_concurrent, 4)
+        self.assertEqual(st_q.color, "#3fb950")
         self.assertIn("Staging", " | ".join(self._combo_labels()))
         self.assertIn("Staging", self._menu_labels())
         self.assertIn("Created queue", self.win._status_label.text())
 
     def test_cancelling_new_queue_creates_nothing(self):
         before = len(self.manager.get_queues())
-        with patch.object(QInputDialog, "getText", return_value=("Staging", False)):
+        class _FakeAddDlg:
+            name = "Staging"
+            max_concurrent = 4
+            color = "#3fb950"
+            def exec(self):
+                return False
+
+        with patch("my_idm.main_window.AddQueueDialog", return_value=_FakeAddDlg()):
             self.win._on_new_queue()
         self.assertEqual(len(self.manager.get_queues()), before)
 
-    def test_a_blank_new_queue_name_is_refused_with_a_message(self):
-        with patch.object(QInputDialog, "getText", return_value=("   ", True)):
-            self.win._on_new_queue()
-        self.assertEqual(user_queues(self.manager), [])
-        self.assertIn("cannot be empty", self.win._status_label.text())
+
+class TestAddQueueDialog(unittest.TestCase):
+    """Direct UI and interaction tests for AddQueueDialog."""
+
+    def test_add_queue_dialog_initial_state_and_preview(self):
+        dlg = AddQueueDialog(None, initial_name="Work Queue", initial_color="#a371f7")
+        self.addCleanup(dlg.deleteLater)
+        self.assertEqual(dlg.name, "Work Queue")
+        self.assertEqual(dlg.color, "#a371f7")
+        self.assertEqual(dlg.max_concurrent, 3)
+        self.assertEqual(dlg._color_btn.text(), "W")
+
+        # Typing in name updates the letter
+        dlg._name_edit.setText("Personal")
+        self.assertEqual(dlg._color_btn.text(), "P")
+
+        # Setting color updates color preview
+        dlg._set_color("#db6d28")
+        self.assertEqual(dlg.color, "#db6d28")
+
+    def test_blank_name_rejected_on_accept(self):
+        dlg = AddQueueDialog(None, initial_name="   ")
+        self.addCleanup(dlg.deleteLater)
+        with patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
+            dlg._on_accept()
+            mock_warn.assert_called_once()
+        self.assertFalse(dlg.result())
+
+
+class TestColorSwatchIconAndDelegate(unittest.TestCase):
+    """Tests for color swatch icon generation and QueueColumnDelegate rendering."""
+
+    def test_create_color_swatch_icon_with_letter(self):
+        icon = create_color_swatch_icon("#3fb950", size=18, radius=4, letter="AnimePahe")
+        self.assertFalse(icon.isNull())
+        sizes = icon.availableSizes()
+        self.assertTrue(len(sizes) > 0 or not icon.isNull())
+
+    def test_create_color_swatch_icon_empty_color(self):
+        icon = create_color_swatch_icon("", size=18, radius=4, letter="T")
+        self.assertFalse(icon.isNull())
+
+    def test_queue_delegate_swatch_size(self):
+        from my_idm.delegates import QueueColumnDelegate
+        delegate = QueueColumnDelegate()
+        self.assertGreaterEqual(delegate.SWATCH, 16)
 
 
 if __name__ == "__main__":

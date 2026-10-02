@@ -262,9 +262,9 @@ class QueueColumnDelegate(QStyledItemDelegate):
     """
 
     #: Swatch edge length, the gap to the text, and the padding either side of the swatch.
-    SWATCH = 12
-    GAP = 6
-    PADDING = 4
+    SWATCH = 18
+    GAP = 8
+    PADDING = 5
     #: Narrower than this and the name is dropped rather than elided into uselessness.
     MIN_TEXT_WIDTH = 28
 
@@ -311,10 +311,24 @@ class QueueColumnDelegate(QStyledItemDelegate):
 
         swatch = self._swatch_rect(option)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         painter.setBrush(QColor(colour))
         # A translucent dark outline keeps a dark swatch visible against a dark row.
         painter.setPen(QPen(QColor(0, 0, 0, 140)))
-        painter.drawRoundedRect(swatch, 3, 3)
+        painter.drawRoundedRect(swatch, 4, 4)
+
+        char = (name or "").strip()[:1].upper()
+        if char:
+            letter_font = QFont(option.font)
+            letter_font.setBold(True)
+            letter_font.setPixelSize(10)
+            painter.setFont(letter_font)
+            qc = QColor(colour)
+            luminance = (0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()) / 255.0
+            text_color = QColor(0, 0, 0, 220) if luminance > 0.65 else QColor(255, 255, 255, 240)
+            painter.setPen(text_color)
+            painter.drawText(swatch, int(Qt.AlignmentFlag.AlignCenter), char)
+            painter.setFont(option.font)
 
         text_left = swatch.right() + self.GAP
         available = option.rect.right() - self.PADDING - text_left
@@ -326,6 +340,7 @@ class QueueColumnDelegate(QStyledItemDelegate):
                 metrics.elidedText(name, Qt.TextElideMode.ElideRight, available),
             )
         painter.restore()
+
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex):
         """Wide enough for the swatch plus the name, but no wider than the name needs."""

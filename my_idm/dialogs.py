@@ -631,13 +631,15 @@ class QueueManagerDialog(QDialog):
         self._down_btn = QPushButton("↓ Move Down")
         self._add_btn = QPushButton("Add…")
         self._rename_btn = QPushButton("Rename…")
+        self._color_btn = QPushButton("Color…")
         self._delete_btn = QPushButton("Delete…")
         self._up_btn.clicked.connect(lambda: self._move_selected(-1))
         self._down_btn.clicked.connect(lambda: self._move_selected(+1))
         self._add_btn.clicked.connect(self._on_add)
         self._rename_btn.clicked.connect(self._on_rename)
+        self._color_btn.clicked.connect(self._on_change_color)
         self._delete_btn.clicked.connect(self._on_delete)
-        for btn in (self._up_btn, self._down_btn, self._add_btn, self._rename_btn, self._delete_btn):
+        for btn in (self._up_btn, self._down_btn, self._add_btn, self._rename_btn, self._color_btn, self._delete_btn):
             btn_row.addWidget(btn)
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
@@ -736,16 +738,22 @@ class QueueManagerDialog(QDialog):
         holder = QWidget(self._table)
         row = QHBoxLayout(holder)
         row.setContentsMargins(4, 0, 4, 0)
-        row.setSpacing(6)
+        row.setSpacing(8)
 
         button = QPushButton(holder)
-        button.setFixedSize(16, 16)
-        button.setFlat(True)
+        button.setFixedSize(22, 22)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
         colour = normalize_queue_color(queue.color) or DEFAULT_QUEUE_COLOR
+        char = (queue.name or "").strip()[:1].upper()
+        button.setText(char)
+        qc = QColor(colour)
+        luminance = (0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()) / 255.0
+        text_color = "#000000" if luminance > 0.65 else "#ffffff"
         button.setStyleSheet(
-            f"QPushButton {{ background-color: {colour}; border: 1px solid #555; "
-            f"border-radius: 3px; }}"
-            f"QPushButton:hover {{ border: 1px solid #999; }}"
+            f"QPushButton {{ background-color: {colour}; color: {text_color}; "
+            f"font-weight: bold; font-size: 11px; border: 1px solid #555; "
+            f"border-radius: 4px; }}"
+            f"QPushButton:hover {{ border: 2px solid #fff; }}"
         )
         button.setToolTip(f"Colour for '{queue.name}'. Click to change it.")
         button.clicked.connect(
@@ -775,6 +783,11 @@ class QueueManagerDialog(QDialog):
             self._result_message = message
         self._reload()
 
+    def _on_change_color(self):
+        queue_id = self._selected_queue_id()
+        if queue_id:
+            self._on_pick_color(queue_id)
+
     def _selected_queue_id(self) -> str:
         row = self._table.currentRow()
         if row < 0:
@@ -794,6 +807,7 @@ class QueueManagerDialog(QDialog):
         queue = self._manager.get_queue(queue_id) if queue_id else None
         is_default = bool(queue and queue.is_default)
         self._rename_btn.setEnabled(bool(queue) and not is_default)
+        self._color_btn.setEnabled(bool(queue))
         self._delete_btn.setEnabled(bool(queue) and not is_default)
         rows = self._table.rowCount()
         idx = self._table.currentRow()
@@ -820,15 +834,18 @@ class QueueManagerDialog(QDialog):
         self._select_queue_id(queue_id)
 
     def _on_add(self):
-        name, ok = QInputDialog.getText(
-            self, "New Queue", "Queue name:", QLineEdit.Normal, ""
-        )
-        if not ok:
+        dlg = AddQueueDialog(self, manager=self._manager)
+        if not dlg.exec():
             return
-        created, message = self._manager.create_queue(name.strip(), 3)
+        created, message = self._manager.create_queue(
+            dlg.name.strip(), dlg.max_concurrent, dlg.color
+        )
         self._result_message = message
         if created:
             self._reload()
+            new_q = next((q for q in self._manager.get_queues() if q.name.lower() == dlg.name.strip().lower()), None)
+            if new_q:
+                self._select_queue_id(new_q.id)
 
     def _on_rename(self):
         queue_id = self._selected_queue_id()
@@ -847,6 +864,7 @@ class QueueManagerDialog(QDialog):
         if renamed:
             self._reload()
             self._select_queue_id(queue_id)
+
 
     def _on_delete(self):
         queue_id = self._selected_queue_id()
@@ -870,3 +888,155 @@ class QueueManagerDialog(QDialog):
         self._result_message = message
         if deleted:
             self._reload()
+
+
+class AddQueueDialog(QDialog):
+    """Dialog to create a new named queue with custom name, concurrency limit, and color."""
+
+    def __init__(
+        self,
+        parent=None,
+        manager=None,
+        initial_name: str = "",
+        initial_color: str = "",
+    ):
+        super().__init__(parent)
+        self._manager = manager
+        self.setWindowTitle("Add New Queue")
+        self.setMinimumWidth(380)
+        self.setModal(True)
+
+        from my_idm.resources import get_app_icon
+
+        self.setWindowIcon(get_app_icon())
+
+        # Pick default color from palette or manager/db if not provided
+        if not initial_color and self._manager and hasattr(self._manager, "_db"):
+            initial_color = self._manager._db._next_queue_color()
+        if not initial_color:
+            initial_color = DEFAULT_QUEUE_COLOR
+        self._color = normalize_queue_color(initial_color) or DEFAULT_QUEUE_COLOR
+
+        self._setup_ui(initial_name)
+
+    def _setup_ui(self, initial_name: str):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(18, 18, 18, 18)
+
+        form_layout = QVBoxLayout()
+        form_layout.setSpacing(10)
+
+        # Queue Name
+        name_label = QLabel("Queue Name:")
+        name_label.setStyleSheet("font-weight: bold;")
+        self._name_edit = QLineEdit(initial_name)
+        self._name_edit.setPlaceholderText("e.g. Work, Torrents, Archive…")
+        self._name_edit.textChanged.connect(self._update_preview)
+        form_layout.addWidget(name_label)
+        form_layout.addWidget(self._name_edit)
+
+        # Concurrency Limit
+        limit_label = QLabel("Max Concurrent Downloads (0 = Follow global limit):")
+        limit_label.setStyleSheet("font-weight: bold;")
+        self._limit_spin = QSpinBox()
+        self._limit_spin.setRange(0, 99)
+        self._limit_spin.setValue(3)
+        self._limit_spin.setToolTip("0 = follow global limit (no cap of its own)")
+        form_layout.addWidget(limit_label)
+        form_layout.addWidget(self._limit_spin)
+
+        # Color Picker Section
+        color_label = QLabel("Queue Color:")
+        color_label.setStyleSheet("font-weight: bold;")
+        form_layout.addWidget(color_label)
+
+        color_row = QHBoxLayout()
+        color_row.setSpacing(8)
+
+        self._color_btn = QPushButton()
+        self._color_btn.setFixedSize(30, 30)
+        self._color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._color_btn.setToolTip("Click to choose a custom color")
+        self._color_btn.clicked.connect(self._on_pick_custom_color)
+        color_row.addWidget(self._color_btn)
+
+        # Palette quick-picker buttons
+        from my_idm.database import QUEUE_COLOR_PALETTE
+
+        for pal_col in QUEUE_COLOR_PALETTE:
+            pal_btn = QPushButton()
+            pal_btn.setFixedSize(22, 22)
+            pal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            pal_btn.setStyleSheet(
+                f"QPushButton {{ background-color: {pal_col}; border: 1px solid #555; border-radius: 4px; }}"
+                f"QPushButton:hover {{ border: 2px solid #fff; }}"
+            )
+            pal_btn.setToolTip(f"Select color {pal_col}")
+            pal_btn.clicked.connect(
+                lambda _checked=False, c=pal_col: self._set_color(c)
+            )
+            color_row.addWidget(pal_btn)
+
+        color_row.addStretch()
+        form_layout.addLayout(color_row)
+
+        layout.addLayout(form_layout)
+
+        # Dialog buttons
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        self._buttons.accepted.connect(self._on_accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+        self._update_preview()
+
+    def _set_color(self, color: str):
+        self._color = normalize_queue_color(color) or DEFAULT_QUEUE_COLOR
+        self._update_preview()
+
+    def _on_pick_custom_color(self):
+        from PySide6.QtWidgets import QColorDialog
+
+        current = QColor(self._color)
+        chosen = QColorDialog.getColor(current, self, "Select Queue Color")
+        if chosen.isValid():
+            self._set_color(chosen.name())
+
+    def _update_preview(self):
+        char = self.name.strip()[:1].upper()
+        qc = QColor(self._color)
+        luminance = (
+            0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
+        ) / 255.0
+        text_color = "#000000" if luminance > 0.65 else "#ffffff"
+        self._color_btn.setText(char)
+        self._color_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {self._color}; color: {text_color}; "
+            f"font-weight: bold; font-size: 13px; border: 1px solid #555; border-radius: 4px; }}"
+            f"QPushButton:hover {{ border: 2px solid #fff; }}"
+        )
+
+    def _on_accept(self):
+        if not self.name.strip():
+            QMessageBox.warning(self, "Invalid Name", "Queue name cannot be empty.")
+            self._name_edit.setFocus()
+            return
+        self.accept()
+
+    @property
+    def name(self) -> str:
+        return self._name_edit.text()
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._limit_spin.value()
+
+    @property
+    def color(self) -> str:
+        return self._color
+
