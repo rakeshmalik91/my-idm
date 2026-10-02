@@ -21,7 +21,7 @@ In scope:
   *downloaded* and *uploaded*, plus a completed-file count.
 - **Graphs** — see §4. Three tiers: a daily-volume chart that the existing table already
   supports, and a live speed chart sampled while the popup is open.
-- A **Statistics** button in the main toolbar beside **Preferences**, opening a popup.
+- A **Statistics** entry in **Tools**, grouped with **Preferences**, opening a popup.
 
 Out of scope (deliberately, and why):
 
@@ -284,29 +284,30 @@ patch. It is listed here so it is a known next step rather than an oversight.
 
 ## 5. UI
 
-### 5.1 Toolbar button
+### 5.1 Tools-menu entry
 
-Placed immediately before Preferences, at the end of `_setup_toolbar()`
-(`main_window.py:690`), which currently ends:
-
-```python
-toolbar.addWidget(self._tor_toolbar_container)
-toolbar.addSeparator()
-...
-toolbar.addAction(self._act_preferences)      # main_window.py:773
-```
-
-The action belongs in `_setup_actions()` next to `_act_preferences`
-(`main_window.py:632`) so the menubar can pick it up the same way:
+Grouped with **Preferences**, at the head of `_setup_menubar()`'s Tools section, separated from
+**Export Selected as CSV…** below it:
 
 ```python
-self._act_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
-self._act_stats.setToolTip("Download and upload totals for today, this week, month and year")
-self._act_stats.triggered.connect(self._on_show_statistics)
+self._act_tools_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
+self._act_tools_stats.setToolTip(
+    "Statistics: download and upload totals for today, this week, this month and this year"
+)
+self._act_tools_stats.triggered.connect(self._on_show_statistics)
 ```
 
 `📊` matches the existing emoji-icon convention (`⚙` for Preferences, `🧅` for Tor).
 No shortcut: this is a read-only view, not an action, and <kbd>Ctrl</kbd>, is already taken.
+
+It was a **toolbar** button until 2026-10-02, sitting immediately before Preferences. The
+toolbar is now a row of transport and file commands, and two things about the button argued
+against it there: a strip button reads as an action *on the selection* when the popup reports
+on the whole history, and the abbreviated label it had to wear (`Stats…`, see
+[`.agents/workflows/qt-ui.md`](file:///d:/Projects/my-idm/.agents/workflows/qt-ui.md)) read as a
+different feature from the Tools entry of the same name. Preferences keeps its toolbar button,
+because it opens a window about the selected download's *settings*; the abbreviation is the
+only concession that strip makes.
 
 ### 5.2 The popup
 
@@ -417,10 +418,11 @@ All hermetic, in the style of `tests/test_database.py`. `tmp_path`-equivalent te
 | `test_a_second_click_reuses_the_open_popup` | Modeless + no deletion used to stack dialogs |
 | `test_the_popup_is_marked_for_deletion_on_close` | Otherwise the C++ dialog outlives every click |
 | `test_the_grid_is_defined_exactly_once` | `_populate_grid` was defined twice; the first was dead |
-| `test_the_action_is_in_the_toolbar_immediately_before_preferences` | The placement is a real requirement |
+| `test_it_lives_in_the_tools_menu_and_not_the_toolbar` | The placement is a real requirement, both ways |
 
-The toolbar placement matters more than it looks: "beside Preferences" is the requirement,
-and without a test the next toolbar edit silently moves it.
+The placement matters more than it looks — a strip button reads as an action on the selection
+when the popup reports on the whole history — and without a test the next toolbar or menu edit
+silently moves it.
 
 Timezone note: the conversion reads the host clock, so these fixtures are built as **UTC
 instants that resolve to a chosen local moment** (local noon → `.astimezone(utc)`), and
@@ -470,7 +472,7 @@ refreshed lazily (one row per day per bucket, invalidated by the newest `added_a
 3. `Database.get_download_stats(today)` + the data-layer tests from §7.
 4. `StatsChartWidget` — the bar chart first (§4.2), since its data already exists.
 5. `StatisticsPopup` with the totals grid and the chart, plus the widget tests.
-6. `_act_stats` in `_setup_actions`, `toolbar.addAction` before Preferences, placement test.
+6. `_act_tools_stats` in `_setup_menubar`, grouped with Preferences, plus the placement test.
 7. The live speed sparkline (§4.3), reading the same aggregate as the status bar.
 8. Optional: the status-bar chip (§5.3).
 9. Update `docs/architecture/main.md` and the README documentation index.

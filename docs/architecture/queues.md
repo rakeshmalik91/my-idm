@@ -324,9 +324,8 @@ with no colour falls back to plain text rather than to a blank cell.
 | Surface | Location |
 | :--- | :--- |
 | **Queue** column in the downloads table — swatch + name | `Col.QUEUE_NAME`, painted by `QueueColumnDelegate` |
-| Queue combo, "All Queues" + one row per queue with its limit | `main_window.py` `_setup_toolbar` |
-| **Edit → Queues**: scope switcher, New Queue…, Manage Queues… | `main_window.py` `_setup_menus` |
-| **Edit → Move to Queue** — re-home the selected rows | `main_window.py` `_setup_menus` |
+| **Edit → Queues**: the scope switcher — "All Queues" plus one row per queue, New Queue…, Manage Queues… | `main_window.py` `_setup_menubar` |
+| **Edit → Move to Queue** — re-home the selected rows | `main_window.py` `_setup_menubar` |
 | **Move to Queue** on the row context menu | `main_window.py` `_show_context_menu` |
 | **Queue of the selection**, in the status bar | `MainWindow._update_queue_status` |
 | Colour swatch, in the Queue column of the manager dialog | `QueueManagerDialog._name_cell` |
@@ -359,8 +358,15 @@ text. `Colors.TEXT_DISABLED` is deliberately darker than `TEXT_DIM` (dark `#4d55
 `TEXT_DISABLED` is for a control that cannot be used right now, and reusing the dimmer of the
 two is what left the greyed-out item looking live.
 
-The combo shows queues with their limits (e.g. `Default  (Global)`, `Torrents  (max 1)` or `Torrents  (Global)`), so a limit
-is visible from the toolbar without opening anything.
+A queue's limit is not on the scope menu — the entries are bare names, so a checkmark is never
+next to a number that has to be re-read. The limit lives where it is edited: the **Max at once
+(0 = Global)** column of `QueueManagerDialog`, with the meaning of `0` in the column header, the
+cell tooltip and the note under the table.
+
+There was also a toolbar combo showing the limits inline (`Default  (Global)`,
+`Torrents  (max 1)`), which made a limit visible without opening anything. It was removed on
+2026-10-02 with the rest of the strip's non-transport controls; the queue column in the downloads
+table and the status-bar queue of the selection are what remain visible at a glance.
 
 ### `QueueManagerDialog`
 
@@ -419,18 +425,19 @@ from `DownloadTableModel.queue_filter_items()` and reach `MultiselectFilterPopup
 - `get_queue_counts()` deliberately does **not** apply the queue filter to itself: a popup that
   counted only ticked queues would show the rest as `0` and read as if they were empty. It does
   honour the other filters, so the numbers agree with the rows.
-- Distinct from the toolbar's **scope**: the scope narrows to one queue, this picks any number,
-  and both can be active at once.
+- Distinct from the **scope**: the scope narrows to one queue, this picks any number, and both
+  can be active at once.
 
 `MultiselectFilterPopup` grew an optional `items` parameter rather than a fourth hard-coded map
 specifically so this stayed possible — a fifth `if column == ...` branch would have meant the
 popup's key space growing one place per filterable column.
 
-`_refresh_queue_ui` (`main_window.py:2377`) rebuilds the combo and the menu wholesale rather than
-diffing, and the menu is rebuilt by `clear()` + re-adding the same `QAction` objects in order. An
-earlier version removed actions individually with `list.clear()` *inside* the loop iterating it,
-which ended the iteration after one action — so every refresh left a stale duplicate queue entry
-and shuffled "All Queues" down the menu.
+`_refresh_queue_ui` rebuilds the Edit ▸ Queues menu wholesale rather than diffing, and the menu is
+rebuilt by `clear()` + re-adding the same `QAction` objects in order. An earlier version removed
+actions individually with `list.clear()` *inside* the loop iterating it, which ended the iteration
+after one action — so every refresh left a stale duplicate queue entry and shuffled "All Queues"
+down the menu. It used to refill the toolbar combo in the same pass; with the combo gone the
+exclusive `QActionGroup` is the single source of truth for which queue is selected.
 
 > **A Qt slot swallows its exceptions.** `New Queue…` passed `QLineEdit.EditRole.Normal` to
 > `QInputDialog.getText`; `QLineEdit` has no `EditRole`, so the call raised `AttributeError`,

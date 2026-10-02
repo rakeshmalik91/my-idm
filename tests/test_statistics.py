@@ -1115,18 +1115,17 @@ class TestToolbarAction(unittest.TestCase):
         QApplication.processEvents()
 
     def test_the_action_exists(self):
-        self.assertTrue(hasattr(self.window, "_act_stats"))
-        self.assertIn("Stats", self.window._act_stats.text())
+        self.assertTrue(hasattr(self.window, "_act_tools_stats"))
+        self.assertIn("Statistics", self.window._act_tools_stats.text())
 
-    def test_the_toolbar_spells_the_label_out_in_full(self):
-        """Statistics stays abbreviated; Preferences does not.
+    def test_the_menu_spells_the_label_out_in_full(self):
+        """Statistics was abbreviated to "Stats…" for the toolbar strip.
 
-        "Statistics…" was shortened to "Stats…" because the button sat next to the playback
-        controls and ate a third of the strip. "Preferences…" was abbreviated to "Prefs…" for
-        the same reason but has since been spelled out in full - the toolbar has the room, and
-        the terse form read as a different feature from the Tools menu entry of the same name.
+        The toolbar button is gone, so the Tools menu carries the only label and spells it out -
+        and it must stay distinct from the Preferences entry beside it rather than reading as
+        the same feature.
         """
-        self.assertEqual(self.window._act_stats.text(), "Stats…")
+        self.assertEqual(self.window._act_tools_stats.text(), "Statistics…")
         self.assertEqual(self.window._act_preferences.text(), "Preferences…")
 
     def test_the_tools_menu_keeps_the_long_label(self):
@@ -1135,6 +1134,7 @@ class TestToolbarAction(unittest.TestCase):
             if top.menu() is not None and top.text().replace("&", "") == "Tools"
         )
         texts = [a.text() for a in tools.actions()]
+        self.assertIn("Statistics…", texts)
         self.assertIn("Preferences…", texts)
         self.assertIsNot(
             tools.actions()[0], self.window._act_preferences,
@@ -1154,31 +1154,36 @@ class TestToolbarAction(unittest.TestCase):
             self.window._on_open_preferences = original
         self.assertEqual(recorded, [TAB_GENERAL, TAB_GENERAL])
 
-    def test_the_short_label_still_carries_the_full_name_in_its_tooltip(self):
-        for action in (self.window._act_stats, self.window._act_preferences):
+    def test_the_label_still_carries_the_full_name_in_its_tooltip(self):
+        for action in (self.window._act_tools_stats, self.window._act_preferences):
             with self.subTest(action=action.text()):
                 self.assertTrue(
                     action.toolTip().strip(),
-                    f"{action.text()!r} is now too terse to stand alone",
+                    f"{action.text()!r} needs a tooltip",
                 )
-        self.assertIn("Statistics", self.window._act_stats.toolTip())
+        self.assertIn("Statistics", self.window._act_tools_stats.toolTip())
         self.assertIn("Configure", self.window._act_preferences.toolTip())
 
-    def test_it_is_in_the_toolbar_immediately_before_preferences(self):
-        """A test, because the next toolbar edit silently moves it otherwise."""
-        actions = self.window._toolbar.actions()
-        visible = [a for a in actions if not a.isSeparator()]
-        self.assertIn(self.window._act_stats, visible)
-        self.assertIn(self.window._act_preferences, visible)
-        self.assertEqual(
-            visible.index(self.window._act_stats) + 1,
-            visible.index(self.window._act_preferences),
-            "Statistics must sit directly beside Preferences",
+    def test_it_lives_in_the_tools_menu_and_not_the_toolbar(self):
+        """Statistics is a read-only view, so it belongs in a menu rather than the strip.
+
+        It used to sit in the toolbar immediately before Preferences. The toolbar is a row of
+        transport and file commands now; a button there read as an action on the selection when
+        it acts on the whole history.
+        """
+        tools = next(
+            top.menu() for top in self.window.menuBar().actions()
+            if top.menu() is not None and top.text().replace("&", "") == "Tools"
+        )
+        self.assertIn(self.window._act_tools_stats, tools.actions())
+        self.assertNotIn(
+            self.window._act_tools_stats, self.window._toolbar.actions(),
+            "Statistics must not creep back onto the toolbar",
         )
 
     def test_it_has_no_shortcut(self):
         """Ctrl+, is Preferences; a read-only view must not take a shortcut slot."""
-        self.assertTrue(self.window._act_stats.shortcut().isEmpty())
+        self.assertTrue(self.window._act_tools_stats.shortcut().isEmpty())
 
     def test_opening_it_produces_a_popup_with_a_snapshot(self):
         popup = self.window._on_show_statistics()

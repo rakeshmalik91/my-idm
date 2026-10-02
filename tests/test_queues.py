@@ -17,6 +17,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
     QInputDialog,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -1527,6 +1528,101 @@ class TestQueueMenuGrouping(_MainWindowTestCase):
         self.assertIn("Move Up in Queue", titles)
         self.assertIn("Move Down in Queue", titles)
 
+    def test_the_edit_menu_carries_the_same_file_commands_as_the_context_menu(self):
+        """Open File / Open Folder existed only on a right-click.
+
+        Without them in the Edit menu there was no keyboard or menu-only route to a finished
+        download's folder, which is the one thing a user does once per download at the end.
+        """
+        edit_titles = [a.text() for a in self.win.menuBar().actions()[1].menu().actions()]
+        context_titles = self._row_context_menu()
+        for label in ("Rename…", "Move…", "Open File", "Open Folder", "Delete"):
+            with self.subTest(label=label):
+                self.assertIn(label, edit_titles)
+                self.assertIn(label, context_titles)
+
+        first = min(edit_titles.index(t) for t in
+                    ("Rename…", "Move…", "Open File", "Open Folder", "Delete"))
+        # The contiguous run of real items from there: no separator may split the group.
+        run = []
+        for title in edit_titles[first:]:
+            if not title:
+                break
+            run.append(title)
+        self.assertEqual(
+            run,
+            ["Rename…", "Move…", "Open File", "Open Folder", "Delete", "Recheck"],
+            f"the file commands must be one run, in the context menu's order: {edit_titles}",
+        )
+        self.assertNotIn(
+            "Copy URL / Magnet", run,
+            "Rename must not sit up with Copy URL again",
+        )
+
+    def _row_context_menu(self) -> list:
+        """Build the row context menu and return its titles in display order.
+
+        ``exec`` is overridden rather than patched so the menu under test is the real widget
+        tree: a MagicMock would record the ``addAction`` *calls*, not the order a user sees.
+        """
+        self.db.add_download(entry("d0", status="paused"))
+        self.win._load_history()
+        self.win._table.selectRow(0)
+        built: list = []
+
+        class _CapturingMenu(QMenu):
+            def exec(self, *args, **kwargs):
+                built.append(self)
+                return None
+
+        pos = self.win._table.visualRect(self.win._model.index(0, 0)).center()
+        with patch("my_idm.main_window.QMenu", _CapturingMenu):
+            self.win._show_context_menu(pos)
+
+        self.assertEqual(len(built), 1, "the context menu was never built")
+        return [a.text() for a in built[0].actions()]
+
+    def test_the_row_context_menu_groups_the_move_commands_with_the_queues(self):
+        # Regression: Move Up / Move Down sat in the transport group, right after Pause, so
+        # two ordering commands read as playback controls and the queue commands ended up
+        # split across the menu in two separate groups.
+        titles = self._row_context_menu()
+        queue_at = titles.index("Move to Queue")
+        up_at = titles.index("Move Up in Queue")
+        down_at = titles.index("Move Down in Queue")
+        self.assertLess(queue_at, up_at, f"queue membership first: {titles}")
+        self.assertLess(up_at, down_at)
+        # One trailing group, the way the Edit menu orders them.
+        self.assertEqual(up_at - queue_at, 1, f"no separator splits the pair: {titles}")
+        self.assertEqual(down_at - up_at, 1)
+        # ...and nothing ordering-related is left up with the transport controls.
+        for transport in ("Resume", "Pause", "Stop", "Start Seeding"):
+            self.assertLess(
+                titles.index(transport), queue_at,
+                f"{transport} must stay with the transport controls: {titles}",
+            )
+        self.assertLess(down_at, titles.index("Route through Tor"), f"a later group closes the queue group: {titles}")
+
+    def test_the_row_context_menu_groups_the_file_commands_together(self):
+        # Regression: Rename sat with Copy URL and Move with Scan/Recheck, so the six file
+        # commands were spread over three groups with the two transport-ish ones in between.
+        titles = self._row_context_menu()
+        group = [t for t in ("Rename…", "Move…", "Open File", "Open Folder",
+                             "Delete File", "Delete")]
+        first = min(titles.index(t) for t in group)
+        self.assertEqual(
+            titles[first:first + len(group)], group,
+            f"the file commands must be one unbroken run: {titles}",
+        )
+        # ...and they close the menu, so Delete is still the last thing in it.
+        self.assertEqual(titles[-1], "Delete")
+        # Nothing file-related is left above them.
+        for other in ("Rename…", "Move…", "Open File", "Open Folder", "Delete File"):
+            self.assertGreater(
+                titles.index(other), titles.index("Route through Tor"),
+                f"{other} belongs in the file group at the end: {titles}",
+            )
+
     def test_move_to_queue_enables_as_soon_as_a_row_is_selected(self):
         # Regression: it was enabled only when the menu was rebuilt, so with rows selected the
         # submenu stayed greyed out and read as "not clickable".
@@ -1776,45 +1872,67 @@ class TestQueueUiWiring(_MainWindowTestCase):
     inside the loop that was iterating it.
     """
 
-    def _combo_labels(self):
-        win = self.win
-        return [win._queue_combo.itemText(i) for i in range(win._queue_combo.count())]
+    def _scope_actions(self):
+        """The Edit ▸ Queues entries that pick a scope: All Queues plus one per queue.
+
+        This is the only scope switcher now. There used to be a toolbar combo as well, and
+        these tests drove that one, so a queue could look correctly scoped in the combo while
+        the menu's checkmark said otherwise.
+        """
+        return [self.win._act_queue_all] + list(self.win._queue_actions)
+
+    def _scope_names(self):
+        return [a.text() for a in self._scope_actions()]
+
+    def _checked_scope(self):
+        return next(a.text() for a in self._scope_actions() if a.isChecked())
 
     def _menu_labels(self):
         return [a.text() for a in self.win._menu_queues.actions() if a.text()]
 
-    def test_the_combo_is_populated_at_startup(self):
-        # Not "after some event" - a user opening the app sees this combo immediately.
-        labels = self._combo_labels()
-        self.assertEqual(labels[0], "All Queues")
-        self.assertEqual(labels[1], f"{DEFAULT_QUEUE_NAME}  (Global)")
-        self.assertIn("AnimePahe", " | ".join(labels))
-        self.assertIn("YouTube", " | ".join(labels))
-        data = self._win_queue_data()
-        self.assertEqual(data[0], ALL_QUEUES)
-        self.assertEqual(data[1], DEFAULT_QUEUE_ID)
-        self.assertIn("queue-youtube", data)
-
-    def _win_queue_data(self):
-        combo = self.win._queue_combo
-        return [combo.itemData(i) for i in range(combo.count())]
+    def test_the_queue_menu_is_populated_at_startup(self):
+        # Not "after some event" - a user opening the app sees this immediately.
+        names = self._scope_names()
+        self.assertEqual(names[0], "All Queues")
+        self.assertIn("AnimePahe", names)
+        self.assertIn("YouTube", names)
+        self.assertIn(DEFAULT_QUEUE_NAME, names)
+        self.assertTrue(
+            self.win._act_queue_all.isChecked(), "the scope starts on the whole history"
+        )
 
     def test_the_scope_starts_as_all_queues(self):
         self.assertEqual(self.win._model.queue_scope(), ALL_QUEUES)
 
-    def test_a_new_queue_appears_in_the_combo_and_the_menu(self):
+    def test_a_new_queue_appears_in_the_menu(self):
         self.manager.create_queue("Torrents", 1)
         self.win._refresh_queue_ui()
-        joined = " | ".join(self._combo_labels())
-        self.assertIn("Torrents  (max 1)", joined)
+        names = self._scope_names()
+        self.assertIn("Torrents", names)
         # Appended after the seeded source queues, not replacing them.
-        self.assertTrue(joined.index("AnimePahe") < joined.index("Torrents"))
+        self.assertLess(names.index("AnimePahe"), names.index("Torrents"))
         self.assertIn("Torrents", self._menu_labels())
 
     def test_a_queue_with_no_limit_says_so_rather_than_showing_zero(self):
+        """0 means "follows the global limit", not "unlimited" - that wording must survive.
+
+        It used to be carried by the toolbar combo's labels ("Music  (Global)"). With the
+        combo gone, the dialog's column header, per-queue tooltip and note are the only
+        places left that can say what a bare 0 means.
+        """
         self.manager.create_queue("Music", 0)
-        self.win._refresh_queue_ui()
-        self.assertIn("Music  (Global)", self._combo_labels())
+        dialog = QueueManagerDialog(self.manager, None)
+        self.addCleanup(dialog.deleteLater)
+
+        header = dialog._table.horizontalHeaderItem(2).text()
+        self.assertIn("0", header)
+        self.assertIn("Global", header)
+        self.assertIn("Global", dialog._note.text())
+        tooltips = [s.toolTip() for s in dialog._table.findChildren(QSpinBox)]
+        self.assertTrue(
+            any("0 = follow the global limit" in tip for tip in tooltips),
+            f"no queue cell explains what 0 means: {tooltips}",
+        )
 
     def test_repeated_refreshes_do_not_accumulate_menu_entries(self):
         self.manager.create_queue("Torrents", 1)
@@ -1843,15 +1961,16 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.assertEqual(labels[0], "All Queues")
         self.assertEqual(labels[-2:], ["New Queue…", "Manage Queues…"])
 
-    def test_selecting_in_the_combo_scopes_the_model(self):
+    def test_selecting_in_the_menu_scopes_the_model(self):
         self.manager.create_queue("Torrents", 1)
         self.win._refresh_queue_ui()
         queue_id = next(q.id for q in self.manager.get_queues() if q.name == "Torrents")
 
-        self.win._queue_combo.setCurrentIndex(self.win._queue_combo.findData(queue_id))
+        next(a for a in self.win._queue_actions if a.text() == "Torrents").trigger()
 
         self.assertEqual(self.manager.get_active_queue(), queue_id)
         self.assertEqual(self.win._model.queue_scope(), queue_id)
+        self.assertEqual(self._checked_scope(), "Torrents", "the checkmark must follow")
 
     def test_clearing_the_scope_shows_the_whole_history_again(self):
         self.manager.create_queue("Torrents", 1)
@@ -1859,7 +1978,7 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.win._on_select_queue(queue_id)
         self.win._on_select_queue(ALL_QUEUES)
         self.assertEqual(self.win._model.queue_scope(), ALL_QUEUES)
-        self.assertEqual(self.win._queue_combo.currentData(), ALL_QUEUES)
+        self.assertEqual(self._checked_scope(), "All Queues")
 
     def test_deleting_the_selected_queue_falls_back_to_all_queues(self):
         self.manager.create_queue("Torrents", 1)
@@ -1869,7 +1988,8 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.manager.delete_queue(queue_id)
 
         self.assertEqual(self.win._model.queue_scope(), ALL_QUEUES)
-        self.assertEqual(self.win._queue_combo.currentData(), ALL_QUEUES)
+        self.assertEqual(self._checked_scope(), "All Queues")
+        self.assertNotIn("Torrents", self._scope_names())
 
     def test_the_selected_rows_queue_is_visible_in_the_status_bar(self):
         # A queue is otherwise invisible in the list; the only way to find out was to open the
@@ -1992,15 +2112,14 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.assertIn("Staging", [a.text() for a in self.win._menu_queues.actions()])
         self.assertIn("Staging", [a.text() for a in self.win._menu_move_to_queue.actions()])
 
-    def test_queue_combo_and_menus_have_swatch_icons(self):
+    def test_both_queue_menus_have_swatch_icons(self):
         self.manager.create_queue("Torrents", 1)
         qid = next(q.id for q in self.manager.get_queues() if q.name == "Torrents")
         self.manager.set_queue_color(qid, "#3fb950")
         self.win._refresh_queue_ui()
-        # Find Torrents in queue combo
-        idx = self.win._queue_combo.findText("Torrents", Qt.MatchFlag.MatchStartsWith)
-        self.assertGreaterEqual(idx, 0)
-        self.assertFalse(self.win._queue_combo.itemIcon(idx).isNull())
+
+        scope_action = next(a for a in self.win._queue_actions if a.text() == "Torrents")
+        self.assertFalse(scope_action.icon().isNull())
 
         # Check move to queue action icon
         move_action = next(a for a in self.win._move_to_queue_actions if a.text() == "Torrents")
@@ -2042,7 +2161,7 @@ class TestQueueUiWiring(_MainWindowTestCase):
         st_q = next(q for q in self.manager.get_queues() if q.name == "Staging")
         self.assertEqual(st_q.max_concurrent, 4)
         self.assertEqual(st_q.color, "#3fb950")
-        self.assertIn("Staging", " | ".join(self._combo_labels()))
+        self.assertIn("Staging", " | ".join(self._scope_names()))
         self.assertIn("Staging", self._menu_labels())
         self.assertIn("Created queue", self.win._status_label.text())
 

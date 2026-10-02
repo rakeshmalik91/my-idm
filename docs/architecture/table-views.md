@@ -61,27 +61,43 @@ The main download table exposes 13 columns indexed by the `Col` class:
 
 ### Column Tail & Upgrades
 
-Five columns are pinned to the right-hand tail, in this display order:
+The default display order is a real arrangement rather than a designed one — it was taken from
+a profile that had every column visible and had been dragged around until it stopped being
+adjusted:
 
 ```
-… SAVE_PATH, SOURCE_DOMAIN, FILE_NAME, LAST_SEEDED, SOURCE, SEEDING_STARTED_AT, QUEUE_NAME
+# , QUEUE_NAME, NAME, SIZE, PROGRESS, STATUS, SPEED, ETA, SEEDS_PEERS, ADDED, SAVE_PATH,
+COMPLETED, LAST_TRIED, SOURCE_DOMAIN, FILE_NAME, LAST_SEEDED, SOURCE, SEEDING_STARTED_AT
 ```
 
-The order is defined once, in `_DEFAULT_TAIL_COLUMNS` (`main_window.py`), and applied by
-`_apply_default_tail_order()` from three places: startup, **View → Reset View**, and the stale-state
-heal described below. That helper sweeps slots in ascending order, because `moveSection()` shifts
-everything between the source and the target — placing a tail column that currently sits *left* of
-its slot would otherwise push an already-placed neighbour back out of position.
+Two things in it are not insertion order: the **Queue** badge sits at slot 1 next to the row
+number, where the eye already is; and **Save Path** sits with **Completed** and **Last Tried** so
+the three "what happened to it" columns are read together. The last five form the right-hand
+*tail*, which is the part a stale-state restore has to re-pin (below).
+
+The order is defined once, in `_DEFAULT_COLUMN_ORDER` (`main_window.py`), and applied by
+`_apply_default_column_order()` from two places: startup and **View → Reset View**. Default widths
+live beside it in `_DEFAULT_COLUMN_WIDTHS` (~3080px total, so a fresh profile scrolls sideways
+with all 18 columns visible — deliberate, and the reason two filename columns are wide rather than
+truncated).
+
+Both helpers sweep slots in ascending order, because `moveSection()` shifts everything between the
+source and the target — placing a column that currently sits *left* of its slot would otherwise
+push an already-placed neighbour back out of position.
 
 `LAST_SEEDED`, `SOURCE`, `SEEDING_STARTED_AT` and `QUEUE_NAME` were **appended** (indices 14–17)
 rather than inserted, so every pre-existing logical index is unchanged and the persisted
 `column_widths`, `header_state`, and `sort_column` in `ui_state` keep addressing the same columns.
+That is also why `QUEUE_NAME` is at slot 1 rather than at the end: it is a logical index of 17 and
+was never renumbered to match its new position.
 
 `ui_state` also records `column_count`. On restore, if the stored count differs from `Col.COUNT`, the
 state predates an append: `QHeaderView.restoreState()` only describes the sections that existed
-then, so the new columns can land anywhere. The tail helper is re-applied, which pins them to the end
-while preserving the user's own ordering of the older columns. Once the state is re-saved with the
-current count, custom ordering is respected as-is.
+then, so the new columns can land anywhere. `_apply_default_tail_order()` re-pins the tail to the end
+while preserving the user's own ordering of the older columns — deliberately *not* the full
+`_apply_default_column_order()`, because this path runs on an existing profile and reordering
+everything would discard an arrangement the user never asked to change. Once the state is re-saved
+with the current count, custom ordering is respected as-is.
 
 ### `Source` Derivation
 Resolved at display time from `metadata_json` rather than stored in its own column, so existing rows
@@ -369,7 +385,8 @@ header column. See [`queues.md`](queues.md) for the feature itself.
 - The header filter is a second, independent gate — `_in_queue_filter` — keyed on **queue ids**
   so a rename cannot silently empty the view. `is_filtered()` includes both, so the "filters
   active" indicator and **Reset** account for them.
-- Selected via a toolbar combo (`MainWindow._queue_combo`) or **Edit → Queues**; persisted in
+- Selected via **Edit → Queues** (there is no toolbar combo — the strip is transport and file
+  commands only); persisted in
   `ui_state` under `active_queue_id`.
 
 ---

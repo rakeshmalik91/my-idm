@@ -27,7 +27,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QComboBox,
     QFileDialog,
     QHeaderView,
     QHBoxLayout,
@@ -98,18 +97,77 @@ from my_idm.utils import create_color_swatch_icon
 
 log = logging.getLogger(__name__)
 
-# Columns pinned to the right-hand tail of the download table, in display order.
-# Single source of truth for the startup layout, "Reset View", and the heal applied
-# when restoring a UI state saved before columns were appended. New columns are
-# added here to sit at the very end.
+# Visual order of the downloads-table columns, and the single source of truth for the startup
+# layout, "Reset View", and the heal applied when restoring a UI state saved before columns
+# were appended.
+#
+# This is a real arrangement rather than a designed one — taken from a profile that had every
+# column visible and had been rearranged until it stopped being adjusted. Two things it does
+# that a logical-order list would not: the **Queue** badge sits at slot 1, next to the row
+# number, where the eye already is; and **Save Path** ("where is it going") sits with
+# **Completed** and **Last Tried** instead of after them, so the three "what happened to it"
+# columns are read together rather than split by insertion order.
+#
+# **Append new columns at the end.** Anything else drops the new column into the middle of a
+# layout somebody has already arranged.
+_DEFAULT_COLUMN_ORDER = (
+    Col.QUEUE,              # "#"
+    Col.QUEUE_NAME,         # "Queue"
+    Col.NAME,
+    Col.SIZE,
+    Col.PROGRESS,
+    Col.STATUS,
+    Col.SPEED,
+    Col.ETA,
+    Col.SEEDS_PEERS,
+    Col.ADDED,
+    Col.SAVE_PATH,
+    Col.COMPLETED,
+    Col.LAST_TRIED,
+    Col.SOURCE_DOMAIN,
+    Col.FILE_NAME,
+    Col.LAST_SEEDED,
+    Col.SOURCE,
+    Col.SEEDING_STARTED_AT,
+)
+
+#: The right-hand tail — the columns a stale-state restore has to re-pin at the end, because a
+#: state saved before they existed cannot say where they went. Kept as its own name, and
+#: asserted to be a suffix of ``_DEFAULT_COLUMN_ORDER``, because that is the rule the append
+#: convention above depends on.
 _DEFAULT_TAIL_COLUMNS = (
     Col.SOURCE_DOMAIN,
     Col.FILE_NAME,
     Col.LAST_SEEDED,
     Col.SOURCE,
     Col.SEEDING_STARTED_AT,
-    Col.QUEUE_NAME,
 )
+
+#: Default width per column, from the same arrangement. These add up to ~3080px against a
+#: window that is rarely that wide, so a fresh profile scrolls sideways with all 18 columns
+#: visible. That is deliberate and it is the user's own trade-off: a name column at 270px
+#: truncated every long filename, and a file/folder name column at 220px truncated the other
+#: half of them. Deliberately *not* fitted to a nominal window width.
+_DEFAULT_COLUMN_WIDTHS = {
+    Col.QUEUE: 30,
+    Col.QUEUE_NAME: 30,
+    Col.NAME: 412,
+    Col.SIZE: 82,
+    Col.PROGRESS: 214,
+    Col.STATUS: 135,
+    Col.SPEED: 166,
+    Col.ETA: 80,
+    Col.SEEDS_PEERS: 140,
+    Col.ADDED: 123,
+    Col.SAVE_PATH: 262,
+    Col.COMPLETED: 130,
+    Col.LAST_TRIED: 130,
+    Col.SOURCE_DOMAIN: 187,
+    Col.FILE_NAME: 546,
+    Col.LAST_SEEDED: 131,
+    Col.SOURCE: 110,
+    Col.SEEDING_STARTED_AT: 173,
+}
 
 #: Columns hidden on a **fresh profile only**, when no header state has been saved yet.
 #: Eighteen columns is too many to scan at a glance, and these are the ones a user reaches
@@ -133,6 +191,46 @@ DEFAULT_HIDDEN_COLUMNS = (
     Col.FILE_NAME,
 )
 
+#: Starting floor for the window width, replaced the moment the toolbar and the downloads list
+#: have been measured - see ``MainWindow._fit_min_width_to_toolbar``. Only 600 is fixed: the
+#: rows plus the details panel stacked under them genuinely do not compress further.
+MIN_WINDOW_WIDTH = 640
+MIN_WINDOW_HEIGHT = 600
+
+#: Narrowest a downloads-table column may be dragged or set to. Qt's own floor comes from the
+#: font and is 32px at the default UI font, which is wider than two of the default column
+#: widths in ``_DEFAULT_COLUMN_WIDTHS``. 24 still fits a four-digit row number and keeps a
+#: section grabbable; re-applied after every header restore by
+#: ``MainWindow._apply_minimum_section_size``.
+MIN_COLUMN_WIDTH = 24
+
+
+def _apply_default_column_order(header) -> None:
+    """Reorder *header* to ``_DEFAULT_COLUMN_ORDER``, preserving anything it does not name.
+
+    Moves one column at a time in ascending slot order. Doing it incrementally
+    is not enough: ``moveSection`` shifts everything between the source and the
+    target, so placing a column that currently sits *left* of its target
+    pushes an already-placed neighbour back out of position. Sweeping ascending
+    fixes each slot permanently, because later moves only ever touch higher slots.
+
+    A column the order does not mention — one added by a build newer than this
+    tuple — keeps its relative position and lands at the end, which is the only
+    safe answer: guessing a slot for it would put a new column in the middle of a
+    layout somebody has already arranged.
+    """
+    known = [col for col in _DEFAULT_COLUMN_ORDER if col < header.count()]
+    known_set = set(known)
+    extra = [
+        header.logicalIndex(v)
+        for v in range(header.count())
+        if header.logicalIndex(v) not in known_set
+    ]
+    for slot, col in enumerate(known + extra):
+        visual = header.visualIndex(col)
+        if visual != slot:
+            header.moveSection(visual, slot)
+
 
 def _apply_default_tail_order(header) -> None:
     """Pin the tail columns to the last slots, preserving the order of the rest.
@@ -142,6 +240,11 @@ def _apply_default_tail_order(header) -> None:
     target, so placing a tail column that currently sits *left* of its target
     pushes an already-placed neighbour back out of position. Sweeping ascending
     fixes each slot permanently, because later moves only ever touch higher slots.
+
+    Used **only** for the stale-state heal, where the point is to place columns a
+    saved state could not describe without disturbing the ones it could. Startup and
+    "Reset View" want the whole arrangement and use
+    ``_apply_default_column_order`` instead.
     """
     tail = list(_DEFAULT_TAIL_COLUMNS)
     tail_set = set(tail)
@@ -154,6 +257,16 @@ def _apply_default_tail_order(header) -> None:
         visual = header.visualIndex(col)
         if visual != slot:
             header.moveSection(visual, slot)
+
+
+def _apply_default_column_widths(table) -> None:
+    """Apply ``_DEFAULT_COLUMN_WIDTHS`` to *table*, one call instead of 18 lines.
+
+    The widths used to be written out in three places — ``_setup_ui``,
+    ``_on_reset_view`` and the stale-state heal — which is how they drifted apart.
+    """
+    for col, width in _DEFAULT_COLUMN_WIDTHS.items():
+        table.setColumnWidth(col, width)
 
 SPEED_LIMIT_PRESETS = [
     ("Unlimited", 0),
@@ -415,7 +528,11 @@ class MainWindow(QMainWindow):
         self._stats_dialog = None
 
         self.setWindowTitle("My-IDM — Download Manager")
-        self.setMinimumSize(1100, 600)
+        # The width half is a placeholder: `_fit_min_width_to_toolbar` measures the toolbar
+        # and the downloads list at the end of `_setup_toolbar` and again on first show, and
+        # raises this to whichever needs more. A fixed 1100px outlived the queue switcher and
+        # the Statistics button by ~230px.
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.resize(1400, 750)
         self.setWindowIcon(get_app_icon())
 
@@ -509,6 +626,7 @@ class MainWindow(QMainWindow):
         header.setStretchLastSection(False)
         header.setCascadingSectionResizes(False)
         header.setDefaultSectionSize(110)
+        self._apply_minimum_section_size()
         header.setSectionsMovable(True)
         header.setFirstSectionMovable(True)
         header.sectionMoved.connect(self._on_section_moved)
@@ -558,29 +676,11 @@ class MainWindow(QMainWindow):
         self._model.set_segregated_view(self._segregated_view_enabled, mode=self._segregated_view_mode)
         self._apply_table_spans()
 
-        # Tail columns, in display order. New columns are appended to the end of
-        # the tail list so the two new ones land last.
-        _apply_default_tail_order(header)
+        # Default column order (see _DEFAULT_COLUMN_ORDER).
+        _apply_default_column_order(header)
 
-        # Set specific default column widths
-        self._table.setColumnWidth(Col.QUEUE, 45)
-        self._table.setColumnWidth(Col.NAME, 270)
-        self._table.setColumnWidth(Col.SOURCE_DOMAIN, 160)
-        self._table.setColumnWidth(Col.SIZE, 90)
-        self._table.setColumnWidth(Col.PROGRESS, 160)
-        self._table.setColumnWidth(Col.STATUS, 135)
-        self._table.setColumnWidth(Col.SPEED, 110)
-        self._table.setColumnWidth(Col.ETA, 80)
-        self._table.setColumnWidth(Col.SEEDS_PEERS, 100)
-        self._table.setColumnWidth(Col.ADDED, 130)
-        self._table.setColumnWidth(Col.LAST_TRIED, 130)
-        self._table.setColumnWidth(Col.COMPLETED, 130)
-        self._table.setColumnWidth(Col.SAVE_PATH, 220)
-        self._table.setColumnWidth(Col.FILE_NAME, 220)
-        self._table.setColumnWidth(Col.LAST_SEEDED, 130)
-        self._table.setColumnWidth(Col.SOURCE, 100)
-        self._table.setColumnWidth(Col.SEEDING_STARTED_AT, 150)
-        self._table.setColumnWidth(Col.QUEUE_NAME, 120)
+        # Default column widths (see _DEFAULT_COLUMN_WIDTHS).
+        _apply_default_column_widths(self._table)
 
         # Row height
         self._table.verticalHeader().setDefaultSectionSize(36)
@@ -742,13 +842,6 @@ class MainWindow(QMainWindow):
         self._act_move_down.setToolTip("Move selected download down in queue order")
         self._act_move_down.triggered.connect(self._on_move_queue_down)
 
-        self._act_stats = QAction(_create_emoji_icon("📊"), "Stats…", self)
-        self._act_stats.setToolTip(
-            "Statistics: download and upload totals for today, this week, this month "
-            "and this year"
-        )
-        self._act_stats.triggered.connect(self._on_show_statistics)
-
         self._act_preferences = QAction(_create_emoji_icon("⚙"), "Preferences…", self)
         self._act_preferences.setShortcut(QKeySequence("Ctrl+,"))
         self._act_preferences.setToolTip(
@@ -867,31 +960,10 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self._tor_toolbar_container)
         toolbar.addSeparator()
 
-        # Queue switcher. A combo rather than tabs: a queue is a *scope* that has to compose with
-        # search, the header filter chips and segregated view at the same time, which is the
-        # model's job, not a widget's. Tabs replace the model; this narrows it.
-        self._queue_combo = QComboBox()
-        self._queue_combo.setObjectName("toolbar_queue_combo")
-        self._queue_combo.setToolTip(
-            "Show one queue's downloads. 'All Queues' keeps the whole history visible, which "
-            "is where it starts and where a deleted queue's downloads land."
-        )
-        self._queue_combo.setMinimumWidth(120)
-        self._queue_combo.setMaximumWidth(200)
-        self._queue_combo.setFixedHeight(26)
-        self._queue_combo.currentIndexChanged.connect(self._on_queue_combo_changed)
-        toolbar.addWidget(self._queue_combo)
-
-        # Expanding gap between the action groups and the search box.
-        self._toolbar_gap = QWidget()
-        self._toolbar_gap.setObjectName("toolbar_gap")
-        self._toolbar_gap.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        self._toolbar_gap.setFixedHeight(1)
-        toolbar.addWidget(self._toolbar_gap)
-
-        # Quick search over the visible downloads.
+        # Quick search over the visible downloads. It is the only expanding item on the
+        # toolbar, so it absorbs whatever width is left after the action groups instead of
+        # leaving dead space beside it - it used to sit behind a 1px expanding spacer *and*
+        # be capped at 320px, which wasted exactly the room the search field could use.
         self._search_edit = QLineEdit()
         self._search_edit.setObjectName("toolbar_search")
         self._search_edit.setPlaceholderText("Search downloads…")
@@ -900,16 +972,18 @@ class MainWindow(QMainWindow):
             "Filter downloads by name, original name, URL, or domain"
         )
         self._search_edit.setMinimumWidth(160)
-        self._search_edit.setMaximumWidth(320)
+        self._search_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self._search_edit.setFixedHeight(26)
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
-        # Separate the search field from the two buttons after it. Without it the pair reads
-        # as one control - a filter box with two trailing widgets - rather than as search,
-        # then Stats and Preferences. The playback block above is already split the same way.
+        # Separate the search field from the one button after it, so the strip reads as
+        # search then Preferences rather than as one control. The playback block above is
+        # split the same way. Statistics and the queue switcher are not here: both live in
+        # the Tools and Edit menus, which keeps the toolbar to transport and file actions.
         toolbar.addSeparator()
-        toolbar.addAction(self._act_stats)
         toolbar.addAction(self._act_preferences)
 
         # Show only icons without text for playback and action buttons
@@ -929,10 +1003,46 @@ class MainWindow(QMainWindow):
             if isinstance(btn, QToolButton):
                 btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
 
-        # The expanding gap added before the search box already absorbs the
-        # slack, keeping the search and Preferences pinned to the right end.
+        # Last, because it measures the finished toolbar.
+        self._fit_min_width_to_toolbar()
 
         self.addToolBar(toolbar)
+
+    def _fit_min_width_to_toolbar(self):
+        """Set the window's minimum width to what its contents actually need.
+
+        Two things set that floor, and the wider of the two wins:
+
+        - the toolbar's ``sizeHint``, because a ``QToolBar`` narrower than its contents folds
+          the remainder into a ``>>`` button, which hides download controls behind a second
+          click;
+        - the downloads list's own minimum, because a window narrower than that clips the
+          columns instead of scrolling them.
+
+        Measured rather than hard-coded, because both numbers move: the row's width with the
+        font, the scale factor and which actions are on it, the list's with its columns. The
+        previous fixed 1100px floor was measured against a toolbar carrying a queue switcher
+        and a Statistics button, so it outlived both of them by ~230px.
+
+        Capped at the screen's available width: on a display too small for the full row, a
+        minimum the window cannot be fitted to would be worse than the overflow button the
+        toolbar bound is meant to remove.
+
+        Only ever raises. A narrower toolbar later - a shorter Tor label, a shorter locale -
+        must not shrink a window the user has already opened.
+        """
+        central = self.centralWidget()
+        needed = max(
+            self._toolbar.sizeHint().width(),
+            central.minimumSizeHint().width() if central is not None else 0,
+        )
+        if needed <= 0:
+            return
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry().width() if screen else needed
+        target = min(needed, available)
+        if target > self.minimumWidth():
+            self.setMinimumWidth(target)
 
     def _setup_menubar(self):
         menubar = self.menuBar()
@@ -961,10 +1071,17 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_stop_all_seeding)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_copy_url)
-        edit_menu.addAction(self._act_rename)
         edit_menu.addSeparator()
-        edit_menu.addAction(self._act_delete)
+        # The file operations, in the same order the row context menu uses them: rename it,
+        # move it, look at it, destroy it. Rename used to sit up with Copy URL, and Open File
+        # / Open Folder existed only in the context menu, so the keyboard route to a finished
+        # download's folder did not exist at all. Rename leads so Delete is never the first
+        # item of the group.
+        edit_menu.addAction(self._act_rename)
         edit_menu.addAction(self._act_move)
+        edit_menu.addAction(self._act_open_file)
+        edit_menu.addAction(self._act_open_folder)
+        edit_menu.addAction(self._act_delete)
         edit_menu.addAction(self._act_recheck)
         edit_menu.addSeparator()
 
@@ -1101,6 +1218,19 @@ class MainWindow(QMainWindow):
             lambda: self._on_open_preferences(TAB_GENERAL)
         )
         tools_menu.addAction(self._act_tools_preferences)
+        # Statistics sits with Preferences rather than down with the other tools: both are
+        # "look at / configure the app" entries, not ways to fetch something, and not commands
+        # on the selected rows. It used to be a toolbar button reading the abbreviated
+        # "Stats…"; this is the only Statistics action, spelled out because a menu label may
+        # not be abbreviated. No shortcut: Ctrl+, is Preferences and this is a read-only view.
+        self._act_tools_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
+        self._act_tools_stats.setToolTip(
+            "Statistics: download and upload totals for today, this week, this month "
+            "and this year"
+        )
+        self._act_tools_stats.triggered.connect(self._on_show_statistics)
+        tools_menu.addAction(self._act_tools_stats)
+        tools_menu.addSeparator()
         self._act_export_csv = QAction(_create_emoji_icon("📄"), "Export Selected as CSV…", self)
         self._act_export_csv.triggered.connect(self._on_export_selected_csv)
         tools_menu.addAction(self._act_export_csv)
@@ -2248,16 +2378,11 @@ class MainWindow(QMainWindow):
         menu.addAction(self._act_stop)
         menu.addAction(self._act_start_seeding)
         menu.addSeparator()
-        menu.addAction(self._act_move_up)
-        menu.addAction(self._act_move_down)
-        menu.addSeparator()
         menu.addAction(self._act_copy_url)
-        menu.addAction(self._act_rename)
         menu.addAction(self._act_export_csv)
         menu.addSeparator()
         menu.addAction(self._act_scan_antivirus)
         menu.addAction(self._act_recheck)
-        menu.addAction(self._act_move)
         menu.addSeparator()
         menu.addAction(self._act_toggle_details)
         menu.addSeparator()
@@ -2304,15 +2429,29 @@ class MainWindow(QMainWindow):
         queue_menu.addSeparator()
         q_new = queue_menu.addAction("New Queue…")
         q_new.triggered.connect(self._on_new_queue)
+        # Priority ordering joins queue membership here, in the same order the Edit menu uses
+        # for its trailing queue group. It used to sit up with Pause / Stop / Start Seeding,
+        # where two ordering commands read as transport controls and split the queue commands
+        # across the menu into two groups.
+        menu.addAction(self._act_move_up)
+        menu.addAction(self._act_move_down)
         menu.addSeparator()
 
         # Per-download Tor routing. Built fresh on each invocation because the
         # enabled/checked state is per-row and Tor can start or stop at any time.
         menu.addAction(self._build_download_tor_action(entry))
         menu.addSeparator()
+        # One file-operations group, in the order the Edit menu uses: rename it, move it,
+        # look at it, destroy it. Rename and Move were up with Copy URL and with
+        # Scan/Recheck, which split the file commands across three groups. No separators
+        # inside it, and it stays last so Delete is still the final item in the menu.
+        # `Delete File` is context-menu-only: the Edit menu's Delete already takes the row,
+        # and a second delete that means something else is one more destructive item to keep
+        # straight.
+        menu.addAction(self._act_rename)
+        menu.addAction(self._act_move)
         menu.addAction(self._act_open_file)
         menu.addAction(self._act_open_folder)
-        menu.addSeparator()
         menu.addAction(self._act_delete_file)
         menu.addAction(self._act_delete)
         menu.exec(self._table.viewport().mapToGlobal(pos))
@@ -2456,7 +2595,7 @@ class MainWindow(QMainWindow):
         self._refresh_queue_ui()
 
     def _refresh_queue_ui(self):
-        """Rebuild the queue combo and the View > Queues menu from the manager's state.
+        """Rebuild the Edit ▸ Queues menu from the manager's state.
 
         Rebuilt wholesale rather than diffed: the list is small, and a diff is where a queue
         renamed elsewhere would keep showing its old name until a restart.
@@ -2466,6 +2605,11 @@ class MainWindow(QMainWindow):
         inside the removal loop ended the iteration after one action - so every refresh left a
         stale duplicate behind and shuffled "All Queues" down the menu.
 
+        This used to also refill a queue-switcher combo in the toolbar. There is no combo now:
+        the menu is the only scope switcher, so the exclusive ``QActionGroup`` below is the
+        single source of truth for which queue is selected, and the toolbar stays a row of
+        transport and file commands.
+
         Also refreshes the model's queue_id -> name map: a rename changes what every row of that
         queue shows in ``Col.QUEUE_NAME`` at once, so the two must not drift.
         """
@@ -2473,25 +2617,6 @@ class MainWindow(QMainWindow):
         active = self._manager.get_active_queue()
         self._model.set_queue_names({q.id: q.name for q in queues})
         self._model.set_queue_colors({q.id: q.color for q in queues})
-
-        self._queue_combo.blockSignals(True)
-        self._queue_combo.clear()
-        self._queue_combo.addItem("All Queues", ALL_QUEUES)
-        for queue in queues:
-            label = (
-                f"{queue.name}  (max {queue.max_concurrent})"
-                if queue.max_concurrent > 0
-                else f"{queue.name}  (Global)"
-            )
-            icon = create_color_swatch_icon(
-                queue.color,
-                size=18,
-                radius=4,
-                letter=(queue.name[:1].upper() if queue.name else ""),
-            )
-            self._queue_combo.addItem(icon, label, queue.id)
-        self._queue_combo.setCurrentIndex(max(0, self._queue_combo.findData(active)))
-        self._queue_combo.blockSignals(False)
 
         # Retire the previous per-queue actions from the exclusive group before dropping them,
         # so the group does not accumulate dead actions holding their lambdas alive.
@@ -2634,11 +2759,6 @@ class MainWindow(QMainWindow):
         menu = getattr(self, "_menu_move_to_queue", None)
         if menu is not None:
             menu.setEnabled(enabled)
-
-    def _on_queue_combo_changed(self, index: int):
-        if index < 0:
-            return
-        self._on_select_queue(self._queue_combo.itemData(index) or ALL_QUEUES)
 
     def _on_select_queue(self, queue_id: str):
         """Scope the downloads list to *queue_id* (``""`` for all queues)."""
@@ -2829,6 +2949,8 @@ class MainWindow(QMainWindow):
         ``styles.apply_theme`` has already set the application stylesheet, so the only thing
         left is anything this window caches in palette colours.
         """
+        # A theme can change the font metrics the toolbar row is measured against.
+        self._fit_min_width_to_toolbar()
         self._save_ui_state_to_db()
 
     def _on_show_statistics(self):
@@ -3425,40 +3547,23 @@ class MainWindow(QMainWindow):
     def _on_reset_view(self):
         """Reset all table/grid settings to defaults: column visibility, filters, sorting, and column widths."""
         # 1. Reset column widths to defaults
-        self._table.setColumnWidth(Col.QUEUE, 45)
-        self._table.setColumnWidth(Col.NAME, 270)
-        self._table.setColumnWidth(Col.SOURCE_DOMAIN, 160)
-        self._table.setColumnWidth(Col.SIZE, 90)
-        self._table.setColumnWidth(Col.PROGRESS, 160)
-        self._table.setColumnWidth(Col.STATUS, 135)
-        self._table.setColumnWidth(Col.SPEED, 110)
-        self._table.setColumnWidth(Col.ETA, 80)
-        self._table.setColumnWidth(Col.SEEDS_PEERS, 100)
-        self._table.setColumnWidth(Col.ADDED, 130)
-        self._table.setColumnWidth(Col.LAST_TRIED, 130)
-        self._table.setColumnWidth(Col.COMPLETED, 130)
-        self._table.setColumnWidth(Col.SAVE_PATH, 220)
-        self._table.setColumnWidth(Col.FILE_NAME, 220)
-        self._table.setColumnWidth(Col.LAST_SEEDED, 130)
-        self._table.setColumnWidth(Col.SOURCE, 100)
-        self._table.setColumnWidth(Col.SEEDING_STARTED_AT, 150)
-        self._table.setColumnWidth(Col.QUEUE_NAME, 120)
+        _apply_default_column_widths(self._table)
 
-    # 2. Show all columns (reset column visibility)
+        # 2. Show all columns (reset column visibility)
         header = self._header_view
         for col in range(Col.COUNT):
             header.setSectionHidden(col, False)
 
-        # 3. Reset column order to default (tail columns pinned to the end)
+        # 3. Reset column order to default (see _DEFAULT_COLUMN_ORDER)
         # Ascending order is required: moving each logical index into place in
         # sequence restores true identity order. A descending sweep leaves the
         # displaced section stranded near the front, which then shifts every
-        # subsequent tail position.
+        # subsequent position.
         for logical in range(Col.COUNT):
             visual = header.visualIndex(logical)
             if visual != logical:
                 header.moveSection(visual, logical)
-        _apply_default_tail_order(header)
+        _apply_default_column_order(header)
 
         # 4. Clear all filters (status and type filters)
         self._model.clear_filters()
@@ -3630,8 +3735,9 @@ class MainWindow(QMainWindow):
                     # Genuinely fresh profile: nothing saved anywhere, so start from the
                     # default arrangement. Only on this path - a user who has already chosen
                     # their columns must not have them overridden because a default changed.
-                    # No early return: the tail pinning, default widths and default sort
-                    # below still have to run.
+                    # This branch returns early, so it repeats what the saved-state path
+                    # below ends with: header flags, default sort, and - in the `finally` -
+                    # the minimum section size.
                     for col in DEFAULT_HIDDEN_COLUMNS:
                         self._table.horizontalHeader().setSectionHidden(col, True)
                 splitter_state = settings.value("splitter_state")
@@ -3740,8 +3846,11 @@ class MainWindow(QMainWindow):
 
             # A state saved before columns were appended only describes the older
             # sections, so restoreState() drops the new ones wherever it likes.
-            # Re-pin the tail so newly added columns land at the end while the
-            # user's own ordering of the older ones is preserved.
+            # Re-pin the tail so appended columns land at the end while the
+            # user's own ordering of the older ones is preserved. The full default
+            # order is deliberately NOT applied here: this runs on an existing
+            # profile, and reordering everything would throw away an arrangement the
+            # user never asked to have changed.
             saved_count = state.get("column_count")
             if saved_count is not None and int(saved_count) != Col.COUNT:
                 _apply_default_tail_order(header)
@@ -3749,7 +3858,9 @@ class MainWindow(QMainWindow):
             # Ensure Col.FILE_NAME is visible and properly sized if restored from an older state
             header.setSectionHidden(Col.FILE_NAME, False)
             if self._table.columnWidth(Col.FILE_NAME) < 50:
-                self._table.setColumnWidth(Col.FILE_NAME, 220)
+                self._table.setColumnWidth(
+                    Col.FILE_NAME, _DEFAULT_COLUMN_WIDTHS[Col.FILE_NAME]
+                )
 
             # Restore sort column & order: default to Col.ADDED, DescendingOrder
             sort_col = state.get("sort_column")
@@ -3819,6 +3930,23 @@ class MainWindow(QMainWindow):
             self._sync_panel_buttons()
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
+        finally:
+            # On every exit path, including the fresh-profile `return` above:
+            # `restoreState()` carries the header's section floor in its blob and puts
+            # Qt's font-derived default back, undoing whatever was set before it.
+            self._apply_minimum_section_size()
+
+    def _apply_minimum_section_size(self):
+        """Re-assert how narrow a downloads-table column may be, after a header restore.
+
+        Qt saves ``minimumSectionSize`` inside the header state blob, so restoring one
+        reinstates the font-derived floor — 32px at the default UI font, and wider at a
+        larger scale factor. That silently clamps the two narrowest columns this app ships,
+        ``#`` (a row number, and the only column with no filter button to make room for) and
+        ``Queue``, whose defaults are 30px. Re-applying it here is the difference between a
+        default width that is honoured and one that is quietly 2px off forever.
+        """
+        self._table.horizontalHeader().setMinimumSectionSize(MIN_COLUMN_WIDTH)
 
     def changeEvent(self, event: QEvent):
         if event.type() == QEvent.Type.WindowStateChange:
@@ -3830,6 +3958,11 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Re-measured once the widgets are polished: at construction time the toolbar's
+        # sizeHint under-reports (970px vs 1025px here, before the fonts are resolved), which
+        # is exactly the overflow this prevents. The call only ever raises the minimum, so
+        # repeating it is free.
+        self._fit_min_width_to_toolbar()
         self._update_tray_menu_text()
         self._update_manager_window_visibility()
 

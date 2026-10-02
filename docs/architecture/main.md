@@ -316,7 +316,7 @@ named queues, each with its own budget** — see
 1. **Named Queues**:
    - Every download has a `queue_id`; a queue carries a `max_concurrent` budget, where `<= 0` means *unlimited within that queue*.
    - `GeneralConfig.max_concurrent_downloads` remains a **global ceiling over everything**, so a per-queue budget is a local ceiling and not a reservation.
-   - Selecting a queue in the toolbar (or **View → Queues**) scopes the downloads list to it. **"All Queues" is the startup default** — history is the product, so a user must never find existing downloads missing because a queue is selected.
+   - Selecting a queue in **Edit → Queues** scopes the downloads list to it. **"All Queues" is the startup default** — history is the product, so a user must never find existing downloads missing because a queue is selected. (This was a toolbar combo until 2026-10-02; the strip is now transport and file commands only.)
    - Deleting a queue re-homes its downloads to Default; downloads are never deleted with their queue.
 2. **Active Concurrency Counting**:
    - Downloads in `downloading`, `checking`, `fetching_metadata`, and `stalled` states consume concurrency slots.
@@ -556,15 +556,14 @@ Downloads often start with generic or hashed URLs (e.g. `/download?id=12345` or 
 QMainWindow (MainWindow)
   ├── QMenuBar
   │     ├── File (Add Download, Add Torrent, Load Backlog, Exit)
-  │     ├── Edit (Resume, Pause, Delete, Move, Recheck)
+  │     ├── Edit (Resume, Pause, Copy URL, Rename, Move, Open File, Open Folder, Delete, Recheck, Queues, Move to Queue)
   │     ├── View (📋 Details Panel [F4], Select All, Sort By)
-  │     ├── Tools (Preferences, VPN & Network Settings, Antivirus & Security Settings)
+  │     ├── Tools (Preferences, Statistics, Export Selected as CSV…, VPN & Network Settings, Antivirus & Security Settings)
   │     └── Help (About)
     ├── QToolBar
-    │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [📄 Open File][📁 Open Folder] | [📋 Details Panel]
-    │         └── ──── expanding gap ──── [🔍 Search downloads…] [⚙️ Preferences]
-    │             (the gap is `toolbar_gap`, an Expanding spacer, so the search box
-    │              and Settings stay pinned to the right end at any window width)
+    │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [🧅 Tor] | [🔍 Search downloads…] [⚙️ Preferences]
+    │             (the search box is the strip's only Expanding item, so it takes whatever
+    │              width is left and Preferences stays pinned to the right end)
   ├── QSplitter (central widget, vertical orientation)
   │     ├── QTableView (top pane)
   │     │     ├── Model: DownloadTableModel

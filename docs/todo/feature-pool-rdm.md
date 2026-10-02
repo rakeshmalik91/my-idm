@@ -69,7 +69,9 @@ RDM: "Create custom queues with independent parallel download limits."
   global count it replaced.
 - Dispatch order: priority within a queue; a queue with budget before a saturated one; ties on
   the user's switcher order, never on the queue id (uuids would make it nondeterministic).
-- UI: a toolbar combo, **View → Queues**, a **Move to Queue** context submenu, and a
+- UI: **Edit → Queues** (the scope switcher, which also holds New Queue… / Manage Queues… — a
+  toolbar combo beside the search box was removed on 2026-10-02), a **Move to Queue** context
+  submenu, and a
   `QueueManagerDialog`. `queue_id=''` resolves to Default on every write, so no reader has to
   treat empty as meaningful.
 
@@ -115,8 +117,10 @@ design, and `my_idm/stats_dialog.py` for the implementation.
   without a frozen clock. Buckets use `substr(added_at,1,10)` rather than `strftime`, plus a
   `GLOB` guard on the date prefix: the cut-off is a *string* compare, so a hand-edited
   `not-a-date` sorts after `2026-09-24` and would otherwise be filed under *today*.
-- A `📊 Statistics…` toolbar action beside **Preferences**, opening a read-only popup with
-  the totals grid, a stacked per-day volume chart, and a live speed sparkline.
+- A `📊 Statistics…` entry in **Tools**, grouped with **Preferences**, opening a read-only popup
+  with the totals grid, a stacked per-day volume chart, and a live speed sparkline. (It was a
+  toolbar button beside Preferences until 2026-10-02; the strip is transport and file commands
+  only now.)
 - Charts are `QPainter`-drawn, not matplotlib: matplotlib and numpy are importable here but
   are **absent from `requirements.txt`**, so depending on them would work on the author's
   machine and fail for anyone installing from the requirements file.

@@ -12,6 +12,7 @@ from PySide6.QtCore import (
     QEvent,
     QItemSelectionModel,
     QPointF,
+    QRect,
     QSettings,
     Qt,
 )
@@ -560,9 +561,11 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         self.assertTrue(header.sectionsMovable())
         self.assertTrue(header.isFirstSectionMovable())
 
-        # Move section Col.NAME (1) to visual index 3
+        # Move Col.NAME to visual index 3. The source is read from the header rather than
+        # hard-coded: the default arrangement changed once already, and a literal that no
+        # longer names the column moves a *different* one and still "passes" the save check.
         with patch.object(self.win, "_save_ui_state_to_db", wraps=self.win._save_ui_state_to_db) as mock_save:
-            header.moveSection(Col.NAME, 3)
+            header.moveSection(header.visualIndex(Col.NAME), 3)
             self.assertEqual(header.visualIndex(Col.NAME), 3)
             # Exactly one persist per move; "called at least once" would not notice
             # a regression that re-saves the whole state on every sectionMoved.
@@ -576,7 +579,10 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
 
     def test_window_geometry_location_maximized_columns_in_db(self):
         """Window size, location, maximized state, and column lengths are persisted and restored via DB."""
-        self.win.resize(1280, 720)
+        # The minimum width follows the toolbar, which is font- and DPI-dependent, so 1280
+        # is only a valid width where the toolbar fits inside it.
+        width = max(1280, self.win.minimumWidth())
+        self.win.resize(width, 720)
         self.win.move(150, 120)
         self.win._table.setColumnWidth(Col.NAME, 360)
         self.win._table.setColumnWidth(Col.SIZE, 130)
@@ -585,7 +591,7 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
 
         db_state = self.db.get_window_state()
         self.assertIsNotNone(db_state)
-        self.assertEqual(db_state["width"], 1280)
+        self.assertEqual(db_state["width"], width)
         self.assertEqual(db_state["height"], 720)
         self.assertEqual(db_state["x"], 150)
         self.assertEqual(db_state["y"], 120)
@@ -594,7 +600,7 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         self.assertEqual(db_state["column_widths"][str(Col.SIZE)], 130)
 
         win2 = self.new_window()
-        self.assertEqual(win2.width(), 1280)
+        self.assertEqual(win2.width(), width)
         self.assertEqual(win2.height(), 720)
         self.assertEqual(win2.x(), 150)
         self.assertEqual(win2.y(), 120)
@@ -1430,21 +1436,122 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertIs(actions[-1], self.win._act_preferences)
 
     def test_toolbar_search_precedes_preferences(self):
-        """The search box sits in the gap before the Settings button."""
+        """The search box is the last stretch of the strip, and Preferences the last control."""
         names = []
         for action in self.win._toolbar.actions():
             widget = self.win._toolbar.widgetForAction(action)
             if widget is not None:
                 names.append(widget.objectName())
         self.assertIn("toolbar_search", names)
-        self.assertIn("toolbar_gap", names)
-        self.assertLess(names.index("toolbar_gap"), names.index("toolbar_search"))
-
-    def test_toolbar_gap_expands(self):
+        named = [n for n in names if n]
         self.assertEqual(
-            self.win._toolbar_gap.sizePolicy().horizontalPolicy(),
-            QSizePolicy.Policy.Expanding,
+            named[-1], "toolbar_search",
+            f"the search field is the last widget on the strip: {names}",
         )
+
+    def test_the_toolbar_carries_transport_and_file_actions_only(self):
+        """No queue switcher, no Statistics: both are read-or-configure, not row commands.
+
+        A queue combo in the strip read as a filter on the selection, and Statistics is a
+        report over the whole history. They live in Edit ▸ Queues and Tools ▸ Statistics.
+        """
+        labels = [a.text() for a in self.win._toolbar.actions() if not a.isSeparator()]
+        for gone in ("All Queues", "Statistics…", "Stats…", "Move to Queue"):
+            with self.subTest(label=gone):
+                self.assertNotIn(gone, labels)
+        widget_names = [
+            self.win._toolbar.widgetForAction(a).objectName()
+            for a in self.win._toolbar.actions()
+            if self.win._toolbar.widgetForAction(a) is not None
+        ]
+        self.assertNotIn("toolbar_queue_combo", widget_names)
+        self.assertFalse(
+            hasattr(self.win, "_queue_combo"),
+            "the combo widget is gone, not merely unparented - an orphan would still be "
+            "populated by _refresh_queue_ui on every queue change",
+        )
+        # ...and both features are still reachable from a menu.
+        edit = [a.text() for a in self.win.menuBar().actions()[1].menu().actions()]
+        tools = next(
+            top.menu() for top in self.win.menuBar().actions()
+            if top.menu() is not None and top.text().replace("&", "") == "Tools"
+        )
+        self.assertIn(self.win._menu_queues.title(), edit)
+        self.assertIn("Statistics…", [a.text() for a in tools.actions()])
+
+    def test_the_search_box_takes_the_leftover_width(self):
+        """It is the toolbar's only expanding item, and nothing caps its width.
+
+        Regression: an invisible 1px expanding spacer used to absorb the free width while
+        the search box itself was pinned to 320px, so a wide window had a large dead gap
+        between the queue switcher and a search box too small to use it.
+        """
+        search = self.win._search_edit
+        self.assertEqual(
+            search.sizePolicy().horizontalPolicy(), QSizePolicy.Policy.Expanding
+        )
+        self.assertGreater(
+            search.maximumWidth(), 320,
+            "a hard maximum would put the free width back into dead space",
+        )
+        self.assertFalse(
+            hasattr(self.win, "_toolbar_gap"),
+            "the spacer widget is gone; the search box is the expander now",
+        )
+        self.assertTrue(search.minimumWidth() > 0, "but it must not collapse to nothing")
+
+    def _refit_with_screen(self, screen_width: int):
+        """Re-run the toolbar fit against a faked screen width, from a zero floor.
+
+        The floor is only ever raised in production, and on this machine the toolbar is
+        narrower than the hard-coded 1100 default, so the interesting branches are only
+        reachable from a known starting point.
+        """
+        class _Screen:
+            def availableGeometry(self):
+                return QRect(0, 0, screen_width, 1040)
+
+        with patch.object(
+            QApplication, "primaryScreen", staticmethod(lambda: _Screen())
+        ):
+            self.win.setMinimumWidth(0)
+            self.win._fit_min_width_to_toolbar()
+        return self.win.minimumWidth()
+
+    def test_the_minimum_width_follows_the_toolbar_and_the_list(self):
+        """The floor is the wider of what the toolbar and the downloads list need.
+
+        A QToolBar narrower than its contents folds the remainder into a `>>` button, and a
+        window narrower than the list clips its columns instead of scrolling them. The old
+        fixed 1100px floor was measured against a toolbar carrying a queue switcher and a
+        Statistics button, so it outlived both by ~230px.
+        """
+        expected = max(
+            self.win._toolbar.sizeHint().width(),
+            self.win.centralWidget().minimumSizeHint().width(),
+        )
+        self.assertGreater(expected, 0, "unbuilt widgets cannot prove anything")
+        self.assertEqual(self._refit_with_screen(expected + 500), expected)
+
+    def test_a_screen_too_narrow_for_the_row_caps_the_floor(self):
+        """Better a `>>` button on a small display than a window that cannot be fitted."""
+        needed = max(
+            self.win._toolbar.sizeHint().width(),
+            self.win.centralWidget().minimumSizeHint().width(),
+        )
+        self.assertEqual(self._refit_with_screen(needed - 100), needed - 100)
+
+    def test_a_shorter_toolbar_never_lowers_the_floor(self):
+        """The Tor label and the locale both shrink the row; an open window must not jump."""
+        self.win.setMinimumWidth(1800)
+        self.win._fit_min_width_to_toolbar()
+        self.assertEqual(self.win.minimumWidth(), 1800)
+
+    def test_a_shorter_toolbar_never_lowers_the_floor(self):
+        """The Tor label and the locale both shrink the row; an open window must not jump."""
+        self.win.setMinimumWidth(1800)
+        self.win._fit_min_width_to_toolbar()
+        self.assertEqual(self.win.minimumWidth(), 1800)
 
     def test_header_sort_indicator_and_painting(self):
         header = self.win._header_view
@@ -1621,7 +1728,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         appended_columns = 4
         legacy_count = Col.COUNT - appended_columns
         self.assertEqual(legacy_count, 14, "the pre-append build had 14 columns")
-        self.assertEqual(len(_DEFAULT_TAIL_COLUMNS), 6)
+        self.assertEqual(len(_DEFAULT_TAIL_COLUMNS), 5)
         for col in (Col.LAST_SEEDED, Col.SOURCE, Col.SEEDING_STARTED_AT):
             self.assertGreaterEqual(
                 col, legacy_count,
@@ -1643,7 +1750,6 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             self.win._restore_ui_state_from_db()
 
         # New columns land at the very end...
-        self.assertEqual(header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1)
         self.assertEqual(header.count(), Col.COUNT)
         # ...the tail is fully pinned...
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
@@ -1651,8 +1757,11 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
                 header.visualIndex(col), Col.COUNT - len(_DEFAULT_TAIL_COLUMNS) + i,
                 f"{Col.HEADERS[col]} must be pinned at its tail position",
             )
-        # ...and the user's own ordering of the older columns survives.
+        # ...and the user's own ordering of the older columns survives. The heal must NOT
+        # apply the full default order here: this is an existing profile, and resetting
+        # everything would discard an arrangement the user never asked to change.
         self.assertEqual(Col.HEADERS[header.logicalIndex(1)], "Size")
+        self.assertEqual(header.logicalIndex(1), Col.SIZE)
 
     def test_current_ui_state_respects_user_order(self):
         """Once the stored state matches the column count, order is left alone."""
@@ -1689,15 +1798,223 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
                 f"{Col.HEADERS[col]} should sit at visual {visual}",
             )
 
+    def test_the_default_order_and_widths_are_the_arrangement_from_the_real_profile(self):
+        """Pinned literally, because "the default" is a decision, not a derivation.
+
+        This is the arrangement from a real profile: the Queue badge next to the row number,
+        Save Path grouped with the other "what happened to it" columns, and the two filename
+        columns wide enough not to truncate. A test that recomputed it from the tuple would
+        pass whatever the tuple said, which is the failure this exists to prevent.
+        """
+        from my_idm.main_window import (
+            _DEFAULT_COLUMN_ORDER,
+            _DEFAULT_COLUMN_WIDTHS,
+            DEFAULT_HIDDEN_COLUMNS,
+        )
+
+        self.assertEqual(
+            [Col.HEADERS[c] for c in _DEFAULT_COLUMN_ORDER],
+            ["#", "Queue", "Name", "Size", "Progress", "Status", "Speed", "ETA",
+             "Seeds / Peers", "Added", "Save Path", "Completed", "Last Tried",
+             "Source Domain", "File / Folder Name", "Last Seeded", "Source",
+             "Seeding Started At"],
+        )
+        self.assertEqual(
+            [_DEFAULT_COLUMN_WIDTHS[c] for c in _DEFAULT_COLUMN_ORDER],
+            [30, 30, 412, 82, 214, 135, 166, 80, 140, 123, 262, 130, 130, 187,
+             546, 131, 110, 173],
+        )
+
+        header = self.win._table.horizontalHeader()
+        # Unhide everything first: a hidden section reports 0, not the width it will take
+        # when shown again.
+        for col in range(Col.COUNT):
+            header.setSectionHidden(col, False)
+        try:
+            for col, width in _DEFAULT_COLUMN_WIDTHS.items():
+                self.assertEqual(
+                    self.win._table.columnWidth(col), width,
+                    f"{Col.HEADERS[col]} is not at its default width",
+                )
+        finally:
+            for col in DEFAULT_HIDDEN_COLUMNS:
+                header.setSectionHidden(col, True)
+
+    def test_no_default_column_width_is_clamped_by_the_section_floor(self):
+        """A default below Qt's floor is a default that cannot be honoured.
+
+        Qt's floor is font-derived — 32px at the default UI font, wider at a larger scale
+        factor — and `#` and Queue default to 30. `setColumnWidth(30)` then reports back 32
+        and nothing anywhere says why.
+        """
+        from my_idm.main_window import MIN_COLUMN_WIDTH, _DEFAULT_COLUMN_WIDTHS
+
+        header = self.win._table.horizontalHeader()
+        self.assertEqual(header.minimumSectionSize(), MIN_COLUMN_WIDTH)
+        self.assertLessEqual(
+            MIN_COLUMN_WIDTH, min(_DEFAULT_COLUMN_WIDTHS.values()),
+            "the floor must not be wider than the narrowest default column",
+        )
+        self.assertGreaterEqual(
+            header.fontMetrics().horizontalAdvance("1000"), 0,
+            "the floor is allowed to elide a five-digit row number; four must fit",
+        )
+        self.assertLessEqual(
+            header.fontMetrics().horizontalAdvance("1000"), MIN_COLUMN_WIDTH,
+            f"{MIN_COLUMN_WIDTH}px must fit a four-digit row number",
+        )
+
+    def test_restoring_a_saved_header_state_keeps_the_section_floor(self):
+        """`QHeaderView.restoreState()` puts the floor back, so it has to be re-asserted.
+
+        The value is saved inside the state blob, which means the restore path silently undoes
+        whatever was set before it — and the early `return` on the fresh-profile branch is one
+        of the exits it has to survive.
+        """
+        from my_idm.main_window import MIN_COLUMN_WIDTH
+
+        self.win._save_ui_state_to_db()
+        win2 = self.new_window(self.manager)
+        self.assertEqual(
+            win2._table.horizontalHeader().minimumSectionSize(), MIN_COLUMN_WIDTH,
+            "a saved header state must not reinstate Qt's font-derived floor",
+        )
+
+    def test_the_hash_header_label_is_drawn_in_full_at_its_default_width(self):
+        """`#` is 30px and was drawn as a clipped sliver — or not at all.
+
+        Qt draws a header label into the section rect *minus* the stylesheet's padding, plus
+        its own header margin scaled by the header font. Once that total reaches the section's
+        width there is no box left: the label goes, and just below that it is clipped to an
+        edge. The shared padding exists for the filter funnel, and `#` is the one section
+        without one, so it now gets symmetric padding.
+
+        Asserted as ink *relative to* the same section drawn wide enough to be unclipped, and
+        with the rule stripped as a control — the ratio separates cleanly (0.82 with the rule,
+        0.35 without), so this cannot pass on a clipped label.
+        """
+        import re
+
+        from my_idm import styles
+        from my_idm.download_model import Col
+        from my_idm.main_window import _DEFAULT_COLUMN_WIDTHS
+
+        header = self.win._table.horizontalHeader()
+        self.assertEqual(
+            self.win._table.columnWidth(Col.QUEUE),
+            _DEFAULT_COLUMN_WIDTHS[Col.QUEUE],
+            "this is about the label at the default width",
+        )
+        app = QApplication.instance()
+        sheet = styles.STYLESHEETS["dark"]
+        self.assertIn("QHeaderView::section:first", sheet, "the rule under test is missing")
+
+        unclipped = 64      # comfortably wider than 30 + padding + margin
+
+        def ink_at(width):
+            header.resizeSection(Col.QUEUE, width)
+            QApplication.processEvents()
+            return self._ink_in_section(header, Col.QUEUE)
+
+        try:
+            app.setStyleSheet(sheet)
+            self.win.show()
+            QApplication.processEvents()
+            full = ink_at(unclipped)
+            narrow = ink_at(_DEFAULT_COLUMN_WIDTHS[Col.QUEUE])
+            self.assertGreater(full, 0, "the control measurement found no ink at all")
+            self.assertGreater(
+                narrow, full * 0.6,
+                f"the '#' label is clipped at its default width: {narrow} of {full}",
+            )
+
+            without = re.sub(
+                r"QHeaderView::section:first\s*\{[^}]*\}", "", sheet, flags=re.S
+            )
+            app.setStyleSheet(without)
+            QApplication.processEvents()
+            self.assertLess(
+                ink_at(_DEFAULT_COLUMN_WIDTHS[Col.QUEUE]), full * 0.6,
+                "the control no longer reproduces the defect, so this test proves nothing",
+            )
+        finally:
+            app.setStyleSheet("")
+            QApplication.processEvents()
+
+    @staticmethod
+    def _ink_in_section(header, logical_index: int) -> int:
+        """Count pixels in one section that differ from the header's background.
+
+        The section is located by its own offset rather than assuming it starts at x=0, and it
+        is only meaningful for a section with no filter funnel.
+        """
+        image = header.grab().toImage()
+        left = header.sectionViewportPosition(logical_index)
+        width = header.sectionSize(logical_index)
+        image = image.copy(left, 0, width, image.height())
+        background = image.pixelColor(1, 1)
+        count = 0
+        for y in range(2, image.height() - 1):
+            for x in range(1, image.width() - 1):
+                colour = image.pixelColor(x, y)
+                if (abs(colour.red() - background.red())
+                        + abs(colour.green() - background.green())
+                        + abs(colour.blue() - background.blue())) > 30:
+                    count += 1
+        return count
+
+    def test_the_default_order_covers_every_column_exactly_once(self):
+        """A duplicated or omitted column here is silently a broken startup layout."""
+        from my_idm.main_window import _DEFAULT_COLUMN_ORDER, _DEFAULT_COLUMN_WIDTHS
+
+        self.assertEqual(
+            sorted(_DEFAULT_COLUMN_ORDER), list(range(Col.COUNT)),
+            "every column must appear exactly once in the default order",
+        )
+        self.assertEqual(
+            sorted(_DEFAULT_COLUMN_WIDTHS), list(range(Col.COUNT)),
+            "every column needs a default width",
+        )
+        self.assertTrue(
+            all(w > 0 for w in _DEFAULT_COLUMN_WIDTHS.values()),
+            "a zero default width makes a column invisible until it is dragged",
+        )
+
+    def test_the_tail_columns_are_a_suffix_of_the_default_order(self):
+        """The append convention depends on it: a new column joins the tail by being last."""
+        from my_idm.main_window import _DEFAULT_COLUMN_ORDER, _DEFAULT_TAIL_COLUMNS
+
+        span = len(_DEFAULT_TAIL_COLUMNS)
+        self.assertEqual(
+            _DEFAULT_COLUMN_ORDER[-span:], _DEFAULT_TAIL_COLUMNS,
+            "the tail must be the last columns of the order, in the same sequence",
+        )
+
+    def test_reset_view_applies_the_default_widths(self):
+        from my_idm.main_window import _DEFAULT_COLUMN_WIDTHS
+
+        self.win._table.setColumnWidth(Col.NAME, 90)
+        self.win._on_reset_view()
+        self.assertEqual(self.win._table.columnWidth(Col.NAME), _DEFAULT_COLUMN_WIDTHS[Col.NAME])
+
     def test_new_columns_default_to_the_very_end(self):
         """The appended columns sit at the end of the table by default."""
-        from my_idm.main_window import _DEFAULT_TAIL_COLUMNS
+        from my_idm.main_window import _DEFAULT_COLUMN_ORDER, _DEFAULT_TAIL_COLUMNS
 
         header = self.win._table.horizontalHeader()
         span = len(_DEFAULT_TAIL_COLUMNS)
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
             self.assertEqual(header.visualIndex(col), Col.COUNT - span + i, Col.HEADERS[col])
-        self.assertEqual(header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1)
+        # The newest appended column is the last one, and nothing sits after the tail.
+        self.assertEqual(
+            header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1,
+            "Seeding Started At is the newest column, so it must end the row",
+        )
+        self.assertEqual(
+            [Col.HEADERS[header.logicalIndex(v)] for v in range(Col.COUNT)],
+            [Col.HEADERS[c] for c in _DEFAULT_COLUMN_ORDER],
+            "a fresh profile must show the documented arrangement",
+        )
 
     def test_new_column_indices_do_not_shift_existing_columns(self):
         """Persisted column indices must keep pointing at the same columns.
@@ -1731,11 +2048,16 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertEqual(Col.HEADERS[Col.SEEDING_STARTED_AT], "Seeding Started At")
 
     def test_reset_view_restores_new_column_order(self):
+        from my_idm.main_window import _DEFAULT_COLUMN_ORDER
+
         header = self.win._table.horizontalHeader()
         header.moveSection(header.visualIndex(Col.SOURCE), 0)
         self.win._on_reset_view()
-        self.assertEqual(header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1)
-        self.assertEqual(header.visualIndex(Col.SOURCE), Col.COUNT - 3)
+        self.assertEqual(
+            [Col.HEADERS[header.logicalIndex(v)] for v in range(Col.COUNT)],
+            [Col.HEADERS[c] for c in _DEFAULT_COLUMN_ORDER],
+            "Reset View must land on the documented arrangement, not identity order",
+        )
 
     def test_details_panel_state_survives_a_hidden_window_save(self):
         """Regression: the panel appeared closed after restart.
@@ -2020,9 +2342,14 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
 
         self.assertEqual(next_win.pos().x(), 350)
         self.assertEqual(next_win.pos().y(), 250)
-        # MainWindow.setMinimumSize(1100, 600) clamps the restored 820 px width;
-        # the height is above the minimum and survives verbatim.
-        self.assertEqual(next_win.width(), 1100, "the restored width must be clamped to the minimum")
+        # The width is below the floor, which `_fit_min_width_to_toolbar` measures from the
+        # toolbar and the downloads list on first show; the height is above the 600px minimum
+        # and survives verbatim.
+        self.assertGreater(next_win.width(), 820, "the restored width must be clamped")
+        self.assertEqual(
+            next_win.width(), next_win.minimumWidth(),
+            "a legacy 820px width must land exactly on the measured floor",
+        )
         self.assertEqual(next_win.height(), 610)
 
     def test_legacy_geometry_state_with_stale_column_count_heals_the_tail(self):
@@ -2058,8 +2385,8 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertEqual(healed.pos().x(), 350)
         self.assertEqual(healed.pos().y(), 250)
         self.assertEqual(
-            healed_header.visualIndex(Col.QUEUE_NAME), Col.COUNT - 1,
-            "the newest column must be re-pinned to the end after an upgrade",
+            healed_header.visualIndex(Col.SEEDING_STARTED_AT), Col.COUNT - 1,
+            "the newest appended column must be re-pinned to the end after an upgrade",
         )
         for i, col in enumerate(_DEFAULT_TAIL_COLUMNS):
             self.assertEqual(
@@ -2767,6 +3094,55 @@ class TestToolsMenuOpensTheRightPreferencesPage(_MainWindowTestCase):
         for handler, _name, _word in self.EXPECTED:
             with self.subTest(handler=handler):
                 self.assertTrue(hasattr(self.win, handler))
+
+    def _tools_titles(self) -> list:
+        tools = next(
+            a.menu() for a in self.win.menuBar().actions() if a.text().startswith("&Tools")
+        )
+        return [a.text() for a in tools.actions()]
+
+    def test_tools_groups_statistics_with_preferences(self):
+        """Statistics and Preferences are both "look at / configure the app" entries.
+
+        Export is a way to get something out, so a separator belongs between the two groups.
+        """
+        titles = self._tools_titles()
+        prefs_at = titles.index("Preferences…")
+        stats_at = titles.index("Statistics…")
+        export_at = titles.index("Export Selected as CSV…")
+        self.assertLess(
+            prefs_at, stats_at, f"Statistics joins the Preferences group: {titles}"
+        )
+        self.assertEqual(
+            stats_at - prefs_at, 1, f"no separator splits the pair: {titles}"
+        )
+        self.assertGreater(
+            export_at, stats_at, f"Export belongs after the group: {titles}"
+        )
+        self.assertEqual(
+            titles[stats_at + 1], "",
+            f"a separator must fall between Statistics and Export: {titles}",
+        )
+
+    def test_the_tools_statistics_entry_is_wired_and_unabbreviated(self):
+        """A menu label may not be abbreviated, and it must not inherit Ctrl+,.
+
+        The toolbar copy that used to be abbreviated to "Stats…" is gone; this is the only
+        Statistics action, so there is no second one to drift out of step with it.
+        """
+        act = self.win._act_tools_stats
+        self.assertEqual(act.text(), "Statistics…")
+        self.assertTrue(act.shortcut().isEmpty(), "no shortcut may be registered twice")
+
+        with patch.object(self.win, "_on_show_statistics") as handler:
+            act.trigger()
+        handler.assert_called_once_with()
+
+        self.assertFalse(
+            hasattr(self.win, "_act_stats"),
+            "the old toolbar action is gone, not left parentless for something to reuse",
+        )
+        self.assertTrue(act.toolTip().strip(), "a menu entry still needs its tooltip")
 
     def test_every_settings_action_triggers_its_handler(self):
         """Trigger the real ``QAction`` and assert which page it asks for.

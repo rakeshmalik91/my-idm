@@ -430,7 +430,8 @@ def _stylesheet_for_palette() -> str:
         margin: 4px 6px;
     }}
 
-    /* Toolbar quick-search: sits in the gap before the Preferences button. */
+    /* Toolbar quick-search: the one expanding toolbar item, so it spans whatever width is
+       left before the Stats/Preferences buttons. */
     QLineEdit#toolbar_search {{
         background-color: {Colors.BG_DARK};
         border: 1px solid {Colors.BORDER};
@@ -520,6 +521,17 @@ def _stylesheet_for_palette() -> str:
         font-weight: 600;
         font-size: 12px;
         text-transform: uppercase;
+    }}
+
+    /* The 22px on the right above is the filter funnel's clearance, and every section pays it
+       whether it has a funnel or not. Qt adds its own header margin on top, scaled by the
+       header font, so the total can exceed the width of a narrow section — and then Qt has no
+       text box at all and drops the label rather than drawing it clipped. `#` is 30px, is the
+       one section with no funnel, and lost its label that way. Symmetric padding gives it the
+       room back. Keyed on position, not on the column: the label follows whatever is first,
+       which is the harmless direction to be wrong in. */
+    QHeaderView::section:first {{
+        padding: 6px 8px 6px 8px;
     }}
 
     QHeaderView::section:hover {{

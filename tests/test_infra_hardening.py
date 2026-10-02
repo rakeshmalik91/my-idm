@@ -135,7 +135,7 @@ class TestKeyboardShortcuts(unittest.TestCase):
         )
         self.assertEqual(self.win._act_preferences.shortcut().toString(), "Ctrl+,")
         self.assertTrue(self.win._act_tools_preferences.shortcut().isEmpty())
-        self.assertTrue(self.win._act_stats.shortcut().isEmpty())
+        self.assertTrue(self.win._act_tools_stats.shortcut().isEmpty())
 
 
 class TestDatabaseQueries(unittest.TestCase):

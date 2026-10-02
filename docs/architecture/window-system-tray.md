@@ -103,6 +103,31 @@ in the status bar instead of being swallowed.
 
 ## 4. Window State Events & Interceptions
 
+### Minimum Width Follows What the Window Holds (`_fit_min_width_to_toolbar`)
+Set by `setMinimumWidth(MAX(toolbar.sizeHint(), centralWidget().minimumSizeHint()))`, not fixed:
+
+- **the toolbar's `sizeHint`** — a `QToolBar` narrower than its contents folds the remainder into
+  a `>>` overflow button, which hides download controls behind a second click;
+- **the downloads list's own minimum** — a window narrower than that clips the columns instead of
+  scrolling them.
+
+Measured rather than hard-coded, because both numbers move: the row's width with the font, the
+scale factor and which actions are on it, the list's with its columns. The previous fixed **1100px**
+floor was measured against a toolbar carrying a queue switcher and a Statistics button and outlived
+both by ~230px. `MIN_WINDOW_WIDTH = 640` is only the pre-measurement starting value.
+
+- Re-run at the end of `_setup_toolbar()`, again in `showEvent()`, and in `_on_theme_applied()` (a
+  theme can change the font metrics it is measured against).
+- Capped at `QApplication.primaryScreen().availableGeometry().width()`. On a display too small for
+  the full row, degrading to the overflow button beats a minimum the window cannot be fitted to.
+- **Only ever raises.** A shorter toolbar later — the Tor label going from `Tor: Connecting...` to
+  `Tor: OFF`, a shorter locale — must not shrink a window the user already opened.
+
+At 1920×1032, 100% scaling, after the queue switcher and Statistics button left the strip: toolbar
+needs **787px**, the downloads list **866px**, so the floor settles at **866**. It was 1100 before,
+and the toolbar used to be 1025 — which is why the old floor was doing nothing useful for the
+toolbar it was written for.
+
 ### Minimize Interception (`changeEvent`)
 When the main window receives a `QEvent.Type.WindowStateChange`:
 - If `self.isMinimized()` is true and `cfg.enable_system_tray` & `cfg.minimize_to_tray` are active:

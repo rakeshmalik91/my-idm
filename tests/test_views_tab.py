@@ -367,9 +367,10 @@ class ViewsTabTestCase(unittest.TestCase):
     def test_the_column_list_is_in_visual_order(self):
         """Ordering control is only useful if it reads the way the table looks.
 
-        Note the app's *default* order is not identity order: ``_apply_default_tail_order``
-        deliberately pins SOURCE_DOMAIN, FILE_NAME and the seeding columns to the tail. So
-        this asserts the list mirrors the header rather than that it is sorted.
+        Note the app's *default* order is not identity order: ``_DEFAULT_COLUMN_ORDER``
+        deliberately puts QUEUE_NAME at slot 1 and SOURCE_DOMAIN, FILE_NAME and the seeding
+        columns in the tail. So this asserts the list mirrors the header rather than that it is
+        sorted.
         """
         dialog = self.make_dialog()
         header = self.window._table.horizontalHeader()

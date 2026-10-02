@@ -54,8 +54,8 @@ The canonical architecture documentation is organized under [`docs/architecture/
 
    | Tier | Command | Scope | Time |
    | :--- | :--- | :--- | :--- |
-   | Basic sanity | `run_all_tests.bat basic` | 1616 tests. No window, no tray, no real clipboard. | ~52 s |
-   | Full | `run_all_tests.bat` | All 2576 tests. | ~4–7 min |
+   | Basic sanity | `run_all_tests.bat basic` | 1621 tests. No window, no tray, no real clipboard. | ~60 s |
+   | Full | `run_all_tests.bat` | All 2594 tests. | ~4–7 min |
 
    **Read [`workflows/testing.md`](file:///d:/Projects/my-idm/.agents/workflows/testing.md) before writing a test or debugging a flake.** It holds the two-tier setup and the `ui` marker, the enforced hermeticity fixtures, the traps that have actually bitten this suite (destructive helpers resolving blank paths to the CWD, the silent `deleteLater()` widget leak, the locked-clipboard flake), the UTC-vs-local determinism rules, and the known-flaky areas.
 
@@ -76,9 +76,11 @@ The canonical architecture documentation is organized under [`docs/architecture/
    - Pushing to the remote repository must only be done if explicitly instructed by the user.
 5. **Adding a Downloads-Table Column**: **Append** a `Col` constant — never insert, or persisted
    `column_widths` / `header_state` / `sort_column` in `ui_state` re-point at the wrong field.
-   `NOT NULL DEFAULT ''` column guarded by `PRAGMA table_info`; add it to `_DEFAULT_TAIL_COLUMNS`
-   with a default width in both `_setup_ui()` and `_on_reset_view()`; the tail helper must stay an
-   **ascending** sweep. → [`workflows/qt-ui.md`](file:///d:/Projects/my-idm/.agents/workflows/qt-ui.md#1-adding-a-downloads-table-column)
+   `NOT NULL DEFAULT ''` column guarded by `PRAGMA table_info`; append it to `_DEFAULT_COLUMN_ORDER`
+   (and `_DEFAULT_TAIL_COLUMNS`, which must stay a suffix of that order) with a width in
+   `_DEFAULT_COLUMN_WIDTHS` — those two tuples feed both `_setup_ui()` and `_on_reset_view()`; the
+   order helpers must stay an **ascending** sweep. →
+   [`workflows/qt-ui.md`](file:///d:/Projects/my-idm/.agents/workflows/qt-ui.md#1-adding-a-downloads-table-column)
 6. **File Deletion**: never call `Path.unlink()` or `os.remove()` on user data. Use
    `utils.send_to_trash()` and `utils.unlock_path()`, and stop any worker holding the file first —
    on Windows an open handle makes the file undeletable.

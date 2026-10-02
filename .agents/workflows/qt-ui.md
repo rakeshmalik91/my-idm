@@ -19,9 +19,11 @@ original. See [`../AGENTS.md`](../AGENTS.md) for the index.
 - Record `column_count` in the saved UI state (already done). A state whose stored count differs
   from `Col.COUNT` predates the append, so the tail is re-pinned on restore and the user's own
   ordering of the older columns survives.
-- Add the column to `_DEFAULT_TAIL_COLUMNS` in `main_window.py` **and** set a default width in
-  both `_setup_ui()` and `_on_reset_view()`.
-- The tail helper must stay an **ascending** sweep. `moveSection()` shifts everything between
+- Add the column at the **end** of `_DEFAULT_COLUMN_ORDER` in `main_window.py` (and to
+  `_DEFAULT_TAIL_COLUMNS`, which must stay a suffix of that order — a test asserts it), plus an
+  entry in `_DEFAULT_COLUMN_WIDTHS`. Both feed `_setup_ui()` and `_on_reset_view()`; do not write
+  per-column `setColumnWidth` calls at a call site, which is how the widths drifted apart before.
+- The order helpers must stay an **ascending** sweep. `moveSection()` shifts everything between
   source and target, so placing a column left of its target displaces an already-placed
   neighbour — and the result looks correct until a column vanishes.
 
@@ -91,10 +93,9 @@ Two rules make it work:
 
 ## 6. Toolbar labels may be abbreviated; menu labels may not
 
-The Statistics button next to the playback controls reads `Stats…` — `Statistics…` ate a third of
-the toolbar strip. The Preferences button spells itself out (`Preferences…`): the toolbar has the
-room, and the former `Prefs…` read as a different feature from the Tools menu entry of the same
-name.
+The Preferences button spells itself out (`Preferences…`): the former `Prefs…` read as a different
+feature from the Tools menu entry of the same name. Statistics used to sit beside it as `Stats…`
+and now lives in **Tools** as `Statistics…` — the strip carries transport and file commands only.
 
 The Tools menu keeps its own `_act_tools_preferences` for a second reason: **a shortcut lives on
 exactly one `QAction`**, so `Ctrl+,` stays on the toolbar copy alone.
