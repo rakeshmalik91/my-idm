@@ -1335,6 +1335,8 @@ class DownloadTableModel(QAbstractTableModel):
                         e.downloaded_size = max(downloaded, e.downloaded_size)
                     elif e.total_size > 0:
                         e.downloaded_size = e.total_size
+                elif e.status in ("paused", "stopped") and downloaded == 0 and e.downloaded_size > 0:
+                    pass
                 else:
                     e.downloaded_size = downloaded
                 if total > 0:
@@ -1519,6 +1521,8 @@ class DownloadTableModel(QAbstractTableModel):
 
         for i, e in enumerate(self._all_entries):
             if e.id == download_id:
+                if entry.downloaded_size == 0 and e.downloaded_size > 0 and entry.status in ("paused", "stopped", "suspended"):
+                    entry.downloaded_size = e.downloaded_size
                 self._all_entries[i] = entry
                 break
         else:

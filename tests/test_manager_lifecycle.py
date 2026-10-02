@@ -1598,6 +1598,85 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual(self.db.get_download("p_dl_2").status, "paused")
         self.assertEqual(self.db.get_download("p_comp").status, "completed")
 
+    def test_pause_download_preserves_progress_in_model_and_db(self):
+        """Pausing an active download retains downloaded_size in database and model."""
+        test_file = Path(self.tmp_dir.name) / "progress_test.bin"
+        test_file.write_bytes(b"x" * 500_000)
+        entry = DownloadEntry(
+            id="pause-prog-test",
+            url="https://example.com/progress_test.bin",
+            filename="progress_test.bin",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=1_000_000,
+            downloaded_size=0,
+            status="downloading",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        model = DownloadTableModel()
+        model.load_entries([entry])
+        self.manager.status_changed.connect(lambda did, st, err: model.update_status(did, st, err))
+        self.manager.progress_updated.connect(
+            lambda did, dl, total, spd, eta, s, p, up: model.update_progress(did, dl, total, spd, eta, s, p, up)
+        )
+
+        # Simulate live progress reaching 500,000 bytes
+        model.update_progress("pause-prog-test", 500_000, 1_000_000, 100_000.0, 5.0)
+        row = model._id_to_row["pause-prog-test"]
+        prog_before = model.data(model.index(row, Col.PROGRESS))
+        self.assertAlmostEqual(prog_before["progress"], 50.0)
+
+        # Pause download
+        self.manager.pause_download("pause-prog-test")
+
+        prog_after = model.data(model.index(row, Col.PROGRESS))
+        self.assertAlmostEqual(prog_after["progress"], 50.0)
+        self.assertEqual(model.get_entry_by_id("pause-prog-test").downloaded_size, 500_000)
+
+        # Check database entry
+        db_entry = self.db.get_download("pause-prog-test")
+        self.assertEqual(db_entry.status, "paused")
+        self.assertEqual(db_entry.downloaded_size, 500_000)
+
+    def test_pause_segmented_download_persists_progress(self):
+        """Pausing a segmented download sums segment progress and updates downloaded_size."""
+        entry = DownloadEntry(
+            id="seg-pause-test",
+            url="https://example.com/seg_test.bin",
+            filename="seg_test.bin",
+            save_path=self.tmp_dir.name,
+            total_size=1_000_000,
+            downloaded_size=0,
+            status="downloading",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        from my_idm.database import SegmentEntry
+        seg1 = SegmentEntry(id="s1", download_id="seg-pause-test", index=0, start_byte=0, end_byte=499_999, downloaded_bytes=300_000, status="downloading")
+        seg2 = SegmentEntry(id="s2", download_id="seg-pause-test", index=1, start_byte=500_000, end_byte=999_999, downloaded_bytes=200_000, status="downloading")
+        self.db.add_segments([seg1, seg2])
+
+        model = DownloadTableModel()
+        model.load_entries([entry])
+        self.manager.status_changed.connect(lambda did, st, err: model.update_status(did, st, err))
+        self.manager.progress_updated.connect(
+            lambda did, dl, total, spd, eta, s, p, up: model.update_progress(did, dl, total, spd, eta, s, p, up)
+        )
+
+        self.manager.pause_download("seg-pause-test")
+
+        row = model._id_to_row["seg-pause-test"]
+        prog = model.data(model.index(row, Col.PROGRESS))
+        self.assertAlmostEqual(prog["progress"], 50.0)
+        self.assertEqual(model.get_entry_by_id("seg-pause-test").downloaded_size, 500_000)
+
+        db_entry = self.db.get_download("seg-pause-test")
+        self.assertEqual(db_entry.status, "paused")
+        self.assertEqual(db_entry.downloaded_size, 500_000)
+
 
 if __name__ == "__main__":
     unittest.main()

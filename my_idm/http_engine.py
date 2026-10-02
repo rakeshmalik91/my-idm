@@ -437,9 +437,23 @@ class HTTPEngine:
                 await asyncio.wait_for(task, timeout=3.0)
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 pass
-        if self._progress_cb:
-            entry = self._db.get_download(download_id)
-            if entry:
+        entry = self._db.get_download(download_id)
+        if entry:
+            segments = self._db.get_segments(download_id)
+            if segments:
+                seg_dl = sum(s.downloaded_bytes for s in segments)
+                if seg_dl > entry.downloaded_size:
+                    entry.downloaded_size = seg_dl
+                    self._db.update_progress(download_id, seg_dl)
+            elif entry.file_path and Path(entry.file_path).exists():
+                try:
+                    f_size = Path(entry.file_path).stat().st_size
+                    if f_size > entry.downloaded_size:
+                        entry.downloaded_size = f_size
+                        self._db.update_progress(download_id, f_size)
+                except OSError:
+                    pass
+            if self._progress_cb:
                 self._progress_cb(download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0)
 
     async def cancel(self, download_id: str):
@@ -875,6 +889,9 @@ class HTTPEngine:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         finally:
+            total_dl = sum(seg_progress.values())
+            if total_dl > 0:
+                self._db.update_progress(download_id, total_dl)
             self._active_segments.pop(download_id, None)
 
     async def _download_segment_curl(
@@ -906,6 +923,9 @@ class HTTPEngine:
                 if cancel_evt.is_set():
                     seg.status = "paused"
                     self._db.update_segment(seg.id, seg.downloaded_bytes, "paused")
+                    total_dl = sum(seg_progress.values())
+                    if total_dl > 0:
+                        self._db.update_progress(entry.id, total_dl)
                     return
 
                 with open(file_path, "r+b") as f:
@@ -1032,6 +1052,9 @@ class HTTPEngine:
                             self._db.update_segment(
                                 seg.id, seg.downloaded_bytes, "paused"
                             )
+                            total_dl = sum(seg_progress.values())
+                            if total_dl > 0:
+                                self._db.update_progress(entry.id, total_dl)
                             return
 
                         with open(file_path, "r+b") as f:
@@ -1081,6 +1104,9 @@ class HTTPEngine:
                 self._db.update_segment(
                     seg.id, seg.downloaded_bytes, "paused"
                 )
+                total_dl = sum(seg_progress.values())
+                if total_dl > 0:
+                    self._db.update_progress(entry.id, total_dl)
                 raise
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 if cancel_evt.is_set():

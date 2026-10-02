@@ -2056,6 +2056,28 @@ class DownloadManager(QObject):
         self._starting_downloads.discard(download_id)
         if self._is_ytdlp_native_entry(entry):
             self._stop_ytdlp_worker(download_id, "paused")
+
+        if entry.download_type == "http":
+            segments = self._db.get_segments(download_id)
+            if segments:
+                seg_dl = sum(s.downloaded_bytes for s in segments)
+                if seg_dl > entry.downloaded_size:
+                    entry.downloaded_size = seg_dl
+                    self._db.update_progress(download_id, seg_dl)
+            elif entry.file_path and Path(entry.file_path).exists():
+                try:
+                    f_size = Path(entry.file_path).stat().st_size
+                    if f_size > entry.downloaded_size:
+                        entry.downloaded_size = f_size
+                        self._db.update_progress(download_id, f_size)
+                except OSError:
+                    pass
+        elif entry.download_type == "torrent":
+            status = self._torrent.get_status(download_id)
+            if status and status["downloaded"] > entry.downloaded_size:
+                entry.downloaded_size = status["downloaded"]
+                self._db.update_progress(download_id, entry.downloaded_size)
+
         self._db.update_status(download_id, "paused")
         self._db.update_queue_order(download_id, 0)
         self.status_changed.emit(download_id, "paused", "")
@@ -2116,6 +2138,25 @@ class DownloadManager(QObject):
                 )
         elif entry.download_type == "torrent":
             self._torrent.pause(download_id)
+
+        # Sync downloaded_size
+        if entry.download_type == "http":
+            segments = self._db.get_segments(download_id)
+            if segments:
+                seg_dl = sum(s.downloaded_bytes for s in segments)
+                if seg_dl > entry.downloaded_size:
+                    entry.downloaded_size = seg_dl
+            elif entry.file_path and Path(entry.file_path).exists():
+                try:
+                    f_size = Path(entry.file_path).stat().st_size
+                    if f_size > entry.downloaded_size:
+                        entry.downloaded_size = f_size
+                except OSError:
+                    pass
+        elif entry.download_type == "torrent":
+            status = self._torrent.get_status(download_id)
+            if status and status["downloaded"] > entry.downloaded_size:
+                entry.downloaded_size = status["downloaded"]
 
         # Update DB: stopped status, clear queue position
         entry.status = "stopped"
@@ -3224,6 +3265,19 @@ class DownloadManager(QObject):
                 entry.peers = to_int(entry.metadata.get("peers", 0))
                 entry.total_seeds = to_int(entry.metadata.get("total_seeds", 0))
                 entry.total_peers = to_int(entry.metadata.get("total_peers", 0))
+        elif entry.download_type == "http":
+            segments = self._db.get_segments(download_id)
+            if segments:
+                seg_dl = sum(s.downloaded_bytes for s in segments)
+                if seg_dl > entry.downloaded_size:
+                    entry.downloaded_size = seg_dl
+            elif entry.file_path and Path(entry.file_path).exists():
+                try:
+                    f_size = Path(entry.file_path).stat().st_size
+                    if f_size > entry.downloaded_size:
+                        entry.downloaded_size = f_size
+                except OSError:
+                    pass
         if entry.status in ("completed", "seeding") and entry.total_size > 0:
             if entry.downloaded_size < entry.total_size:
                 entry.downloaded_size = entry.total_size
