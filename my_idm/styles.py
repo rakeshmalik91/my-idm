@@ -708,19 +708,27 @@ def _stylesheet_for_palette() -> str:
         border-color: {Colors.ACCENT};
     }}
 
+    /* ---- Item Views (Lists, Trees) ---- */
+    QListWidget::item,
+    QListView::item,
+    QTreeWidget::item {{
+        padding: 3px 4px;
+        min-height: 20px;
+    }}
+
     /* Item-view checkboxes are drawn through the *view's* ::indicator sub-control,
        not QCheckBox::indicator, so they fell back to a dark default whose border is
-       invisible on these backgrounds. Only the outline is declared here: the tick
-       itself stays the native one, so these still read as "✓ in a box" rather than
-       the solid accent fill used by QCheckBox. */
+       invisible on these backgrounds. Sized to 14px (16px outer with border) so they
+       fit cleanly within item row heights without cropping. */
     QListWidget::indicator,
     QListView::indicator,
     QTreeWidget::indicator {{
-        width: 16px;
-        height: 16px;
+        width: 14px;
+        height: 14px;
         border: 1px solid {Colors.BORDER};
         border-radius: 3px;
         background: {Colors.BG_DARK};
+        margin-right: 6px;
     }}
 
     QListWidget::indicator:hover,
