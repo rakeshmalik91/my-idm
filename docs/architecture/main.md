@@ -276,6 +276,9 @@ stateDiagram-v2
     suspended --> queued: User Resumes
     stopped --> queued: User Resumes
     
+    seeding --> completed: Seeding Ratio / Time Reached or User Pauses/Stops
+    completed --> seeding: User Clicks Start Seeding
+    
     completed --> file_not_found: Target File Moved/Deleted Externally
     file_not_found --> checking: User Rechecks / Re-locates File
     

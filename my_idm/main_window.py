@@ -68,8 +68,11 @@ from my_idm.dialogs import (
     RenameDialog,
 )
 from my_idm.download_model import (
+    DATE_SECTION_DEFS,
     DEFAULT_SEGREGATED_MODE,
+    SEGREGATED_MODE_LABELS,
     SEGREGATED_MODES,
+    TYPE_SECTION_DEFS,
     Col,
     DownloadTableModel,
 )
@@ -2328,10 +2331,10 @@ class MainWindow(QMainWindow):
                 current_mode = self._model.segregated_mode()
                 if current_mode == "status":
                     active_sec_ids = ("active", "seeding", "inactive")
+                elif current_mode == "type":
+                    active_sec_ids = tuple(s[0] for s in TYPE_SECTION_DEFS)
                 else:
-                    active_sec_ids = (
-                        "date_today", "date_yesterday", "date_last_7_days", "date_last_30_days", "date_older"
-                    )
+                    active_sec_ids = tuple(s[0] for s in DATE_SECTION_DEFS)
 
                 act_expand_all = QAction("Expand All Sections", self)
                 def _expand_all():
@@ -2352,13 +2355,13 @@ class MainWindow(QMainWindow):
                 sec_menu.addAction(act_collapse_all)
 
                 sec_menu.addSeparator()
-                if current_mode == "status":
-                    act_switch = QAction("Switch to Date Grouping", self)
-                    act_switch.triggered.connect(lambda: self._set_segregation_mode("date"))
-                else:
-                    act_switch = QAction("Switch to Status Grouping", self)
-                    act_switch.triggered.connect(lambda: self._set_segregation_mode("status"))
-                sec_menu.addAction(act_switch)
+                mode_menu = sec_menu.addMenu("Switch Grouping Mode")
+                for m_key in SEGREGATED_MODES:
+                    m_label = SEGREGATED_MODE_LABELS.get(m_key, m_key.capitalize())
+                    act_m = mode_menu.addAction(m_label)
+                    act_m.setCheckable(True)
+                    act_m.setChecked(current_mode == m_key)
+                    act_m.triggered.connect(lambda checked=False, m=m_key: self._set_segregation_mode(m))
 
                 sec_menu.exec(self._table.viewport().mapToGlobal(pos))
                 return

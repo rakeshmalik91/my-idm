@@ -1607,14 +1607,16 @@ class DownloadTableModel(QAbstractTableModel):
             if role == Qt.ItemDataRole.BackgroundRole:
                 return QColor("#1e2330")
             if role == Qt.ItemDataRole.ForegroundRole:
-                if entry.section_id in (SECTION_ACTIVE, SECTION_DATE_TODAY):
+                if entry.section_id in (SECTION_ACTIVE, SECTION_DATE_TODAY, SECTION_TYPE_PHOTO):
                     return QColor(Colors.ACCENT)
-                elif entry.section_id in (SECTION_SEEDING, SECTION_DATE_YESTERDAY):
+                elif entry.section_id in (SECTION_SEEDING, SECTION_DATE_YESTERDAY, SECTION_TYPE_AUDIO):
                     return QColor(Colors.PURPLE)
-                elif entry.section_id in (SECTION_DATE_LAST_7_DAYS, "date_this_week"):
+                elif entry.section_id in (SECTION_DATE_LAST_7_DAYS, "date_this_week", SECTION_TYPE_ARCHIVE):
                     return QColor("#ffb74d")
-                elif entry.section_id in (SECTION_DATE_LAST_30_DAYS, "date_this_month"):
+                elif entry.section_id in (SECTION_DATE_LAST_30_DAYS, "date_this_month", SECTION_TYPE_VIDEO):
                     return QColor("#64b5f6")
+                elif entry.section_id == SECTION_TYPE_DOCUMENTS:
+                    return QColor(Colors.CYAN)
                 else:
                     return QColor("#8fa0b5")
             if role == Qt.ItemDataRole.FontRole:

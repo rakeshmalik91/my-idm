@@ -157,14 +157,10 @@ Residual, none of which is "implement the feature":
 - **Multi-file torrents are never categorised.** A torrent is one `downloads` row; its file
   list lives inside `metadata_json["files"]`. One torrent therefore lands in exactly one
   section. Closing this needs a schema decision (a `files` table), not a helper.
-- **Expand All / Collapse All are no-ops in File Type mode.** `main_window.py:2078-2084`
-  hard-codes the five *date* section ids in its `else` branch, so in `"type"` mode it iterates
-  ids that do not exist. `TYPE_SECTION_DEFS` is the authoritative list.
-- **File Type section headers get no accent colour.** The `ForegroundRole` chain at
-  `download_model.py:1382-1394` enumerates only `SECTION_ACTIVE` and `SECTION_DATE_*`, so every
-  `type_*` header falls through to the grey default.
 - **The `type_category` override has no UI writer** — only the read and the tests. A
   mis-detected item can be filed by hand only through `metadata_json`.
+
+*(Note: Expand All / Collapse All and section header accent colors for File Type mode were resolved on 2026-10-03).*
 
 ---
 
