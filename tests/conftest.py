@@ -339,7 +339,15 @@ def block_desktop_shell_launches(monkeypatch):
 
     from PySide6.QtGui import QDesktopServices
 
-    real_startfile = os.startfile
+    # `os.startfile` exists only on Windows. Reading it unguarded used to raise AttributeError
+    # here, which meant *every* test in the session errored on Linux and macOS before a single
+    # test body ran - the suite could not even be collected.
+    #
+    # `real_startfile` is therefore allowed to be None, and the guard is installed with
+    # raising=False so it is *added* on POSIX rather than skipped. That is deliberate: if
+    # production code reaches for os.startfile off Windows, this turns a bare AttributeError into
+    # a hermeticity violation naming the offending path.
+    real_startfile = getattr(os, "startfile", None)
 
     def guarded_startfile(path, *args, **kwargs):
         _record_violation("shell", f"os.startfile({str(path)!r}) would open Explorer")
@@ -376,7 +384,9 @@ def block_desktop_shell_launches(monkeypatch):
             )
         return real_popen_init(self, args, *rest, **kwargs)
 
-    monkeypatch.setattr(os, "startfile", guarded_startfile, raising=True)
+    # raising=False: adds the attribute where it is missing (POSIX) and replaces it where it
+    # exists (Windows), so the fence is identical on every platform.
+    monkeypatch.setattr(os, "startfile", guarded_startfile, raising=False)
     monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(guarded_open_url),
                         raising=True)
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded_popen_init, raising=True)

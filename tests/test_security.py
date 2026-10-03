@@ -164,20 +164,43 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
             # the whole test passed vacuously on POSIX).
             self.skipTest(
                 "Windows Defender MpCmdRun.exe is not present on this machine; "
-                "scan_file() will short-circuit to "
-                "'Windows Defender scanner not found; skipped scan.'"
+                "scan_file() will short-circuit to a 'no scanner' verdict."
             )
         self.assertIsNotNone(path, "Windows Defender MpCmdRun.exe should be present on Windows")
         self.assertTrue(os.path.isfile(path))
         self.assertTrue(path.lower().endswith("mpcmdrun.exe"), path)
 
-    def test_scan_file_is_skipped_when_no_scanner_is_installed(self):
-        """The missing-scanner short-circuit is a documented no-op, not a clean bill of health."""
+    def test_scan_file_reports_no_verdict_when_no_scanner_is_installed(self):
+        """No scanner must not read as a clean file.
+
+        This is the fail-open that made every scan on Linux and macOS report success for a file
+        nothing had inspected. The verdict is ``None`` - neither clean nor threatened - and
+        crucially it is falsy-but-not-False, so the callers that branch on "was a threat found?"
+        do not treat it as one.
+        """
         path = self._temp_file()
         with patch("my_idm.security.find_windows_defender_path", return_value=None):
-            is_clean, report = scan_file(str(path), _defender_config())
-        self.assertTrue(is_clean)
-        self.assertEqual(report, "Windows Defender scanner not found; skipped scan.")
+            verdict, report = scan_file(str(path), _defender_config())
+        self.assertIsNone(verdict, "a missing scanner must not produce a clean verdict")
+        self.assertNotEqual(verdict, False, "no scanner is not a threat verdict either")
+        self.assertIn("not scanned", report)
+        self.assertIn("No antivirus scanner available", report)
+
+    def test_a_no_verdict_scan_is_not_treated_as_a_threat_by_the_manager(self):
+        """The dangerous direction: a falsy verdict must not trigger quarantine or deletion.
+
+        ``manager._do_scan`` branches on ``verdict is False``. If that check were written as
+        ``if not verdict`` instead, every download on a machine without Defender would be marked
+        infected and, with `action_on_threat == "delete"`, deleted.
+        """
+        path = self._temp_file()
+        with patch("my_idm.security.find_windows_defender_path", return_value=None):
+            verdict, _ = scan_file(str(path), _defender_config())
+
+        # Mirrors the manager's own branching, spelled out.
+        self.assertNotEqual(verdict, False)
+        # And the property the manager relies on.
+        self.assertFalse(verdict is False)
 
     def test_scan_file_clean_with_defender(self):
         if not RUN_REAL_AV_TESTS:
@@ -275,13 +298,24 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
 
         self.assertTrue(is_clean, report)
         self.assertIn("Clean", report)
+        # An argv list, not a shell string: the target path comes from a download name and is
+        # therefore attacker-influenced, so it must never reach a shell.
         cmd = mock_run.call_args.args[0]
-        self.assertTrue(cmd.startswith(f'"{scanner}" '), cmd)
-        self.assertIn(f'--bell "{path.resolve()}"', cmd)
+        self.assertEqual(
+            cmd,
+            [str(scanner), "--bell", str(path.resolve())],
+            "the scanner must be invoked as an argv list with the path as one argument",
+        )
         self.assertNotIn("%file%", cmd)
-        self.assertNotIn("%f ", cmd)
+        self.assertNotIn("%f", cmd)
+        self.assertNotIn("shell", mock_run.call_args.kwargs)
 
     def test_scan_file_custom_scanner_missing_executable_is_reported(self):
+        """A misconfigured scanner path yields no verdict, not a clean one.
+
+        Same fail-open as a missing Defender: pointing `custom_scanner_path` at a binary that is
+        not there must not read as "scanned, nothing found".
+        """
         path = self._temp_file()
         cfg = SecurityConfig(
             scan_after_download=True,
@@ -289,8 +323,8 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
             custom_scanner_path=r"C:\definitely\not\here\clamscan.exe",
         )
         with patch("subprocess.run", side_effect=AssertionError("no scanner to run")):
-            is_clean, report = scan_file(str(path), cfg)
-        self.assertTrue(is_clean)
+            verdict, report = scan_file(str(path), cfg)
+        self.assertIsNone(verdict)
         self.assertIn("not found", report)
 
     def test_quarantine_or_delete_file(self):

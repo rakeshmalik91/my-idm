@@ -1,8 +1,13 @@
 # Cross-Platform Architecture & Porting Specification
 
-**Status: specification, with one subsystem shipped.** Sections 3–5 are proposals, not
-descriptions, **except §4.9 (launch at login), which is implemented** in
-[`my_idm/autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) for all three platforms.
+**Status: Phases 0–3 shipped.** Sections 3–5 are a mixture, and the distinction is worth keeping
+sharp. Implemented and recorded here: §2.1–2.4 (Phase 0 — file revelation, test portability,
+close-to-tray, dependency manifests), §4.3 (notification backends), §4.4 (antivirus fail-closed,
+shell-injection fix, ClamAV auto-detection), §4.5 (XDG paths), §4.6 (VPN keywords), §4.7 (detached
+spawns), §4.8 (close-to-tray), §4.9 (launch at login), §4.10 (embedded browser), §4.11
+(typography and desktop identity), and §6 Phase 2 (CI). Still proposals: §4.2 (global hotkeys) and
+the Wayland activation-token tail of §4.8. §5 packaging rows describe artefacts not yet built.
+
 This document records what would have to change to make **My-IDM** a first-class application on
 **Linux (X11 & Wayland)** and **macOS (Intel & Apple Silicon)** alongside Windows, and what the
 current code actually does on those platforms today. Claims about current behaviour are cited as
@@ -33,98 +38,139 @@ The real blockers are narrower and sharper than "several subsystems use Win32 AP
 
 | # | Subsystem | Windows (current) | Linux / macOS today | Severity | Effort |
 | :--- | :--- | :--- | :--- | :---: | :---: |
-| 1 | **Reveal / open file** | `explorer` + `os.startfile` | **`AttributeError` — `os.startfile` does not exist**, in 7 unguarded call sites | **Blocker** | Low |
-| 2 | **Test suite** | Runs (`run_all_tests.bat`) | **Cannot run at all** — `conftest.py:342` reads `os.startfile` in an autouse fixture | **Blocker** | Low |
-| 3 | **Close-to-tray** | Tray always present | Window hides with **no tray icon** when `isSystemTrayAvailable()` is `False` (GNOME without AppIndicator) | High | Low |
-| 4 | **Dependencies** | `pip install -r requirements.txt` works | **Fails**: `win10toast` is unconditional; `psutil` missing from `pyproject.toml` | High | Low |
-| 5 | **Notifications** | `win10toast` + tray | Tray only; `win10toast` import already degrades gracefully | Med | Low |
+| 1 | **Reveal / open file** | Routed through `external_tools` helpers | Was `AttributeError` in 7 unguarded sites — **fixed** (§2.1) | **Blocker** | ✅ Done |
+| 2 | **Test suite** | Runs (`run_all_tests.bat`) | Was uncollectable — **fixed** (§2.2) | **Blocker** | ✅ Done |
+| 3 | **Close-to-tray** | Tray always present | Hid the window with no tray icon — **fixed** (§2.3) | High | ✅ Done |
+| 4 | **Dependencies** | `pip install -r requirements.txt` works | `win10toast` install failure — **fixed** (§2.4) | High | ✅ Done |
+| 5 | **Notifications** | `win10toast` + tray | `notify-send` / `osascript` chain behind the tray | Low | ✅ Done |
 | 6 | **Global hotkeys** | `user32.RegisterHotKey` + `WM_HOTKEY` | Refuses with *"only available on Windows"* (`hotkey.py:276`) | Med | High |
-| 7 | **Data paths** | `~/.my-idm` | Works, but non-standard; 4 modules hardcode the literal | Med | Med |
-| 8 | **Antivirus** | Defender `MpCmdRun.exe` | Silently reports *"scanner not found; skipped scan"* | Med | Med |
-| 9 | **Embedded browser** | Chrome HWND reparented into a tab | `find_chrome_hwnd` returns `None`; tab never attaches, no error | Med | High |
-| 10 | **VPN keywords** | `wintun`/`nord`/… | `utun`, `ipsec`, `ppp` unmatched; `wg`/`tun`/`tap` already present | Low | Low |
-| 11 | **Launchers** | `run.bat`, `run.pyw`, `my-idm-gui` | None; `.venv\Scripts\pythonw.exe` paths are Windows-only | Low | Low |
-| 12 | **Fonts / menu bar** | `Segoe UI`, `Consolas` | Fall back to whatever Qt picks; monospace metrics drift | Low | Low |
-| 13 | **Launch at login** | `HKCU\…\Run` via [`autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) | Same module: XDG `.desktop` / `launchd` agent | Low | Done |
-| 14 | **CI** | None (`.github/` does not exist) | None | Med | Low |
+| 7 | **Data paths** | `my_idm/paths.py` | Same module: XDG / App Support, legacy `~/.my-idm` preserved | — | ✅ Done |
+| 8 | **Antivirus** | Fail-open: no scanner = *clean*; plus a shell-injection in the custom scanner | Both fixed; verdict is tri-state, scanner takes argv, ClamAV auto-detected | — | ✅ Done |
+| 9 | **Embedded browser** | Chrome HWND reparented into a tab | Now stated as Windows-only where the user sees it | — | ✅ Done |
+| 10 | **VPN keywords** | `utun`/`ppp`/`ipsec` now matched; `wg`/`tun`/`tap` already were | — | — | ✅ Done |
+| 11 | **Launchers** | `run.bat`, `run.pyw`, `my-idm-gui` | `run.sh` added; entry points already worked | Low | ✅ Done |
+| 12 | **Fonts / menu bar** | `my_idm/fonts.py` resolver, 15 sites repointed | Same module | — | ✅ Done |
+| 13 | **Launch at login** | `HKCU\…\Run` via [`autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) | Same module: XDG `.desktop` / `launchd` agent | Low | ✅ Done |
+| 14 | **Background spawns** | `creationflags` at each site | Detached on POSIX via `my_idm/proc.py` | — | ✅ Done |
+| 15 | **CI** | `.github/workflows/ci.yml`: 3-OS matrix, `not ui` tier | Same; plus the Windows full tier, non-blocking | Med | ✅ Done |
+| 16 | **Desktop identity** | `.desktop` absent; `WM_CLASS` unmatched | `my-idm.desktop` + `setDesktopFileName` | Low | ✅ Done |
 
-Row 13 is implemented and documented in [§4.9](#49-launch-at-login). Note that
-`config.py:550` `auto_start_at_startup` is unrelated: it is a `TorConfig` field meaning "activate
-Tor when My-IDM starts", not "start My-IDM when the machine boots".
+What remains is row 6 (global hotkeys — Carbon/X11/Wayland backends, and the Wayland activation
+token tail of row 5 in §4.8), plus Phase 5 packaging builds, which produce artefacts rather than
+code. Note that `config.py:550` `auto_start_at_startup` is unrelated to row 13: it is a
+`TorConfig` field meaning "activate Tor when My-IDM starts", not "start My-IDM when the machine
+boots".
 
 ---
 
 ## 2. What Breaks Today
 
-### 2.1 `os.startfile` is the actual P1 (rows 1–2)
+> **Phase 0 status: rows 1–4 are resolved.** Sections 2.1–2.4 below are kept as the record of
+> *what* was broken and *how* it was fixed, because each fix is a behaviour change worth being able
+> to trace. Citations are current as of the Phase 0 work; row 13 (§4.9) was already shipped.
+
+### 2.1 `os.startfile` was the actual P1 (rows 1–2) — **Resolved**
 
 The original draft of this document described the file-manager problem as *"`explorer` does not
-exist and raises `FileNotFoundError`"*. That understates it. The unguarded sites call
-`os.startfile`, which CPython defines **only on Windows**. On Linux and macOS these are
-`AttributeError`s, not graceful fallbacks:
+exist and raises `FileNotFoundError`"*. That understated it. The seven unguarded sites called
+`os.startfile`, which CPython defines **only on Windows**, so on Linux and macOS they raised
+`AttributeError` — not a graceful fallback, but a crash on every "Open file" and "Open folder".
 
-| Call site | Guarded? | Behaviour on Linux/macOS |
+All seven now route through the two helpers in `external_tools.py`, which were already correct:
+
+| Site | Was | Now |
 | :--- | :--- | :--- |
-| `details_panel.py:1625` | none | `AttributeError` — double-clicking a file in the Files tree |
-| `details_panel.py:2021` | `else` branch | `AttributeError` — "Open folder" on the console tab |
-| `details_panel.py:2032` | `else` branch | `AttributeError` — "Open folder" with a file selected |
-| `details_panel.py:2034` | none | `AttributeError` — "Open folder" fallback |
-| `main_window.py:2085` | none | `AttributeError` — "Open file" |
-| `main_window.py:2246` | `else` branch | `AttributeError` — "Open folder" with a file selected |
-| `main_window.py:2248` | none | `AttributeError` — "Open folder" fallback |
+| `details_panel.py:1629` | `os.startfile(full_path)` | `open_file_in_default_app(full_path, create_if_missing=False)` |
+| `details_panel.py:2024` | `explorer` / `os.startfile(repo)` | `show_in_folder(repo)` |
+| `details_panel.py:2036` | `explorer /select,` split token / `os.startfile` | `show_in_folder(file_path)` |
+| `details_panel.py:2038` | `os.startfile(folder)` | `show_in_folder(folder)` |
+| `main_window.py:2096` | `os.startfile(entry.file_path)` | `open_file_in_default_app(..., create_if_missing=False)` |
+| `main_window.py:2257` | `explorer /select,` split token / `os.startfile` | `show_in_folder(file_path)` |
+| `main_window.py:2259` | `os.startfile(folder)` | `show_in_folder(folder)` |
 
-`external_tools.py:285,313,337` also call `os.startfile`, but each sits inside an explicit
-`if sys.platform == "win32":`, so they are safe.
+`create_if_missing=False` is load-bearing at both "open file" sites. The helper defaults to
+creating an empty placeholder for a missing file; the callers have already checked existence, so
+the default would fabricate a zero-byte file if the download vanished between check and call.
 
-`external_tools.show_in_folder()` (`external_tools.py:320`) is the one implementation that is
-already correct: Windows branch uses `explorer` / `startfile`, everything else goes through
-`QDesktopServices.openUrl(QUrl.fromLocalFile(...))`. The fix is therefore **consolidation onto
-that function**, not a new `reveal_in_file_manager` helper — the seven broken sites should be
-routed to it.
+Three latent bugs were fixed by the same consolidation:
 
-The same call sites also pass `explorer` its arguments wrongly. `details_panel.py:2030` and
-`main_window.py:2243` use `["explorer", "/select,", path]` as two separate `argv` elements;
-`explorer` requires one token, `f"/select,{path}"` — which is what `external_tools.py:335`
-correctly does. The split form only appears to work because Explorer tolerates it.
+- **The split `/select,` token.** `explorer` requires one argument, `f"/select,{path}"`. The old
+  code passed `["explorer", "/select,", path]` as two elements, which only worked because Explorer
+  tolerates it. `external_tools.py:335` already had the correct form.
+- **Platforms disagreed.** Windows highlighted the file; the non-Windows branch opened the
+  containing folder. Both now highlight, via `show_in_folder(file_path)`.
+- **`subprocess` was orphaned** in both modules by the change, and `os` was never imported in
+  `utils.py` — see §2.5.
 
-### 2.2 The test suite cannot start off Windows
+The reference implementation is unchanged at `external_tools.py:320` (`show_in_folder`) and
+`external_tools.py:285,313,337` (`open_file_in_default_app`), each `os.startfile` still correctly
+inside an `if sys.platform == "win32":` block. No third implementation was added.
 
-`tests/conftest.py:342` executes `real_startfile = os.startfile` inside the autouse fixture
-`block_desktop_shell_launches`. On Linux/macOS that raises `AttributeError` before any test body
-runs, so **every** test errors. Two further blockers sit behind it:
+### 2.2 The test suite could not start off Windows (row 2) — **Resolved**
 
-- `unittest.mock.patch("os.startfile")` (no `create=True`) in `test_details_panel.py:367` and
-  `test_external_tools.py:151` raises at patch time, because the attribute does not exist.
-- `test_tor.py:148` asserts `argv[0] == "taskkill"`, which is the Windows branch of
-  `tor_service.py:259`; the POSIX branch (`os.kill(pid, 15)`) is asserted nowhere.
+`tests/conftest.py:342` read `os.startfile` unguarded inside the autouse fixture
+`block_desktop_shell_launches`, and patched it with `raising=True`. On Linux and macOS that raised
+`AttributeError` before any test body ran, so **every** test in the session errored.
 
-Until this is fixed there is no signal from CI on non-Windows, which makes every other item in
-this document unverifiable. It is sequenced first for that reason.
+Fixed at the source rather than skipped: `real_startfile` is now `getattr(os, "startfile", None)`
+(`conftest.py:350`) and the guard is installed with `raising=False` (`conftest.py:389`), so it is
+*added* where the attribute is missing instead of skipped. That is deliberate — if production code
+reaches for `os.startfile` off Windows it now produces a hermeticity violation naming the path,
+rather than a bare `AttributeError`.
 
-### 2.3 Close-to-tray can strand the application
+Five tests patched `os.startfile` with mock's default `raising=True` and had to gain `create=True`
+for the same reason (`test_details_panel.py` ×2, `test_external_tools.py` ×3).
 
-`main_window.closeEvent` (`main_window.py:4013`) gates on `cfg.enable_system_tray and
-cfg.close_to_tray` — both default `True` (`config.py:122,124`) — but **not** on whether the tray
-icon was actually created. `_setup_system_tray` (`main_window.py:1407`) returns early with
-`self._tray_icon = None` when `QSystemTrayIcon.isSystemTrayAvailable()` is `False`, which is the
-normal case on GNOME and on Wayland compositors without an AppIndicator implementation. The user
-then closes the window, `event.ignore()` runs, the window hides, and there is no tray icon, no
-taskbar entry and no menu to restore it. (Launching a second instance recovers the window via the
-IPC path in `single_instance.py:19`, but that is not a discoverable escape hatch.)
+**A correction to the previous revision of this document.** It claimed the POSIX termination branch
+(`os.kill(pid, 15)`, `tor_service.py:267`) was "asserted nowhere". That was wrong:
+`tests/test_tor.py:93-99` patches both `subprocess.run` and `os.kill` in `setUp` and its assertion
+at `test_tor.py:146-153` branches on whichever was called. The branch was asserted but never
+*executed*, because the suite could not start. Two real hazards were found alongside it in
+`tests/test_ui_tor_and_utils.py`, where `TorTestCase` patched only `subprocess.run`: off Windows
+`TorServiceManager.stop()` would have called the **real** `os.kill` against the fictional PIDs
+those tests invent (777, 5, 4321, and `1` in one case — on Linux, PID 1 is init). `TorTestCase` now
+fences both mechanisms in `setUp`, and its four assertions branch on `os.name == "nt"`, mirroring
+`tor_service.py:259`.
 
-### 2.4 Dependency manifests are inconsistent and Windows-only
+### 2.3 Close-to-tray could strand the application (row 3) — **Resolved**
 
-`pyproject.toml:8-16` and `requirements.txt` have drifted:
+`main_window.closeEvent` gated on `cfg.enable_system_tray and cfg.close_to_tray` — both default
+`True` (`config.py:122,124`) — but **not** on whether a tray icon existed. `_setup_system_tray`
+(`main_window.py:1406`) leaves `_tray_icon` as `None` when
+`QSystemTrayIcon.isSystemTrayAvailable()` is `False`, the normal case on GNOME and on Wayland
+compositors without an AppIndicator. Closing the window then hid it with no tray icon, no taskbar
+entry and no menu, while downloads kept running.
 
-| Package | `pyproject.toml` | `requirements.txt` | Effect off Windows |
-| :--- | :--- | :--- | :--- |
-| `win10toast` | absent | `>=0.9` | **Hard install failure** — the package is Windows-only |
-| `psutil` | absent | `>=5.9` | `network.py:171` falls back to `socket.gethostbyname_ex`, losing per-interface VPN detection |
-| `aiohttp-socks` | `>=0.10.0` | absent | `http_engine.py:247` fails to import; SOCKS5 proxying breaks |
+`closeEvent` now consults `_can_hide_to_tray()` (`main_window.py:4037`), which requires both
+preferences *and* `_has_tray_icon()` (`main_window.py:4026`). Losing the window is strictly worse
+than losing close-to-tray, so with no tray the window closes normally.
 
-`win10toast` should move behind an environment marker, and the two files should be generated from
-one source. Note that `notifications.py:29` already wraps the import in `try/except ImportError`,
-so the *code* is already portable — only the *manifest* is not.
+`changeEvent` had the **same defect with no check at all** and was not called out in the previous
+revision: minimizing hid the window via `QTimer.singleShot(0, self.hide)` whenever
+`minimize_to_tray` was on (`main_window.py:3996`). It now consults the same predicate.
+
+`_setup_system_tray` also logs a warning when the tray is unavailable, so the degraded state is
+visible at startup instead of being discovered the first time the window is closed.
+
+### 2.4 Dependency manifests were inconsistent (row 4) — **Resolved**
+
+`pyproject.toml` and `requirements.txt` had drifted in both directions. Since `requirements.txt` is
+the documented install path for end users (`README.md:54`, `docs/user-guide.md:40`), a package
+present in only one file was silently missing for whoever installed via the other.
+
+| Package | Was | Now |
+| :--- | :--- | :--- |
+| `win10toast` | `requirements.txt`, unmarked | Both, behind `sys_platform == "win32"` |
+| `psutil` | `requirements.txt` only | Both |
+| `aiohttp-socks` | `pyproject.toml` only | Both |
+
+The `win10toast` marker is the part that mattered: pip cannot resolve that package on Linux or
+macOS, so an unmarked entry makes `pip install` **fail outright** rather than skip it.
+`notifications.py:29` already guards the import, so the code degrades to the tray without it —
+only the manifest was broken.
+
+Both files now carry the same nine requirements and are cross-checked against each other with
+markers compared through `packaging`'s parser, so `'win32'` and `"win32"` are not read as drift.
 
 ### 2.5 Non-issues, recorded so they are not re-litigated
 
@@ -132,7 +178,7 @@ These were investigated and need no work:
 
 - **VPN binding is already portable.** `HTTPEngine` binds via `TCPConnector(local_addr=...)`
   (`http_engine.py:255`) and `TorrentEngine` via `listen_interfaces` / `outgoing_interfaces`
-  (`torrent_engine.py:424-425`). Both are address-based, need no privileges, and work on all three
+  (`torrent_engine.py:425-426`). Both are address-based, need no privileges, and work on all three
   platforms. Adding `SO_BINDTODEVICE` would be a *regression* in portability: it requires
   `CAP_NET_RAW` and is Linux-only, so it cannot be the primary mechanism.
 - **Tor discovery already handles POSIX.** `tor_service.py:59-66` searches `/usr/bin/tor`,
@@ -146,11 +192,17 @@ These were investigated and need no work:
 - **`QSettings` needs no change.** NativeFormat already resolves to the correct per-platform
   location (registry / `~/.config` / `~/Library/Preferences`). Forcing `IniFormat` in production
   would be a regression; it belongs in tests only, which `conftest.py:123` already does.
-- **Emoji font stacks are already correct.** `main_window.py:345` and `utils.py:165` both use
+- **Emoji font stacks are already correct.** `main_window.py:344` and `utils.py:166` both use
   `["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", "sans-serif"]`.
 - **`creationflags=0` is harmless on POSIX.** CPython only raises when the value is non-zero
   (`Lib/subprocess.py:854`). The unguarded uses at `youtube_tool.py:305,1046,1060` therefore do
   not break — they are noise to clean up, not a bug.
+- **`utils.send_to_trash` is already cross-platform** — `QFile.moveToTrash` first, `send2trash`
+  second, permanent delete last. It did carry one Windows-shaped wart: a retry with
+  `path_str.replace("/", "\\")`, which on POSIX builds a path with literal backslashes that can
+  never exist. Now guarded by `os.name == "nt"` (`utils.py:519`), which preserves the Windows UNC
+  case it was written for. Note `utils.py` did not import `os` at all — inside the surrounding
+  `try/except` that would have silently swallowed the `NameError` and disabled the retry.
 
 ---
 
@@ -225,27 +277,19 @@ company: it answers one OS question with one function per platform.
 
 ## 4. Component Plans
 
-### 4.1 File revelation, opening and trash
+### 4.1 File revelation, opening and trash — **Done**
 
-**Today.** `external_tools.show_in_folder()` is correct and is the reference implementation.
-Seven call sites bypass it (see §2.1). `utils.send_to_trash()` (`utils.py:489`) is already
-cross-platform — `QFile.moveToTrash` first, `send2trash` second, permanent delete last — with one
-wart: the `path_str.replace("/", "\\")` retry at `utils.py:512` is a Windows-shaped fallback that
-can only ever help on Windows.
+All seven call sites now route through `external_tools.show_in_folder` /
+`open_file_in_default_app` (§2.1 for the site-by-site mapping and the three latent bugs this
+fixed). No `my_idm/platform/fs.py` package was created: the two helpers already were the correct
+abstraction, so the work was deletion rather than extraction, and a six-module package for one
+remaining question would have been indirection without benefit.
 
-**Target.**
+The `utils.py:519` backslash retry is now Windows-scoped (§2.5).
 
-1. Move `show_in_folder` and `open_file_in_default_app` into `my_idm/platform/fs.py` unchanged in
-   behaviour, and repoint all seven broken call sites at it. Do not add a third implementation.
-2. Delete the `os.startfile` calls from `details_panel.py` and `main_window.py` entirely; the
-   platform branch already lives inside the helper.
-3. Fix the split `explorer` argument at `details_panel.py:2030` and `main_window.py:2243` by
-   routing through the helper, which already uses `f"/select,{p}"`.
-4. Drop the backslash retry from `utils.py:512`.
-5. If per-platform reveal fidelity matters (Nautilus/Dolphin/Thunar highlight the file rather than
-   opening the folder), add `org.freedesktop.FileManager1.ShowItems` over D-Bus as the first
-   branch of the POSIX path, falling back to `QDesktopServices`. This is a *nice-to-have*; the
-   blocker is fixed without it.
+Still open, and genuinely optional: `org.freedesktop.FileManager1.ShowItems` over D-Bus as the
+first branch of the POSIX path, so Nautilus/Dolphin/Thunar highlight the file instead of opening
+its folder. `QDesktopServices` already works everywhere.
 
 ### 4.2 Global hotkeys
 
@@ -278,118 +322,208 @@ than failing the feature.
 and `Meta`/`Win`/`Super` (`hotkey.py:45`) need mapping to `Super_L`/`Meta_L` keycodes on X11 and
 `Command` on macOS.
 
-### 4.3 Notifications
+### 4.3 Notifications — **Done**
 
-**Today.** `notifications.show_notification` already prefers a registered handler
-(`notifications.py:61`) and only falls through to `win10toast` if none is registered. The GUI
-registers `QSystemTrayIcon.showMessage` at `main_window.py:1491`. So with a tray present,
-notifications already work everywhere; the import guard handles the rest.
+`show_notification` already preferred a registered handler (`notifications.py:61`), which the GUI
+wires to `QSystemTrayIcon.showMessage` (`main_window.py:1498`) — so with a tray present,
+notifications already worked everywhere. What was missing was any fallback for when there is **no**
+tray: GNOME without AppIndicator, some Wayland compositors, or a notification raised before the GUI
+finishes starting.
 
-**Target.** `platform/notif.py` with a backend chain, each returning `bool` so failure is silent
-and non-fatal:
+`notifications.py` now has a per-platform chain (`notifications.py:_PLATFORM_FALLBACKS`), each
+backend returning `bool` and swallowing its own errors — a notification is a courtesy, and the
+callers are download-completion paths:
 
 1. `QSystemTrayIcon.showMessage` — primary everywhere, already wired.
-2. Linux: `notify-send` via `shutil.which`, then `libnotify`/D-Bus
-   `org.freedesktop.Notifications`.
-3. macOS: `osascript -e 'display notification …'`, then PyObjC `UNUserNotificationCenter`
-   (PyObjC is a packaging dependency, not a runtime one — see §5).
-4. Windows: `win10toast`, unchanged.
+2. Linux: `notify-send` (`notifications.py:_notify_via_notify_send`) via `shutil.which`. Preferred
+   over the D-Bus binding because it needs no extra Python package and exists wherever libnotify
+   does.
+3. macOS: `osascript -e 'display notification …'`
+   (`notifications.py:_notify_via_osascript`). AppleScript rather than PyObjC, so **PyObjC stays an
+   optional packaging extra** instead of becoming a hard dependency (§5).
+4. Windows: `win10toast`, unchanged, now behind an environment marker (§2.4).
 
-Move `win10toast` out of the unconditional dependency set (§2.4) regardless of which backend wins.
+Both new backends build **argv, never a shell string** — the message carries a download filename,
+which is attacker-influenced. `notify-send` also only gets `--icon` when the file exists, because
+it treats a missing icon path as a hard error rather than ignoring it, which would lose the
+notification entirely. The `osascript` backend additionally escapes for the *language*: argv blocks
+the shell but not AppleScript, so an unescaped quote in a filename would end the string early and
+the remainder would parse as code.
 
-### 4.4 Antivirus
+### 4.4 Antivirus — **Done (fail-closed); ClamAV adapter still open**
 
-**Today.** `find_windows_defender_path()` (`security.py:165`) searches Program Files and the
-`ProgramData` Defender Platform tree. `scan_file` (`security.py:354`) treats "not found" as
-`(True, "Windows Defender scanner not found; skipped scan")` — a **fail-open** that reports the
-file as clean. On Linux/macOS every scan therefore returns a clean verdict with no scan performed.
-That is the actual defect; the missing ClamAV integration is a consequence.
+**The defect was a fail-open, and it was worse than "no scanner".** `scan_file`
+(`security.py:309`) returned `True` — a *clean* verdict — for every way a scan could fail to
+happen: no scanner installed, a configured custom scanner path that is not there, a timeout, a
+crash, an unrecognised exit code. On any machine without Windows Defender — that is, every Linux
+and macOS machine — every post-download scan therefore reported success for a file nothing had
+inspected, and the Details Panel rendered a green "✔ Clean (Scanned)".
 
-**Target.**
+The verdict is now tri-state: `True` clean, `False` threat, `None` **no verdict reached**.
+Seven return paths moved to `None` (`security.py:394` and siblings). All four call sites handle
+three states:
 
-1. Fail **closed** when `scanner_type == "defender"` and the binary is absent: return
-   `(None, "no scanner available")` and surface it in the Details Panel as *Not scanned*, distinct
-   from *Clean*. Do not let "could not scan" render as "safe".
-2. Add a `platform/scan.py` adapter:
-   - **Linux** — `clamscan`/`clamdscan` via `shutil.which`. Exit `0` clean, `1` infected,
-     `2` error. Default template `clamscan --no-summary "%file%"`.
-   - **macOS** — ClamAV via Homebrew, plus `spctl --assess --type execute` as a Gatekeeper
-     signal. Note `spctl` is a code-signing assessment, not a malware scanner; it must not be
-     presented as one, and its non-zero exit is *not* a threat verdict.
-3. Keep the existing **custom scanner** path (`security.py:319`) as the universal escape hatch —
-   it already takes an arbitrary executable plus a `%file%` template, so on any POSIX platform a
-   user can point it at `clamscan` today with no code change. This is the cheapest interim answer
-   and should be documented in `antivirus.md` before any of the above is written.
+- `manager.py:3366` and `manager.py:3417` — the download **completes** but records
+  `antivirus_scanned = False` plus `antivirus_scan_error`. Completing is right: refusing to finish
+  a download because no antivirus happens to be installed is a worse failure than the one being
+  guarded against. Crucially the threat branch is `if verdict is False:`, **not** `if not
+  verdict:` — `None` is falsy, so the latter would route every unscanned download into quarantine
+  and, with `action_on_threat == "delete"`, delete the user's files.
+- `details_panel.py:1124` — a fourth state in amber, "⚠ Not scanned — <reason>", so a failed scan
+  is visibly different from a pending one.
+- The two scanner-test dialogs report it as "could not be run, the result is unknown" rather than
+  as success or as a detected threat.
 
-### 4.5 Data paths and XDG compliance
+**A command injection was found and fixed alongside it.** The custom-scanner path built a
+`shell=True` string with the target path interpolated into it (`security.py:357` now builds an
+argv list instead). The path comes from a download's filename, which a crafted torrent controls, so
+a name containing `"` closed the surrounding quotes and `&`, `|`, `$(...)` then executed — arbitrary
+commands as the user, triggered by downloading a file. `shlex.split` now splits the template and
+the path is substituted *after* splitting, so a filename containing spaces stays one argument.
 
-**Today.** `~/.my-idm` is hardcoded in four places, not one:
+**Still open:** nothing on the scan path. ClamAV is auto-detected — see below.
 
-| Site | Purpose |
-| :--- | :--- |
-| `database.py:19` | `APP_DIR`, `DB_PATH` (`database.py:20`) |
-| `torrent_engine.py:40` | `FASTRESUME_DIR` |
-| `tor_service.py:83` | `tor_data` |
-| `main.py:18-19` | `DEFAULT_BACKLOG`, `LOGS_DIR` (derived from `APP_DIR`, so indirect) |
+#### ClamAV auto-detection
 
-**Target.** One resolver, `platform/paths.py`, with an explicit migration rule:
+`find_clamav()` (`security.py:322`) looks for `clamdscan` then `clamscan` on `PATH` and returns
+them with `--no-summary %file%` (clamscan exits `0` clean, `1` infected, `2` error).
+`--no-summary` because My-IDM builds its own report line from the exit code.
+
+The wiring needed care. `scan_file`'s scanner selection is a **binary** Defender-or-Custom radio
+(`security_dialog.py:164`), so `scanner_type == "defender"` is what every stored configuration
+says — *including on Linux and macOS, where Defender cannot exist*. Left alone, that meant default
+settings could never scan off Windows no matter how ClamAV was installed. So `defender` is
+reinterpreted as "the system scanner" on non-Windows platforms (`security.py:494`), with a log line
+saying so, and the radio is **relabelled per platform** — "System scanner - ClamAV" rather than
+"Windows Defender", because a label naming software that does not exist is one a user can act on.
+Windows behaviour is unchanged.
+
+Detection only, never installation: installing a security tool, let alone a system daemon, without
+being asked is not this application's decision. A packaged build finds its own bundled copy through
+the same lookup.
+
+### 4.5 Data paths and XDG compliance — **Done**
+
+`~/.my-idm` was hardcoded in four places, not one. All four now route through
+[`my_idm/paths.py`](file:///d:/Projects/my-idm/my_idm/paths.py), whose `data_dir()`
+(`paths.py:128`) resolves:
 
 | Platform | Config | Data |
 | :--- | :--- | :--- |
 | Linux/BSD | `$XDG_CONFIG_HOME/my-idm` (default `~/.config/my-idm`) | `$XDG_DATA_HOME/my-idm` (default `~/.local/share/my-idm`) |
 | macOS | `~/Library/Application Support/My-IDM` | same |
-| Windows | `%APPDATA%\My-IDM`, else `~/.my-idm` | same |
+| Windows | `%APPDATA%\My-IDM` | same |
 
-Backward compatibility: if `~/.my-idm` exists and is non-empty, keep using it and log once at
-`INFO` that the legacy location is in use. Migrating a user's live `downloads.db` unattended is
-not worth the risk of splitting one user's history across two directories. `QSettings` is left
-alone — it already resolves correctly per platform (§2.5).
+| Site | Now |
+| :--- | :--- |
+| `database.py:24` | `APP_DIR` (= `data_dir()`), `database.py:25` `DB_PATH` |
+| `torrent_engine.py:41` | `FASTRESUME_DIR` |
+| `tor_service.py:85` | Tor's `DataDirectory` |
+| `main.py:19-20` | `DEFAULT_BACKLOG`, `LOGS_DIR` |
 
-### 4.6 VPN and network binding
+**The deliberate decision: a pre-existing `~/.my-idm` keeps winning, on every platform**
+(`paths.py:77`). A user's `downloads.db` is their download history — every URL, every completed
+file, hours of seeding. Migrating it unattended means opening a live SQLite database the app may
+hold, and getting it wrong splits one user's history across two directories in a way they cannot see
+and cannot undo. So nothing is migrated.
 
-**Today.** Binding is already portable (§2.5). `_VPN_KEYWORDS` (`network.py:15`) already contains
-`wg`, `tun`, `tap` and `tailscale`; what is missing for POSIX interface names is `utun`
-(macOS system VPN), `ipsec` and `ppp`.
+That means a user with a pre-existing `~/.my-idm` on Linux keeps the non-standard location until
+they move it themselves. The trade-off is explicit: this is the cost of not risking their history,
+and it is why the legacy branch is gated on the directory *existing* rather than on the platform. A
+**fresh** install on Linux or macOS gets the standard location, which is what makes the difference
+observable to anyone starting clean.
 
-**Target.** Add those three keywords. Explicitly do **not** add `SO_BINDTODEVICE`; if
-interface-level binding is ever wanted, `IP_BOUND_IF` + `if_nametoindex` is the BSD/macOS form and
-requires privileges on both platforms, which conflicts with the unprivileged design here.
+Two details that are easy to get wrong and were: a *relative* `XDG_DATA_HOME` is ignored, because
+the spec calls it invalid and joining one onto `$HOME` scatters data where no desktop environment
+looks; and `default_downloads_dir()` (`paths.py:229`) uses `QStandardPaths` rather than
+`~/Downloads`, which is wrong on any install that localises directory names.
 
-### 4.7 Process spawning
+`QSettings` is left alone — it already resolves correctly per platform (§2.5). `config_dir()`
+(`paths.py:149`) is provided for future file-based config, deliberately *separate* from
+`data_dir()`: a stray config file in the data directory ends up in backups of the user's download
+history.
 
-**Today.** Four sites pass `creationflags` unconditionally (`youtube_tool.py:305,1046,1060`, plus
-`external_tools.py:187`); three more guard correctly (`external_tools.py:172,217`,
-`tor_service.py:149`). `creationflags=0` is accepted on POSIX, so nothing breaks — but no POSIX
-site sets `start_new_session`, so background children (Tor, the AnimePahe scraper) share the
-parent's process group and die with the terminal.
+### 4.11 Typography, menu bar and app identity — **Done**
 
-**Target.** `platform/proc.py`:
+Sixteen call sites hardcoded `"Segoe UI"` or `"Consolas"` — Windows faces. On Linux and macOS Qt
+falls back to a default sans that ignores the app's metrics, and for the two monospace sites it
+means the console and file-tree columns lose fixed-pitch alignment: `shorten_path` and the segment
+table *measure text* to decide where to elide, so a proportional substitution makes those
+measurements wrong and the columns ragged.
 
-```python
-def background_kwargs() -> dict:
-    """Kwargs for launching a silent, detached background process."""
-    if sys.platform == "win32":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
-    return {"start_new_session": True}
-```
+[`my_idm/fonts.py`](file:///d:/Projects/my-idm/my_idm/fonts.py) holds three ordered preference
+chains — `ui_font_families()` (`fonts.py:91`), `mono_font_families()` (`fonts.py:96`),
+`emoji_font_families()` — and Qt resolves a list itself, picking the first family the font database
+has. Every chain starts with the platform's own UI face, because the OS default is what the user's
+other applications use.
 
-Apply at all seven sites. For the fully detached GUI launcher (`external_tools.py:218`), add
-`CREATE_NEW_PROCESS_GROUP` on Windows to match the existing intent.
+All 15 sites now call through it: `details_panel.py:2162` (the last hardcoded monospace, now
+`mono_font`), `download_model.py`, `main_window.py:345` and `utils.py` (emoji, which was already
+correct and merely duplicated), ten in `splash.py`, and the stylesheet's CSS family via
+`stylesheet_family()` (`fonts.py:158`), which quotes every name because a family containing a space
+or a digit is not a valid unquoted CSS identifier.
 
-### 4.8 Close-to-tray and single-instance activation
+Windows still resolves `Segoe UI` first, so **nothing changes visually for existing users**. The
+guards in `tests/test_fonts.py` cover what is easy to break: an emptied table must not yield an
+empty family list (which does not raise — Qt substitutes its own default silently, leaving the app
+subtly wrong with nothing in the log), and no family may be shared between the UI and mono chains.
 
-**Today.** See §2.3. `activate_window` is already correct on X11.
+**App identity.** `my-idm.desktop` ships with `StartupWMClass=My-IDM`, and
+`main.py:119` now calls `setDesktopFileName("my-idm.desktop")`. Without that call Qt derives
+`WM_CLASS` from the application name alone and the entry never matches: GNOME and KDE then show no
+taskbar icon and a tray icon the user cannot associate with the window, and both match strictly
+rather than guessing. It is also the app id the GlobalShortcuts portal requires (§4.2), so it is
+not cosmetic. `tests/test_desktop_entry.py` asserts the three identifiers agree, because nothing
+fails *loudly* when they drift.
 
-**Target.**
+The `Exec` line points at `run.sh`, which is right for a checkout and wrong for an installed
+package; packaging replaces it (§5).
 
-1. Gate `closeEvent` on the tray icon actually existing, not on the config flag:
-   `cfg.close_to_tray and self._tray_icon is not None`. If there is no tray, close normally —
-   losing the window is strictly worse than losing the tray behaviour.
-2. Warn at startup when `isSystemTrayAvailable()` is `False` but `enable_system_tray` is set, so
-   the degraded state is visible rather than discovered by accident.
-3. Wayland: pass an `XDG_ACTIVATION_TOKEN` in the existing `QLocalSocket` payload
-   (`single_instance.py:69`) and consume it via `gtk_window_activate`/Qt's
-   `QWindow.requestActivate()`. macOS needs no change beyond what is already there.
+### 4.6 VPN and network binding — **Keywords done; binding already portable**
+
+Binding needed no work (§2.5). `_VPN_KEYWORDS` (`network.py:23`) gained `utun`, `ppp` and
+`ipsec` (`network.py:30`) for the POSIX interface names.
+
+This was not cosmetic. macOS names *every* system-VPN interface `utunN` regardless of provider,
+and BSD/Linux name theirs `pppN` / `ipsecN`; none matched before, so a fully connected tunnel was
+not tagged as a VPN — and since `get_available_interfaces` sorts VPNs first, it also sank down the
+list. Note `tun` already covers `utun` by substring, which is why the explicit entry is belt-and-braces
+rather than load-bearing.
+
+`SO_BINDTODEVICE` was **not** added, deliberately: it needs `CAP_NET_RAW`, is Linux-only, and would
+replace an unprivileged address-based mechanism with a privileged one.
+
+### 4.7 Process spawning — **Done**
+
+No POSIX site set `start_new_session`, so every background child shared My-IDM's process group and
+terminal. Closing the terminal My-IDM was started from delivered SIGHUP to the Tor proxy — it died
+mid-download, silently — and Ctrl-C reached children nobody expected it to.
+
+All sites now route through `my_idm/proc.background_kwargs()` (`proc.py:33`), which returns exactly
+one platform key: `creationflags` with `CREATE_NO_WINDOW` on Windows, `start_new_session` on POSIX.
+Applied at the scraper (`external_tools.py:203`), the two AnimePahe GUI launches, and Tor
+(`tor_service.py:158`). `youtube_tool`'s three sites pass `detach=False`: those are
+`subprocess.run(timeout=...)` calls that are *waited on*, where detaching would mean Ctrl-C no
+longer interrupts a long yt-dlp fetch — a different surprise, not a fix.
+
+This also retires the `creationflags` pattern the previous revision flagged as noise. It was never
+a crash — CPython only rejects a non-zero value on POSIX — but it was seven near-copies of a
+two-line answer, and the copies had drifted.
+
+`start_new_session` is applied unconditionally on POSIX rather than being opt-in: every caller here
+wants detachment, and a flag nobody sets is a flag nobody reads.
+
+### 4.8 Close-to-tray and single-instance activation — **Close-to-tray done; Wayland token open**
+
+**Close-to-tray: done.** `closeEvent` and `changeEvent` both gate on `_has_tray_icon()` rather
+than on the preference alone, and `_setup_system_tray` warns at startup when the tray is missing
+(§2.3).
+
+**Still open:** the Wayland activation token. `single_instance.activate_window`
+(`single_instance.py:19`) already does `raise_()` + `activateWindow()`, which Qt maps to
+`_NET_ACTIVE_WINDOW` on X11 and to a normal activation on macOS, so only Wayland needs work: carry
+an `XDG_ACTIVATION_TOKEN` in the existing `QLocalSocket` payload (`single_instance.py:69`) and
+consume it on the receiving side.
 
 ### 4.9 Launch at login
 
@@ -427,18 +561,22 @@ A failure to register does **not** discard the preference. The user's intent sur
 registry hive or a read-only home, and the failure is surfaced in a dialog instead of leaving a
 checkbox that quietly lies.
 
-### 4.10 Embedded browser container
+### 4.10 Embedded browser container — **Done (explicitly Windows-only)**
 
-**Today.** `find_chrome_hwnd` (`external_tools.py:72`) returns `None` off Windows, and
-`attach_window` (`details_panel.py:468`) sets `_chrome_hwnd` then returns early at
-`details_panel.py:495`. The AnimePahe console tab therefore shows its placeholder forever with no
-error surfaced. Reparenting a foreign top-level window into a Qt tab has no portable equivalent:
-X11 would need `XReparentWindow` on a client window, macOS has nothing comparable.
+`find_chrome_hwnd` returned `None` off Windows, so the Embedded Browser sub-tab was never added and
+nothing explained why: a user on Linux launched the scraper, a browser opened separately, and the
+panel silently had no view of it.
 
-**Target.** Treat this as an explicitly Windows-only feature. Detect the platform and disable the
-browser sub-tab with a stated reason ("embedded browser view is Windows-only") rather than
-presenting a tab that can never populate. A cross-platform alternative — launching the system
-browser and streaming nothing back — is a product decision, not a porting task.
+The reason is now stated where the user looks. `external_tools.embedded_browser_supported()`
+(`external_tools.py:73`) is the single predicate — `find_chrome_hwnd` consults it too, so the flag
+shown to the user and the behaviour that decides whether the tab attaches cannot drift apart — and
+the console header carries the reason (`details_panel.py:2745`).
+
+This stays Windows-only, and that is not a missing feature. Docking the browser means reparenting a
+foreign top-level window into a Qt widget: X11 needs `XReparentWindow` against a client window plus
+a matching event loop, and macOS has no comparable public API. A cross-platform alternative —
+launching the system browser and streaming nothing back — is a product decision, not a porting
+task.
 
 ### 4.11 Typography, menu bar and app identity
 
@@ -493,76 +631,121 @@ Phase 0 is first because nothing else can be verified until it lands.
 gantt
     title Cross-Platform Porting Milestones
     dateFormat  YYYY-MM-DD
-    section Phase 0: Unblock
-    Fix os.startfile call sites (7)          :p0_1, 2026-10-06, 2d
-    Make conftest + suite POSIX-safe         :p0_2, after p0_1, 2d
-    Reconcile pyproject / requirements       :p0_3, after p0_2, 1d
-    Fix close-to-tray tray guard             :p0_4, after p0_3, 1d
-    section Phase 1: Core portability
-    platform/paths.py + XDG resolution       :p1_1, after p0_4, 3d
-    platform/proc.py + spawn kwargs          :p1_2, after p1_1, 2d
-    platform/fs.py + call-site consolidation :p1_3, after p1_2, 2d
-    platform/fonts.py + typography           :p1_4, after p1_3, 2d
-    section Phase 2: Security
-    Antivirus fail-closed + ClamAV adapter   :p2_1, after p1_4, 4d
-    VPN keyword expansion (utun/ipsec/ppp)   :p2_2, after p2_1, 1d
-    Notification backend chain               :p2_3, after p2_2, 3d
-    section Phase 3: Desktop integration
-    macOS Carbon hotkey backend              :p3_1, after p2_3, 4d
-    X11 XGrabKey hotkey backend              :p3_2, after p3_1, 5d
-    Wayland portal backend + .desktop id     :p3_3, after p3_2, 4d
-    Wayland activation token over IPC        :p3_4, after p3_3, 2d
-    Mark embedded browser Windows-only        :p3_5, after p3_4, 1d
-    section Phase 4: Packaging & CI
-    GitHub Actions matrix (win/mac/ubuntu)   :p4_1, 2026-11-16, 3d
-    AppImage build                           :p4_2, after p4_1, 4d
-    macOS .app bundle + notarization         :p4_3, after p4_2, 5d
-    Flatpak manifest                         :p4_4, after p4_3, 3d
+    section Phase 0: Unblock — complete
+    Fix os.startfile call sites (7)          :p0_1_done, 2026-10-06, 2d
+    Make conftest + suite POSIX-safe         :p0_2_done, after p0_1_done, 2d
+    Reconcile pyproject / requirements       :p0_3_done, after p0_2_done, 1d
+    Fix close-to-tray tray guard             :p0_4_done, after p0_3_done, 1d
+    section Phase 1: Correctness
+    Antivirus fail-closed + shell-injection   :p1_1_done, after p0_4_done, 2d
+    VPN keywords for POSIX interfaces        :p1_2_done, after p1_1_done, 1d
+    Embedded browser marked Windows-only      :p1_3_done, after p1_2_done, 1d
+    Detached background spawns (proc.py)      :p1_4_done, after p1_3_done, 1d
+    section Phase 2: Verification
+    CI matrix (win/mac/ubuntu)               :p2_1_done, after p1_4_done, 2d
+    Security + manifest checks in CI         :p2_2_done, after p2_1_done, 1d
+    section Phase 3: Remaining portability — complete
+    paths.py + XDG/App Support resolution   :p3_1_done, after p2_2_done, 3d
+    fonts.py + typography (15 sites)        :p3_2_done, after p3_1_done, 3d
+    run.sh + .desktop + WM_CLASS identity   :p3_3_done, after p3_2_done, 1d
+    Notification backend chain               :p3_4_done, after p3_3_done, 3d
+    ClamAV auto-detection on POSIX           :p3_5_done, after p3_4_done, 2d
+    section Phase 4: Desktop integration
+    macOS Carbon hotkey backend              :p4_1, after p3_5_done, 4d
+    X11 XGrabKey hotkey backend              :p4_2, after p4_1, 5d
+    Wayland portal backend (app id shipped)  :p4_3, after p4_2, 3d
+    Wayland activation token over IPC        :p4_4, after p4_3, 2d
+    section Phase 5: Packaging
+    AppImage build                           :p5_1, after p4_4, 4d
+    macOS .app bundle + notarization         :p5_2, after p5_1, 5d
+    Flatpak manifest                         :p5_3, after p5_2, 3d
 ```
 
-Phase 0 is roughly a week and removes every hard blocker. Phase 4's CI job should run
-`pytest -m "not ui"` on all three platforms, matching the existing basic-sanity tier described in
-`.agents/AGENTS.md`; the `ui` tier stays Windows-only because it drives the real system tray and
-clipboard.
+**Phases 0–3 are complete.** Phase 2 was sequenced before the remaining portability work because it
+is what makes that work verifiable: Phase 0 was validated on Windows by simulating POSIX
+(deleting `os.startfile`, exercising the `os.name == "posix"` branch directly), which cannot catch a
+`sys.platform`-conditional path. The CI matrix runs `pytest -m "not ui"` on all three platforms
+(`.github/workflows/ci.yml`) and adds two assertions there that cannot be made from Windows —
+`scripts/check_no_scanner_verdict.py` and `scripts/check_manifests.py`.
+
+Two of the Phase 3 items existed only because their absence would have been invisible:
+
+- **`.desktop` + `setDesktopFileName`** (§4.11). Without the call, nothing fails loudly — GNOME and
+  KDE simply show no taskbar icon — so nothing in the test suite would ever have flagged it.
+- **`.gitattributes`** pinning `*.sh` to LF. With `core.autocrlf=true` and no attributes file, a
+  committed `run.sh` checks out on Linux with a CRLF shebang and fails as "exec format error"
+  before the shell sees it. Also untestable from Windows, where the script is never executed.
+
+The Windows-only full tier is wired but `continue-on-error`: a runner is not a desktop session, so
+the tray may be unavailable and those tests skip. A human still runs `run_all_tests.bat` before a
+release.
+
+**Phase 4 is the first item that cannot be verified from Windows at all.** The Carbon, X11 and
+Wayland backends are platform FFI: they can be *written* on any host, but nothing here can execute
+them, so shipping them marked "Done" would be a claim without evidence. They need a real Linux and
+macOS runner — which the Phase 2 matrix now provides.
 
 ---
 
 ## 7. Verification Checklist
 
-Each item is a check that can fail today, not a description of the target.
+Each item is a check that can fail today, not a description of the target. Phase 0 items are
+marked with how they were verified, since none of them can be fully verified from Windows alone.
 
-### Blocking (Phase 0)
+### Blocking (Phase 0) — complete
 
-- [ ] **No unguarded `os.startfile`.** `grep -rn "os\.startfile" my_idm/` returns hits only inside
-      `if sys.platform == "win32":` blocks or inside the consolidated helper.
-- [ ] **`explorer` receives one `/select,` token.** No `["explorer", "/select,", path]` two-element
-      form remains.
-- [ ] **Suite collects and runs on Linux and macOS.** `pytest -m "not ui" --collect-only` succeeds;
-      `conftest.py` reads `os.startfile` only behind `hasattr`.
-- [ ] **`pip install -e .` succeeds on all three platforms.** No unconditional Windows-only
-      package; `psutil` and `aiohttp-socks` present in both manifests.
-- [ ] **Closing the window with no tray available exits cleanly** rather than hiding the app.
+- [x] **No unguarded `os.startfile`.** Verified: `grep -rn "os\.startfile" my_idm/` returns only
+      the three reference-implementation call sites, each inside `if sys.platform == "win32":`.
+- [x] **`explorer` receives one `/select,` token.** No `["explorer", "/select,", path]` two-element
+      form remains; the only `explorer` call left is `external_tools.py:335`.
+- [x] **Suite collects and runs where `os.startfile` is absent.** Verified by deleting the
+      attribute via a pytest plugin and running the full suite: 2715 passed. **Caveat:** `sys.platform`
+      stayed `win32` in that run, so platform-conditional branches in tests were not all exercised.
+- [x] **`pip install -r requirements.txt` has no unconditional Windows-only package.** Both
+      manifests carry the same nine requirements, cross-checked with markers compared through
+      `packaging`; the `win10toast` marker evaluates `False` on Linux and macOS.
+- [x] **Closing the window with no tray available exits cleanly** rather than hiding the app, and
+      minimizing does the same. Verified by reverting the gate: all three new tests fail without it.
 
-### Correctness (Phases 1–3)
+### Correctness
 
-- [ ] **`~/.my-idm` appears in exactly one module.** `grep -rn '"\.my-idm"' my_idm/` matches only
-      `platform/paths.py`.
-- [ ] **No `creationflags` without a `sys.platform` guard**, and every background launch sets
-      `start_new_session` on POSIX.
-- [ ] **Antivirus "not scanned" is distinguishable from "clean"** in the Details Panel, and a
-      missing scanner does not return a clean verdict.
-- [ ] **Hotkey backend absence is surfaced in Preferences** with a reason, not as a save-time
-      error, and a local `QShortcut` fallback exists.
-- [ ] **Zero hardcoded backslashes** in path construction; `pathlib` throughout.
-- [ ] **Monospace metrics stable** across platforms for the console view and file-tree columns.
-- [ ] **Launch at login round-trips on all three platforms**: enable writes a parsable entry, the
+- [x] **`~/.my-idm` appears in exactly one module** — `my_idm/paths.py`. Verified: `grep -rn
+      '"\.my-idm"' my_idm/` matches only the legacy-fallback constant there.
+- [x] **Monospace metrics stable** across platforms for the console view and file-tree columns.
+      `my_idm/fonts.py` keeps the UI and mono chains disjoint, so nothing proportional can be
+      offered where fixed pitch is required.
+- [x] **Launch at login round-trips on all three platforms**: enable writes a parsable entry, the
       status probe reads it back as enabled, disabling removes it, and a moved checkout is reported
       stale rather than enabled.
-- [ ] **A login launch starts without stealing focus and without a console window**
+- [x] **A login launch starts without stealing focus and without a console window**
       (`pythonw.exe` on Windows, `Terminal=false` in the `.desktop`, `--autostart` honoured).
+- [x] **Desktop identity is self-consistent**: `StartupWMClass`, `setApplicationName` and
+      `setDesktopFileName` agree, asserted by `tests/test_desktop_entry.py`. Nothing fails loudly
+      when they drift, so it is worth asserting.
+- [x] **`run.sh` is committed with LF endings and the executable bit**, via `.gitattributes`. A
+      CRLF shebang fails on Linux as "exec format error", and is invisible from Windows.
 
-### Packaging (Phase 4)
+### Security
 
+- [x] **A scanner that cannot run yields no verdict**, never a clean one. Asserted off Windows in CI
+      via `scripts/check_no_scanner_verdict.py`, which fails against the old fail-open behaviour.
+- [x] **The custom scanner takes an argv list, not a `shell=True` string.** The target path is
+      attacker-influenced (a download filename), so a crafted torrent could previously execute
+      arbitrary commands. Asserted by
+      `TestScanFileEdges::test_a_hostile_download_name_cannot_inject_a_shell_command`.
+- [x] **The notification backends build argv, not shell strings**, and the `osascript` one also
+      escapes for the *language* — argv stops the shell but not AppleScript.
+- [x] **Default settings actually scan off Windows.** `scanner_type == "defender"` — the binary
+      radio's persisted value — is reinterpreted as "the system scanner" on POSIX, and the radio is
+      relabelled so the UI does not name software that is not installed.
+
+### Packaging
+
+- [x] **CI matrix wired** on `windows-latest`, `ubuntu-latest`, `macos-latest` running
+      `pytest -m "not ui"`, plus the Windows full tier as non-blocking.
+- [ ] **CI matrix actually green** on all three platforms — first observable once the workflow has
+      run at least once. This is the gate for every remaining item, and specifically for Phase 4.
 - [ ] **AppImage runs on a clean Ubuntu 24.04 image** with `xcb` and `wayland` Qt plugins bundled.
 - [ ] **`.app` bundle launches on Intel and Apple Silicon** and survives Gatekeeper notarization.
-- [ ] **CI matrix green** on `windows-latest`, `ubuntu-latest`, `macos-latest`.
+- [ ] **Global hotkey backends verified on their platforms** (Carbon, X11, Wayland portal). Not
+      attempted: they are platform FFI, and nothing on a Windows host can execute them.

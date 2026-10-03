@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from my_idm.config import TorConfig, TorrentConfig
 from my_idm.database import Database, DownloadEntry
 from my_idm.network import NetworkConfig, is_interface_active
+from my_idm.paths import fastresume_dir
 from my_idm.utils import (
     check_disk_space,
     normalize_path,
@@ -37,7 +38,7 @@ except ImportError:
 
 HAS_LIBTORRENT = _HAS_LIBTORRENT
 
-FASTRESUME_DIR = Path.home() / ".my-idm" / "fastresume"
+FASTRESUME_DIR = fastresume_dir()
 
 ProgressCallback = Callable[
     [str, int, int, float, float, int, int, float],

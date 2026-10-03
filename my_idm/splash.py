@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QSplashScreen, QWidget
 
 from my_idm.resources import LOGO_PNG, get_app_logo_pixmap
 from my_idm.styles import Colors
+from my_idm import fonts
 
 SPLASH_WIDTH = 500
 SPLASH_HEIGHT = 270
@@ -134,7 +135,7 @@ class IDMSplashScreen(QSplashScreen):
 
         # Title: "My-IDM"
         painter.setPen(QColor(Colors.TEXT))
-        title_font = QFont(["Segoe UI", "Inter", "Helvetica", "Arial"], 22, QFont.Weight.Bold)
+        title_font = fonts.ui_font(22, bold=True)
         painter.setFont(title_font)
         painter.drawText(QPointF(text_x, title_y), "My-IDM")
 
@@ -151,13 +152,13 @@ class IDMSplashScreen(QSplashScreen):
         painter.setPen(QColor(88, 166, 255, 120))
         painter.drawPath(pill_path)
 
-        pill_font = QFont(["Segoe UI", "Inter", "sans-serif"], 9, QFont.Weight.DemiBold)
+        pill_font = fonts.ui_font(9, bold=True)
         painter.setFont(pill_font)
         painter.setPen(QColor(Colors.ACCENT))
         painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, APP_VERSION)
 
         # 5. Concise Tagline (Fits comfortably without horizontal overflow)
-        tagline_font = QFont(["Segoe UI", "Inter", "sans-serif"], 10, QFont.Weight.Normal)
+        tagline_font = fonts.ui_font(10, bold=False)
         painter.setFont(tagline_font)
         painter.setPen(QColor(Colors.TEXT_SECONDARY))
         painter.drawText(QPointF(text_x, title_y + 24.0), "Fast, Modern & Secure Download Manager")
@@ -168,7 +169,7 @@ class IDMSplashScreen(QSplashScreen):
         bar_w = w - 72.0
         bar_h = 6.0
 
-        status_font = QFont(["Segoe UI", "Inter", "sans-serif"], 9, QFont.Weight.Normal)
+        status_font = fonts.ui_font(9, bold=False)
         painter.setFont(status_font)
         painter.setPen(QColor(Colors.TEXT_SECONDARY))
         status_rect = QRectF(bar_x, bar_y - 24.0, bar_w - 60.0, 20.0)
@@ -179,7 +180,7 @@ class IDMSplashScreen(QSplashScreen):
         )
 
         # Percentage text
-        pct_font = QFont(["Segoe UI", "Inter", "sans-serif"], 9, QFont.Weight.DemiBold)
+        pct_font = fonts.ui_font(9, bold=True)
         painter.setFont(pct_font)
         painter.setPen(QColor(Colors.ACCENT))
         pct_rect = QRectF(bar_x + bar_w - 55.0, bar_y - 24.0, 55.0, 20.0)
@@ -212,7 +213,7 @@ class IDMSplashScreen(QSplashScreen):
             painter.fillPath(fill_path, prog_grad)
 
         # 8. Footer Copyright
-        footer_font = QFont(["Segoe UI", "Inter", "sans-serif"], 8, QFont.Weight.Normal)
+        footer_font = fonts.ui_font(8, bold=False)
         painter.setFont(footer_font)
         painter.setPen(QColor(Colors.BORDER_LIGHT))
         footer_rect = QRectF(bar_x, h - 34.0, bar_w, 20.0)
@@ -337,11 +338,11 @@ class IDMExitSplashScreen(QSplashScreen):
         title_y = 58.0
 
         painter.setPen(QColor(Colors.TEXT))
-        title_font = QFont(["Segoe UI", "Inter", "Helvetica", "Arial"], 18, QFont.Weight.Bold)
+        title_font = fonts.ui_font(18, bold=True)
         painter.setFont(title_font)
         painter.drawText(QPointF(text_x, title_y), "Shutting down My-IDM")
 
-        subtitle_font = QFont(["Segoe UI", "Inter", "sans-serif"], 10, QFont.Weight.Normal)
+        subtitle_font = fonts.ui_font(10, bold=False)
         painter.setFont(subtitle_font)
         painter.setPen(QColor(Colors.TEXT_SECONDARY))
         painter.drawText(QPointF(text_x, title_y + 22.0), "Saving download sessions and releasing resources...")
@@ -352,7 +353,7 @@ class IDMExitSplashScreen(QSplashScreen):
         bar_w = w - 72.0
         bar_h = 6.0
 
-        status_font = QFont(["Segoe UI", "Inter", "sans-serif"], 9, QFont.Weight.Normal)
+        status_font = fonts.ui_font(9, bold=False)
         painter.setFont(status_font)
         painter.setPen(QColor(Colors.TEXT_SECONDARY))
         status_rect = QRectF(bar_x, bar_y - 22.0, bar_w - 60.0, 18.0)
@@ -362,7 +363,7 @@ class IDMExitSplashScreen(QSplashScreen):
             self._message,
         )
 
-        pct_font = QFont(["Segoe UI", "Inter", "sans-serif"], 9, QFont.Weight.DemiBold)
+        pct_font = fonts.ui_font(9, bold=True)
         painter.setFont(pct_font)
         painter.setPen(QColor(Colors.PURPLE))
         pct_rect = QRectF(bar_x + bar_w - 55.0, bar_y - 22.0, 55.0, 18.0)
@@ -394,7 +395,7 @@ class IDMExitSplashScreen(QSplashScreen):
             painter.fillPath(fill_path, prog_grad)
 
         # 7. Footer
-        footer_font = QFont(["Segoe UI", "Inter", "sans-serif"], 8, QFont.Weight.Normal)
+        footer_font = fonts.ui_font(8, bold=False)
         painter.setFont(footer_font)
         painter.setPen(QColor(Colors.BORDER_LIGHT))
         footer_rect = QRectF(bar_x, h - 30.0, bar_w, 18.0)

@@ -364,11 +364,17 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_download_id("test-dbl-1")
         self.assertTrue(real_file.exists(), "precondition: the file really exists on disk")
 
-        with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile, \
+        # Patch the helper the panel now calls, not `os.startfile`. The panel lazy-imports it
+        # inside the handler, so patching the source module is what intercepts it - and it has to
+        # be patched, because the real helper reaches `QDesktopServices.openUrl` / `os.startfile`
+        # and would hand the file to the actual shell.
+        with unittest.mock.patch(
+            "my_idm.external_tools.open_file_in_default_app"
+        ) as mock_open, \
              unittest.mock.patch.object(self.manager, "mark_file_not_found") as mock_missing:
             file_item = panel._tree_files.topLevelItem(0)
             panel._on_tree_item_double_clicked(file_item)
-            mock_startfile.assert_called_once_with(str(real_file))
+            mock_open.assert_called_once_with(str(real_file), create_if_missing=False)
             mock_missing.assert_not_called()
         self.assertTrue(real_file.exists(), "opening must not delete anything")
 
@@ -417,7 +423,7 @@ class TestDetailsPanel(unittest.TestCase):
         real_file.unlink()
         self.assertFalse(real_file.exists(), "precondition: the file is really gone")
 
-        with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile, \
+        with unittest.mock.patch("my_idm.details_panel.os.startfile", create=True) as mock_startfile, \
              unittest.mock.patch.object(self.manager, "mark_file_not_found") as mock_missing:
             panel._on_tree_item_double_clicked(file_item)
             mock_startfile.assert_not_called()
@@ -455,7 +461,7 @@ class TestDetailsPanel(unittest.TestCase):
         panel = self.win._details_panel
         panel.set_download_id("test-dbl-folder-1")
 
-        with unittest.mock.patch("my_idm.details_panel.os.startfile") as mock_startfile:
+        with unittest.mock.patch("my_idm.details_panel.os.startfile", create=True) as mock_startfile:
             folder_item = panel._tree_files.topLevelItem(0)
             panel._on_tree_item_double_clicked(folder_item)
             mock_startfile.assert_not_called()

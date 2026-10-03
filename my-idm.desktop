@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=My-IDM
+GenericName=Download Manager
+Comment=Parallel download manager supporting HTTP, HTTPS, FTP and BitTorrent
+Exec=run.sh %u
+TryExec=run.sh
+Icon=my-idm
+Terminal=false
+Categories=Network;FileTransfer;Internet;
+Keywords=download;downloader;torrent;bt;manager;http;ftp;
+StartupNotify=true
+# Must match QGuiApplication.setDesktopFileName() in my_idm/main.py, and must match the window's
+# WM_CLASS. When all three agree, the window associates with this entry, which is what gives the
+# taskbar and tray icons a clickable identity on GNOME and KDE - both of which match strictly and
+# will not fall back to a guess. It is also the app id the XDG GlobalShortcuts portal requires for
+# global hotkeys on Wayland (cross-platform.md §4.2), so it is not cosmetic.
+StartupWMClass=My-IDM
+# Magnet links are accepted as command-line arguments (see main.py parse_args), so registering
+# the handler is accurate and makes My-IDM appear in "Open with" for a magnet.
+MimeType=x-scheme-handler/magnet;
+# Exec points at run.sh in the source tree, which is right for a developer checkout and wrong for
+# an installed package. Packaging replaces this line: an AppImage or Flatpak sets Exec to the
+# bundle, and a distro package installs a wrapper on PATH. See cross-platform.md §5.

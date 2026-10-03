@@ -11,7 +11,15 @@ from PySide6.QtCore import QSettings
 
 log = logging.getLogger(__name__)
 
-# Keywords identifying virtual or VPN network adapters
+# Keywords identifying virtual or VPN network adapters.
+#
+# Matched as substrings, so short entries are deliberate and load-bearing: "wg" covers wg0/wg1,
+# "tun" already covers utun0 because the substring test is `keyword in name`.
+#
+# The POSIX entries matter as much as the vendor names. macOS names every system-VPN interface
+# `utunN` regardless of provider, and Linux/BSD name theirs `pppN` and `ipsecN`, so without
+# `utun`/`ppp`/`ipsec` a fully connected VPN is not tagged as one - and the interface list is
+# sorted VPNs-first, so it also sinks down the list.
 _VPN_KEYWORDS = (
     "vpn",
     "wireguard",
@@ -19,6 +27,7 @@ _VPN_KEYWORDS = (
     "nord",
     "tap",
     "tun",
+    "utun",
     "tailscale",
     "proton",
     "mullvad",
@@ -29,6 +38,8 @@ _VPN_KEYWORDS = (
     "warp",
     "hamachi",
     "wg",
+    "ppp",
+    "ipsec",
 )
 
 

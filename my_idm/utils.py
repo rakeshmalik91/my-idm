@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+from my_idm import fonts
 from pathlib import Path
 from typing import Any, Optional, Set
 
@@ -162,7 +164,7 @@ def create_emoji_icon(emoji: str, size: int = 32):
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-    font = QFont(["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", "sans-serif"])
+    font = fonts.emoji_font(12)
     font.setPixelSize(int(size * 0.65))
     p.setFont(font)
     p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
@@ -193,7 +195,7 @@ def create_color_swatch_icon(color: str, size: int = 18, radius: int = 4, letter
 
     char = (letter or "").strip()[:1].upper()
     if char:
-        font = QFont("Segoe UI", int(size * scale * 0.52), QFont.Weight.Bold)
+        font = fonts.ui_font(max(1, int(size * scale * 0.52)), bold=True)
         p.setFont(font)
         qc = QColor(color)
         luminance = (0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()) / 255.0
@@ -508,8 +510,14 @@ def send_to_trash(file_path: str | Path) -> bool:
     try:
         from PySide6.QtCore import QFile
         path_str = str(fp)
-        # Try both native and normalized string representations
-        if QFile.moveToTrash(path_str) or QFile.moveToTrash(path_str.replace("/", "\\")):
+        if QFile.moveToTrash(path_str):
+            if not fp.exists():
+                return True
+        # Retry with backslashes, on Windows only. Some Windows paths (notably UNC and long
+        # paths) need the backslash form for the shell to accept them, and `Path` hands us
+        # forward slashes. On POSIX a backslash is an ordinary filename character, so the retry
+        # builds a path that cannot exist - it was never more than a wasted call there.
+        if os.name == "nt" and QFile.moveToTrash(path_str.replace("/", "\\")):
             if not fp.exists():
                 return True
     except Exception:

@@ -9,6 +9,7 @@ and the per-widget ones.
 from __future__ import annotations
 
 import re
+from my_idm import fonts
 
 # ---------------------------------------------------------------------------
 # Asset paths
@@ -344,7 +345,7 @@ def _stylesheet_for_palette() -> str:
     QWidget {{
         background-color: {Colors.BG_DARK};
         color: {Colors.TEXT};
-        font-family: "Segoe UI", "Inter", "Roboto", sans-serif;
+        font-family: {fonts.stylesheet_family()};
         font-size: 13px;
     }}
 

@@ -12,16 +12,20 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from my_idm.database import Database, APP_DIR
 from my_idm.main_window import MainWindow
 from my_idm.manager import DownloadManager
+from my_idm.paths import backlog_path, ensure_data_dir, logs_dir
 from my_idm.styles import DARK_STYLESHEET
 
 
-DEFAULT_BACKLOG = APP_DIR / "backlog.txt"
-LOGS_DIR = APP_DIR / "logs"
+DEFAULT_BACKLOG = backlog_path()
+LOGS_DIR = logs_dir()
 LOG_FILE = LOGS_DIR / "my-idm.log"
 
 
 def setup_logging(verbose: bool = False):
-    APP_DIR.mkdir(parents=True, exist_ok=True)
+    # Creates the data directory as a side effect, and reports the offending path plus the
+    # MYIDM_DATA_DIR escape hatch if it cannot - a bare OSError here would surface as a stack trace
+    # during startup with no hint of what to change.
+    ensure_data_dir()
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
     level = logging.DEBUG if verbose else logging.INFO
@@ -105,6 +109,14 @@ def main():
     app.setApplicationName("My-IDM")
     app.setApplicationDisplayName("My-IDM")
     app.setApplicationVersion("1.0.0")
+    # Associate the process with our .desktop entry.
+    #
+    # Without this, Qt derives WM_CLASS from the application name alone and the desktop entry's
+    # StartupWMClass never matches. The visible symptom is a window with no taskbar icon and a tray
+    # icon the user cannot associate with it, on GNOME and KDE - both of which match strictly.
+    # It is also the app id the XDG GlobalShortcuts portal requires for global hotkeys on Wayland
+    # (cross-platform.md §4.2), so it is not cosmetic.
+    app.setDesktopFileName("my-idm.desktop")
     app.setStyle("Fusion")
     app.setStyleSheet(DARK_STYLESHEET)
 

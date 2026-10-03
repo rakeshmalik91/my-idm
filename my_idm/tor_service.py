@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional
 
 from my_idm.config import TorConfig, is_tor_reachable
+from my_idm.paths import tor_data_dir
+from my_idm.proc import background_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +82,7 @@ class TorServiceManager:
 
     def __init__(self, config: TorConfig, data_dir: Optional[Path] = None):
         self._config = config
-        self._data_dir = data_dir or (Path.home() / ".my-idm" / "tor_data")
+        self._data_dir = data_dir or tor_data_dir()
         self._process: Optional[subprocess.Popen] = None
         self._spawned_by_us = False
 
@@ -144,11 +146,9 @@ class TorServiceManager:
             "--DataDirectory", str(self._data_dir),
         ]
 
-        # Windows: hide console window
-        creationflags = 0
-        if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-
+        # The Tor proxy must outlive My-IDM's terminal: on POSIX `start_new_session` detaches it from
+        # the session so closing the shell cannot SIGHUP the proxy mid-download. See
+        # my_idm.proc.background_kwargs.
         log.info("Spawning Tor background process: %s", " ".join(cmd))
         try:
             self._process = subprocess.Popen(
@@ -156,7 +156,7 @@ class TorServiceManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                creationflags=creationflags,
+                **background_kwargs(),
             )
             self._spawned_by_us = True
             try:

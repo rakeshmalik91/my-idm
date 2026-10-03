@@ -1,6 +1,19 @@
-"""Windows toast notification utilities."""
+"""Desktop notification utilities, per platform.
+
+The registered handler is the primary path: the GUI registers ``QSystemTrayIcon.showMessage`` at
+startup, which works on all three platforms when a tray exists. The fallbacks here matter for the
+cases the tray does not cover - no system tray (GNOME without AppIndicator, some Wayland
+compositors), or notifications raised before the GUI finishes starting.
+
+Windows uses ``win10toast``; Linux uses ``notify-send``; macOS uses ``osascript``. PyObjC is
+deliberately *not* used, so it stays an optional packaging extra rather than a hard dependency.
+"""
 
 import logging
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -45,17 +58,94 @@ except ImportError:
     _HAS_WIN10TOAST = False
 
 
+def _notify_via_notify_send(title: str, message: str, duration: int, icon_path: Optional[str]) -> bool:
+    """Linux: `notify-send`, the libnotify CLI.
+
+    Preferred over the D-Bus binding because it needs no extra Python package, and
+    `notify-send` is present wherever libnotify is. Arguments are passed as a list, never a
+    shell string: the message contains a filename, which is attacker-influenced from a download
+    name, so a shell would be an injection point.
+    """
+    executable = shutil.which("notify-send")
+    if not executable:
+        return False
+    cmd = [
+        executable,
+        "--app-name=My-IDM",
+        f"--expire-time={int(duration) * 1000}",
+    ]
+    if icon_path:
+        # Only pass the icon if it exists; notify-send treats a missing path as a hard error
+        # rather than ignoring it, which would lose the notification entirely.
+        if Path(icon_path).is_file():
+            cmd.append(f"--icon={icon_path}")
+    cmd += [title, message]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=10)
+        return proc.returncode == 0
+    except Exception as exc:
+        log.debug("notify-send failed: %s", exc)
+        return False
+
+
+def _notify_via_osascript(title: str, message: str, duration: int, icon_path: Optional[str]) -> bool:
+    """macOS: `osascript` with the `display notification` Apple Event.
+
+    Uses the scripting bridge rather than PyObjC so that PyObjC stays an optional extra
+    (`antivirus.md`/`cross-platform.md` §5) instead of a hard dependency.
+
+    The title and message are interpolated into AppleScript source, so both are escaped for the
+    language. A quote or backslash in a filename would otherwise end the string early - and
+    because the argument is argv rather than a shell string, that injection is confined to
+    AppleScript, which is still not something a download name should be able to do.
+    """
+    executable = shutil.which("osascript")
+    if not executable:
+        return False
+
+    def esc(text: str) -> str:
+        return (
+            text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\r\n", " ")
+            .replace("\n", " ")
+            .replace("\r", " ")
+        )
+
+    script = (
+        f'display notification "{esc(message)}" '
+        f'with title "{esc(title)}" '
+        f'subtitle "My-IDM"'
+    )
+    try:
+        proc = subprocess.run(
+            [executable, "-e", script], capture_output=True, timeout=10
+        )
+        return proc.returncode == 0
+    except Exception as exc:
+        log.debug("osascript notification failed: %s", exc)
+        return False
+
+
+#: Tried in order after the registered handler. First success wins; all failures return False
+#: without raising, because a notification is a courtesy and must never abort a download's
+#: completion path.
+_PLATFORM_FALLBACKS = {
+    "win32": (),
+    "darwin": (_notify_via_osascript,),
+    "default": (_notify_via_notify_send,),
+}
+
+
 def show_notification(title: str, message: str, duration: int = 5, icon_path: Optional[str] = None) -> bool:
-    """Show a Windows toast notification.
-    
-    Args:
-        title: Notification title
-        message: Notification message body
-        duration: Duration in seconds
-        icon_path: Optional path to .ico file
-    
-    Returns:
-        True if notification was sent, False otherwise
+    """Show a desktop notification using the best mechanism this platform offers.
+
+    Order: the registered handler (the GUI registers ``QSystemTrayIcon.showMessage``), then the
+    platform fallbacks, then Windows ``win10toast``.
+
+    Every backend returns ``bool`` and swallows its own errors. A notification is a courtesy - the
+    caller is usually a download completing - and a failure here must not become an exception in
+    the middle of that.
     """
     global _notification_handler
     if _notification_handler is not None:
@@ -65,10 +155,18 @@ def show_notification(title: str, message: str, duration: int = 5, icon_path: Op
         except Exception as exc:
             log.warning("Custom notification handler failed: %s", exc)
 
+    key = "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "default")
+    for backend in _PLATFORM_FALLBACKS[key]:
+        try:
+            if backend(title, message, duration, icon_path):
+                return True
+        except Exception as exc:
+            log.debug("Notification backend %s failed: %s", backend.__name__, exc)
+
     if not _HAS_WIN10TOAST or _toaster is None:
-        log.debug("win10toast not available, skipping notification")
+        log.debug("No notification backend available for %s", sys.platform)
         return False
-    
+
     try:
         _toaster.show_toast(
             title,

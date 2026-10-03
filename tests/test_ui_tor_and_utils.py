@@ -811,6 +811,25 @@ class TorTestCase(unittest.TestCase):
         self.config = TorConfig(enabled=True, proxy_host="127.0.0.1", proxy_port=9050)
         self.manager = TorServiceManager(self.config, self.data_dir)
 
+        # `TorServiceManager.stop()` terminates with `subprocess.run(["taskkill", ...])` on
+        # Windows and `os.kill(pid, 15)` everywhere else - see tor_service.stop.
+        #
+        # Patching only the former meant that off Windows the real `os.kill` ran against the
+        # fictional PIDs these tests invent (777, 5, 4321), signalling whatever unrelated
+        # processes happen to own them. So this fences both mechanisms for the whole class, the
+        # same way tests/test_tor.py does, and the individual tests assert against whichever
+        # branch their platform takes.
+        #
+        # Individual `patcher.stop` cleanups rather than `patch.stopall`: that would tear down
+        # every live patch in the process, including ones other fixtures still depend on.
+        self.mock_run = self._start_patch(patch.object(tor_module.subprocess, "run"))
+        self.mock_kill = self._start_patch(patch.object(tor_module.os, "kill"))
+
+    def _start_patch(self, patcher):
+        mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mock
+
     def fake_process(self, pid=4321, poll=0, stdout="", stderr=""):
         process = MagicMock()
         process.pid = pid
@@ -1046,10 +1065,18 @@ class TestTorServiceStart(TorTestCase):
              patch.object(tor_module.subprocess, "run") as run, \
              patch.object(tor_module.time, "sleep"):
             self.manager.start(timeout=0.0)
-        run.assert_called_once_with(
-            ["taskkill", "/F", "/T", "/PID", "4321"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
+        # The stale pid file from a previous run is cleaned up on start, using whichever
+        # mechanism this platform has: taskkill on Windows, os.kill elsewhere.
+        if os.name == "nt":
+            run.assert_called_once_with(
+                ["taskkill", "/F", "/T", "/PID", "4321"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )
+        else:
+            self.assertIn(
+                unittest.mock.call(4321, 15), self.mock_kill.call_args_list,
+                "a stale tor pid must be signalled on POSIX too",
+            )
         cmd = popen.call_args.args[0]
         self.assertEqual(
             cmd[1:], ["--SocksPort", "9050", "--DataDirectory", str(self.data_dir)]
@@ -1228,8 +1255,15 @@ class TestTorServiceStop(TorTestCase):
             self.manager.stop()
 
         process.terminate.assert_called_once()
-        run.assert_called_once()
-        self.assertEqual(run.call_args.args[0], ["taskkill", "/F", "/T", "/PID", "777"])
+        if os.name == "nt":
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], ["taskkill", "/F", "/T", "/PID", "777"])
+        else:
+            run.assert_not_called()
+            self.assertIn(
+                unittest.mock.call(777, 15), self.mock_kill.call_args_list,
+                "a spawned tor must be signalled on POSIX",
+            )
         self.assertFalse((self.data_dir / "tor.pid").exists())
         self.assertIsNone(self.manager._process)
         self.assertFalse(self.manager._spawned_by_us)
@@ -1243,10 +1277,17 @@ class TestTorServiceStop(TorTestCase):
         (self.data_dir / "tor.pid").write_text("5", encoding="utf-8")
         with patch.object(tor_module.subprocess, "run") as run:
             self.manager.stop()
-        self.assertEqual(run.call_args_list, [unittest.mock.call(
-            ["taskkill", "/F", "/T", "/PID", "5"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )])
+        if os.name == "nt":
+            self.assertEqual(run.call_args_list, [unittest.mock.call(
+                ["taskkill", "/F", "/T", "/PID", "5"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            )])
+        else:
+            self.assertEqual(
+                [c for c in self.mock_kill.call_args_list if c == unittest.mock.call(5, 15)],
+                [unittest.mock.call(5, 15)],
+                "the pid must be signalled exactly once, not repeatedly",
+            )
 
     def test_an_orphaned_pid_from_the_file_is_also_killed(self):
         """A previous run that was force-quit leaves a live Tor with no handle."""

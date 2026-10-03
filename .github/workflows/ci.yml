@@ -1,0 +1,115 @@
+# Cross-platform CI.
+#
+# Row 14 of docs/architecture/cross-platform.md. Phase 0 removed the hard portability blockers,
+# but they were validated on Windows by simulating POSIX - deleting `os.startfile` and exercising
+# the `os.name == "posix"` branch directly. `sys.platform` stayed `win32` throughout, so the
+# `if sys.platform == "win32"` branches inside tests never took their POSIX path. This workflow is
+# what actually settles that.
+#
+# Tier policy (see .agents/AGENTS.md and run_all_tests.bat):
+#   * "not ui" runs on all three platforms. It opens no window, drives no tray icon and never
+#     touches the real clipboard, so it is safe unattended.
+#   * the `ui` tier drives the real system tray and clipboard, so it stays on Windows, where those
+#     exist. It is non-blocking here because a runner is not a desktop session - the tray may be
+#     unavailable and those tests skip, which is correct but makes the job's signal weaker than it
+#     looks. A human still runs run_all_tests.bat before a release.
+#
+# `pull_request_target` is deliberately absent. It runs with base-repo write access and secrets, so
+# checking out and executing untrusted PR code under it is the standard privilege-escalation
+# footgun. This workflow needs no secrets, so plain `pull_request` is both sufficient and safe.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  basic:
+    name: basic tier (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing must not mask the others - a POSIX-only break is exactly what this
+      # matrix exists to find, and it would otherwise be hidden behind a cancelled Windows job.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Qt's xcb platform plugin links against these. They are not in the PySide6 wheel, and
+      # without them the import succeeds but constructing a QApplication aborts at runtime.
+      # libxcb-cursor0 is separate from libxcb-cursor since Qt 6.5, and Ubuntu 24.04 runners do
+      # not have it - which is the classic "works on my machine" Qt-on-Linux failure.
+      - name: Qt runtime libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libegl1 \
+            libgl1 \
+            libxkbcommon-x11-0 \
+            libxcb-cursor0 \
+            libdbus-1-3
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Dependency manifests are self-consistent
+        # The two files drifted before Phase 0, and the drift was not cosmetic: `win10toast` was
+        # unmarked, which does not get skipped off Windows - pip cannot resolve it at all, so
+        # `pip install -r requirements.txt` failed outright rather than degrading.
+        run: python scripts/check_manifests.py
+
+      - name: Security property - a missing scanner must not report clean
+        # The one behaviour that cannot be proven from Windows, and the highest-value assertion
+        # on this runner. `scan_file` used to return a *clean* verdict whenever no scanner could
+        # run, so on Linux and macOS every post-download scan reported success for a file nothing
+        # had inspected, and the Details Panel showed a green "Clean (Scanned)".
+        if: runner.os != 'Windows'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python scripts/check_no_scanner_verdict.py
+
+      - name: Basic sanity tier
+        env:
+          # No display on any runner. Must match what the tests themselves assume.
+          QT_QPA_PLATFORM: offscreen
+          QT_LOGGING_RULES: "*.debug=false;qt.qpa.*=false"
+        run: python -m pytest tests/ -m "not ui" -q --tb=short
+
+  full-windows:
+    name: full tier (windows, non-blocking)
+    runs-on: windows-latest
+    # Reported, but never blocks a merge: this tier needs a desktop session, and a runner is not
+    # one. See the tier policy at the top of this file.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Full suite (includes the ui tier)
+        run: python -m pytest tests/ -q --tb=short

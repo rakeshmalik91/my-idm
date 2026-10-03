@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -97,6 +96,7 @@ from my_idm.settings_dialog import (
 from my_idm.external_tools import launch_animepahe_gui
 from my_idm.styles import Colors
 from my_idm.utils import create_color_swatch_icon
+from my_idm import fonts
 
 log = logging.getLogger(__name__)
 
@@ -342,7 +342,7 @@ def _create_emoji_icon(emoji: str, size: int = 32) -> QIcon:
     p = QPainter(pix)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-    font = QFont(["Segoe UI Emoji", "Noto Color Emoji", "Apple Color Emoji", "sans-serif"])
+    font = fonts.emoji_font(12)
     font.setPixelSize(int(size * 0.65))
     p.setFont(font)
     p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
@@ -1406,6 +1406,13 @@ class MainWindow(QMainWindow):
         """Initializes the Windows system tray icon and context menu."""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             self._tray_icon = None
+            # Say so once, at startup. Without a tray icon "close to tray" silently degrades to
+            # "close the app" (see `_can_hide_to_tray`), and a user who enabled the preference
+            # would otherwise only discover it the first time they closed the window.
+            log.warning(
+                "No system tray is available on this desktop. The tray icon and close-to-tray "
+                "will be unavailable; downloads will stop if My-IDM is closed."
+            )
             return
 
         icon = get_app_icon()
@@ -2082,7 +2089,12 @@ class MainWindow(QMainWindow):
         entry = self._first_selected_entry()
         if entry:
             if entry.file_path and Path(entry.file_path).exists():
-                os.startfile(entry.file_path)
+                # Was `os.startfile`, which is Windows-only — an AttributeError elsewhere.
+                # create_if_missing=False: the file is known to exist, and the default would
+                # create an empty placeholder if it disappeared before the call.
+                from my_idm.external_tools import open_file_in_default_app
+
+                open_file_in_default_app(entry.file_path, create_if_missing=False)
             else:
                 self._manager.mark_file_not_found(entry.id)
 
@@ -2234,18 +2246,18 @@ class MainWindow(QMainWindow):
         entry = self._first_selected_entry()
         if not entry:
             return
+        from my_idm.external_tools import show_in_folder
+
         folder = entry.save_path
         file_path = entry.file_path
         if file_path and Path(file_path).exists():
-            # Open explorer with file selected
-            if sys.platform == "win32":
-                subprocess.Popen(
-                    ["explorer", "/select,", file_path.replace("/", "\\")]
-                )
-            else:
-                os.startfile(folder)
+            # Pass the file, not the folder, so the platform can select it. The old Windows branch
+            # sent `explorer /select,` as its own argv element (Explorer tolerates that by
+            # accident) and the non-Windows branch called `os.startfile`, which does not exist
+            # outside Windows.
+            show_in_folder(file_path)
         elif folder and Path(folder).exists():
-            os.startfile(folder)
+            show_in_folder(folder)
 
     def _on_load_backlog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -3978,7 +3990,14 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event: QEvent):
         if event.type() == QEvent.Type.WindowStateChange:
             cfg = self._manager.general_config
-            if self.isMinimized() and cfg.enable_system_tray and cfg.minimize_to_tray:
+            if (
+                self.isMinimized()
+                and cfg.enable_system_tray
+                and cfg.minimize_to_tray
+                and self._has_tray_icon()
+            ):
+                # Same trap as close-to-tray: with no tray icon there is nothing to minimize
+                # *to*, so hiding here would strand the window with no way back.
                 QTimer.singleShot(0, self.hide)
         super().changeEvent(event)
         self._update_manager_window_visibility()
@@ -4005,12 +4024,34 @@ class MainWindow(QMainWindow):
             visible = self.isVisible() and not self.isMinimized()
             self._manager.set_window_visible(visible)
 
+    def _has_tray_icon(self) -> bool:
+        """Whether a tray icon actually exists to hide into.
+
+        ``_setup_system_tray`` leaves ``_tray_icon`` as ``None`` whenever
+        ``QSystemTrayIcon.isSystemTrayAvailable()`` is False - the normal case on GNOME, and on
+        Wayland compositors with no AppIndicator implementation - so the ``enable_system_tray``
+        preference can be on while there is nothing behind it. Anything that hides the window must
+        consult this, not the preference.
+        """
+        return self._tray_icon is not None
+
+    def _can_hide_to_tray(self) -> bool:
+        """Whether *closing* the window can leave the application recoverable.
+
+        Requires a tray icon as well as both preferences: hiding the window with no icon, no
+        taskbar entry and no menu leaves the app looking like it quit while its downloads keep
+        running. Losing the window is strictly worse than losing close-to-tray behaviour, so when
+        there is no tray the window closes normally instead.
+        """
+        cfg = self._manager.general_config
+        return bool(cfg.enable_system_tray and cfg.close_to_tray) and self._has_tray_icon()
+
     def closeEvent(self, event):
         timer = getattr(self, "_tor_availability_timer", None)
         if timer is not None:
             timer.stop()
         cfg = self._manager.general_config
-        if not getattr(self, "_force_exit", False) and cfg.enable_system_tray and cfg.close_to_tray:
+        if not getattr(self, "_force_exit", False) and self._can_hide_to_tray():
             event.ignore()
             self.hide()
             if self._tray_icon and self._tray_icon.isVisible() and not getattr(self, "_close_to_tray_notified", False):

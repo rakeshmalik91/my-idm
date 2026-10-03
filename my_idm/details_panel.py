@@ -5,7 +5,6 @@ from __future__ import annotations
 import html
 import logging
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -46,10 +45,11 @@ logger = logging.getLogger("my_idm.details_panel")
 
 from my_idm.database import DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
-from my_idm.external_tools import find_chrome_hwnd
+from my_idm.external_tools import embedded_browser_supported, find_chrome_hwnd
 from my_idm.manager import DownloadManager
 from my_idm.styles import Colors, themed, themed_widget
 from my_idm.utils import send_to_trash, to_int, unlock_path
+from my_idm import fonts
 
 
 _TORRENT_PRIORITY_MAP = {
@@ -1122,6 +1122,14 @@ class DetailsPanel(QWidget):
             self._ov_security.setText(f"<span style='color: {Colors.RED}; font-weight: bold;'>⚠ Threat Detected: {html.escape(rep)}</span>")
         elif meta.get("antivirus_scanned"):
             self._ov_security.setText(f"<span style='color: {Colors.GREEN}; font-weight: bold;'>✔ Clean (Scanned)</span>")
+        elif meta.get("antivirus_scan_error"):
+            # A scanner that could not run. Deliberately neither green nor grey: the file was not
+            # cleared, and saying "Not scanned yet" would imply it is still pending rather than
+            # that no scanner exists.
+            err = html.escape(str(meta["antivirus_scan_error"]))
+            self._ov_security.setText(
+                f"<span style='color: {Colors.ORANGE};'>⚠ Not scanned — {err}</span>"
+            )
         else:
             self._ov_security.setText(
                 f"<span style='color: {Colors.TEXT_SECONDARY};'>Not scanned yet</span>"
@@ -1622,7 +1630,12 @@ class DetailsPanel(QWidget):
             return
         full_path = str(Path(self._current_entry.save_path) / file_path)
         if Path(full_path).exists():
-            os.startfile(full_path)
+            # Was `os.startfile`, which only exists on Windows — an AttributeError everywhere
+            # else. create_if_missing=False because the path is known to exist here, and the
+            # default would fabricate a placeholder if it vanished between the check and the call.
+            from my_idm.external_tools import open_file_in_default_app
+
+            open_file_in_default_app(full_path, create_if_missing=False)
         else:
             self._manager.mark_file_not_found(self._current_entry.id)
 
@@ -2012,13 +2025,12 @@ class DetailsPanel(QWidget):
     # -- Actions --------------------------------------------------------------
 
     def _on_open_folder_clicked(self):
+        from my_idm.external_tools import show_in_folder
+
         if hasattr(self, "_tab_console") and self._tabs.currentWidget() == self._tab_console:
             repo = self._manager.external_tools_config.get_effective_repo_path()
             if repo and Path(repo).exists():
-                if sys.platform == "win32":
-                    subprocess.Popen(["explorer", str(repo).replace("/", "\\")])
-                else:
-                    os.startfile(repo)
+                show_in_folder(repo)
             return
 
         if not self._current_entry:
@@ -2026,12 +2038,13 @@ class DetailsPanel(QWidget):
         folder = self._current_entry.save_path
         file_path = self._current_entry.file_path
         if file_path and Path(file_path).exists():
-            if sys.platform == "win32":
-                subprocess.Popen(["explorer", "/select,", file_path.replace("/", "\\")])
-            else:
-                os.startfile(folder)
+            # Hands the file over so the platform can *select* it, which is what the Windows
+            # `explorer /select,` branch was reaching for. The old non-Windows branch opened the
+            # containing folder instead, and the Windows branch passed `/select,` as a separate
+            # argv element, which Explorer only tolerates by accident.
+            show_in_folder(file_path)
         elif folder and Path(folder).exists():
-            os.startfile(folder)
+            show_in_folder(folder)
 
     # -- AnimePahe Console Log View & Streaming -------------------------------
 
@@ -2146,7 +2159,7 @@ class DetailsPanel(QWidget):
         self._console_text.setReadOnly(True)
         self._console_text.setMaximumBlockCount(15000)
         self._console_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = QFont("Consolas", 10)
+        font = fonts.mono_font(10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self._console_text.setFont(font)
         self._console_text.setStyleSheet("""
@@ -2723,7 +2736,15 @@ class DetailsPanel(QWidget):
         proc = getattr(self._manager, "_animepahe_process", None)
         if hasattr(self, "_console_info_lbl"):
             if is_running and proc and hasattr(proc, "pid"):
-                self._console_info_lbl.setText(f"PID: {proc.pid}")
+                info = f"PID: {proc.pid}"
+                if not embedded_browser_supported():
+                    # Say why the Embedded Browser subtab is not coming, rather than leaving the
+                    # user to wonder why launching the scraper opened a browser they cannot see
+                    # embedded here. The scraper itself works fine - only the in-panel view is
+                    # unavailable, because reparenting a foreign top-level window into a Qt tab
+                    # has no portable equivalent.
+                    info += "  ·  Embedded Browser is Windows-only; the scraper's own window opens separately"
+                self._console_info_lbl.setText(info)
             else:
                 self._console_info_lbl.setText("")
 

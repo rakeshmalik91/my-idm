@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -18,6 +19,12 @@ from urllib.parse import urlparse
 from PySide6.QtCore import QSettings
 
 log = logging.getLogger(__name__)
+
+# Stand-in for the `%file%` / `%f` placeholder while the argument template is split. Substituted
+# with the real path *after* splitting, so a path containing a space stays a single argument.
+# Printable on purpose: Windows rejects a NUL anywhere in an argument string, and although this
+# text never reaches the OS, keeping it printable removes any need to reason about that.
+_TEMPLATE_SENTINEL = "MYIDM_SCAN_TARGET_a7f3c1e9"
 
 # Extensions with higher risk of malware or direct execution
 HIGH_RISK_EXTENSIONS = {
@@ -300,62 +307,101 @@ def _is_threat_excluded(report: str, config: SecurityConfig) -> Optional[str]:
     return None
 
 
-def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool, str]:
-    """Scan a downloaded file with the configured antivirus scanner.
+#: Executables tried, in order, when auto-detecting a POSIX scanner. `clamdscan` is listed first
+#: because it talks to a running `clamd` and is much faster on large files, but it needs that
+#: daemon to be up - so a missing daemon makes it fail where `clamscan` would have worked.
+#: Order is therefore the lesser-evil choice, and both are reported the same way if neither works.
+_CLAMSCAN_EXECUTABLES = ("clamdscan", "clamscan")
 
-    Returns (is_clean, report_message).
-    Threats matching excluded categories/patterns are treated as clean.
+#: Default argument template for an auto-detected scanner.
+#: `--no-summary` because My-IDM builds its own report line from the exit code, and clamscan's
+#: per-file scan summary would only be noise. clamscan exits 0 clean, 1 infected, 2 error.
+_CLAMSCAN_ARGS = "--no-summary %file%"
+
+
+def find_clamav() -> tuple[Optional[str], Optional[str]]:
+    """Locate a ClamAV command-line scanner. Returns ``(executable, args_template)``.
+
+    ClamAV is the only practical antivirus on Linux and the only installable one on macOS
+    (``brew install clamav``). Neither platform ships a Defender equivalent, so without this the
+    post-download scan has nothing to run and reports "not scanned" - correct, but only useful if
+    the user knows ClamAV is the answer.
+
+    Detection only, never installation. Installing a security tool, let alone a system daemon, on
+    a user's machine without being asked is not this application's decision to make; a packaged
+    build will simply find its own bundled copy through this same lookup.
     """
-    if not config.scan_after_download:
-        return True, "Post-download scan is disabled."
+    for name in _CLAMSCAN_EXECUTABLES:
+        found = shutil.which(name)
+        if found:
+            return found, _CLAMSCAN_ARGS
+    return None, None
 
-    file_p = Path(file_path)
-    if not file_p.exists():
-        return True, f"File does not exist on disk: {file_path}"
 
-    abs_path = str(file_p.resolve())
+def _scan_with_custom(
+    scanner: str,
+    args_template: Optional[str],
+    abs_path: str,
+    config: SecurityConfig,
+) -> tuple[bool | None, str]:
+    """Run an arbitrary command-line scanner and interpret its exit code.
 
-    # 1. Custom scanner
-    if config.scanner_type == "custom" and config.custom_scanner_path:
-        scanner = config.custom_scanner_path
-        if not os.path.isfile(scanner):
-            return True, f"Configured custom antivirus executable not found: {scanner}"
+    Shared by the configured-custom branch and by ClamAV auto-detection, which is why the
+    executable and the argument template are parameters rather than read from *config*.
 
-        # Replace %file% or %f with target path
-        args_template = config.custom_scanner_args or '"%file%"'
-        cmd_str = f'"{scanner}" ' + args_template.replace("%file%", abs_path).replace("%f", abs_path)
-        log.info("Running custom antivirus scan: %s", cmd_str)
+    Builds an argv list, never a shell string. This used to interpolate the target path into a
+    ``shell=True`` command line: a download whose filename contains a double quote breaks out of
+    the surrounding quotes, and ``&``, ``|`` or ``$(...)`` in a path then execute - so a crafted
+    torrent could run arbitrary commands as the user. The path is attacker-influenced, which is
+    what makes that an injection rather than a quoting nit.
 
-        try:
-            res = subprocess.run(
-                cmd_str,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            # Standard exit codes: 0 is clean, non-zero usually indicates threat or error
-            if res.returncode == 0:
-                return True, f"Clean (Custom Scanner: {Path(scanner).name})"
-            else:
-                out = (res.stdout + "\n" + res.stderr).strip()
-                threat_report = f"Threat detected or scanner alert (Exit code {res.returncode}): {out[:200]}"
-                excluded = _is_threat_excluded(threat_report, config)
-                if excluded:
-                    return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
-                return False, threat_report
-        except subprocess.TimeoutExpired:
-            return True, "Custom scan timed out after 60 seconds."
-        except Exception as exc:
-            log.error("Custom scan failed: %s", exc)
-            return True, f"Custom scan execution error: {exc}"
+    ``shlex.split`` gives the template the same treatment a shell would, minus the shell. The
+    placeholder is swapped for a sentinel first so the path is never split on: a path containing a
+    space must stay a single argument.
+    """
+    if not os.path.isfile(scanner):
+        return None, f"Configured custom antivirus executable not found: {scanner}"
 
-    # 2. Windows Defender (Default)
-    defender = find_windows_defender_path()
-    if not defender:
-        log.warning("Windows Defender (MpCmdRun.exe) not found on this system")
-        return True, "Windows Defender scanner not found; skipped scan."
+    template = args_template or '"%file%"'
+    template = template.replace("%file%", _TEMPLATE_SENTINEL).replace("%f", _TEMPLATE_SENTINEL)
+    argv = shlex.split(template, posix=os.name != "nt")
+    # With posix=False, shlex keeps the surrounding quote characters, so strip them before
+    # comparing against the sentinel.
+    argv = [abs_path if arg.strip('"') == _TEMPLATE_SENTINEL else arg for arg in argv]
+    cmd = [scanner, *argv]
+    log.info("Running antivirus scan: %s", cmd)
 
+    try:
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        # 0 is clean, non-zero is a threat *or* an error - clamscan's 1 (infected) and 2 (error)
+        # are indistinguishable here, and both are "not clean". The exclusion list still applies,
+        # so a user who has excluded a category keeps that behaviour on ClamAV too.
+        if res.returncode == 0:
+            return True, f"Clean (Custom Scanner: {Path(scanner).name})"
+        out = (res.stdout + "\n" + res.stderr).strip()
+        threat_report = (
+            f"Threat detected or scanner alert (Exit code {res.returncode}): {out[:200]}"
+        )
+        excluded = _is_threat_excluded(threat_report, config)
+        if excluded:
+            return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
+        return False, threat_report
+    except subprocess.TimeoutExpired:
+        return None, "Custom scan timed out after 60 seconds."
+    except Exception as exc:
+        log.error("Custom scan failed: %s", exc)
+        return None, f"Custom scan could not be executed: {exc}"
+
+
+def _scan_with_defender(
+    defender: str, abs_path: str, config: SecurityConfig
+) -> tuple[bool | None, str]:
+    """Run Windows Defender's command-line scanner and interpret its exit code."""
     log.info("Running Windows Defender scan on %s", abs_path)
     cmd = [defender, "-Scan", "-ScanType", "3", "-File", abs_path, "-DisableRemediation"]
 
@@ -373,28 +419,137 @@ def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool, str]:
         # 2: Threat detected
         if res.returncode == 0:
             return True, "Clean (Windows Defender verified no threats found)"
-        elif res.returncode == 2:
+        if res.returncode == 2:
             threat_report = f"⚠️ Threat detected by Windows Defender!\n{out}"
             excluded = _is_threat_excluded(threat_report, config)
             if excluded:
                 return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
             return False, threat_report
-        else:
-            if "found no threats" in out.lower():
-                return True, "Clean (Windows Defender: no threats found)"
-            if "threat" in out.lower():
-                threat_report = f"⚠️ Threat detected by Windows Defender: {out}"
-                excluded = _is_threat_excluded(threat_report, config)
-                if excluded:
-                    return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
-                return False, threat_report
-            return True, f"Windows Defender completed with code {res.returncode}."
+        if "found no threats" in out.lower():
+            return True, "Clean (Windows Defender: no threats found)"
+        if "threat" in out.lower():
+            threat_report = f"⚠️ Threat detected by Windows Defender: {out}"
+            excluded = _is_threat_excluded(threat_report, config)
+            if excluded:
+                return True, f"Allowed (matched exclusion '{excluded}'): {threat_report}"
+            return False, threat_report
+        # An unrecognised exit code with output matching neither verdict is not a clean result,
+        # it is an unread one. Same reasoning as a missing scanner.
+        return None, (
+            f"Windows Defender exited with code {res.returncode} and produced no "
+            f"recognisable verdict; the file was not scanned."
+        )
     except subprocess.TimeoutExpired:
         log.warning("Windows Defender scan timed out on %s", abs_path)
-        return True, "Windows Defender scan timed out."
+        return None, "Windows Defender scan timed out; the file was not scanned."
     except Exception as exc:
         log.error("Windows Defender execution failed: %s", exc)
-        return True, f"Scanner error: {exc}"
+        return None, f"Windows Defender could not be executed: {exc}"
+
+
+def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool | None, str]:
+    """Scan a downloaded file with the configured antivirus scanner.
+
+    Returns ``(verdict, report_message)`` where **verdict is tri-state**:
+
+    * ``True``  - the scanner ran and found nothing.
+    * ``False`` - the scanner found a threat.
+    * ``None``  - **no verdict could be reached**: no scanner is installed, the scanner is
+      misconfigured, it timed out, or it could not be executed.
+
+    ``None`` used to be reported as ``True``. That is a fail-*open* defect, not a lenient default:
+    on any machine without Windows Defender - which is every Linux and macOS machine - every scan
+    returned a clean verdict for a file nothing had looked at, and the UI showed a green
+    "Clean (Scanned)". A scanner that could not run says nothing about the file, and rendering that
+    as safe is the one answer that cannot be allowed.
+
+    Threats matching excluded categories/patterns are treated as clean.
+    """
+    if not config.scan_after_download:
+        return True, "Post-download scan is disabled."
+
+    file_p = Path(file_path)
+    if not file_p.exists():
+        return True, f"File does not exist on disk: {file_path}"
+
+    abs_path = str(file_p.resolve())
+
+    scanner_type = (config.scanner_type or "auto").strip().lower()
+
+    if scanner_type == "custom" and config.custom_scanner_path:
+        return _scan_with_custom(
+            config.custom_scanner_path, config.custom_scanner_args, abs_path, config
+        )
+
+    # `custom` with an empty Executable field is a misconfiguration, not a choice of scanner.
+    # Falling back to `auto` keeps a blank field from silently disabling scanning - the user did
+    # not ask for no scanning, they left a text box empty.
+    if scanner_type == "custom":
+        scanner_type = "auto"
+
+    # "defender" is the historical value of the Windows/Custom radio button, so it is also what
+    # every existing configuration has stored - including on Linux and macOS, where Defender
+    # cannot exist. Treating it there as "the system scanner" is what makes the default settings
+    # work off Windows at all; the radio is relabelled per platform so the UI says so.
+    if scanner_type == "defender" and sys.platform != "win32":
+        log.info(
+            "Scanner is set to 'defender' but this is %s; using the system scanner instead. "
+            "The Settings label reads 'System scanner' on this platform.",
+            sys.platform,
+        )
+        scanner_type = "auto"
+
+    # `auto`: use Defender where it exists, otherwise fall back to whatever ClamAV is installed.
+    # This is what makes the *default* configuration meaningful on Linux and macOS, rather than
+    # every scan reporting "not scanned" because no antivirus happens to be installed.
+    if scanner_type == "auto":
+        if sys.platform == "win32":
+            defender = find_windows_defender_path()
+            if defender:
+                return _scan_with_defender(defender, abs_path, config)
+            clam, clam_args = find_clamav()
+            if clam:
+                return _scan_with_custom(clam, clam_args, abs_path, config)
+            log.warning(
+                "No scanner available - Windows Defender and ClamAV are both absent. "
+                "The file was NOT scanned."
+            )
+            return None, (
+                "No antivirus scanner available (Windows Defender not found and "
+                "ClamAV is not installed). Install ClamAV, or set a Custom Antivirus "
+                "Scanner in Settings; the file was not scanned."
+            )
+        clam, clam_args = find_clamav()
+        if clam:
+            return _scan_with_custom(clam, clam_args, abs_path, config)
+        log.warning("Neither clamscan nor clamdscan found on PATH - the file was NOT scanned")
+        return None, (
+            "No antivirus scanner available. Install ClamAV (apt install clamav / "
+            "brew install clamav), or set a Custom Antivirus Scanner in Settings; "
+            "the file was not scanned."
+        )
+
+    if scanner_type == "defender":
+        defender = find_windows_defender_path()
+        if not defender:
+            log.warning(
+                "Windows Defender (MpCmdRun.exe) not found on this system - "
+                "the file was NOT scanned"
+            )
+            return None, (
+                "No antivirus scanner available (Windows Defender not found). "
+                "The file was not scanned."
+            )
+        return _scan_with_defender(defender, abs_path, config)
+
+    # `clamscan` / `clamav`: an explicit POSIX selection, honouring configured arguments.
+    clam, clam_args = find_clamav()
+    if not clam:
+        return None, (
+            "ClamAV is selected but neither clamscan nor clamdscan is on PATH. "
+            "The file was not scanned."
+        )
+    return _scan_with_custom(clam, config.custom_scanner_args or clam_args, abs_path, config)
 
 
 def quarantine_or_delete_file(file_path: str) -> bool:

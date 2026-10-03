@@ -12,6 +12,12 @@ dependencies = [
     "aiosqlite>=0.20",
     "humanize>=4.9",
     "libtorrent>=2.0",
+    "psutil>=5.9",
+    # Windows-only balloon notifications. The marker is load-bearing: pip cannot resolve this
+    # package on Linux or macOS, so an unmarked entry makes `pip install` fail outright rather
+    # than skip it. `notifications.py` already guards the import, so the code degrades to the
+    # tray without it.
+    "win10toast>=0.9 ; sys_platform == 'win32'",
     "yt-dlp>=2024.1.1",
 ]
 

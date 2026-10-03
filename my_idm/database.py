@@ -13,11 +13,16 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from my_idm.paths import data_dir, database_path
 from my_idm.utils import normalize_path, to_int
 
 
-APP_DIR = Path.home() / ".my-idm"
-DB_PATH = APP_DIR / "downloads.db"
+#: Retained as module attributes because many modules import these names directly. The values are
+#: resolved once, at import, through `my_idm.paths` - which prefers a pre-existing `~/.my-idm` over
+#: the platform location so an existing install never moves its download history.
+#: See my_idm/paths.py for the resolution rules.
+APP_DIR = data_dir()
+DB_PATH = database_path()
 
 
 def _now_iso() -> str:

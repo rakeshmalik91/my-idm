@@ -3168,9 +3168,19 @@ class SettingsDialog(QDialog):
             temp_path = tf.name
 
         try:
-            is_clean, report = scan_file(temp_path, cfg)
+            verdict, report = scan_file(temp_path, cfg)
             scanner_display = f"Custom ({Path(custom_path).name})" if scanner_type == "custom" and custom_path else "Windows Defender"
-            if is_clean:
+            if verdict is None:
+                # Distinct from a threat: the scanner never ran, so the test verified nothing.
+                # Reporting this as "scanner executed but detected a threat" would be a lie, and
+                # reporting it as success would be worse.
+                QMessageBox.critical(
+                    self, "Antivirus Scanner Test",
+                    f"⚠ The scanner could not be run, so the result is unknown.\n\n"
+                    f"Scanner: {scanner_display}\n"
+                    f"Details: {report}",
+                )
+            elif verdict:
                 QMessageBox.information(
                     self, "Antivirus Scanner Test",
                     f"✅ Scanner verified successfully!\n\n"

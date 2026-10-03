@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from typing import Optional
 
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 from my_idm.security import (
     KNOWN_THREAT_CATEGORIES,
     SecurityConfig,
+    find_clamav,
     find_windows_defender_path,
     scan_file,
 )
@@ -149,8 +151,29 @@ class SecuritySettingsDialog(QDialog):
         scanner_inner = QVBoxLayout(scanner_group)
         scanner_inner.setSpacing(10)
 
-        self._rb_defender = QRadioButton(
-            f"Windows Defender ({'Found: ' + self._defender_path if self._defender_path else 'Not Detected'})"
+        # Windows names its scanner; no other platform ships one. Labelling this "Windows Defender"
+        # on Linux or macOS is a lie the user can act on - they would go looking for Defender. So
+        # the label follows the platform, and shows what was actually found.
+        self._clamav_path, _clamav_args = find_clamav()
+        if sys.platform == "win32":
+            default_label = (
+                f"Windows Defender ({'Found: ' + self._defender_path if self._defender_path else 'Not Detected'})"
+            )
+        else:
+            default_label = (
+                f"System scanner - ClamAV ({'Found: ' + self._clamav_path if self._clamav_path else 'Not Detected'})"
+            )
+        self._rb_defender = QRadioButton(default_label)
+        self._rb_defender.setToolTip(
+            "Use the antivirus built into this operating system."
+            + (
+                ""
+                if sys.platform == "win32"
+                else "\n\nMy-IDM looks for clamscan or clamdscan on PATH. Install it with"
+                "\n  apt install clamav      (Debian/Ubuntu)"
+                "\n  dnf install clamav      (Fedora)"
+                "\n  brew install clamav     (macOS)"
+            )
         )
         self._rb_defender.toggled.connect(self._on_scanner_type_toggled)
         scanner_inner.addWidget(self._rb_defender)
@@ -360,8 +383,14 @@ class SecuritySettingsDialog(QDialog):
             temp_path = f.name
 
         try:
-            is_clean, report = scan_file(temp_path, test_cfg)
-            if is_clean:
+            verdict, report = scan_file(temp_path, test_cfg)
+            if verdict is None:
+                QMessageBox.critical(
+                    self, "Antivirus Scanner Unavailable",
+                    f"The scanner could not be run, so this test proves nothing either way.\n\n"
+                    f"{report}"
+                )
+            elif verdict:
                 QMessageBox.information(
                     self, "Antivirus Scanner Test Passed",
                     f"Scanner executed successfully!\n\nVerdict: Clean\n\nReport:\n{report}"

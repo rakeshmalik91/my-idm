@@ -32,6 +32,7 @@ from my_idm.config import (
     ExternalToolsConfig,
     clamp_ytdlp_playlist_limit,
 )
+from my_idm.proc import background_kwargs
 from my_idm.utils import sanitize_filename, split_extension
 
 log = logging.getLogger(__name__)
@@ -302,7 +303,7 @@ def get_ytdlp_version(config: Optional[ExternalToolsConfig] = None) -> str:
             capture_output=True,
             text=True,
             timeout=15,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            **background_kwargs(detach=False),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         log.debug("Failed to query yt-dlp version: %s", exc)
@@ -1043,7 +1044,7 @@ def update_ytdlp(config: Optional[ExternalToolsConfig] = None) -> tuple[bool, st
                 capture_output=True,
                 text=True,
                 timeout=300,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                **background_kwargs(detach=False),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"yt-dlp update failed: {exc}"
@@ -1057,7 +1058,7 @@ def update_ytdlp(config: Optional[ExternalToolsConfig] = None) -> tuple[bool, st
             capture_output=True,
             text=True,
             timeout=600,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            **background_kwargs(detach=False),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"yt-dlp update failed: {exc}"

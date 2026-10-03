@@ -101,9 +101,41 @@ Users can specify when antivirus scanning occurs:
 
 ---
 
+## Scanning Is Tri-State
+
+`scan_file()` returns a verdict that is **not** a boolean:
+
+| Verdict | Meaning | Effect on the download |
+| :--- | :--- | :--- |
+| `True` | The scanner ran and found nothing | Completes, badge reads "✔ Clean (Scanned)" |
+| `False` | The scanner found a threat | `threat_detected`; quarantined or deleted per **Action on Threat** |
+| `None` | **No verdict was reached** — no scanner installed, misconfigured, timed out, crashed, or exited with an unreadable result | Completes, badge reads "⚠ Not scanned — <reason>" |
+
+The `None` case used to report `True`. That was a fail-**open**: on every machine without Windows
+Defender — that is, every Linux and macOS machine — each post-download scan reported success for a
+file nothing had inspected, and the panel showed a green "Clean". A scanner that could not run says
+nothing about the file, so the UI distinguishes "clean" from "not scanned" rather than collapsing
+them.
+
+The verdict must also never be `False` merely because it is falsy. `None` is falsy, so a call site
+written as `if not verdict:` instead of `if verdict is False:` would route every unscanned download
+into quarantine and, with **Action on Threat** set to *Delete*, remove the user's files. Both
+post-download call sites in `manager.py` are written explicitly for this reason.
+
+---
+
 ## Troubleshooting
 
-- **Windows Defender Not Found**: If running on non-Windows systems or specialized Windows Server editions lacking Defender, configure a **Custom Antivirus Scanner** pointing to `clamscan` or your installed security package.
-- **Scanner Timed Out**: Large archives or multi-gigabyte disk images (`.iso`) may take longer to scan. The timeout is set to 90 seconds for Windows Defender and 60 seconds for custom scanners.
+- **No Scanner Available (Linux / macOS)**: The default scanner is Windows Defender, which does not
+  exist off Windows. Nothing is scanned until you configure one — either point **Custom Antivirus
+  Scanner** at `clamscan`/`clamdscan` (set **Arguments** to `--no-summary "%file%"`; exit `0` clean,
+  `1` infected, `2` error), or switch to the **VirusTotal** engine for pre-download URL checks.
+  Note `spctl` is *not* an antivirus scanner: it assesses code signing, so a non-zero exit is not a
+  threat verdict.
+- **Scanner Timed Out**: Large archives or multi-gigabyte disk images (`.iso`) may take longer to scan. The timeout is set to 90 seconds for Windows Defender and 60 seconds for custom scanners. A timeout now yields "not scanned" rather than "clean".
+- **Custom Scanner Arguments**: the field is an **argument list**, not a shell command. Shell
+  operators (`|`, `>`, `&&`) and redirections are not interpreted, and the target path is passed as
+  a single argument regardless of spaces or quoting inside it. Pipelines belong in a wrapper script
+  pointed at by **Executable**.
 - **False Positives**: If a safe developer tool or self-compiled binary is flagged, check the **Warn only** option in settings to prevent immediate deletion.
 - **VirusTotal Rate Limits**: Free public VirusTotal API keys are limited to 4 requests per minute. If you exceed this rate, the URL check gracefully defaults to local heuristic validation.

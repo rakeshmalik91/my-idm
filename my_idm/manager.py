@@ -3358,22 +3358,15 @@ class DownloadManager(QObject):
 
         def _do_scan():
             try:
-                is_clean, report = scan_file(entry.file_path, self._security_config)
+                verdict, report = scan_file(entry.file_path, self._security_config)
                 meta = entry.metadata
-                meta["antivirus_scanned"] = True
+                # Tri-state, not boolean: `None` means no scanner could run, which is neither a
+                # clean bill of health nor a threat. Recording it as scanned would make the
+                # details panel render a green "Clean" for a file nothing inspected.
+                meta["antivirus_scanned"] = verdict is not None
                 meta["antivirus_report"] = report
 
-                if is_clean:
-                    final_status = "seeding" if target_seeding else "completed"
-                    entry.metadata = meta
-                    self._db.update_download(entry)
-                    self._db.update_status(download_id, final_status)
-                    if final_status == "seeding":
-                        h = self._torrent._handles.get(download_id)
-                        if h:
-                            self._torrent._apply_seeding_limit_to_handle(h)
-                    self.status_changed.emit(download_id, final_status, report)
-                else:
+                if verdict is False:
                     meta["threat_detected"] = True
                     if self._security_config.action_on_threat == "delete":
                         quarantine_or_delete_file(entry.file_path)
@@ -3383,6 +3376,23 @@ class DownloadManager(QObject):
                     self._db.update_status(download_id, "threat_detected", report)
                     self.status_changed.emit(download_id, "threat_detected", report)
                     self.threat_detected.emit(download_id, report)
+                    return
+
+                if verdict is None:
+                    # Completed, but unscanned. The download still finishes - refusing to finish
+                    # because no antivirus happens to be installed would be a worse failure than
+                    # the one being guarded against - and the panel reports it as not scanned.
+                    meta["antivirus_scan_error"] = report
+
+                final_status = "seeding" if target_seeding else "completed"
+                entry.metadata = meta
+                self._db.update_download(entry)
+                self._db.update_status(download_id, final_status)
+                if final_status == "seeding":
+                    h = self._torrent._handles.get(download_id)
+                    if h:
+                        self._torrent._apply_seeding_limit_to_handle(h)
+                self.status_changed.emit(download_id, final_status, report)
             except Exception as exc:
                 log.debug("Antivirus scan background task error for %s: %s", download_id, exc)
 
@@ -3401,20 +3411,13 @@ class DownloadManager(QObject):
         self.status_changed.emit(download_id, "scanning", "Scanning file for malware...")
 
         def _do_scan():
-            is_clean, report = scan_file(entry.file_path, self._security_config)
+            verdict, report = scan_file(entry.file_path, self._security_config)
             meta = entry.metadata
-            meta["antivirus_scanned"] = True
+            # Tri-state: see the sibling rescan path in `_on_download_complete`.
+            meta["antivirus_scanned"] = verdict is not None
             meta["antivirus_report"] = report
 
-            if is_clean:
-                entry.metadata = meta
-                self._db.update_download(entry)
-                target_status = original_status if original_status in ("paused", "queued", "downloading", "seeding") else "completed"
-                if entry.total_size > 0 and entry.downloaded_size < entry.total_size and target_status == "completed":
-                    target_status = "paused"
-                self._db.update_status(download_id, target_status)
-                self.status_changed.emit(download_id, target_status, report)
-            else:
+            if verdict is False:
                 meta["threat_detected"] = True
                 if self._security_config.action_on_threat == "delete":
                     quarantine_or_delete_file(entry.file_path)
@@ -3424,6 +3427,18 @@ class DownloadManager(QObject):
                 self._db.update_status(download_id, "threat_detected", report)
                 self.status_changed.emit(download_id, "threat_detected", report)
                 self.threat_detected.emit(download_id, report)
+                return
+
+            if verdict is None:
+                meta["antivirus_scan_error"] = report
+
+            entry.metadata = meta
+            self._db.update_download(entry)
+            target_status = original_status if original_status in ("paused", "queued", "downloading", "seeding") else "completed"
+            if entry.total_size > 0 and entry.downloaded_size < entry.total_size and target_status == "completed":
+                target_status = "paused"
+            self._db.update_status(download_id, target_status)
+            self.status_changed.emit(download_id, target_status, report)
 
         threading.Thread(
             target=_do_scan, daemon=True, name=f"scan-ondemand-{download_id}"

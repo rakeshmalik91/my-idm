@@ -15,6 +15,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 
 from my_idm.config import ExternalToolsConfig
+from my_idm.proc import background_kwargs
 
 log = logging.getLogger(__name__)
 
@@ -69,9 +70,23 @@ def get_child_pids(parent_pid: int) -> set[int]:
     return child_pids
 
 
+def embedded_browser_supported() -> bool:
+    """Whether the in-panel embedded browser view can work on this platform.
+
+    Windows-only, and not for a fixable reason. Docking the browser means reparenting a foreign
+    top-level window into a Qt widget: on X11 that needs ``XReparentWindow`` against a client
+    window plus a matching event loop, and macOS has no comparable public API at all. Neither is
+    a matter of finding the right handle - ``find_chrome_hwnd`` returns ``None`` off Windows for
+    the same reason.
+
+    The AnimePahe scraper itself is unaffected; only the in-panel view of it is unavailable.
+    """
+    return sys.platform == "win32"
+
+
 def find_chrome_hwnd(parent_pid: Optional[int] = None) -> Optional[int]:
     """Find newly created top-level Chrome_WidgetWin_1 browser window HWND belonging to parent_pid tree."""
-    if sys.platform != "win32":
+    if not embedded_browser_supported():
         return None
     try:
         import ctypes
@@ -184,8 +199,8 @@ def launch_animepahe_cli(
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                creationflags=flags,
                 env=env,
+                **background_kwargs(),
             )
         msg = f"Started AnimePahe scraper in CLI mode (PID: {proc.pid})"
         log.info(msg)
@@ -217,13 +232,18 @@ def launch_animepahe_gui(config: ExternalToolsConfig) -> Tuple[bool, str]:
     if sys.platform == "win32":
         flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
+    # Detached on every platform. On Windows the flags above already do it; on POSIX they are
+    # ignored and `start_new_session` is what stops this GUI dying with the terminal My-IDM was
+    # launched from. See my_idm.proc.background_kwargs.
+    spawn_kwargs = background_kwargs(new_process_group=True)
+
     try:
         if run_pyw.is_file():
             cmd = [pythonw, str(run_pyw)]
             subprocess.Popen(
                 cmd,
                 cwd=repo,
-                creationflags=flags,
+                **spawn_kwargs,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -237,7 +257,7 @@ def launch_animepahe_gui(config: ExternalToolsConfig) -> Tuple[bool, str]:
             subprocess.Popen(
                 cmd,
                 cwd=repo,
-                creationflags=flags,
+                **spawn_kwargs,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -258,7 +278,7 @@ def launch_animepahe_gui(config: ExternalToolsConfig) -> Tuple[bool, str]:
             script = Path(repo) / "animepahe_download.py"
             if script.is_file():
                 cmd = [pythonw, str(script), "--gui"]
-                subprocess.Popen(cmd, cwd=repo, creationflags=flags, stdin=subprocess.DEVNULL)
+                subprocess.Popen(cmd, cwd=repo, **spawn_kwargs, stdin=subprocess.DEVNULL)
                 msg = "Launched AnimePahe GUI via animepahe_download.py --gui"
                 log.info(msg)
                 return True, msg

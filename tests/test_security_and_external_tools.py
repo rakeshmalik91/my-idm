@@ -494,11 +494,17 @@ class TestScanFileEdges(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("does not exist", detail)
 
-    def test_a_missing_defender_is_reported_as_a_skipped_scan(self):
+    def test_a_missing_defender_yields_no_verdict(self):
+        """No scanner is not a clean file.
+
+        This used to return `True`, which made every scan on Linux and macOS report success for a
+        file nothing had looked at.
+        """
         with patch.object(security, "find_windows_defender_path", return_value=None):
-            clean, detail = scan_file(str(self.target), SecurityConfig())
-        self.assertTrue(clean, "a missing scanner must not be reported as clean *silently*")
-        self.assertIn("not found", detail)
+            verdict, detail = scan_file(str(self.target), SecurityConfig())
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False, "no scanner must not become a threat verdict")
+        self.assertIn("not scanned", detail)
 
     def test_defender_exit_code_zero_is_clean(self):
         with patch.object(security, "find_windows_defender_path", return_value="MpCmdRun.exe"), \
@@ -550,27 +556,35 @@ class TestScanFileEdges(unittest.TestCase):
         )
         self.assertIn("exclusion", detail)
 
-    def test_an_unknown_exit_code_with_no_verdict_is_reported_as_a_skip(self):
-        """Exit 1 with an unreadable log must not be guessed either way."""
+    def test_an_unknown_exit_code_with_no_verdict_is_not_guessed_either_way(self):
+        """Exit 1 with an unreadable log must not be guessed - and "not guessed" is not clean.
+
+        This is the narrower sibling of the missing-scanner case: Defender *ran*, but its output
+        matches neither verdict, so the scan established nothing.
+        """
         with patch.object(security, "find_windows_defender_path", return_value="MpCmdRun.exe"), \
              self._defender(1, stdout=""):
-            clean, detail = scan_file(str(self.target), SecurityConfig())
-        self.assertTrue(clean)
-        self.assertIn("completed with code 1", detail)
+            verdict, detail = scan_file(str(self.target), SecurityConfig())
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False)
+        self.assertIn("exited with code 1", detail)
+        self.assertIn("not scanned", detail)
 
-    def test_a_defender_timeout_is_reported_not_raised(self):
+    def test_a_defender_timeout_yields_no_verdict(self):
         with patch.object(security, "find_windows_defender_path", return_value="MpCmdRun.exe"), \
              patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("cmd", 90)):
-            clean, detail = scan_file(str(self.target), SecurityConfig())
-        self.assertTrue(clean)
+            verdict, detail = scan_file(str(self.target), SecurityConfig())
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False)
         self.assertIn("timed out", detail)
 
-    def test_a_defender_crash_is_reported_not_raised(self):
+    def test_a_defender_crash_yields_no_verdict(self):
         with patch.object(security, "find_windows_defender_path", return_value="MpCmdRun.exe"), \
              patch.object(subprocess, "run", side_effect=OSError("access denied")):
-            clean, detail = scan_file(str(self.target), SecurityConfig())
-        self.assertTrue(clean)
-        self.assertIn("Scanner error", detail)
+            verdict, detail = scan_file(str(self.target), SecurityConfig())
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False)
+        self.assertIn("could not be executed", detail)
 
     def test_the_defender_command_line_is_the_documented_one(self):
         with patch.object(security, "find_windows_defender_path", return_value="MpCmdRun.exe"), \
@@ -627,29 +641,32 @@ class TestScanFileEdges(unittest.TestCase):
         self.assertTrue(clean)
         self.assertIn("exclusion", detail)
 
-    def test_a_custom_scanner_timeout_is_reported_not_raised(self):
+    def test_a_custom_scanner_timeout_yields_no_verdict(self):
         scanner = Path(self._tmp.name) / "scan.exe"
         scanner.write_text("# stub")
         with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("c", 60)):
-            clean, detail = scan_file(str(self.target), self._custom(scanner))
-        self.assertTrue(clean)
+            verdict, detail = scan_file(str(self.target), self._custom(scanner))
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False)
         self.assertIn("timed out", detail)
 
-    def test_a_custom_scanner_that_cannot_execute_is_reported_not_raised(self):
+    def test_a_custom_scanner_that_cannot_execute_yields_no_verdict(self):
         scanner = Path(self._tmp.name) / "scan.exe"
         scanner.write_text("# stub")
         with patch.object(subprocess, "run", side_effect=OSError("not a valid win32 app")):
-            clean, detail = scan_file(str(self.target), self._custom(scanner))
-        self.assertTrue(clean)
-        self.assertIn("execution error", detail)
+            verdict, detail = scan_file(str(self.target), self._custom(scanner))
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False)
+        self.assertIn("could not be executed", detail)
 
     def test_a_custom_scanner_with_no_path_falls_through_to_defender(self):
         with patch.object(security, "find_windows_defender_path", return_value=None):
-            clean, detail = scan_file(
+            verdict, detail = scan_file(
                 str(self.target), SecurityConfig(scanner_type="custom", custom_scanner_path="")
             )
         self.assertIn("Defender", detail)
-        self.assertTrue(clean)
+        self.assertIsNone(verdict)
+        self.assertNotEqual(verdict, False)
 
     def test_both_placeholder_spellings_are_substituted(self):
         scanner = Path(self._tmp.name) / "scan.exe"
@@ -658,7 +675,52 @@ class TestScanFileEdges(unittest.TestCase):
                           return_value=subprocess.CompletedProcess(args=[], returncode=0,
                                                                    stdout="", stderr="")) as run:
             scan_file(str(self.target), self._custom(scanner, custom_scanner_args="--in %f --out"))
-        self.assertIn(f"--in {self.target.resolve()}", run.call_args.args[0])
+        argv = run.call_args.args[0]
+        self.assertEqual(
+            argv, [str(scanner), "--in", str(self.target.resolve()), "--out"],
+            "the template must be split into separate arguments, not interpolated into a string",
+        )
+
+    def test_a_hostile_download_name_cannot_inject_a_shell_command(self):
+        """The path is attacker-influenced, so it must never be interpreted by a shell.
+
+        The target path comes from a download's filename, which a crafted torrent controls. This
+        used to be interpolated into a `shell=True` string, where a double quote in the name
+        closes the surrounding quotes and `&`, `|`, or `$(...)` then execute - arbitrary commands
+        as the user, triggered by downloading a file.
+
+        The names are synthesised rather than created on disk: `"`, `|`, `<` and `>` are all
+        rejected in Windows filenames, so a test that made a real file could only ever run on
+        POSIX and would silently skip where the shell=True code path was most reachable.
+        Asserted on the argv rather than by executing anything: the point is that no shell is
+        involved, so there is nothing to intercept.
+        """
+        scanner = Path(self._tmp.name) / "scan.exe"
+        scanner.write_text("# stub")
+
+        hostile_names = [
+            'payload"&calc.exe&"',
+            "payload`calc`",
+            "payload$(calc).bin",
+            "payload|calc|.bin",
+            "payload\ncalc\n",
+            'payload";calc;"',
+        ]
+        for name in hostile_names:
+            with self.subTest(name=name):
+                victim = Path(self._tmp.name) / name
+                with patch.object(Path, "exists", return_value=True), \
+                     patch.object(Path, "resolve", return_value=victim), \
+                     patch.object(subprocess, "run",
+                                  return_value=subprocess.CompletedProcess(
+                                      args=[], returncode=0, stdout="", stderr="")) as run:
+                    scan_file(str(victim), self._custom(scanner))
+
+                self.assertNotIn("shell", run.call_args.kwargs)
+                argv = run.call_args.args[0]
+                self.assertIsInstance(argv, list, "the scanner must be invoked with an argv list")
+                # The whole name survives as exactly one argument - nothing split, nothing dropped.
+                self.assertEqual(argv, [str(scanner), str(victim)])
 
     def test_a_custom_scanner_argument_template_with_no_placeholder_is_passed_through(self):
         scanner = Path(self._tmp.name) / "scan.exe"
@@ -777,9 +839,12 @@ class TestScanFileThreadSafety(unittest.TestCase):
                 self.assertFalse(thread.is_alive())
 
         self.assertEqual(len(verdicts), self.THREADS)
-        for clean, detail in verdicts:
-            self.assertTrue(clean)
-            self.assertIn("Scanner error", detail)
+        for verdict, detail in verdicts:
+            # A scanner that crashed on every thread establishes nothing, so every thread must
+            # report "no verdict" rather than the clean result this used to assert.
+            self.assertIsNone(verdict)
+            self.assertNotEqual(verdict, False)
+            self.assertIn("could not be executed", detail)
 
 
 # ---------------------------------------------------------------------------
@@ -1263,6 +1328,28 @@ class TestChildPidEnumeration(unittest.TestCase):
         with patch.object(external_tools.sys, "platform", "linux"):
             self.assertEqual(external_tools.get_child_pids(1234), set())
             self.assertIsNone(external_tools.find_chrome_hwnd(1234))
+
+    def test_embedded_browser_support_follows_the_platform(self):
+        """The capability flag and the finder must never disagree.
+
+        The panel surfaces `embedded_browser_supported()` to the user as the reason the Embedded
+        Browser tab never appears, while `find_chrome_hwnd` is what actually decides whether it
+        attaches. If those two ever diverged, the panel would promise a tab that silently fails
+        to populate - the exact defect the flag was added to remove.
+        """
+        for platform, expected in (("win32", True), ("linux", False), ("darwin", False)):
+            with self.subTest(platform=platform):
+                with patch.object(external_tools.sys, "platform", platform):
+                    self.assertIs(external_tools.embedded_browser_supported(), expected)
+
+        # The direction that matters: where the feature is unsupported the finder must
+        # short-circuit, never reach Win32 enumeration. (The reverse does not hold as an equality
+        # - on Windows the finder returns None simply when no matching window exists.)
+        for platform in ("linux", "darwin"):
+            with self.subTest(platform=platform):
+                with patch.object(external_tools.sys, "platform", platform):
+                    self.assertFalse(external_tools.embedded_browser_supported())
+                    self.assertIsNone(external_tools.find_chrome_hwnd(1234))
 
     def test_a_failed_snapshot_is_an_empty_set(self):
         self.kernel32.CreateToolhelp32Snapshot.return_value = -1

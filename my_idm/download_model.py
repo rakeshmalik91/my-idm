@@ -26,6 +26,7 @@ from my_idm.database import (
 )
 from my_idm.styles import Colors
 from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, to_int
+from my_idm import fonts
 
 _ICON_CACHE: dict[str, Any] = {}
 
@@ -1620,7 +1621,7 @@ class DownloadTableModel(QAbstractTableModel):
                 else:
                     return QColor("#8fa0b5")
             if role == Qt.ItemDataRole.FontRole:
-                return QFont("Segoe UI", 10, QFont.Weight.Bold)
+                return fonts.ui_font(10, bold=True)
             if role == Qt.ItemDataRole.TextAlignmentRole:
                 return int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             if role == Qt.ItemDataRole.ToolTipRole:

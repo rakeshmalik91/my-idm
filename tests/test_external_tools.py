@@ -148,7 +148,7 @@ class TestExternalTools(unittest.TestCase):
         # Both platform branches are stubbed: on POSIX the code takes the
         # QDesktopServices path, which is otherwise free to hand the URI to a real
         # desktop file manager.
-        with patch("os.startfile", return_value=None) as mock_startfile, \
+        with patch("os.startfile", return_value=None, create=True) as mock_startfile, \
              patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
             ok, msg = open_file_in_default_app(target_folder)
             self.assertTrue(ok, f"opening an existing folder should succeed, got: {msg}")
@@ -172,7 +172,7 @@ class TestExternalTools(unittest.TestCase):
 
         # Test highlighting file
         with patch("subprocess.Popen") as mock_popen, \
-             patch("os.startfile") as mock_startfile, \
+             patch("os.startfile", create=True) as mock_startfile, \
              patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
             ok, msg = show_in_folder(sample_file)
             self.assertTrue(ok, f"revealing a file should succeed, got: {msg}")
@@ -191,7 +191,7 @@ class TestExternalTools(unittest.TestCase):
 
         # Test opening folder
         with patch("subprocess.Popen") as mock_popen, \
-             patch("os.startfile") as mock_startfile, \
+             patch("os.startfile", create=True) as mock_startfile, \
              patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
             ok, msg = show_in_folder(folder)
             self.assertTrue(ok, f"opening a folder should succeed, got: {msg}")

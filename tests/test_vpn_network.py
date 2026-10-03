@@ -125,6 +125,30 @@ class TestNetworkConfig(unittest.TestCase):
         self.assertFalse(is_vpn_adapter_name("Ethernet"))
         self.assertFalse(is_vpn_adapter_name("Local Area Connection"))
 
+    def test_posix_vpn_interface_names_are_detected(self):
+        """A connected VPN on macOS or Linux must be tagged as one.
+
+        macOS names every system-VPN interface ``utunN`` whatever the provider, and BSD/Linux name
+        theirs ``pppN`` / ``ipsecN``. Missing those meant a fully connected tunnel was not tagged
+        as a VPN, which also demoted it in the interface list - that list is sorted VPNs-first.
+        """
+        for name in ("utun0", "utun3", "ppp0", "ipsec0", "ipsec_tunnel"):
+            with self.subTest(interface=name):
+                self.assertTrue(
+                    is_vpn_adapter_name(name),
+                    f"{name!r} is a VPN interface and must be recognised on a POSIX host",
+                )
+
+    def test_common_posix_physical_interfaces_are_not_flagged(self):
+        """The additions must not turn ordinary adapters into VPNs.
+
+        Substring matching is a blunt instrument, so the negative cases matter as much as the
+        positive ones - ``lo0`` and ``en0`` are the interfaces a false positive would hit first.
+        """
+        for name in ("lo0", "en0", "eth0", "enp3s0", "wlan0", "ap0", "bridge0"):
+            with self.subTest(interface=name):
+                self.assertFalse(is_vpn_adapter_name(name), f"{name!r} is not a VPN")
+
     def test_get_available_interfaces(self):
         """Enumeration must be exercised, not just called on a host with no adapters.
 

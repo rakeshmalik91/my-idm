@@ -765,6 +765,94 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
 
         self.assertEqual(self.db.get_download("d1").status, "file_not_found")
 
+    def test_open_file_routes_through_the_cross_platform_helper(self):
+        """"Open file" must not call ``os.startfile``.
+
+        ``os.startfile`` only exists on Windows, so calling it unguarded raised
+        ``AttributeError`` on Linux and macOS. The handler now defers to
+        ``open_file_in_default_app``, which has a working ``QDesktopServices`` path.
+
+        The helper is patched at its source module because the handler lazy-imports it; letting
+        the real one run would hand the file to the actual shell, which the session
+        hermeticity fixture treats as a failure.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            real_file = Path(tmp) / "present.zip"
+            real_file.write_bytes(b"data")
+            e = DownloadEntry(
+                id="open-present",
+                url="http://example.com/present.zip",
+                filename="present.zip",
+                file_path=str(real_file),
+                save_path=tmp,
+                status="completed",
+            )
+            self.db.add_download(e)
+            self.win._load_history()
+            self.win._table.selectRow(0)
+
+            # Compared against the value the database actually holds: `normalize_path` rewrites
+            # separators to forward slashes on the way in, so the entry no longer matches the
+            # backslash form this test built the path with.
+            stored = self.db.get_download("open-present").file_path
+
+            with patch(
+                "my_idm.external_tools.open_file_in_default_app"
+            ) as mock_open:
+                self.win._on_open_file()
+
+        mock_open.assert_called_once_with(stored, create_if_missing=False)
+
+    def test_open_folder_reveals_the_file_not_the_containing_folder(self):
+        """The file is what gets handed over, so the platform can *select* it.
+
+        Previously the Windows branch ran ``explorer /select,<path>`` — passing ``/select,`` as
+        its own argv element, which Explorer tolerates by accident — while the non-Windows branch
+        opened the containing folder instead. Both now go through ``show_in_folder`` with the
+        file, so the two platforms agree.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            real_file = Path(tmp) / "present.zip"
+            real_file.write_bytes(b"data")
+            e = DownloadEntry(
+                id="reveal-present",
+                url="http://example.com/present.zip",
+                filename="present.zip",
+                file_path=str(real_file),
+                save_path=tmp,
+                status="completed",
+            )
+            self.db.add_download(e)
+            self.win._load_history()
+            self.win._table.selectRow(0)
+
+            stored = self.db.get_download("reveal-present").file_path
+            with patch("my_idm.external_tools.show_in_folder") as mock_reveal:
+                self.win._on_open_folder()
+
+        mock_reveal.assert_called_once_with(stored)
+
+    def test_open_folder_falls_back_to_the_folder_when_the_file_is_gone(self):
+        """No file to select, so the folder is the thing to open."""
+        with tempfile.TemporaryDirectory() as tmp:
+            e = DownloadEntry(
+                id="reveal-folder-only",
+                url="http://example.com/gone.zip",
+                filename="gone.zip",
+                file_path=str(Path(tmp) / "vanished.zip"),
+                save_path=tmp,
+                status="completed",
+            )
+            self.db.add_download(e)
+            self.win._load_history()
+            self.win._table.selectRow(0)
+
+            stored = self.db.get_download("reveal-folder-only").save_path
+            with patch("my_idm.external_tools.show_in_folder") as mock_reveal:
+                self.win._on_open_folder()
+
+        mock_reveal.assert_called_once_with(stored)
+
     def test_copy_url_to_clipboard(self):
         """MainWindow._on_copy_url copies the selected magnet link verbatim."""
         entry = DownloadEntry(
@@ -2761,8 +2849,15 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         )
 
     def test_close_to_tray_and_exit_app(self):
-        """Closing window when close_to_tray is enabled hides window; _exit_app completely closes."""
+        """Closing window when close_to_tray is enabled hides window; _exit_app completely closes.
+
+        Skipped where the desktop provides no system tray. With no tray icon there is nothing to
+        close *into*, and the window now closes for real instead - which is the correct behaviour
+        but is not what this test is asserting.
+        """
         from PySide6.QtGui import QCloseEvent
+        if self.win._tray_icon is None:
+            self.skipTest("no system tray on this desktop")
         self.win._manager._general_config.enable_system_tray = True
         self.win._manager._general_config.close_to_tray = True
         self.win._force_exit = False
@@ -2795,6 +2890,82 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         # stops the live child timers a hidden close-to-tray window would leak.
         self.assertTrue(self.win._details_timer.isActive() is False,
                         "the force-exit path must stop the 1 Hz details timer")
+
+    def test_close_without_a_tray_icon_closes_instead_of_stranding(self):
+        """The data-loss case: no tray icon means the window must not hide.
+
+        ``_setup_system_tray`` leaves ``_tray_icon`` as None when
+        ``QSystemTrayIcon.isSystemTrayAvailable()`` is False - normal on GNOME, and on Wayland
+        compositors with no AppIndicator. The preferences are both on by default, so the old gate
+        hid the window anyway, leaving no tray icon, no taskbar entry and no menu: the app looked
+        like it had quit while its downloads kept running.
+
+        ``_is_closing`` is pre-set so closeEvent takes its ``event.accept()`` short-circuit rather
+        than the full teardown, which would tear down this shared window.
+        """
+        from PySide6.QtGui import QCloseEvent
+
+        cfg = self.win._manager._general_config
+        cfg.enable_system_tray = True
+        cfg.close_to_tray = True
+        self.win._force_exit = False
+        self.win._tray_icon = None  # simulate a desktop with no tray
+
+        self.assertFalse(
+            self.win._can_hide_to_tray(),
+            "with no tray icon there is nothing to close into",
+        )
+
+        self.win._is_closing = True
+        close_ev = QCloseEvent()
+        self.win.closeEvent(close_ev)
+        self.assertTrue(
+            close_ev.isAccepted(),
+            "close must be honoured so the window can actually go away",
+        )
+        self.win._tray_icon = None
+
+    def test_can_hide_to_tray_requires_both_preferences_and_a_real_icon(self):
+        """The full truth table, since each input is a separate way to strand the window."""
+        cfg = self.win._manager._general_config
+        original = (cfg.enable_system_tray, cfg.close_to_tray, self.win._tray_icon)
+        try:
+            cfg.enable_system_tray = True
+            cfg.close_to_tray = True
+
+            self.win._tray_icon = None
+            self.assertFalse(self.win._can_hide_to_tray(), "no icon")
+
+            cfg.close_to_tray = False
+            self.assertFalse(self.win._can_hide_to_tray(), "close_to_tray off")
+
+            cfg.close_to_tray = True
+            cfg.enable_system_tray = False
+            self.assertFalse(self.win._can_hide_to_tray(), "enable_system_tray off")
+
+            # A truthy stand-in: the predicate tests for None, not for a live QSystemTrayIcon, so
+            # this does not need a real tray on the machine running the tests.
+            cfg.enable_system_tray = True
+            self.win._tray_icon = object()
+            self.assertTrue(self.win._can_hide_to_tray(), "all three satisfied")
+        finally:
+            cfg.enable_system_tray, cfg.close_to_tray, self.win._tray_icon = original
+
+    def test_minimize_does_not_hide_when_there_is_no_tray(self):
+        """Minimizing has the same trap as closing, and had the same missing check.
+
+        Asserted through ``_has_tray_icon`` rather than by driving a real window-state change:
+        the hide is deferred with ``QTimer.singleShot(0, ...)``, so it would not have happened by
+        the time the assertion runs.
+        """
+        original = self.win._tray_icon
+        try:
+            self.win._tray_icon = None
+            self.assertFalse(self.win._has_tray_icon())
+            self.win._tray_icon = object()
+            self.assertTrue(self.win._has_tray_icon())
+        finally:
+            self.win._tray_icon = original
 
     def test_tray_resume_all_downloads(self):
         """_on_resume_all_downloads triggers manager.resume_all_downloads and updates status label."""

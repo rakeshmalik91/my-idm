@@ -1,0 +1,36 @@
+# Line endings.
+#
+# Without this, `core.autocrlf=true` on Windows rewrites text files to CRLF in the working tree,
+# and a committed shell script then checks out on Linux with a CRLF shebang - which fails as
+# "exec format error" before the shell ever sees it. Nothing in the test suite catches that,
+# because on Windows the script is never executed.
+#
+# Kept deliberately narrow: only the file types whose line endings actually matter are pinned.
+# Everything else follows `text=auto`, which normalises to LF in the repository and lets the
+# platform's own convention apply in the working tree.
+
+* text=auto
+
+# POSIX shell scripts. The shebang line is the whole point - `#!/bin/sh\r` is not a valid
+# interpreter path.
+*.sh text eol=lf
+
+# Desktop entries are read by GLib, which is tolerant, but a stray CR in an Exec line becomes part
+# of the argument. Pin LF so a packaging step cannot introduce one.
+*.desktop text eol=lf
+
+# Windows batch files. `cmd.exe` has historically been unhappy with LF-only files, particularly
+# around labels and `goto`, so these are pinned the other way deliberately.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Python and Qt UI files: the repository stores LF, matching what the diffs were written with.
+*.py text eol=lf
+
+# Binary assets - never touched by a text filter.
+*.png binary
+*.ico binary
+*.icns binary
+*.torrent binary
+*.sqlite binary
+*.db binary
