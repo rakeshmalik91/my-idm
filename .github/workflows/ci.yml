@@ -30,6 +30,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PYTHONPATH: .
+
 jobs:
   basic:
     name: basic tier (${{ matrix.os }})
@@ -68,6 +71,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
+          pip install --no-deps -e .
 
       - name: Dependency manifests are self-consistent
         # The two files drifted before Phase 0, and the drift was not cosmetic: `win10toast` was
@@ -110,6 +114,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
+          pip install --no-deps -e .
 
       - name: Full suite (includes the ui tier)
         run: python -m pytest tests/ -q --tb=short
