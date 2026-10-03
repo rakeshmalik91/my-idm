@@ -15,6 +15,7 @@ See ``docs/architecture/youtube-scraper.md`` for the full design.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import glob
 import shutil
@@ -279,8 +280,22 @@ def check_ytdlp_available(config: Optional[ExternalToolsConfig] = None) -> bool:
         return False
 
 
+#: Memoised version strings for a resolved yt-dlp *binary*, keyed by
+#: ``(path, mtime, size)``. The key includes the file's identity so upgrading yt-dlp in place
+#: produces a new key rather than a stale answer - a version label that lies about which version is
+#: installed is worse than one that is slow.
+_YTDLP_BINARY_VERSION_CACHE: "OrderedDict[tuple, str]" = OrderedDict()
+_YTDLP_VERSION_CACHE_MAX = 16
+
+
 def get_ytdlp_version(config: Optional[ExternalToolsConfig] = None) -> str:
-    """Return the installed yt-dlp version string, or an empty string."""
+    """Return the installed yt-dlp version string, or an empty string.
+
+    Memoised for the binary path. Querying it means spawning the executable with ``--version``,
+    which is tens of milliseconds of process startup, and the Preferences dialog asks for the
+    version several times per open. The import path is already cached by Python itself, so only the
+    subprocess needed memoising.
+    """
     try:
         module = _import_ytdlp()
     except YouTubeToolError:
@@ -297,6 +312,17 @@ def get_ytdlp_version(config: Optional[ExternalToolsConfig] = None) -> str:
     binary = config.get_effective_ytdlp_path() if config else (shutil.which("yt-dlp") or "")
     if not binary:
         return ""
+
+    try:
+        stat = os.stat(binary)
+        key = (binary, int(stat.st_mtime), stat.st_size)
+    except OSError:
+        # No stat (a broken symlink, a permission problem): don't cache, just query it.
+        key = None
+
+    if key is not None and key in _YTDLP_BINARY_VERSION_CACHE:
+        return _YTDLP_BINARY_VERSION_CACHE[key]
+
     try:
         completed = subprocess.run(
             [binary, "--version"],
@@ -310,7 +336,13 @@ def get_ytdlp_version(config: Optional[ExternalToolsConfig] = None) -> str:
         return ""
     if completed.returncode != 0:
         return ""
-    return (completed.stdout or "").strip()
+    result = (completed.stdout or "").strip()
+
+    if key is not None:
+        _YTDLP_BINARY_VERSION_CACHE[key] = result
+        while len(_YTDLP_BINARY_VERSION_CACHE) > _YTDLP_VERSION_CACHE_MAX:
+            _YTDLP_BINARY_VERSION_CACHE.popitem(last=False)
+    return result
 
 
 def check_ffmpeg_available(config: Optional[ExternalToolsConfig] = None) -> bool:

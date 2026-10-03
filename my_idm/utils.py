@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 from my_idm import fonts
 from pathlib import Path
 from typing import Any, Optional, Set
@@ -154,8 +155,18 @@ def normalize_path(path: str | Path | None) -> str:
     return p_str.replace("\\", "/")
 
 
+@lru_cache(maxsize=512)
 def create_emoji_icon(emoji: str, size: int = 32):
-    """Create a high-DPI QIcon containing the specified emoji."""
+    """Create a high-DPI QIcon containing the specified emoji.
+
+    Cached, and the win is not the drawing - it is that the *first* call in a process pays Qt's
+    font-engine load (a few hundred milliseconds) for the colour-emoji face, and every later
+    `QFont` construction for it is cheap but not free. Preferences builds a fresh icon per sidebar
+    entry per open, so without this the cost is paid again on every open.
+
+    ``QIcon`` is implicitly shared in Qt, so handing the same instance to several widgets is safe;
+    none of the callers mutate what they are given.
+    """
     from PySide6.QtCore import Qt, QRect
     from PySide6.QtGui import QIcon, QPixmap, QPainter, QFont
 

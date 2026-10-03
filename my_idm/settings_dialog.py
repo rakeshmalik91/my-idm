@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QUrl, QSettings
+from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal
 from PySide6.QtGui import QDesktopServices, QFontMetrics, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -241,6 +242,94 @@ class _WholeRowListWidget(QListWidget):
         return False
 
 
+class _PrefsProbeEmitter(QObject):
+    """Carries probe results back to the GUI thread.
+
+    Deliberately a bare ``QObject`` and not a ``QThread``. A ``QThread`` that is destroyed while
+    still running aborts the process, and the dialog owns the thread, so any path that drops the
+    dialog without closing it - a test that forgets, a GC, an early return - is a hard crash. That
+    failure is intermittent by nature, which is the worst kind to have.
+
+    A plain ``threading.Thread(daemon=True)`` has no such semantics: it completes on its own, and
+    if the receiver is gone the queued emit is simply delivered to nobody.
+
+    Not parented to the dialog either. A child QObject is destroyed with its parent, and the worker
+    may still be holding this one when that happens; the resulting emit raises. Unparented, the
+    emitter outlives the dialog until the worker's last reference goes away, and `run()` guards the
+    emit as well.
+    """
+
+    finished = Signal(object)
+
+
+class _PrefsProbeWorker(threading.Thread):
+    """Runs the Preferences dialog's blocking system probes off the GUI thread.
+
+    Three things the dialog wants to display require leaving the GUI thread to be worth doing at
+    all: importing ``yt_dlp`` (~300 ms the first time), enumerating network adapters via psutil
+    (~25 ms), and walking the filesystem for a Tor executable (~14 ms). Together they dominated the
+    dialog's open time, and every one is a *display* concern - nothing depends on them to decide
+    what to save.
+
+    So they run once, at construction, and the results come back through `emitter.finished`. Nothing
+    here touches a widget; only `_apply_probe_results` does, and only on the GUI thread, which is
+    the rule Qt actually enforces.
+
+    Each probe is isolated so one failure cannot stop the others from being reported.
+    """
+
+    def __init__(self, emitter: _PrefsProbeEmitter, tor_hint: str = ""):
+        super().__init__(daemon=True, name="prefs-probe")
+        self._emitter = emitter
+        self._tor_hint = tor_hint
+
+    def run(self):
+        # Imported inside run() so the module-level cost is paid here rather than at dialog import,
+        # and so a failure in any one of them cannot stop the others.
+        results = {}
+        try:
+            from my_idm.network import get_available_interfaces
+
+            results["interfaces"] = get_available_interfaces()
+        except Exception as exc:
+            log.debug("Interface probe failed: %s", exc)
+            results["interfaces"] = []
+
+        try:
+            from my_idm.config import ExternalToolsConfig
+            from my_idm import youtube_tool as ytt
+
+            cfg = ExternalToolsConfig()
+            ytdlp_path = cfg.get_effective_ytdlp_path()
+            results["ytdlp_path"] = ytdlp_path
+            results["ytdlp_version"] = (
+                ytt.get_ytdlp_version(cfg) if ytdlp_path else ""
+            )
+            results["ffmpeg_path"] = cfg.get_effective_ffmpeg_path()
+        except Exception as exc:
+            log.debug("yt-dlp probe failed: %s", exc)
+            results["ytdlp_path"] = ""
+            results["ytdlp_version"] = ""
+            results["ffmpeg_path"] = ""
+
+        try:
+            from my_idm.tor_service import find_tor_executable
+
+            results["tor"] = self._tor_hint or find_tor_executable() or ""
+        except Exception as exc:
+            log.debug("Tor probe failed: %s", exc)
+            results["tor"] = ""
+
+        try:
+            self._emitter.finished.emit(results)
+        except RuntimeError:
+            # The dialog (and with it the emitter, which is its child) was destroyed while this
+            # probe was in flight. There is nobody left to tell, which is the correct outcome for
+            # a dialog that has closed - but emitting into a deleted QObject raises, and an
+            # exception escaping a daemon thread surfaces as a test-suite warning.
+            pass
+
+
 class SettingsDialog(QDialog):
     """Preferences / Settings dialog for general downloads, torrent, network, Tor, security, and browser."""
 
@@ -336,6 +425,7 @@ class SettingsDialog(QDialog):
             self._manager.animepahe_queue_changed.connect(self._on_animepahe_queue_changed)
         self._populate_fields()
         self._restore_size_from_db()
+        self._start_probe()
 
         self._initial_tab = tab_index(initial_tab) if isinstance(initial_tab, str) else int(initial_tab)
         if 0 <= self._initial_tab < self._tabs.count():
@@ -347,6 +437,70 @@ class SettingsDialog(QDialog):
         if 0 <= index < len(self._tab_names):
             return self._tab_names[index]
         return ""
+
+    def _start_probe(self):
+        """Kick off the blocking system probes on a worker thread.
+
+        Called at the end of ``__init__`` so the work overlaps with the dialog's remaining
+        construction rather than adding to the time before it appears.
+
+        A plain daemon thread rather than a QThread, deliberately: see `_PrefsProbeEmitter` for why
+        an interruptible-looking `QThread` here is a process-abort risk. If a probe is already in
+        flight this does nothing - the earlier one will report.
+        """
+        if getattr(self, "_probe_worker", None) is not None:
+            return
+        emitter = _PrefsProbeEmitter()  # unparented - see _PrefsProbeEmitter
+        self._probe_emitter = emitter
+        emitter.finished.connect(self._apply_probe_results)
+        worker = _PrefsProbeWorker(
+            emitter,
+            tor_hint=(getattr(self._tor_cfg, "tor_executable_path", "") or ""),
+        )
+        self._probe_worker = worker
+        worker.start()
+
+    def _apply_probe_results(self, results):
+        """Fill in everything the probe found. Runs on the GUI thread.
+
+        Every value is written unconditionally from the *probed* result rather than being folded
+        into the current widget state, so this cannot overwrite something the user typed while the
+        probe was in flight - there is nothing of theirs here, only what the system reports.
+
+        Each section is guarded independently: one failure must not stop the rest from being
+        applied, and a widget that does not exist on this build must not raise.
+        """
+        self._probe_worker = None
+
+        interfaces = results.get("interfaces")
+        if isinstance(interfaces, list):
+            self._apply_interfaces(interfaces)
+
+        tor = results.get("tor")
+        if tor is not None:
+            # Only prefill when the user has no explicit path. `_populate_fields` has already
+            # loaded the saved value by now, so an empty box means "not configured".
+            if not self._tor_path_edit.text().strip():
+                self._tor_path_edit.setText(tor)
+
+        ytdlp_path = results.get("ytdlp_path", "")
+        version = results.get("ytdlp_version", "")
+        if ytdlp_path:
+            self._yt_path_status.setText(f"✓ {version}" if version else "✓ found")
+            self._yt_path_status.setStyleSheet("color: #3fb950;")
+            self._yt_version_lbl.setText(f"yt-dlp {version or 'unknown'}")
+        else:
+            self._yt_path_status.setText("✗ not found — pip install -U yt-dlp")
+            self._yt_path_status.setStyleSheet("color: #f85149;")
+            self._yt_version_lbl.setText("yt-dlp unavailable")
+
+        if results.get("ffmpeg_path"):
+            self._yt_ffmpeg_status.setText("✓ found")
+            self._yt_ffmpeg_status.setStyleSheet("color: #3fb950;")
+        else:
+            self._yt_ffmpeg_status.setText("✗ not found")
+            self._yt_ffmpeg_status.setStyleSheet("color: #f85149;")
+
 
     def _get_db(self) -> Optional[Database]:
         if self._db is not None:
@@ -497,6 +651,19 @@ class SettingsDialog(QDialog):
 
     def closeEvent(self, event):
         self._save_size_to_db()
+        # Drop the probe's result connection before the dialog goes.
+        #
+        # The worker thread cannot be interrupted and is left to finish on its own; it is a daemon
+        # holding a reference only to its own emitter, which this detaches. With the receiver gone a
+        # late result is delivered to nobody, which is the correct outcome for a dialog that has
+        # closed rather than something to be reported.
+        emitter = getattr(self, "_probe_emitter", None)
+        if emitter is not None:
+            try:
+                emitter.finished.disconnect(self._apply_probe_results)
+            except (RuntimeError, TypeError):
+                pass  # already disconnected, or the C++ object is gone
+            self._probe_emitter = None
         super().closeEvent(event)
 
     # -----------------------------------------------------------------------
@@ -1963,7 +2130,7 @@ class SettingsDialog(QDialog):
         yt_browse = QPushButton("Browse…")
         yt_browse.clicked.connect(self._on_browse_ytdlp)
         tg.addWidget(yt_browse, 0, 2)
-        self._yt_path_status = QLabel("")
+        self._yt_path_status = QLabel("Checking\u2026")
         tg.addWidget(self._yt_path_status, 0, 3)
 
         self._yt_ffmpeg_edit = QLineEdit()
@@ -1975,14 +2142,14 @@ class SettingsDialog(QDialog):
         ff_browse = QPushButton("Browse…")
         ff_browse.clicked.connect(self._on_browse_ffmpeg)
         tg.addWidget(ff_browse, 1, 2)
-        self._yt_ffmpeg_status = QLabel("")
+        self._yt_ffmpeg_status = QLabel("Checking\u2026")
         tg.addWidget(self._yt_ffmpeg_status, 1, 3)
 
         gl.addWidget(tools_group)
 
         # -- version / update --
         ver_row = QHBoxLayout()
-        self._yt_version_lbl = QLabel("")
+        self._yt_version_lbl = QLabel("Checking\u2026")
         self._yt_version_lbl.setStyleSheet("color: #8fa0b5;")
         ver_row.addWidget(self._yt_version_lbl, 1)
         self._yt_update_btn = QPushButton("Update yt-dlp")
@@ -2107,13 +2274,17 @@ class SettingsDialog(QDialog):
         mg.addLayout(args_row)
         gl.addWidget(misc_group)
 
-        self._on_youtube_enabled_toggled(cfg.ytdlp_enabled)
-        self._refresh_youtube_status()
+        # Only the enable/disable wiring runs here. Probing for yt-dlp costs a `import yt_dlp` plus
+        # a subprocess, and doing it during construction blocked the dialog's first paint for the
+        # best part of a second. `_on_youtube_enabled_toggled` used to refresh, and the line after
+        # it refreshed again, so the work was done twice before the dialog was even on screen.
+        # The status labels start on "Checking…" and are filled in by `_apply_probe_results`.
+        self._on_youtube_enabled_toggled(cfg.ytdlp_enabled, probe=False)
         return group
 
     # -- YouTube settings handlers ------------------------------------------
 
-    def _on_youtube_enabled_toggled(self, enabled: bool):
+    def _on_youtube_enabled_toggled(self, enabled: bool, probe: bool = True):
         for widget in (
             self._yt_path_edit, self._yt_ffmpeg_edit, self._yt_format_combo,
             self._yt_prefer_mode_a_cb, self._yt_embed_thumb_cb, self._yt_embed_subs_cb,
@@ -2122,7 +2293,7 @@ class SettingsDialog(QDialog):
         ):
             widget.setEnabled(enabled)
         self._yt_subs_langs_edit.setEnabled(enabled and self._yt_embed_subs_cb.isChecked())
-        if enabled:
+        if enabled and probe:
             self._refresh_youtube_status()
 
     def _current_youtube_config(self) -> ExternalToolsConfig:
@@ -2143,14 +2314,19 @@ class SettingsDialog(QDialog):
         return cfg
 
     def _refresh_youtube_status(self):
-        """Live validation of the configured yt-dlp and ffmpeg paths."""
+        """Live validation of the configured yt-dlp and ffmpeg paths.
+
+        Queries the version once and reuses it: this used to ask twice per call, and the caller
+        itself could run twice per dialog open, so a single visible refresh cost up to four
+        `yt-dlp --version` subprocesses.
+        """
         from my_idm import youtube_tool as ytt
 
         cfg = self._current_youtube_config()
 
         ytdlp_path = cfg.get_effective_ytdlp_path()
+        version = ytt.get_ytdlp_version(cfg) if ytdlp_path else ""
         if ytdlp_path:
-            version = ytt.get_ytdlp_version(cfg)
             self._yt_path_status.setText(f"✓ {version}" if version else "✓ found")
             self._yt_path_status.setStyleSheet("color: #3fb950;")
         else:
@@ -2167,8 +2343,7 @@ class SettingsDialog(QDialog):
         if not ytdlp_path:
             self._yt_version_lbl.setText("yt-dlp unavailable")
         else:
-            version = ytt.get_ytdlp_version(cfg) or "unknown"
-            self._yt_version_lbl.setText(f"yt-dlp {version}")
+            self._yt_version_lbl.setText(f"yt-dlp {version or 'unknown'}")
 
     def _on_youtube_paths_changed(self):
         self._refresh_youtube_status()
@@ -2549,8 +2724,9 @@ class SettingsDialog(QDialog):
         self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
         self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
 
-        # Network tab
-        self._load_interfaces()
+        # Network tab. Only the default entry is seeded here; enumerating adapters walks psutil
+        # and is done by the probe thread (see `_start_probe`).
+        self._reset_interface_combo()
 
         self._kill_switch_cb.setChecked(self._network_cfg.kill_switch)
         self._proxy_enable_cb.setChecked(self._network_cfg.proxy_enabled)
@@ -2611,7 +2787,9 @@ class SettingsDialog(QDialog):
         self._tor_route_torrent_cb.setChecked(self._tor_cfg.route_torrent)
         self._tor_host_edit.setText(self._tor_cfg.proxy_host)
         self._tor_port_spin.setValue(self._tor_cfg.proxy_port or 9050)
-        detected_tor = self._tor_cfg.tor_executable_path or find_tor_executable() or ""
+        # The detected executable is filled in by the probe thread; prefill only the saved value
+        # so a user-typed path is never overwritten by a filesystem walk.
+        detected_tor = self._tor_cfg.tor_executable_path or ""
         self._tor_path_edit.setText(detected_tor)
 
         # External Tools tab
@@ -2942,8 +3120,32 @@ class SettingsDialog(QDialog):
         for d in defaults:
             self._backlog_list.addItem(d)
 
-    def _load_interfaces(self):
-        self._interfaces = get_available_interfaces()
+    def _reset_interface_combo(self):
+        """Seed the combo with just the default entry. Cheap - no system calls.
+
+        Deliberately does *not* enumerate interfaces: that is a synchronous psutil walk costing
+        ~25 ms, and it belongs on the probe thread (see `_PrefsProbeWorker`).
+
+        Keeping this as the only synchronous content is what makes the deferred populate safe. Every
+        consumer of `self._interfaces` (`_on_iface_changed`, the bind-IP lookup, the save path)
+        treats index 0 as "all interfaces", so a combo holding only index 0 can never index an empty
+        list.
+        """
+        self._interfaces = []
+        self._iface_combo.blockSignals(True)
+        self._iface_combo.clear()
+        self._iface_combo.addItem("🌐 All Interfaces (Default / Automatic)", "")
+        self._iface_combo.setCurrentIndex(0)
+        self._iface_combo.blockSignals(False)
+        self._iface_details_label.setText("Checking available interfaces…")
+
+    def _apply_interfaces(self, interfaces):
+        """Fill the interface combo from probe results.
+
+        Enumerating adapters is not free and touches the network stack, so it runs off the GUI
+        thread. Only widgets are touched here, and only on the GUI thread, because Qt requires it.
+        """
+        self._interfaces = list(interfaces)
         self._iface_combo.blockSignals(True)
         self._iface_combo.clear()
         self._iface_combo.addItem("🌐 All Interfaces (Default / Automatic)", "")
@@ -2960,6 +3162,16 @@ class SettingsDialog(QDialog):
         self._iface_combo.setCurrentIndex(selected_idx)
         self._iface_combo.blockSignals(False)
         self._on_iface_changed(selected_idx)
+
+    def _load_interfaces(self):
+        """Enumerate adapters on the calling thread and apply the result.
+
+        Kept synchronous for the explicit Refresh button, where the user has asked for it and a
+        brief freeze is the expected cost.
+        """
+        from my_idm.network import get_available_interfaces
+
+        self._apply_interfaces(get_available_interfaces())
 
     def _on_system_tray_toggled(self, checked: bool):
         self._minimize_to_tray_cb.setEnabled(checked)
