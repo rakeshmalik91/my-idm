@@ -122,24 +122,55 @@ In addition to standard flat-list display, My-IDM provides **Segregated Views**,
 
 ### 1. View Modes
 
-My-IDM supports two distinct segregation modes configured under **View → 🗂️ Segregated View**:
+My-IDM supports three distinct segregation modes configured under **View → 🗂️ Segregated View**:
 
 ```mermaid
 graph TD
     A["View Menu: Segregated View → On"] -->|Enabled| B{Segregation Mode}
     B -->|Status Grouping| C[Status Mode]
     B -->|Date Grouping| D[Date Mode]
-    
+    B -->|File Type Grouping| E[File Type Mode]
+
     C --> C1["Active (Downloading, Queued, Metadata, Paused, Stalled, Error)"]
     C --> C2["Seeding (BitTorrent Swarm Seeding)"]
     C --> C3["Inactive (Completed, Stopped, Suspended, File Not Found)"]
-    
+
     D --> D1["Today (Active/Finished Today)"]
     D --> D2["Yesterday (Active/Finished Yesterday)"]
     D --> D3["Last 7 Days (Past 7 Days)"]
     D --> D4["Last 30 Days (Past 30 Days)"]
     D --> D5["Older (Older or Dateless Entries)"]
+
+    E --> E1["Video"]
+    E --> E2["Audio"]
+    E --> E3["Archives"]
+    E --> E4["Documents"]
+    E --> E5["Photos"]
+    E --> E6["General"]
 ```
+
+The mode key set is `SEGREGATED_MODES = ("status", "date", "type")`, with
+`DEFAULT_SEGREGATED_MODE = "status"`; both are validated on read, so a stale persisted mode
+degrades to the default rather than rendering an undefined grouping.
+
+#### Mode Availability Follows the Enable Flag
+
+The three modes only mean something while the table is actually partitioned, so both surfaces that
+expose them grey them out together when segregation is off:
+
+| Surface | Widget | Kept in step by |
+| :--- | :--- | :--- |
+| View menu | `_act_seg_by_status` / `_act_seg_by_date` / `_act_seg_by_type` | `MainWindow._sync_segregation_mode_actions`, called from `_setup_menubar` and `_on_toggle_segregated_view` |
+| Preferences → 👁️ Views & Columns | `_seg_mode_combo` | `SettingsDialog._sync_seg_controls`, wired to `_seg_enabled_cb.toggled` and called from `_populate_views_tab` |
+
+Two consequences worth knowing:
+
+- **A disabled action keeps its checkmark.** The checkmark is the *remembered* mode, restored when
+  segregation is switched back on; clearing it would regroup by Status for a user who had chosen
+  File Type. Only `setEnabled` is touched, never `setChecked`.
+- **The "picking a mode turns segregation on" shortcut is no longer reachable from the View menu**,
+  because the action to pick is disabled. `_set_segregation_mode` still performs the promotion for
+  programmatic callers that invoke it directly.
 
 #### A. Status-Based Segregation (`status`)
 Partitions downloads according to operational lifecycle state:
@@ -188,6 +219,11 @@ as `TODAY (0)` rather than disappearing.
 `Database.get_download_stats(today=...)`: `_apply_sort(now_dt=None)` and
 `_reapply_filter(now_dt=None)` thread it through so the same `now` drives the classification
 *and* the staleness bookkeeping below.
+
+#### C. File-Type Segregation (`type`)
+Partitions downloads by what the payload *is* rather than when it was added, using the extension
+classification in `download_model`. Sections are Video, Audio, Archives, Documents, Photos and
+General, with `General` as the catch-all so no download is ever dropped from the table.
 
 #### Midnight Rollover
 
@@ -241,7 +277,9 @@ Right-clicking any section header opens a contextual management menu:
 - **Expand / Collapse '[Title]' Section**: Toggles the targeted section.
 - **Expand All Sections**: Expands all sections in the active view mode.
 - **Collapse All Sections**: Collapses all sections in the active view mode.
-- **Switch to Date / Status Grouping**: Quick toggle between segregation modes.
+- **Switch Grouping Mode**: Toggles between all three segregation modes. This submenu is built inside
+  the `is_section_header_row` branch of `_show_context_menu`, so it only exists once sections do —
+  no separate enable/disable coupling is needed on this third surface.
 
 ---
 

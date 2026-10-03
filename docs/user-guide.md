@@ -218,7 +218,11 @@ Rechecking verifies existing files:
 ### Segregated View & Collapsible Sections
 
 1. Toggle **View → 🗂️ Segregated View → On** from the menu bar to enable or disable sectioned partitioning.
-2. Select the grouping strategy directly under **View → 🗂️ Segregated View**:
+2. Select the grouping strategy directly under **View → 🗂️ Segregated View**. The three strategy
+   entries are greyed out while segregation is **Off**, in both this menu and
+   **Preferences → 👁️ Views & Columns**, because a flat table has nothing to group by. Turn
+   segregation on first to choose one. Your choice is remembered while it is off and restored when
+   you switch it back on:
    - **Status Grouping**: Segregates downloads into 3 collapsible sections:
      - **Active**: Items in `fetching metadata`, `queued`, `downloading`, `paused`, `stalled`, or `error` states.
      - **Seeding**: Items actively seeding in the BitTorrent swarm.
@@ -229,9 +233,13 @@ Rechecking verifies existing files:
      - **Last 7 Days**: Active or completed within the last 7 days.
      - **Last 30 Days**: Active or completed within the last 30 days.
      - **Older**: Older downloads or downloads without timestamps.
+   - **File Type Grouping**: Groups by what the file is rather than when it was added, into 6 collapsible sections:
+     - **Video**, **Audio**, **Archives**, **Documents**, **Photos**, and **General** for anything else.
 3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
-4. Right-click any section header to expand/collapse all sections or quickly switch between Status and Date grouping.
-5. The active segregation mode (`status` or `date`), enabled state, and individual collapsed section states are persisted in SQLite and restored automatically on next launch.
+4. Right-click any section header to expand/collapse all sections, or switch between any of the three
+   grouping modes. This menu appears only once sections exist.
+5. The active segregation mode (`status`, `date` or `type`), enabled state, and individual collapsed
+   section states are persisted in SQLite and restored automatically on next launch.
 6. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
 
 ### Context Menu

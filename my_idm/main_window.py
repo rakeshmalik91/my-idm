@@ -1163,6 +1163,15 @@ class MainWindow(QMainWindow):
         self._seg_mode_group.addAction(self._act_seg_by_type)
         self._menu_segregated_view.addAction(self._act_seg_by_type)
 
+        # One mapping of mode key -> action, so the checkmark sync in `_set_segregation_mode` and
+        # the enable/disable sync here cannot drift apart as modes are added.
+        self._seg_mode_actions = {
+            "status": self._act_seg_by_status,
+            "date": self._act_seg_by_date,
+            "type": self._act_seg_by_type,
+        }
+        self._sync_segregation_mode_actions()
+
         view_menu.addAction(self._act_toggle_details)
         view_menu.addSeparator()
         select_all_act = QAction(_create_emoji_icon("☑️"), "Select All", self)
@@ -2114,25 +2123,36 @@ class MainWindow(QMainWindow):
             mode, "Status"
         )
 
+    def _sync_segregation_mode_actions(self, enabled: Optional[bool] = None):
+        """Enable the three mode actions only while segregated view is on.
+
+        The modes are meaningless while segregation is off - picking one has nothing to group by -
+        so offering them invites a change that appears to do nothing. Their *checkmark* is
+        deliberately left alone: it records the mode that will be restored when segregation is
+        turned back on, and clearing it would silently lose the user's choice.
+
+        Mirrors the Preferences Views tab, where the same coupling already exists between
+        `_seg_enabled_cb` and `_seg_mode_combo`.
+        """
+        if enabled is None:
+            enabled = self._segregated_view_enabled
+        for action in self._seg_mode_actions.values():
+            action.setEnabled(enabled)
+
     def _set_segregation_mode(self, mode: str):
         if mode not in SEGREGATED_MODES:
             mode = DEFAULT_SEGREGATED_MODE
         self._segregated_view_mode = mode
         self._manager.db.set_ui_state("segregated_view_mode", mode)
-        for action_name, value in (
-            ("_act_seg_by_status", "status"),
-            ("_act_seg_by_date", "date"),
-            ("_act_seg_by_type", "type"),
-        ):
-            action = getattr(self, action_name, None)
-            if action is not None:
-                action.setChecked(mode == value)
+        for value, action in self._seg_mode_actions.items():
+            action.setChecked(mode == value)
 
         if not self._segregated_view_enabled:
-            # Turning a mode on implies turning segregation on. This is the behaviour the
-            # View menu wants, so it stays here - but it must never run while a caller is
-            # deliberately applying the user's *unchecked* box, which is why
-            # SettingsDialog._apply_views_tab calls _on_toggle_segregated_view first.
+            # Turning a mode on implies turning segregation on. Unreachable from the View menu,
+            # which greys these actions out while segregation is off, but kept for programmatic
+            # callers - and it must never run while a caller is deliberately applying the user's
+            # *unchecked* box, which is why SettingsDialog._apply_views_tab calls
+            # _on_toggle_segregated_view first.
             self._act_segregated_view.setChecked(True)
         else:
             self._model.set_segregated_mode(mode)
@@ -2161,6 +2181,10 @@ class MainWindow(QMainWindow):
         self._model.set_segregated_view(checked, mode=self._segregated_view_mode)
         self._restore_selection(selected)
         self._apply_table_spans()
+        # The mode actions follow the enable flag. Done here rather than in the action's own
+        # handler so the Preferences checkbox and the View menu cannot disagree - both drive
+        # this method, and only this method knows the resulting state.
+        self._sync_segregation_mode_actions(checked)
         if checked:
             mode_str = self._segregation_mode_label(self._segregated_view_mode)
             self._status_label.setText(f"Segregated view enabled ({mode_str})")

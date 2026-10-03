@@ -1345,11 +1345,15 @@ class TestSegregationModeLabels(ViewsTabTestCase):
         self.assertIn("File Type", text)
 
     def test_choosing_a_mode_while_disabled_still_enables_segregation(self):
-        """Documented View-menu behaviour that the checkbox fix must not have broken.
+        """The programmatic path still promotes a mode choice into an enable.
 
-        This also covers the View-menu checkmark sync: ``_set_segregation_mode`` enables
-        segregation by checking the action, which emits nothing when it is already checked,
-        so without the sync the enable silently did not happen.
+        No longer reachable from the View menu - the three mode actions are disabled while
+        segregation is off, precisely so a dead-end choice cannot be made there - but
+        ``_set_segregation_mode`` keeps doing it for callers that invoke it directly.
+
+        This also covers the View-menu checkmark sync: ``_set_segregation_mode`` enables segregation
+        by checking the action, which emits nothing when it is already checked, so without the sync
+        the enable silently did not happen.
         """
         self.window._on_toggle_segregated_view(False)
         self.window._set_segregation_mode("type")
@@ -1360,6 +1364,171 @@ class TestSegregationModeLabels(ViewsTabTestCase):
         self.assertTrue(self.window._act_segregated_view.isChecked())
         self.window._on_toggle_segregated_view(False)
         self.assertFalse(self.window._act_segregated_view.isChecked())
+
+
+class TestSegregationModeAvailability(ViewsTabTestCase):
+    """The three mode choices are only meaningful while segregation is on.
+
+    While the table is a flat list there is nothing to group by, so a live mode picker invites a
+    change that silently does nothing. Both surfaces that expose the modes therefore grey them out
+    together: the View menu's three ``QAction``s and the Preferences combo.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(self.window._set_segregation_mode, DEFAULT_SEGREGATED_MODE)
+        self.addCleanup(self.window._on_toggle_segregated_view, False)
+
+    @property
+    def mode_actions(self):
+        return self.window._seg_mode_actions
+
+    def test_the_menu_exposes_one_action_per_mode(self):
+        self.assertEqual(
+            sorted(self.mode_actions), sorted(SEGREGATED_MODES),
+            "every mode needs a menu action, and every action needs a mode",
+        )
+
+    def test_all_three_are_disabled_while_segregation_is_off(self):
+        self.window._on_toggle_segregated_view(False)
+        for mode, action in self.mode_actions.items():
+            with self.subTest(mode=mode):
+                self.assertFalse(
+                    action.isEnabled(),
+                    f"{mode} must not be selectable while the table is not segregated",
+                )
+
+    def test_all_three_are_enabled_once_segregation_is_on(self):
+        self.window._on_toggle_segregated_view(True)
+        for mode, action in self.mode_actions.items():
+            with self.subTest(mode=mode):
+                self.assertTrue(
+                    action.isEnabled(),
+                    f"{mode} must be selectable once sections exist to group by",
+                )
+
+    def test_the_view_menu_toggle_greys_and_restores_them(self):
+        """Driven through the real action, so this covers the signal wiring too."""
+        self.window._act_segregated_view.setChecked(False)
+        self.assertFalse(self.mode_actions["date"].isEnabled())
+        self.window._act_segregated_view.setChecked(True)
+        self.assertTrue(self.mode_actions["date"].isEnabled())
+        self.window._act_segregated_view.setChecked(False)
+        self.assertFalse(self.mode_actions["date"].isEnabled())
+
+    def test_the_remembered_mode_survives_being_switched_off(self):
+        """The checkmark records what to restore.
+
+        Clearing it would make the picker show "Status" for a user who had chosen File Type, and
+        turning segregation back on would regroup by the wrong thing - a silent change of the
+        user's setting, caused by them briefly toggling something else.
+        """
+        self.window._on_toggle_segregated_view(True)
+        self.window._set_segregation_mode("type")
+        self.window._on_toggle_segregated_view(False)
+        self.assertTrue(
+            self.mode_actions["type"].isChecked(),
+            "a disabled action still shows its checkmark; that is the stored mode",
+        )
+        self.window._on_toggle_segregated_view(True)
+        self.assertTrue(self.mode_actions["type"].isChecked())
+        self.assertEqual(self.window._segregated_view_mode, "type")
+
+    def test_the_preferences_combo_follows_the_same_rule(self):
+        self.db.set_ui_state("segregated_view_enabled", False)
+        dialog = self.make_dialog()
+        try:
+            self.assertFalse(dialog._seg_mode_combo.isEnabled())
+            dialog._seg_enabled_cb.setChecked(True)
+            self.assertTrue(dialog._seg_mode_combo.isEnabled())
+            dialog._seg_enabled_cb.setChecked(False)
+            self.assertFalse(dialog._seg_mode_combo.isEnabled())
+        finally:
+            self._dispose(dialog)
+
+    def test_both_surfaces_agree_after_a_preferences_change(self):
+        """The Preferences checkbox and the View menu must not disagree.
+
+        They drive the same state through different widgets, so one being left enabled while the
+        other is off is exactly the drift this coupling exists to prevent.
+        """
+        dialog = self.make_dialog()
+        try:
+            dialog._seg_enabled_cb.setChecked(False)
+            dialog._apply_views_tab()
+            self.assertFalse(self.window._act_segregated_view.isChecked())
+            for mode, action in self.mode_actions.items():
+                with self.subTest(mode=mode):
+                    self.assertFalse(action.isEnabled())
+                    self.assertFalse(dialog._seg_mode_combo.isEnabled())
+
+            dialog._seg_enabled_cb.setChecked(True)
+            dialog._apply_views_tab()
+            self.assertTrue(self.window._act_segregated_view.isChecked())
+            for mode, action in self.mode_actions.items():
+                with self.subTest(mode=mode):
+                    self.assertTrue(action.isEnabled())
+                    self.assertTrue(dialog._seg_mode_combo.isEnabled())
+        finally:
+            self._dispose(dialog)
+
+
+class TestViewsTabStandalonePopulation(ViewsTabTestCase):
+    """A dialog built without ``db=`` must still reflect the stored state.
+
+    ``SettingsDialog`` reads the database during construction, but the Views page is built before
+    anything resolves the handle, so touching the raw ``self._db`` attribute found it ``None`` and
+    the load was skipped silently - the page then showed the default for a saved non-default, and
+    the mode combo's enabled state with it. The shipped window passes ``db=`` and was never
+    affected; the standalone path is what tests and any headless caller use.
+    """
+
+    def test_a_dialog_without_a_db_argument_still_loads_the_segregation_state(self):
+        from my_idm.settings_dialog import SettingsDialog
+
+        self.db.set_ui_state("segregated_view_enabled", True)
+        self.db.set_ui_state("segregated_view_mode", "type")
+        dialog = SettingsDialog(parent=self.window)
+        self.addCleanup(self._dispose, dialog)
+        self.assertTrue(dialog._seg_enabled_cb.isChecked())
+        self.assertEqual(dialog._seg_mode_combo.currentData(), "type")
+        self.assertTrue(
+            dialog._seg_mode_combo.isEnabled(),
+            "a saved 'on' must enable the picker, or the page contradicts itself on open",
+        )
+
+    def test_a_stored_off_still_honours_the_remembered_mode(self):
+        """Off *and* a stored mode: the picker must show the mode while refusing input.
+
+        Asserting only "it is disabled" would pass even if the load were skipped entirely, because
+        the default is off - which is why this also checks the mode round-trips. A user who turns
+        segregation back on should get the mode they had chosen, not the default.
+        """
+        from my_idm.settings_dialog import SettingsDialog
+
+        self.db.set_ui_state("segregated_view_enabled", False)
+        self.db.set_ui_state("segregated_view_mode", "type")
+        dialog = SettingsDialog(parent=self.window)
+        self.addCleanup(self._dispose, dialog)
+        self.assertFalse(dialog._seg_enabled_cb.isChecked())
+        self.assertFalse(dialog._seg_mode_combo.isEnabled())
+        self.assertEqual(dialog._seg_mode_combo.currentData(), "type")
+
+    def test_applying_from_a_standalone_dialog_still_persists(self):
+        """Guards that a Save from a standalone dialog reaches the database.
+
+        Not a regression test for the ``_get_db`` change above - by the time Save runs the handle has
+        been resolved either way, so this passes with or without it.
+        """
+        from my_idm.settings_dialog import SettingsDialog
+
+        dialog = SettingsDialog(parent=self.window)
+        self.addCleanup(self._dispose, dialog)
+        dialog._seg_enabled_cb.setChecked(True)
+        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("date"))
+        dialog._apply_views_tab()
+        self.assertEqual(self.db.get_ui_state("segregated_view_enabled"), True)
+        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "date")
 
 
 class TestDisabledStyling(unittest.TestCase):

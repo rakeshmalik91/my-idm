@@ -2262,7 +2262,10 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.db.add_download(e_older)
         self.win._load_history()
 
-        # Switch to Date segregation via menu action
+        # Segregation is switched on first, then the mode is chosen. The order matters: the three mode
+        # actions are disabled while the table is flat (MainWindow._sync_segregation_mode_actions),
+        # because there is nothing to group by, so triggering one does nothing until "On" is set.
+        self.win._act_segregated_view.setChecked(True)
         self.win._act_seg_by_date.trigger()
         self.assertTrue(self.win._model.is_segregated_view())
         self.assertEqual(self.win._model.segregated_mode(), "date")

@@ -692,7 +692,7 @@ class SettingsDialog(QDialog):
         self._col_up_btn.clicked.connect(lambda: self._move_selected_column(-1))
         self._col_down_btn.clicked.connect(lambda: self._move_selected_column(1))
         self._col_reset_btn.clicked.connect(self._reset_columns_to_defaults)
-        self._seg_enabled_cb.toggled.connect(self._seg_mode_combo.setEnabled)
+        self._seg_enabled_cb.toggled.connect(self._sync_seg_controls)
 
         self._populate_views_tab()
         return tab
@@ -712,13 +712,33 @@ class SettingsDialog(QDialog):
             return None
         return table
 
+    def _sync_seg_controls(self, checked: bool | None = None):
+        """Keep the Segregated View controls consistent with the enable checkbox.
+
+        The mode combo (Status / Date / File Type) is only meaningful while the table is actually
+        grouped into sections, so it follows the checkbox. Populating the page and clicking the
+        checkbox both route through here rather than setting the enabled state directly, so the two
+        cannot disagree - a combo that was enabled-when-off on a freshly opened dialog would
+        silently let the user pick a mode that does nothing.
+
+        Mirrors ``MainWindow._sync_segregation_mode_actions``, which does the same job for the View
+        menu's three actions.
+        """
+        if checked is None:
+            checked = self._seg_enabled_cb.isChecked()
+        self._seg_mode_combo.setEnabled(bool(checked))
+
     def _populate_views_tab(self) -> None:
         from my_idm.download_model import (
             DEFAULT_SEGREGATED_MODE,
             SEGREGATED_MODES,
         )
 
-        db = self._db
+        # `_get_db()`, not `self._db`: the raw attribute is still None this early in construction
+        # (the Views page is built before anything resolves it), so reading it here silently skipped
+        # the database and left the Segregated View checkbox at its default - so the page opened
+        # showing "off" for a saved "on", and with it the mode combo's enabled state wrong too.
+        db = self._get_db()
         if db is not None:
             self._seg_enabled_cb.setChecked(bool(db.get_ui_state("segregated_view_enabled", False)))
             mode = db.get_ui_state("segregated_view_mode", DEFAULT_SEGREGATED_MODE)
@@ -726,7 +746,9 @@ class SettingsDialog(QDialog):
                 mode = DEFAULT_SEGREGATED_MODE
             index = self._seg_mode_combo.findData(mode)
             self._seg_mode_combo.setCurrentIndex(max(0, index))
-        self._seg_mode_combo.setEnabled(self._seg_enabled_cb.isChecked())
+        # The mode choices are meaningless while segregation is off, so they follow the checkbox -
+        # the same coupling `_seg_enabled_cb.toggled` maintains interactively (see `_build_views_tab`).
+        self._sync_seg_controls()
 
         # The combo, not the running palette, is the source of truth for what the user
         # picked: reading `current_theme()` back would report the *applied* theme and so
@@ -815,8 +837,9 @@ class SettingsDialog(QDialog):
 
         # The database write comes first and is unconditional, because the dialog is also
         # constructed standalone (that is how the tests use it) where there is no parent to
-        # apply anything live.
-        db = self._db
+        # apply anything live. `_get_db()` rather than `self._db`, so the write cannot be skipped
+        # outright on a construction path that has not resolved the handle yet.
+        db = self._get_db()
         if db is not None:
             db.set_ui_state("segregated_view_enabled", enabled)
             db.set_ui_state("segregated_view_mode", mode)
