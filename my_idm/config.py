@@ -123,6 +123,11 @@ class GeneralConfig:
     minimize_to_tray: bool = True
     close_to_tray: bool = True
     start_minimized: bool = False
+    # Launch My-IDM when the user logs in. Opt-in for the same reason clipboard capture is: an app
+    # that starts itself unbidden is a surprise, and a user surprised by it disables it for good.
+    # The OS registration itself lives in `my_idm.autostart`; this flag is the user's intent, and
+    # `autostart.reconcile` is called only when the settings checkbox actually moves.
+    launch_at_login: bool = False
     # Clipboard capture watches what the user copies, so it is opt-in: reading the clipboard
     # without being asked is surveillance, and a user who is surprised by it turns it off and
     # does not turn it on again.
@@ -226,6 +231,7 @@ class GeneralConfig:
             "minimize_to_tray": self.minimize_to_tray,
             "close_to_tray": self.close_to_tray,
             "start_minimized": self.start_minimized,
+            "launch_at_login": self.launch_at_login,
             "clipboard_monitor_enabled": self.clipboard_monitor_enabled,
             "clipboard_monitor_max_urls": self.clipboard_monitor_max_urls,
             "clipboard_min_file_size_kb": self.clipboard_min_file_size_kb,
@@ -271,6 +277,7 @@ class GeneralConfig:
             minimize_to_tray=bool(data.get("minimize_to_tray", True)),
             close_to_tray=bool(data.get("close_to_tray", True)),
             start_minimized=bool(data.get("start_minimized", False)),
+            launch_at_login=bool(data.get("launch_at_login", False)),
             clipboard_monitor_enabled=bool(data.get("clipboard_monitor_enabled", False)),
             clipboard_monitor_max_urls=max(
                 1, int(data.get("clipboard_monitor_max_urls", 20))
@@ -316,6 +323,7 @@ class GeneralConfig:
         settings.setValue("minimize_to_tray", self.minimize_to_tray)
         settings.setValue("close_to_tray", self.close_to_tray)
         settings.setValue("start_minimized", self.start_minimized)
+        settings.setValue("launch_at_login", self.launch_at_login)
         settings.setValue("clipboard_monitor_enabled", self.clipboard_monitor_enabled)
         settings.setValue("clipboard_monitor_max_urls", self.clipboard_monitor_max_urls)
         settings.setValue("clipboard_min_file_size_kb", self.clipboard_min_file_size_kb)
@@ -364,6 +372,7 @@ class GeneralConfig:
         minimize_to_tray = settings.value("minimize_to_tray", True, type=bool)
         close_to_tray = settings.value("close_to_tray", True, type=bool)
         start_minimized = settings.value("start_minimized", False, type=bool)
+        launch_at_login = settings.value("launch_at_login", False, type=bool)
         clipboard_monitor_enabled = settings.value(
             "clipboard_monitor_enabled", False, type=bool
         )
@@ -410,6 +419,7 @@ class GeneralConfig:
             minimize_to_tray=bool(minimize_to_tray),
             close_to_tray=bool(close_to_tray),
             start_minimized=bool(start_minimized),
+            launch_at_login=bool(launch_at_login),
             clipboard_monitor_enabled=bool(clipboard_monitor_enabled),
             clipboard_monitor_max_urls=int(clipboard_monitor_max_urls),
             clipboard_min_file_size_kb=int(clipboard_min_file_size_kb),

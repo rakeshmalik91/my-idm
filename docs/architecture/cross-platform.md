@@ -1,10 +1,12 @@
 # Cross-Platform Architecture & Porting Specification
 
-**Status: specification only. Nothing in sections 3–5 is implemented.** This document records what
-would have to change to make **My-IDM** a first-class application on **Linux (X11 & Wayland)** and
-**macOS (Intel & Apple Silicon)** alongside Windows, and what the current code actually does on
-those platforms today. Claims about current behaviour are cited as `file.py:line` so they can be
-re-verified; the "Target" subsections are proposals, not descriptions.
+**Status: specification, with one subsystem shipped.** Sections 3–5 are proposals, not
+descriptions, **except §4.9 (launch at login), which is implemented** in
+[`my_idm/autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) for all three platforms.
+This document records what would have to change to make **My-IDM** a first-class application on
+**Linux (X11 & Wayland)** and **macOS (Intel & Apple Silicon)** alongside Windows, and what the
+current code actually does on those platforms today. Claims about current behaviour are cited as
+`file.py:line` so they can be re-verified.
 
 ---
 
@@ -43,13 +45,12 @@ The real blockers are narrower and sharper than "several subsystems use Win32 AP
 | 10 | **VPN keywords** | `wintun`/`nord`/… | `utun`, `ipsec`, `ppp` unmatched; `wg`/`tun`/`tap` already present | Low | Low |
 | 11 | **Launchers** | `run.bat`, `run.pyw`, `my-idm-gui` | None; `.venv\Scripts\pythonw.exe` paths are Windows-only | Low | Low |
 | 12 | **Fonts / menu bar** | `Segoe UI`, `Consolas` | Fall back to whatever Qt picks; monospace metrics drift | Low | Low |
-| 13 | **Auto-start on boot** | **Not implemented anywhere** | Not implemented | — | — |
+| 13 | **Launch at login** | `HKCU\…\Run` via [`autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) | Same module: XDG `.desktop` / `launchd` agent | Low | Done |
 | 14 | **CI** | None (`.github/` does not exist) | None | Med | Low |
 
-Row 13 is listed to be explicit: there is **no** launch-at-login feature on any platform, and
-`config.py:540` `auto_start_at_startup` belongs to `TorConfig` — it means "activate Tor when
-My-IDM starts", not "start My-IDM when the machine boots". Porting does not require touching the
-Windows registry for this, because nothing writes to it.
+Row 13 is implemented and documented in [§4.9](#49-launch-at-login). Note that
+`config.py:550` `auto_start_at_startup` is unrelated: it is a `TorConfig` field meaning "activate
+Tor when My-IDM starts", not "start My-IDM when the machine boots".
 
 ---
 
@@ -68,9 +69,9 @@ exist and raises `FileNotFoundError`"*. That understates it. The unguarded sites
 | `details_panel.py:2021` | `else` branch | `AttributeError` — "Open folder" on the console tab |
 | `details_panel.py:2032` | `else` branch | `AttributeError` — "Open folder" with a file selected |
 | `details_panel.py:2034` | none | `AttributeError` — "Open folder" fallback |
-| `main_window.py:2076` | none | `AttributeError` — "Open file" |
-| `main_window.py:2222` | `else` branch | `AttributeError` — "Open folder" with a file selected |
-| `main_window.py:2224` | none | `AttributeError` — "Open folder" fallback |
+| `main_window.py:2085` | none | `AttributeError` — "Open file" |
+| `main_window.py:2246` | `else` branch | `AttributeError` — "Open folder" with a file selected |
+| `main_window.py:2248` | none | `AttributeError` — "Open folder" fallback |
 
 `external_tools.py:285,313,337` also call `os.startfile`, but each sits inside an explicit
 `if sys.platform == "win32":`, so they are safe.
@@ -82,7 +83,7 @@ that function**, not a new `reveal_in_file_manager` helper — the seven broken 
 routed to it.
 
 The same call sites also pass `explorer` its arguments wrongly. `details_panel.py:2030` and
-`main_window.py:2219` use `["explorer", "/select,", path]` as two separate `argv` elements;
+`main_window.py:2243` use `["explorer", "/select,", path]` as two separate `argv` elements;
 `explorer` requires one token, `f"/select,{path}"` — which is what `external_tools.py:335`
 correctly does. The split form only appears to work because Explorer tolerates it.
 
@@ -102,9 +103,9 @@ this document unverifiable. It is sequenced first for that reason.
 
 ### 2.3 Close-to-tray can strand the application
 
-`main_window.closeEvent` (`main_window.py:3989`) gates on `cfg.enable_system_tray and
+`main_window.closeEvent` (`main_window.py:4013`) gates on `cfg.enable_system_tray and
 cfg.close_to_tray` — both default `True` (`config.py:122,124`) — but **not** on whether the tray
-icon was actually created. `_setup_system_tray` (`main_window.py:1398`) returns early with
+icon was actually created. `_setup_system_tray` (`main_window.py:1407`) returns early with
 `self._tray_icon = None` when `QSystemTrayIcon.isSystemTrayAvailable()` is `False`, which is the
 normal case on GNOME and on Wayland compositors without an AppIndicator implementation. The user
 then closes the window, `event.ignore()` runs, the window hides, and there is no tray icon, no
@@ -131,7 +132,7 @@ These were investigated and need no work:
 
 - **VPN binding is already portable.** `HTTPEngine` binds via `TCPConnector(local_addr=...)`
   (`http_engine.py:255`) and `TorrentEngine` via `listen_interfaces` / `outgoing_interfaces`
-  (`torrent_engine.py:424`). Both are address-based, need no privileges, and work on all three
+  (`torrent_engine.py:424-425`). Both are address-based, need no privileges, and work on all three
   platforms. Adding `SO_BINDTODEVICE` would be a *regression* in portability: it requires
   `CAP_NET_RAW` and is Linux-only, so it cannot be the primary mechanism.
 - **Tor discovery already handles POSIX.** `tor_service.py:59-66` searches `/usr/bin/tor`,
@@ -172,11 +173,16 @@ flowchart TD
         PATH[paths.py — XDG / App Support resolution]
     end
 
+    subgraph DONE["Shipped: my_idm/autostart.py"]
+        AS[launch-at-login backend]
+    end
+
     subgraph WIN["Windows backend"]
         W1[explorer / os.startfile]
         W2[MpCmdRun.exe]
         W3[win10toast]
         W4[RegisterHotKey]
+        W5[HKCU Run key]
     end
 
     subgraph POSIX["POSIX backend"]
@@ -184,10 +190,12 @@ flowchart TD
         P2[clamscan / spctl]
         P3[notify-send / osascript / libnotify]
         P4[X11 XGrabKey / XDG GlobalShortcuts]
+        P5[.desktop / launchd agent]
     end
 
     MW --> FS
     MW --> PROC
+    MW --> AS
     ST --> NOTIF
     HK --> HKBE
     FS --> WIN
@@ -202,11 +210,16 @@ flowchart TD
     SCAN --> P2
     PATH --> WIN
     PATH --> POSIX
+    AS --> W5
+    AS --> P5
 ```
 
 The boundary is deliberately narrow: six modules, each owning one OS question, selected once at
 import time. Everything above the line keeps calling the same function names it calls today, which
 is what makes rows 1–4 of the gap matrix a refactor rather than a rewrite.
+
+`my_idm/autostart.py` sits outside that planned package because it already exists and needs no
+company: it answers one OS question with one function per platform.
 
 ---
 
@@ -226,7 +239,7 @@ can only ever help on Windows.
    behaviour, and repoint all seven broken call sites at it. Do not add a third implementation.
 2. Delete the `os.startfile` calls from `details_panel.py` and `main_window.py` entirely; the
    platform branch already lives inside the helper.
-3. Fix the split `explorer` argument at `details_panel.py:2030` and `main_window.py:2219` by
+3. Fix the split `explorer` argument at `details_panel.py:2030` and `main_window.py:2243` by
    routing through the helper, which already uses `f"/select,{p}"`.
 4. Drop the backslash retry from `utils.py:512`.
 5. If per-platform reveal fidelity matters (Nautilus/Dolphin/Thunar highlight the file rather than
@@ -269,7 +282,7 @@ and `Meta`/`Win`/`Super` (`hotkey.py:45`) need mapping to `Super_L`/`Meta_L` key
 
 **Today.** `notifications.show_notification` already prefers a registered handler
 (`notifications.py:61`) and only falls through to `win10toast` if none is registered. The GUI
-registers `QSystemTrayIcon.showMessage` at `main_window.py:1482`. So with a tray present,
+registers `QSystemTrayIcon.showMessage` at `main_window.py:1491`. So with a tray present,
 notifications already work everywhere; the import guard handles the rest.
 
 **Target.** `platform/notif.py` with a backend chain, each returning `bool` so failure is silent
@@ -378,7 +391,43 @@ Apply at all seven sites. For the fully detached GUI launcher (`external_tools.p
    (`single_instance.py:69`) and consume it via `gtk_window_activate`/Qt's
    `QWindow.requestActivate()`. macOS needs no change beyond what is already there.
 
-### 4.9 Embedded browser container
+### 4.9 Launch at login
+
+**Implemented.** [`my_idm/autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) registers
+My-IDM with the OS so it starts at login, on all three platforms:
+
+| Platform | Mechanism | Key detail |
+| :--- | :--- | :--- |
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `My-IDM` | Registers `pythonw.exe`, not `python.exe`, so no console flashes on login |
+| Linux | `$XDG_CONFIG_HOME/autostart/my-idm.desktop` | `Terminal=false`; `XDG_CONFIG_HOME` ignored when relative, per spec |
+| macOS | `~/Library/LaunchAgents/com.myidm.launcher.plist` | `KeepAlive=False` — otherwise quitting from the tray would be undone instantly |
+
+Toggle: **Preferences → 🖥️ Application & Tray → System Tray & Window Behavior → "Start My-IDM
+when I log in"** (`GeneralConfig.launch_at_login`, `config.py:130`, default off). The entry point
+accepts `--autostart` (`main.py:75`, handled at `main.py:163`), which the registered command passes
+and which starts the app in the tray — but only when `QSystemTrayIcon.isSystemTrayAvailable()`
+(`main.py:168`), since an autostarted instance that starts invisible with no tray to return to is
+unrecoverable without a second launch.
+
+The design point that matters is **staleness**. Every platform stores the command as an opaque
+string, so a moved checkout or a replaced virtualenv leaves a login item that launches a path which
+no longer exists: every login produces a process that dies instantly with nothing on screen. So
+`status()` compares the *stored* command against the one this build would write and reports
+`STALE` rather than `ENABLED`; the Preferences page shows that state and offers a repair button.
+
+The other design point is **when the OS is touched**. `reconcile()` is reached only when the
+checkbox actually moved from what was loaded, so it always means "the user just asked" and makes
+the registration match. A Save that did not touch the box reaches no code path that writes. That
+matters because the entry can be removed outside the app — Task Manager, Startup Apps, a desktop
+settings panel — and an unconditional sync would resurrect it the next time the user so much as
+opened Preferences. Turning it off always removes the entry, stale or not: there is no reading of
+"off" that leaves a broken autostart behind.
+
+A failure to register does **not** discard the preference. The user's intent survives a locked
+registry hive or a read-only home, and the failure is surfaced in a dialog instead of leaving a
+checkbox that quietly lies.
+
+### 4.10 Embedded browser container
 
 **Today.** `find_chrome_hwnd` (`external_tools.py:72`) returns `None` off Windows, and
 `attach_window` (`details_panel.py:468`) sets `_chrome_hwnd` then returns early at
@@ -391,7 +440,7 @@ browser sub-tab with a stated reason ("embedded browser view is Windows-only") r
 presenting a tab that can never populate. A cross-platform alternative — launching the system
 browser and streaming nothing back — is a product decision, not a porting task.
 
-### 4.10 Typography, menu bar and app identity
+### 4.11 Typography, menu bar and app identity
 
 **Current hardcoded values:**
 
@@ -409,7 +458,7 @@ through the same mechanism (`Consolas` / `Menlo` / `DejaVu Sans Mono`) so consol
 column metrics stay correct.
 
 `QMenuBar.setNativeMenuBar(True)` is already the macOS default and must be set `False` explicitly
-on Windows/Linux to keep the dark in-window bar. `main.py:94`'s
+on Windows/Linux to keep the dark in-window bar. `main.py:99`'s
 `SetCurrentProcessExplicitAppUserModelID` is the Windows taskbar-grouping equivalent of the
 `StartupWMClass` key in the `.desktop` file required by §4.2.
 
@@ -426,7 +475,9 @@ There is no packaging beyond `pyproject.toml` and `run.bat`. Required per platfo
 | Linux | `.desktop` | Required for `StartupWMClass` and for the portal app id |
 | macOS | **`.app` bundle** via `py2app` or `PyInstaller` | Needs `Info.plist` (`LSUIElement` for tray-only), `LSMinimumSystemVersion`, and a notarized `py2app` recipe |
 | macOS | Icons | `logo.ico` exists; `.icns` does not. `logo.png` covers Linux |
-| All | Launchers | `run.bat` and `run.pyw` reference `.venv\Scripts\pythonw.exe`; add `run.sh`. The `my-idm` / `my-idm-gui` entry points in `pyproject.toml:18-22` already work on all three |
+| All | Launchers | `run.bat` and `run.pyw` reference `.venv\Scripts\pythonw.exe`; add `run.sh`. The `my-idm` / `my-idm-gui` entry points in `pyproject.toml:18-22` already work on all three, and are what `autostart.py` registers |
+| Linux | Autostart validation | The `.desktop` entry written by `autostart.py` is written blind — the desktop environment is never asked whether it accepted it. Under Flatpak, verify the app id satisfies the portal requirement in §4.2 |
+| macOS | Autostart validation | A `launchd` agent loads on the next login even if `launchctl bootstrap` failed, so a silent no-op is possible; `autostart.py` reports that case as a caveat rather than a failure |
 | All | Dependency manifests | Generate `requirements.txt` from `pyproject.toml`, with `win10toast` behind `sys_platform == "win32"` |
 
 PyObjC is needed only if the native notification backend is chosen over `osascript` (§4.3) and
@@ -504,6 +555,11 @@ Each item is a check that can fail today, not a description of the target.
       error, and a local `QShortcut` fallback exists.
 - [ ] **Zero hardcoded backslashes** in path construction; `pathlib` throughout.
 - [ ] **Monospace metrics stable** across platforms for the console view and file-tree columns.
+- [ ] **Launch at login round-trips on all three platforms**: enable writes a parsable entry, the
+      status probe reads it back as enabled, disabling removes it, and a moved checkout is reported
+      stale rather than enabled.
+- [ ] **A login launch starts without stealing focus and without a console window**
+      (`pythonw.exe` on Windows, `Terminal=false` in the `.desktop`, `--autostart` honoured).
 
 ### Packaging (Phase 4)
 

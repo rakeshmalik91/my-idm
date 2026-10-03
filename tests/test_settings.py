@@ -1239,5 +1239,159 @@ class TestExternalToolsSettings(ConfigIsolationMixin, unittest.TestCase):
         dlg.close()
 
 
+class TestLaunchAtLoginPreference(ConfigIsolationMixin, unittest.TestCase):
+    """Preferences -> Application: launch at login.
+
+    The interesting behaviour is not the checkbox but *when* the OS registration is touched. The
+    rule under test: a Save that did not move the checkbox must not touch the registration, or
+    merely opening Preferences would resurrect a login item the user removed on purpose through
+    Task Manager or their desktop's startup panel.
+
+    ``my_idm.autostart`` is stubbed here rather than used for real - a live call would write a
+    genuine ``HKCU\\...\\Run`` value on a Windows developer machine.
+    """
+
+    def _dialog(self, launch_at_login=False):
+        from my_idm.settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog(general_config=GeneralConfig(launch_at_login=launch_at_login))
+        self.addCleanup(dlg.close)
+        return dlg
+
+    @staticmethod
+    def _fake_autostart(status):
+        from my_idm import autostart
+
+        calls = []
+
+        def record(reconcile_or_none=None):
+            calls.append(reconcile_or_none)
+            return True, ""
+
+        return calls, patch.multiple(
+            autostart,
+            status=staticmethod(lambda: status),
+            reconcile=staticmethod(record),
+        )
+
+    def test_the_checkbox_reflects_the_stored_preference(self):
+        from my_idm import autostart
+
+        for stored in (False, True):
+            with self.subTest(stored=stored):
+                with patch.object(autostart, "status", return_value=autostart.AutostartState.DISABLED):
+                    with patch.object(autostart, "location", return_value="test://here"):
+                        dlg = self._dialog(launch_at_login=stored)
+                        self.assertEqual(dlg._launch_at_login_cb.isChecked(), stored)
+
+    def test_ticking_it_registers_the_entry(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.DISABLED):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=False)
+        calls, fake = self._fake_autostart(autostart.AutostartState.DISABLED)
+        dlg._launch_at_login_cb.setChecked(True)
+        with fake, patch("PySide6.QtWidgets.QMessageBox.warning") as warn:
+            dlg._on_save()
+        self.assertEqual(calls, [True], "ticking the box must register the entry")
+        warn.assert_not_called()
+        self.assertTrue(dlg._general_cfg.launch_at_login)
+
+    def test_unticking_it_removes_the_entry(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.ENABLED):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=True)
+        calls, fake = self._fake_autostart(autostart.AutostartState.ENABLED)
+        dlg._launch_at_login_cb.setChecked(False)
+        with fake, patch("PySide6.QtWidgets.QMessageBox.warning"):
+            dlg._on_save()
+        self.assertEqual(calls, [False])
+        self.assertFalse(dlg._general_cfg.launch_at_login)
+
+    def test_a_save_that_does_not_touch_the_box_leaves_the_registration_alone(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.ENABLED):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=True)
+        calls, fake = self._fake_autostart(autostart.AutostartState.ENABLED)
+        with fake, patch("PySide6.QtWidgets.QMessageBox.warning"):
+            dlg._on_save()
+        self.assertEqual(
+            calls, [],
+            "re-registering on every Save would override a removal made outside this app",
+        )
+
+    def test_a_failed_registration_warns_but_still_saves_the_preference(self):
+        """Losing the toggle would be a worse lie than a registration the user is told failed."""
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.DISABLED):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=False)
+        dlg._launch_at_login_cb.setChecked(True)
+        with patch.object(autostart, "reconcile", return_value=(False, "access is denied")):
+            with patch("PySide6.QtWidgets.QMessageBox.warning") as warn:
+                dlg._on_save()
+        warn.assert_called_once()
+        self.assertIn("access is denied", warn.call_args[0][2])
+        self.assertTrue(dlg._general_cfg.launch_at_login,
+                        "the user's intent must survive a transient failure")
+
+    def test_a_stale_entry_is_surfaced_with_a_repair_affordance(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.STALE):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=True)
+        # isHidden() rather than isVisible(): the dialog is never shown, and a child of a hidden
+        # parent reports isVisible() == False regardless of what was asked for.
+        self.assertFalse(dlg._autostart_repair_btn.isHidden())
+        self.assertIn("will not start", dlg._autostart_status_lbl.text())
+
+    def test_a_working_entry_hides_the_repair_button(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.ENABLED):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=True)
+        # isHidden(), not isVisible(): the dialog is never shown, so isVisible() is False either
+        # way and would assert nothing about what the code asked for.
+        self.assertTrue(dlg._autostart_repair_btn.isHidden())
+
+    def test_an_unsupported_platform_disables_the_box_and_says_why(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.UNSUPPORTED):
+            with patch.object(autostart, "location", return_value="not supported"):
+                dlg = self._dialog(launch_at_login=True)
+        self.assertFalse(dlg._launch_at_login_cb.isEnabled())
+        self.assertFalse(dlg._launch_at_login_cb.isChecked())
+        self.assertIn("not supported", dlg._autostart_status_lbl.text())
+
+    def test_repair_rewrites_the_entry_and_refreshes_the_label(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", return_value=autostart.AutostartState.STALE):
+            with patch.object(autostart, "location", return_value="test://here"):
+                dlg = self._dialog(launch_at_login=True)
+        with patch.object(autostart, "repair", return_value=(True, "")) as repair:
+            with patch.object(autostart, "status", return_value=autostart.AutostartState.ENABLED):
+                with patch("PySide6.QtWidgets.QMessageBox.information"):
+                    dlg._on_repair_autostart()
+        repair.assert_called_once()
+
+    def test_the_status_probe_failing_does_not_break_preferences(self):
+        from my_idm import autostart
+
+        with patch.object(autostart, "status", side_effect=RuntimeError("probe exploded")):
+            dlg = self._dialog(launch_at_login=False)
+        self.assertIn("probe exploded", dlg._autostart_status_lbl.text())
+        self.assertTrue(dlg._autostart_repair_btn.isHidden())
+
+
 if __name__ == "__main__":
     unittest.main()

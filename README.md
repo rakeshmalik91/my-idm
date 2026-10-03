@@ -162,7 +162,7 @@ machine while they run.
 - [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
 - [**Bandwidth Statistics**](docs/architecture/statistics.md) — Today / week / month / year / all-time totals from the existing `downloads` table, a `📊 Statistics` entry in **Tools** beside Preferences, a per-day volume chart and a live speed sparkline. Buckets are the user's **local** calendar days; rows are stamped in UTC and converted per row.
 - [**Named Queues & Concurrency Budgets**](docs/architecture/queues.md) — Every download belongs to a named queue with its own concurrency ceiling, on top of the global limit. Scope the list with **Edit → Queues**; AnimePahe and YouTube get their own queues automatically; backlog files can assign queues with `queue=`.
-- [**Cross-Platform Architecture**](docs/architecture/cross-platform.md) — Specifications for Linux (X11 & Wayland) and macOS (Intel & Apple Silicon) compatibility, including hotkeys, file managers, notifications, and XDG paths.
+- [**Cross-Platform Architecture**](docs/architecture/cross-platform.md) — Specifications for Linux (X11 & Wayland) and macOS (Intel & Apple Silicon) compatibility, including hotkeys, file managers, notifications, and XDG paths. Also the reference for launch-at-login registration on all three platforms.
 - [**User Guide**](docs/user-guide.md) — End-user walkthrough of every feature, settings tab, and keyboard shortcut.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
 

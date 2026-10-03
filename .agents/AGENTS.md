@@ -26,7 +26,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Table Views & Segregation** | [`table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md) | Table model, delegates, status/date/type segregation, section headers, context menus. |
 | **YouTube Scraper** | [`youtube-scraper.md`](file:///d:/Projects/my-idm/docs/architecture/youtube-scraper.md) | `yt-dlp`, Mode A (direct CDN) vs Mode B (yt-dlp + ffmpeg), playlists, rate budgeting. |
 | **Bandwidth Statistics** | [`statistics.md`](file:///d:/Projects/my-idm/docs/architecture/statistics.md) | `get_download_stats()` local-day bucketing, totals grid, volume chart, sparkline. |
-| **Cross-Platform Architecture** | [`cross-platform.md`](file:///d:/Projects/my-idm/docs/architecture/cross-platform.md) | Linux (X11/Wayland) & macOS (Intel/ARM) porting specs, hotkeys, file managers, DBus/XDG. |
+| **Cross-Platform Architecture** | [`cross-platform.md`](file:///d:/Projects/my-idm/docs/architecture/cross-platform.md) | Linux (X11/Wayland) & macOS (Intel/ARM) porting specs, hotkeys, file managers, DBus/XDG. Also documents `autostart.py`, the one shipped cross-platform subsystem. |
 
 > `queues.md` also designs two things that are **not** implemented: an off-peak scheduler and
 > absolute per-download bandwidth caps. Its "current state" sections are accurate; the rest is a

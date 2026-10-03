@@ -1126,6 +1126,33 @@ class SettingsDialog(QDialog):
         )
         tray_layout.addWidget(self._start_minimized_cb)
 
+        # Launch at login. The checkbox is the user's intent; `my_idm.autostart` owns the OS-level
+        # registration and decides whether that intent is actually in force - the two can disagree,
+        # so the status line reports the real state rather than echoing the checkbox back.
+        self._launch_at_login_cb = QCheckBox("Start My-IDM when I log in")
+        self._launch_at_login_cb.setToolTip(
+            "Register My-IDM with the operating system so it starts when you log in.\n\n"
+            "This is independent of the options above: it controls whether My-IDM is launched at "
+            "all, while they control where the window goes."
+        )
+        tray_layout.addWidget(self._launch_at_login_cb)
+
+        self._autostart_status_lbl = QLabel("")
+        self._autostart_status_lbl.setWordWrap(True)
+        self._autostart_status_lbl.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+        tray_layout.addWidget(self._autostart_status_lbl)
+
+        self._autostart_repair_btn = QPushButton("Repair Startup Entry")
+        self._autostart_repair_btn.setToolTip(
+            "Rewrite the login item so it points at this copy of My-IDM again.\n\n"
+            "Needed after the project folder or Python environment has been moved."
+        )
+        self._autostart_repair_btn.clicked.connect(self._on_repair_autostart)
+        self._repair_row = QHBoxLayout()
+        self._repair_row.addWidget(self._autostart_repair_btn)
+        self._repair_row.addStretch(1)
+        tray_layout.addLayout(self._repair_row)
+
         self._enable_system_tray_cb.toggled.connect(self._on_system_tray_toggled)
         layout.addWidget(tray_group)
 
@@ -2458,6 +2485,11 @@ class SettingsDialog(QDialog):
         self._minimize_to_tray_cb.setChecked(self._general_cfg.minimize_to_tray)
         self._close_to_tray_cb.setChecked(self._general_cfg.close_to_tray)
         self._start_minimized_cb.setChecked(self._general_cfg.start_minimized)
+        self._launch_at_login_cb.setChecked(self._general_cfg.launch_at_login)
+        # Remembered so `_on_save` can tell "the user asked for this" from "the user left the box
+        # alone and hit Save". Without it, every Save would re-register a login item the user had
+        # deliberately removed through Task Manager or their desktop's startup panel.
+        self._launch_at_login_as_loaded = self._general_cfg.launch_at_login
         self._minimize_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
         self._close_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
         self._start_minimized_cb.setEnabled(self._general_cfg.enable_system_tray)
@@ -2466,6 +2498,7 @@ class SettingsDialog(QDialog):
             QKeySequence(self._general_cfg.capture_hotkey_sequence or "Ctrl+Alt+D")
         )
         self._on_capture_hotkey_toggled(self._general_cfg.capture_hotkey_enabled)
+        self._refresh_autostart_status()
 
         # Clipboard tab
         self._clipboard_monitor_cb.setChecked(
@@ -2910,6 +2943,69 @@ class SettingsDialog(QDialog):
         self._close_to_tray_cb.setEnabled(checked)
         self._start_minimized_cb.setEnabled(checked)
 
+    def _refresh_autostart_status(self):
+        """Report the real registration state under the launch-at-login checkbox.
+
+        The checkbox shows stored intent; this label shows what the OS will actually do. They can
+        legitimately differ - the login item can be removed behind the app's back, or left pointing
+        at a checkout that has moved - and a checkbox that merely echoes itself back would hide
+        both.
+        """
+        from my_idm import autostart
+
+        try:
+            state = autostart.status()
+        except Exception as exc:  # a probe failure must not break the preferences dialog
+            self._autostart_status_lbl.setText(f"⚠️ Could not read the startup entry: {exc}")
+            self._autostart_status_lbl.setStyleSheet("color: #e06c75; font-size: 11px;")
+            self._autostart_repair_btn.setVisible(False)
+            return
+
+        where = autostart.location()
+
+        if state is autostart.AutostartState.UNSUPPORTED:
+            self._launch_at_login_cb.setEnabled(False)
+            self._launch_at_login_cb.setChecked(False)
+            self._autostart_status_lbl.setText(
+                "⚠️ Launch at login is not supported on this platform. Add My-IDM to your "
+                "session's startup applications by hand."
+            )
+            self._autostart_status_lbl.setStyleSheet("color: #e0af68; font-size: 11px;")
+            self._autostart_repair_btn.setVisible(False)
+        elif state is autostart.AutostartState.STALE:
+            self._autostart_status_lbl.setText(
+                f"⚠️ The saved login item points somewhere else and will not start My-IDM.\n{where}"
+            )
+            self._autostart_status_lbl.setStyleSheet("color: #e0af68; font-size: 11px;")
+            self._autostart_repair_btn.setVisible(True)
+        elif state is autostart.AutostartState.ENABLED:
+            self._autostart_status_lbl.setText(f"✅ Will start when you log in.\n{where}")
+            self._autostart_status_lbl.setStyleSheet("color: #7ee787; font-size: 11px;")
+            self._autostart_repair_btn.setVisible(False)
+        else:
+            self._autostart_status_lbl.setText(
+                f"Not registered. When enabled, the login item is written to:\n{where}"
+            )
+            self._autostart_status_lbl.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+            self._autostart_repair_btn.setVisible(False)
+
+    def _on_repair_autostart(self):
+        from my_idm import autostart
+
+        ok, message = autostart.repair()
+        self._refresh_autostart_status()
+        if ok:
+            if message:
+                QMessageBox.information(self, "Startup Entry Repaired", message)
+            else:
+                QMessageBox.information(
+                    self,
+                    "Startup Entry Repaired",
+                    "The login item now points at this copy of My-IDM.",
+                )
+        else:
+            QMessageBox.warning(self, "Repair Failed", message)
+
     def _on_clipboard_monitor_toggled(self, checked: bool):
         self._clipboard_max_urls_spin.setEnabled(checked)
         self._clipboard_min_size_spin.setEnabled(checked)
@@ -3137,6 +3233,7 @@ class SettingsDialog(QDialog):
         self._general_cfg.minimize_to_tray = self._minimize_to_tray_cb.isChecked()
         self._general_cfg.close_to_tray = self._close_to_tray_cb.isChecked()
         self._general_cfg.start_minimized = self._start_minimized_cb.isChecked()
+        self._general_cfg.launch_at_login = self._launch_at_login_cb.isChecked()
         self._general_cfg.clipboard_monitor_enabled = self._clipboard_monitor_cb.isChecked()
         self._general_cfg.clipboard_monitor_max_urls = self._clipboard_max_urls_spin.value()
         self._general_cfg.clipboard_min_file_size_kb = self._clipboard_min_size_spin.value()
@@ -3156,6 +3253,32 @@ class SettingsDialog(QDialog):
         self._general_cfg.backlog_poll_enabled = self._backlog_poll_cb.isChecked()
         self._general_cfg.backlog_poll_interval = self._backlog_poll_spin.value()
         self._general_cfg.save()
+
+        # 1b. Apply the launch-at-login change to the operating system.
+        #
+        # Only when the checkbox actually moved. An unconditional sync here would re-create a login
+        # item the user removed on purpose through Task Manager or their desktop's startup panel,
+        # the next time they so much as opened Preferences and pressed Save. `reconcile` then does
+        # the remaining repair work - notably rewriting a *stale* entry, which is broken rather than
+        # disabled and so cannot have been an intentional removal.
+        if self._launch_at_login_cb.isChecked() != self._launch_at_login_as_loaded:
+            from my_idm import autostart
+
+            autostart_ok, autostart_message = autostart.reconcile(self._launch_at_login_cb.isChecked())
+            if not autostart_ok:
+                # The preference is still recorded, so the user's intent survives a transient
+                # failure (a locked registry hive, a read-only home). Losing the toggle would be a
+                # worse lie than a failed registration the user is now told about.
+                QMessageBox.warning(
+                    self,
+                    "Launch at Login Not Applied",
+                    f"{autostart_message}\n\n"
+                    "The preference has been saved and will be retried next time you change it.",
+                )
+            elif autostart_message:
+                QMessageBox.information(
+                    self, "Launch at Login", autostart_message
+                )
 
         # 2. Collect BitTorrent settings
         self._torrent_cfg.seeding_after_complete = self._seeding_after_complete_cb.isChecked()

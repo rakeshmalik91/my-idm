@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from my_idm.database import Database, APP_DIR
 from my_idm.main_window import MainWindow
@@ -70,6 +70,11 @@ def parse_args():
         "--restart",
         action="store_true",
         help="Internal flag: skip single-instance check when restarting",
+    )
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Start minimized to the tray; set by the launch-at-login registration",
     )
     parser.add_argument(
         "urls",
@@ -155,6 +160,17 @@ def main():
     window = MainWindow(manager, show_exit_splash=not args.no_splash)
 
     start_in_tray = manager.general_config.enable_system_tray and manager.general_config.start_minimized
+    if args.autostart:
+        # Launched by the login item rather than by the user, so the window would be an
+        # interruption. Only honoured when a tray actually exists: `main_window` hides to the tray
+        # on close but has no icon to come back to if the desktop provides none, and an
+        # autostarted instance that starts invisible is unrecoverable without a second launch.
+        start_in_tray = QSystemTrayIcon.isSystemTrayAvailable()
+        if not start_in_tray:
+            log.warning(
+                "Started by the login item but no system tray is available; showing the window "
+                "instead of launching invisibly."
+            )
     if splash:
         splash.set_message("Ready!", 100)
         if start_in_tray:
