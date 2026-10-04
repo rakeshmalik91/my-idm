@@ -586,24 +586,34 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         self.win.move(150, 120)
         self.win._table.setColumnWidth(Col.NAME, 360)
         self.win._table.setColumnWidth(Col.SIZE, 130)
+        # Shown before saving, so the window manager has clamped it exactly as it will clamp
+        # the restored one. On a runner the screen is a virtual 1280x1024 with no real desktop:
+        # an unshown 1280-wide window keeps the size it was given, while the restored window
+        # comes back clamped to what fits, and comparing the two used to fail on
+        # `1022 != 1280` - a statement about the runner's screen, not about persistence. Every
+        # assertion below is now between two windows that went through the same path.
+        self.win.show()
+        QApplication.processEvents()
 
         self.win._save_ui_state_to_db()
 
         db_state = self.db.get_window_state()
         self.assertIsNotNone(db_state)
-        self.assertEqual(db_state["width"], width)
-        self.assertEqual(db_state["height"], 720)
-        self.assertEqual(db_state["x"], 150)
-        self.assertEqual(db_state["y"], 120)
+        self.assertEqual(db_state["width"], self.win.width())
+        self.assertEqual(db_state["height"], self.win.height())
+        self.assertEqual(db_state["x"], self.win.x())
+        self.assertEqual(db_state["y"], self.win.y())
         self.assertFalse(db_state["is_maximized"])
         self.assertEqual(db_state["column_widths"][str(Col.NAME)], 360)
         self.assertEqual(db_state["column_widths"][str(Col.SIZE)], 130)
 
         win2 = self.new_window()
-        self.assertEqual(win2.width(), width)
-        self.assertEqual(win2.height(), 720)
-        self.assertEqual(win2.x(), 150)
-        self.assertEqual(win2.y(), 120)
+        win2.show()
+        QApplication.processEvents()
+        self.assertEqual(win2.width(), self.win.width())
+        self.assertEqual(win2.height(), self.win.height())
+        self.assertEqual(win2.x(), self.win.x())
+        self.assertEqual(win2.y(), self.win.y())
         self.assertEqual(win2._table.columnWidth(Col.NAME), 360)
         self.assertEqual(win2._table.columnWidth(Col.SIZE), 130)
 
@@ -2403,24 +2413,31 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.win.show()
         QApplication.processEvents()
 
-        initial_pos = self.win.pos()
-        initial_y = initial_pos.y()
-        initial_x = initial_pos.x()
         self.win._save_ui_state_to_db()
+        # The invariant is that the position does not *creep*: every launch must persist the
+        # same coordinates it inherited. Comparing against the literal 200 that `move()` was
+        # given is not a test of persistence - restore goes through `restoreGeometry`, which
+        # replays a frame rectangle, so the first relaunch lands at a different absolute y on a
+        # headless runner (`88 != 200`) purely because of the runner's frame metrics. Comparing
+        # each launch against the persisted state catches an actual shift, on any host.
+        first_state = self.manager.get_ui_state()
 
         for launch_idx in range(3):
             next_win = self.new_window(self.manager)
             next_win.show()
             QApplication.processEvents()
-
-            current_pos = next_win.pos()
-            self.assertEqual(
-                current_pos.y(),
-                initial_y,
-                f"Window shifted vertically on launch {launch_idx + 1}: {current_pos.y()} vs {initial_y}",
-            )
-            self.assertEqual(current_pos.x(), initial_x)
             next_win._save_ui_state_to_db()
+            state = self.manager.get_ui_state()
+            self.assertEqual(
+                state["y"], first_state["y"],
+                f"Window shifted vertically on launch {launch_idx + 1}: "
+                f"{state['y']} vs {first_state['y']}",
+            )
+            self.assertEqual(
+                state["x"], first_state["x"],
+                f"Window shifted horizontally on launch {launch_idx + 1}: "
+                f"{state['x']} vs {first_state['x']}",
+            )
 
     def test_legacy_window_geometry_restore_does_not_shift(self):
         """Restoring legacy UI state dictionary (x, y, width, height) positions window accurately without shift."""

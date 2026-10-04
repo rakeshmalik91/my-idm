@@ -472,6 +472,16 @@ class TestScanFileEdges(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.target = Path(self._tmp.name) / "payload.bin"
         self.target.write_bytes(b"data")
+        # `scan_file` only reaches the Defender branch when `sys.platform == "win32"`; off
+        # Windows it looks for ClamAV instead, which no CI runner has, so every verdict test
+        # below silently degraded into "no scanner available". The scanner itself is faked
+        # (`subprocess.run` and `find_windows_defender_path`), so what is under test is the
+        # verdict logic, not the host - pinning the platform keeps that logic covered on all
+        # three runners instead of skipping it off Windows. The one test that wants the POSIX
+        # branch still patches the platform itself.
+        platform_patcher = patch.object(security.sys, "platform", "win32")
+        platform_patcher.start()
+        self.addCleanup(platform_patcher.stop)
 
     def _defender(self, returncode=0, stdout="", stderr=""):
         result = subprocess.CompletedProcess(args=[], returncode=returncode,
@@ -742,6 +752,20 @@ class TestScanFileThreadSafety(unittest.TestCase):
 
     THREADS = 8
 
+    @staticmethod
+    def _key(path):
+        """Comparable form of a path the scanner is handed.
+
+        ``scan_file`` passes ``str(Path(file_path).resolve())`` to the scanner, so the argv a
+        thread sees is not necessarily string-identical to the path the test created: GitHub's
+        Windows runners point ``TEMP`` at the 8.3 short form ``C:\\Users\\RUNNER~1\\...``, which
+        ``resolve()`` expands to ``...\\runneradmin\\...``, and macOS ``/tmp`` is a symlink to
+        ``/private/tmp``. Looking the target up by value then missed, ``list.index`` raised, and
+        ``scan_file`` - correctly - swallowed it into a "no verdict" result, so the test failed
+        with a verdict mismatch rather than the real cause.
+        """
+        return os.path.normcase(str(Path(path).resolve()))
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -750,6 +774,13 @@ class TestScanFileThreadSafety(unittest.TestCase):
             path = Path(self._tmp.name) / f"payload{index}.bin"
             path.write_bytes(b"data")
             self.targets.append(path)
+        self.index_by_key = {self._key(p): i for i, p in enumerate(self.targets)}
+        # As in `TestScanFileEdges`: the Defender branch is the one under test, and it is only
+        # taken when `sys.platform == "win32"`. Off Windows `scan_file` looks for ClamAV, finds
+        # nothing on a runner, and returns no verdict at all.
+        platform_patcher = patch.object(security.sys, "platform", "win32")
+        platform_patcher.start()
+        self.addCleanup(platform_patcher.stop)
 
     def test_concurrent_scans_stay_independent(self):
         """Half the targets are "infected"; each thread must see only its own verdict.
@@ -764,10 +795,10 @@ class TestScanFileThreadSafety(unittest.TestCase):
         calls: list[str] = []
 
         def _scanner(argv, **kwargs):
-            target = Path(argv[5])
+            scanned = argv[5]
             with lock:
-                calls.append(argv[5])
-            returncode = 2 if self.targets.index(target) % 2 == 0 else 0
+                calls.append(scanned)
+            returncode = 2 if self.index_by_key[self._key(scanned)] % 2 == 0 else 0
             return subprocess.CompletedProcess(args=argv, returncode=returncode,
                                                stdout="", stderr="")
 
@@ -1185,11 +1216,15 @@ class TestAnimePaheArgumentAssembly(unittest.TestCase):
         ``ExternalToolsConfig.get_effective_repo_path`` probes ``D:\\Projects\\animepahe-downloader``
         and ``~/Projects/animepahe-downloader`` when the setting is empty, so a user who
         clears the field does not necessarily get an error - they silently get a checkout
-        that happens to exist on this machine. Pin the behaviour with the probe stubbed so
-        the test does not depend on the ambient disk.
+        that happens to exist on this machine.
+
+        The probe is stubbed on ``Path.is_dir``, which is what the implementation actually
+        calls. It used to patch ``external_tools.os.path.isdir``, which this code path never
+        touches, so the test really asserted "no ``D:\\Projects\\animepahe-downloader`` on this
+        machine" and passed on the runner by luck.
         """
         self.config.animepahe_repo_path = ""
-        with patch.object(external_tools.os.path, "isdir", return_value=False):
+        with patch.object(Path, "is_dir", return_value=False):
             ok, message, proc = external_tools.launch_animepahe_cli(self.config)
         self.assertFalse(ok)
         self.assertIsNone(proc)
@@ -1202,9 +1237,14 @@ class TestAnimePaheArgumentAssembly(unittest.TestCase):
         the setting is empty. Clearing the field therefore does not mean "disabled" - it
         means "use whatever the developer happened to have at D:\\Projects", which on the
         author's own machine silently wires the scraper to a checkout the user never chose.
+
+        Both candidates are stubbed as present, so the assertion is about which one wins and
+        not about what happens to be on the disk. Unstubbed, this only passed on a machine
+        that really has that checkout.
         """
         self.config.animepahe_repo_path = ""
-        with patch.object(external_tools.os.path, "isdir", return_value=True):
+        with patch.object(Path, "is_dir", return_value=True), \
+             patch.object(Path, "is_file", return_value=True):
             effective = self.config.get_effective_repo_path()
         self.assertEqual(
             effective, "D:/Projects/animepahe-downloader",
@@ -1307,6 +1347,7 @@ class TestPythonwDiscovery(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(sys.platform == "win32", "requires ctypes.windll, which only exists on Windows")
 class TestChildPidEnumeration(unittest.TestCase):
     """``get_child_pids`` snapshot handling and ``find_chrome_hwnd`` window matching.
 
@@ -1315,6 +1356,11 @@ class TestChildPidEnumeration(unittest.TestCase):
     released. The recursion itself is exercised indirectly by
     :class:`TestChromeWindowMatching`, which feeds the window matcher a controlled
     ``GetWindowRect`` and therefore the real callback.
+
+    Windows-only, and unavoidably so: the fakes are installed *onto* ``ctypes.windll``, which
+    does not exist on POSIX, so ``patch("ctypes.windll.kernel32", ...)`` raised
+    ``AttributeError: module 'ctypes' has no attribute 'windll'`` there. Simulating win32 is not
+    an option either - a fake DLL cannot be attached to an attribute the platform does not have.
     """
 
     def setUp(self):
@@ -1399,13 +1445,15 @@ class TestChildPidEnumeration(unittest.TestCase):
             self.assertEqual(external_tools.get_child_pids(0), set())
 
 
+@unittest.skipUnless(sys.platform == "win32", "requires ctypes.windll, which only exists on Windows")
 class TestChromeWindowMatching(unittest.TestCase):
     """The ``find_chrome_hwnd`` predicate, driven through the real Win32 callback.
 
     ``EnumWindows`` is faked so that it actually *invokes* the callback with a controlled
     ``GetClassNameW`` / ``GetWindowRect`` / ``GetWindowThreadProcessId``. That makes the
     class-name, size-floor and pid-scoping rules assertable without a real browser, and it
-    exercises the genuine ``WNDENUMPROC`` early-exit path.
+    exercises the genuine ``WNDENUMPROC`` early-exit path. The fakes hang off
+    ``ctypes.windll.user32``, so this class is Windows-only.
     """
 
     HWND = 0x1234
@@ -1552,11 +1600,16 @@ class TestOpenAndRevealFiles(unittest.TestCase):
         only Qt lets a real Explorer window open on the developer's desktop. The
         startfile-first behaviour itself is asserted separately in
         :meth:`test_a_directory_opens_through_startfile_on_windows`.
+
+        The platform is pinned to win32 because that is the branch under test; ``create=True``
+        is needed for the ``startfile`` patch to apply at all off Windows, where the attribute
+        does not exist.
         """
         folder = self.root / "folder"
         folder.mkdir()
-        with patch.object(external_tools, "QDesktopServices") as services, \
-             patch.object(external_tools.os, "startfile") as startfile:
+        with patch.object(external_tools.sys, "platform", "win32"), \
+             patch.object(external_tools, "QDesktopServices") as services, \
+             patch.object(external_tools.os, "startfile", create=True) as startfile:
             services.openUrl.return_value = True
             ok, message = external_tools.open_file_in_default_app(folder)
         self.assertTrue(ok, message)
@@ -1565,9 +1618,14 @@ class TestOpenAndRevealFiles(unittest.TestCase):
         startfile.assert_called_once_with(str(folder.resolve()))
 
     def test_a_directory_that_cannot_be_opened_reports_the_error(self):
+        # Pinned to win32 so the startfile branch is the one that fails. Left on the host
+        # platform, this reached the real `QDesktopServices.openUrl` on Linux and macOS, and
+        # conftest's hermeticity guard recorded the violation - which then surfaced as an
+        # ERROR at the teardown of an unrelated later test.
         folder = self.root / "folder"
         folder.mkdir()
-        with patch.object(external_tools.os, "startfile",
+        with patch.object(external_tools.sys, "platform", "win32"), \
+             patch.object(external_tools.os, "startfile", create=True,
                           side_effect=OSError("no shell")):
             ok, message = external_tools.open_file_in_default_app(folder)
         self.assertFalse(ok)
@@ -1577,8 +1635,9 @@ class TestOpenAndRevealFiles(unittest.TestCase):
         """Windows goes through ``os.startfile``, bypassing Qt's desktop services."""
         folder = self.root / "folder"
         folder.mkdir()
-        with patch.object(external_tools, "QDesktopServices") as services, \
-             patch.object(external_tools.os, "startfile") as startfile:
+        with patch.object(external_tools.sys, "platform", "win32"), \
+             patch.object(external_tools, "QDesktopServices") as services, \
+             patch.object(external_tools.os, "startfile", create=True) as startfile:
             ok, message = external_tools.open_file_in_default_app(folder)
         self.assertTrue(ok)
         services.openUrl.assert_not_called()
@@ -1597,8 +1656,9 @@ class TestOpenAndRevealFiles(unittest.TestCase):
     def test_windows_falls_back_to_startfile_when_openurl_refuses(self):
         target = self.root / "a.bin"
         target.write_bytes(b"x")
-        with patch.object(external_tools, "QDesktopServices") as services, \
-             patch.object(external_tools.os, "startfile") as startfile:
+        with patch.object(external_tools.sys, "platform", "win32"), \
+             patch.object(external_tools, "QDesktopServices") as services, \
+             patch.object(external_tools.os, "startfile", create=True) as startfile:
             services.openUrl.return_value = False
             ok, _ = external_tools.open_file_in_default_app(target)
         self.assertTrue(ok, "openUrl refusing must not fail the request on Windows")

@@ -427,9 +427,15 @@ class TestMacOSBackend(unittest.TestCase):
         backend_patcher = patch.object(autostart, "_BACKEND", autostart._MacOSBackend())
         backend_patcher.start()
         self.addCleanup(backend_patcher.stop)
-        # Off-darwin the module deliberately skips launchctl (see `_macos_write`), so nothing here
-        # shells out on the test machine.
-        self.assertNotEqual(sys.platform, "darwin")
+        # Nothing here may touch the real launchd. `_macos_write` finishes in `_load_now`, which
+        # shells out to `launchctl` on darwin, so on a macOS runner `set_enabled(True)` would
+        # load a genuine login item for the CI user and `set_enabled(False)` would unload it.
+        # This replaces the old `assertNotEqual(sys.platform, "darwin")` guard, which made the
+        # whole class fail in setUp on macOS - leaving the launchd backend with no coverage on
+        # the one platform that uses it, while passing vacuously everywhere else.
+        launchctl_patcher = patch.object(autostart, "_launchctl", return_value=(True, ""))
+        launchctl_patcher.start()
+        self.addCleanup(launchctl_patcher.stop)
 
     @property
     def plist_path(self):
@@ -485,8 +491,13 @@ class TestMacOSBackend(unittest.TestCase):
 
     def test_load_now_is_skipped_off_darwin(self):
         """The module is imported on every platform; shelling out to a command that cannot exist
-        is pointless, and on this machine there is no launchctl at all."""
-        with patch.object(autostart, "_launchctl") as launchctl:
+        is pointless, and off darwin there is no launchctl at all.
+
+        The platform is pinned to a non-darwin value rather than read from the host, so the skip
+        is asserted on every runner instead of only on the two that are not macOS.
+        """
+        with patch.object(sys, "platform", "linux"), \
+             patch.object(autostart, "_launchctl") as launchctl:
             ok, message = autostart._load_now(True)
         self.assertTrue(ok)
         self.assertEqual(message, "")

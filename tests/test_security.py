@@ -228,6 +228,7 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
         """Deterministic stand-in for the real binary: exit code 0 means clean."""
         path = self._temp_file()
         with patch("my_idm.security.find_windows_defender_path", return_value=r"C:\fake\MpCmdRun.exe"), \
+             patch("my_idm.security.sys.platform", "win32"), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "Scan completed."
@@ -248,6 +249,7 @@ class TestPostDownloadAntivirusScanning(unittest.TestCase):
     def test_scan_file_flags_an_unexcluded_threat(self):
         path = self._temp_file(suffix=".exe")
         with patch("my_idm.security.find_windows_defender_path", return_value=r"C:\fake\MpCmdRun.exe"), \
+             patch("my_idm.security.sys.platform", "win32"), \
              patch("subprocess.run") as mock_run:
             mock_run.return_value.returncode = 2
             mock_run.return_value.stdout = "Threat detected: Trojan:Win32/Wacatac found in file."
@@ -741,6 +743,14 @@ class TestThreatExclusionAndScanTiming(unittest.TestCase):
         self.path = Path(self.tmp_dir.name) / "mock.exe"
         self.path.write_bytes(b"mock binary")
         self.addCleanup(self.path.unlink, missing_ok=True)
+        # `scan_file` only consults Defender when `sys.platform == "win32"`; on Linux and
+        # macOS the same `auto` setting looks for ClamAV instead, which no CI runner has, so
+        # every test here was asserting against "No antivirus scanner available" rather than
+        # against the exclusion logic. The scanner is faked, so the host platform is
+        # irrelevant to what is under test - pin it and keep the logic covered everywhere.
+        platform_patcher = patch("my_idm.security.sys.platform", "win32")
+        platform_patcher.start()
+        self.addCleanup(platform_patcher.stop)
 
     def _scanner(self, returncode, stdout, stderr=""):
         """A patched MpCmdRun that is guaranteed to be found.

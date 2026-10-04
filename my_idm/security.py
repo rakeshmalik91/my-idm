@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ntpath
 import os
 import re
 import shlex
@@ -190,13 +191,18 @@ def find_windows_defender_path() -> Optional[str]:
             found = []
             for root, _, files in os.walk(platform_dir):
                 if "MpCmdRun.exe" in files:
-                    full_path = os.path.join(root, "MpCmdRun.exe")
+                    # `ntpath`, not `os.path`: this function only ever handles Windows paths,
+                    # and on a POSIX host `os.path.dirname` finds no separator in
+                    # `C:\...\Platform\4.20.2\MpCmdRun.exe`, so every candidate would score as
+                    # version (0,) and the sort would silently degenerate to enumeration order.
+                    # On Windows `ntpath is os.path`, so nothing changes there.
+                    full_path = ntpath.join(root, "MpCmdRun.exe")
                     if os.path.isfile(full_path):
                         found.append(full_path)
             if found:
                 def _version(path: str):
                     # ...\Platform\<version>\MpCmdRun.exe
-                    name = os.path.basename(os.path.dirname(path))
+                    name = ntpath.basename(ntpath.dirname(path))
                     parts = []
                     for chunk in name.split("."):
                         if chunk.isdigit():

@@ -12,8 +12,8 @@ Two tiers. **Use basic sanity by default** — it is safe to leave running in th
 
 | Tier | Command | Scope | Time |
 | :--- | :--- | :--- | :--- |
-| **Basic sanity** | `run_all_tests.bat basic` | 1621 tests. No window, no tray, no real clipboard. | **~60 s** |
-| **Full** | `run_all_tests.bat` | All 2594 tests, including UI. | ~4–7 min |
+| **Basic sanity** | `run_all_tests.bat basic` | 1816 tests. No window, no tray, no real clipboard. | **~55 s** |
+| **Full** | `run_all_tests.bat` | All 2844 tests, including UI. | ~6 min |
 
 All three measured on 2026-10-02 via the wrapper. The tiers are **not** proportional: the 959
 `ui` tests alone take ~2 min 20 s, because each builds and tears down real Qt widget trees —
@@ -37,10 +37,34 @@ venv, switches to its own directory, and prints the result. Prefer it over calli
 directly. There is no `sync.bat`, no `webapp/` and no Android project — ignore runbooks that
 mention them. The suite is pure Python + PySide6 and needs no build step.
 
-**Current state: full `2593 passed, 1 skipped`; basic `1621 passed, 1 skipped, 972 deselected`.**
-The single skip is the opt-in real Windows Defender scan (`MYIDM_RUN_AV_TESTS=1`). Update these
-numbers when you add or remove tests, and treat a *sudden* drop as a signal that a module failed
-to import.
+**Current state: full `2841 passed, 3 skipped`; basic `1813 passed, 3 skipped, 1028 deselected`.**
+The three skips are the opt-in real Windows Defender scan (`MYIDM_RUN_AV_TESTS=1`) and the
+`ui`-tier tray/clipboard tests that need a desktop session. Update these numbers when you add or
+remove tests, and treat a *sudden* drop as a signal that a module failed to import.
+
+### A test must not depend on the host it runs on
+
+The CI matrix (`.github/workflows/ci.yml`) runs the basic tier on Windows, Ubuntu and macOS, so
+"passes on my Windows box" is not evidence that a test is correct. Three rules, each of which
+exists because the alternative shipped as a red CI job:
+
+- **Optional dependencies must be asserted, not assumed.** The curl branch of `HTTPEngine` is
+  gated on `http_engine._HAS_CURL_CFFI`, and `curl_cffi` is not a declared dependency, so every
+  curl test silently fell through to the aiohttp path on a runner and failed against the strict
+  `FakeSession`. `EngineTestCase.setUp` now patches the flag to `True`; the tests substitute
+  `FakeCurlSession` and never touch the real library. Same for `send2trash`, which *is* declared
+  because the tests patch `send2trash.send2trash` and `mock.patch` has to import the module.
+- **A faked-out OS branch is pinned with `patch.object(module.sys, "platform", ...)`, not skipped.**
+  `scan_file` only reaches Defender when `sys.platform == "win32"`; off Windows it looks for
+  ClamAV, finds nothing on a runner, and returns no verdict, so the exclusion and fail-closed
+  logic was untested on the two platforms that need it. Conversely, a test that patches
+  `ctypes.windll.*` or `os.startfile` genuinely needs Windows, because the attribute does not
+  exist elsewhere — that one takes `skipUnless(sys.platform == "win32")`.
+- **Never assert on the ambient disk or the screen.** `D:\Projects\animepahe-downloader` and a
+  legacy `~/.my-idm` made tests pass only on the author's machine; a 1280-wide window and a
+  1280x1024 runner screen made geometry tests fail only on the runner. Patch `Path.is_dir` /
+  `Path.is_file` rather than a module that is never called, and compare a restored window against
+  a window that went through the same path instead of against a literal.
 
 No randomisation plugin is installed, so test order is deterministic. Passing twice is not
 strong evidence; see §6.

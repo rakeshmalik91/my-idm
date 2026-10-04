@@ -121,6 +121,20 @@ class EngineTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        # Pretend curl_cffi is installed. It is an optional dependency
+        # (`http_engine._HAS_CURL_CFFI`), and every curl branch in the engine is gated on that
+        # flag, so on any machine without the wheel - which is every CI runner, since nothing
+        # declares it - the curl tests silently fell through to the aiohttp path and failed
+        # against the strict `FakeSession` instead of testing anything. The curl paths never
+        # touch the real library: `curl_session_factory` substitutes `FakeCurlSession` for
+        # `CurlAsyncSession` in every one of them. Asserting the flag here makes the branch
+        # under test a property of the test rather than of the host's site-packages; the two
+        # tests that care about the *absent* case still patch it back to False, which wins
+        # over this outer patch for the duration of their `with` block.
+        curl_patcher = patch.object(http_engine_module, "_HAS_CURL_CFFI", True)
+        curl_patcher.start()
+        self.addCleanup(curl_patcher.stop)
+
     # -- helpers --------------------------------------------------------------
 
     def add_entry(self, entry_id="d1", url="https://example.com/a.zip", **kw):

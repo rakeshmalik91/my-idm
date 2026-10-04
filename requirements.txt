@@ -15,6 +15,11 @@ humanize>=4.9
 libtorrent>=2.0
 psutil>=5.9
 
+# Tier 2 of `utils.send_to_trash`, after Qt's `QFile.moveToTrash`. Without it a delete on a
+# platform where Qt declines (headless session, no trash spec dir, Recycle Bin disabled) is a
+# permanent unlink. Pure Python; the test suite patches `send2trash.send2trash` directly.
+send2trash>=1.8.3
+
 # Windows-only. pip cannot resolve win10toast on Linux or macOS, so the marker keeps this from
 # failing the whole install there; notifications.py guards the import either way.
 win10toast>=0.9 ; sys_platform == "win32"

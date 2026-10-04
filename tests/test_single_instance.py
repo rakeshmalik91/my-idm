@@ -92,7 +92,16 @@ def wait_for_marker_file(
     )
 
 
+@unittest.skipUnless(sys.platform == "win32", "activate_window drives the Win32 window manager")
 class TestSingleInstance(unittest.TestCase):
+    """Window activation over the Win32 message loop.
+
+    Windows-only: the tests patch ``ctypes.windll.user32`` functions such as ``IsIconic`` and
+    ``ShowWindow``, and ``ctypes`` has no ``windll`` attribute on Linux or macOS, so
+    ``mock.patch("ctypes.windll.user32.IsIconic", ...)`` raised ``AttributeError`` there. The
+    lock-file half of ``SingleInstanceManager`` is platform-neutral and is covered by the other
+    classes in this module.
+    """
 
     def setUp(self):
         self.unique_server = f"test_idm_ipc_{uuid.uuid4().hex[:12]}"

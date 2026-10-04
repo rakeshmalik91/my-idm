@@ -315,31 +315,53 @@ def check_disk_space(
 
 
 def unlock_path(file_path: str | Path) -> None:
-    """Attempt to unlock a file or directory on disk by clearing read-only/system flags and running GC."""
+    """Attempt to unlock a file or directory on disk by clearing read-only/system flags and running GC.
+
+    On Windows ``os.chmod`` only toggles the read-only attribute, so writing an absolute mode is
+    harmless there. On POSIX the mode is the real permission set, and ``S_IWRITE | S_IREAD``
+    alone is ``0o600``: a *directory* stripped of its execute bit can no longer be traversed, so
+    the next ``stat()``, ``open()`` or ``shutil.move()`` of anything inside it fails with
+    ``PermissionError: [Errno 13]``. That is not hypothetical - ``robust_move_download_files``
+    calls this on the destination directory and then immediately walks into it, which broke every
+    directory move on Linux and macOS while passing on Windows.
+
+    So the existing bits are preserved and only write (plus read, plus execute for directories) is
+    added.
+    """
     if not file_path:
         return
     import gc
     import os
     import stat
     gc.collect()
+
+    def _unlock_mode(target: str, is_dir: bool) -> int:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+        mode |= stat.S_IRUSR | stat.S_IWUSR
+        if is_dir:
+            mode |= stat.S_IXUSR
+        return mode
+
     try:
         p = Path(file_path)
         if not p.exists():
             return
         try:
-            os.chmod(str(p), stat.S_IWRITE | stat.S_IREAD)
+            os.chmod(str(p), _unlock_mode(str(p), p.is_dir()))
         except Exception:
             pass
         if p.is_dir():
             for root, dirs, files in os.walk(str(p)):
                 for d in dirs:
+                    child = os.path.join(root, d)
                     try:
-                        os.chmod(os.path.join(root, d), stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+                        os.chmod(child, _unlock_mode(child, True))
                     except Exception:
                         pass
                 for f in files:
+                    child = os.path.join(root, f)
                     try:
-                        os.chmod(os.path.join(root, f), stat.S_IWRITE | stat.S_IREAD)
+                        os.chmod(child, _unlock_mode(child, False))
                     except Exception:
                         pass
     except Exception:

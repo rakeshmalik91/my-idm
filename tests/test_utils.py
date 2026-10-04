@@ -20,6 +20,7 @@ from my_idm.utils import (
     sanitize_filename,
     send_to_trash,
     split_extension,
+    unlock_path,
 )
 
 app = QApplication.instance() or QApplication([])
@@ -315,6 +316,61 @@ class TestSanitizeFilename(unittest.TestCase):
         self.assertTrue(out)
         self.assertEqual(len(out.rpartition(".")[0]), 1, out)
         self.assertTrue(out.endswith(".zip"))
+
+
+class TestUnlockPath(unittest.TestCase):
+    """``unlock_path`` must leave a directory traversable.
+
+    Regression test for a real Linux/macOS defect. ``unlock_path`` used to chmod its argument to
+    ``S_IWRITE | S_IREAD``, which on Windows only clears the read-only attribute but on POSIX is
+    mode ``0o600`` - no execute bit. Given a directory, that made it untraversable, so the next
+    ``stat()`` / ``open()`` / ``shutil.move()`` of anything inside it raised
+    ``PermissionError: [Errno 13]``. ``robust_move_download_files`` calls it on the destination
+    directory and then immediately walks into it, so every directory move failed on the two CI
+    runners while passing on Windows, where the same code is harmless.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_a_directory_is_still_traversable_afterwards(self):
+        folder = self.root / "payload"
+        folder.mkdir()
+        (folder / "file.txt").write_text("data", encoding="utf-8")
+
+        unlock_path(folder)
+
+        # Reachable, listable, and readable - each of these is an independent way the missing
+        # execute bit showed up.
+        self.assertTrue((folder / "file.txt").is_file())
+        self.assertEqual([p.name for p in folder.iterdir()], ["file.txt"])
+        self.assertEqual((folder / "file.txt").read_text(encoding="utf-8"), "data")
+
+    def test_a_read_only_directory_becomes_writable_and_still_traversable(self):
+        folder = self.root / "locked"
+        folder.mkdir()
+        (folder / "file.txt").write_text("data", encoding="utf-8")
+        folder.chmod(0o500)  # r-x: readable and traversable, not writable
+
+        unlock_path(folder)
+
+        (folder / "added.txt").write_text("new", encoding="utf-8")
+        self.assertEqual((folder / "file.txt").read_text(encoding="utf-8"), "data")
+
+    def test_a_read_only_file_becomes_writable(self):
+        target = self.root / "locked.txt"
+        target.write_text("data", encoding="utf-8")
+        target.chmod(0o400)
+
+        unlock_path(target)
+
+        target.write_text("changed", encoding="utf-8")
+        self.assertEqual(target.read_text(encoding="utf-8"), "changed")
+
+    def test_a_missing_path_is_ignored(self):
+        unlock_path(self.root / "never-existed")  # must not raise
 
 
 class TestSendToTrash(unittest.TestCase):

@@ -169,7 +169,7 @@ macOS, so an unmarked entry makes `pip install` **fail outright** rather than sk
 `notifications.py:29` already guards the import, so the code degrades to the tray without it —
 only the manifest was broken.
 
-Both files now carry the same nine requirements and are cross-checked against each other with
+Both files now carry the same ten requirements and are cross-checked against each other with
 markers compared through `packaging`'s parser, so `'win32'` and `"win32"` are not read as drift.
 
 ### 2.5 Non-issues, recorded so they are not re-litigated
@@ -203,6 +203,39 @@ These were investigated and need no work:
   never exist. Now guarded by `os.name == "nt"` (`utils.py:519`), which preserves the Windows UNC
   case it was written for. Note `utils.py` did not import `os` at all — inside the surrounding
   `try/except` that would have silently swallowed the `NameError` and disabled the retry.
+
+### 2.6 What the first CI run found — **Resolved**
+
+The matrix's first execution (2026-10-03, commit `558473a`) failed on all three platforms: 28 on
+Windows, 75 on Ubuntu, 85 on macOS. Nearly all of it was the suite asserting things about the
+machine it ran on rather than about the code, which is the class of defect Phase 2 exists to catch
+and the one Windows-only validation structurally cannot see. Three findings justified the run on
+their own:
+
+- **`unlock_path` destroyed directory permissions on POSIX — a real defect, not a test artefact.**
+  It chmod'ed its argument to `stat.S_IWRITE | stat.S_IREAD`. On Windows that only clears the
+  read-only attribute, so the call is harmless there; on POSIX it is mode `0o600`, and applied to a
+  *directory* that strips the execute bit and makes it untraversable. `robust_move_download_files`
+  calls it on the destination directory (`utils.py:378`) and then walks straight back into it, so
+  every directory move — and `send_to_trash`'s `rmtree` fallback — failed with
+  `PermissionError: [Errno 13]` on Linux and macOS. Fixed by preserving the existing mode bits and
+  adding execute for directories; `tests/test_utils.py::TestUnlockPath` is the regression test.
+- **`find_windows_defender_path` parsed Windows paths with the host's `os.path`.** On POSIX,
+  `os.path.dirname` finds no separator in `C:\...\Platform\4.20.2\MpCmdRun.exe`, so every candidate
+  scored as version `(0,)` and the "newest build wins" sort silently degenerated into filesystem
+  enumeration order. It now uses `ntpath`, which *is* `os.path` on Windows.
+- **`TestMacOSBackend` asserted that it was not running on macOS.** Its `setUp` ended with
+  `self.assertNotEqual(sys.platform, "darwin")`, so the launchd backend failed in `setUp` on macOS
+  and passed vacuously on the other two, where `_load_now` returns before shelling out. The launchd
+  path had no coverage on any platform. The assertion is replaced by a `_launchctl` stub, which is
+  what was actually needed: nothing may touch the real launchd.
+
+The remainder were test-hygiene failures, catalogued in
+[`.agents/workflows/testing.md`](file:///d:/Projects/my-idm/.agents/workflows/testing.md) §1: two
+undeclared optional dependencies (`send2trash`, `curl_cffi`), Windows-only tests with no platform
+guard, tests that asserted the author's disk layout (`D:\Projects\animepahe-downloader`, a legacy
+`~/.my-idm`), and tests that asserted absolute window geometry against a headless runner's virtual
+screen.
 
 ---
 
@@ -702,7 +735,7 @@ marked with how they were verified, since none of them can be fully verified fro
       attribute via a pytest plugin and running the full suite: 2715 passed. **Caveat:** `sys.platform`
       stayed `win32` in that run, so platform-conditional branches in tests were not all exercised.
 - [x] **`pip install -r requirements.txt` has no unconditional Windows-only package.** Both
-      manifests carry the same nine requirements, cross-checked with markers compared through
+      manifests carry the same ten requirements, cross-checked with markers compared through
       `packaging`; the `win10toast` marker evaluates `False` on Linux and macOS.
 - [x] **Closing the window with no tray available exits cleanly** rather than hiding the app, and
       minimizing does the same. Verified by reverting the gate: all three new tests fail without it.

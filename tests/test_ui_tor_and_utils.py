@@ -55,6 +55,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFontMetrics, QMouseEvent, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem, QTableView
 
+from my_idm import paths as paths_module
 from my_idm import tor_service as tor_module
 from my_idm.config import TorConfig
 from my_idm.delegates import (
@@ -1359,9 +1360,24 @@ class TestTorServiceStop(TorTestCase):
         self.manager.stop()  # must not raise
 
     def test_the_default_data_dir_lives_under_the_user_profile(self):
+        """Tor state sits beside the database, not in a directory of its own.
+
+        Asserted against ``paths.data_dir()`` rather than against ``~/.my-idm``: that legacy
+        location is only used when it already exists (`paths._legacy_in_use`), so a machine
+        that happens to have one - the author's - reported ``~/.my-idm/tor_data`` while a fresh
+        machine reported ``%APPDATA%/My-IDM/tor_data``. Pinning the literal made the test a
+        statement about the host's disk contents.
+        """
         default = TorServiceManager(TorConfig())._data_dir
         self.assertEqual(default.name, "tor_data")
-        self.assertIn(".my-idm", default.parts)
+        self.assertEqual(
+            default.parent, tor_module.tor_data_dir().parent,
+            "the manager must use the shared resolver, not invent its own directory",
+        )
+        self.assertEqual(
+            default.parent, paths_module.data_dir(),
+            "Tor state belongs beside the database, fast-resume state and logs",
+        )
 
     def test_a_signal_is_used_off_windows(self):
         self.manager._process = None
