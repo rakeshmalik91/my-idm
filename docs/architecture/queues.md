@@ -17,7 +17,8 @@ Three knobs answer that, in increasing order of power:
 
 1. **Per-queue concurrency** — implemented. "At most 1 torrent at a time, but all the small
    files together."
-2. **Absolute per-download bandwidth caps** — *not implemented*.
+2. **Per-queue bandwidth ceilings** — implemented. "Downloads in this queue may not exceed
+   500 KB/s, so the torrent cannot eat the line."
 3. **An off-peak schedule** — *not implemented*.
 
 The global `GeneralConfig.max_concurrent_downloads` remains a **ceiling over everything**. A
@@ -88,9 +89,17 @@ CREATE TABLE IF NOT EXISTS queues (
     max_concurrent  INTEGER NOT NULL DEFAULT 3,
     position        INTEGER NOT NULL DEFAULT 0,
     is_default      INTEGER NOT NULL DEFAULT 0,
+    color           TEXT NOT NULL DEFAULT '',
+    download_limit  INTEGER NOT NULL DEFAULT 0,
+    upload_limit    INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT ''
 );
 ```
+
+`color`, `download_limit` and `upload_limit` are each added by an explicit `ALTER TABLE` guard in
+`Database.open`, because `CREATE TABLE IF NOT EXISTS` will not add a column to a table that already
+exists — an install that opened before a column was introduced would otherwise fail on every queue
+read. `_row_to_queue` reads all three defensively for the same reason.
 
 Declared in `Database._create_tables` at `database.py:604`. Four decisions in it:
 
@@ -370,25 +379,95 @@ table and the status-bar queue of the selection are what remain visible at a gla
 
 ### `QueueManagerDialog`
 
-Three columns — **Queue**, **Downloads**, **Max at once (0 = Global)** — with the limit edited
-in place by a `QSpinBox` **in the third column itself**. There is deliberately no fourth column:
-it used to hold the editor while the third showed read-only text, which made the column look like
-two unrelated things and left the default queue as the one row with a blank cell, which read as
-"not editable" rather than "deliberately pinned".
+Five columns — **Queue**, **Downloads**, **Max at once (0 = Global)**, **Download limit (0 =
+Global)**, **Upload limit (0 = Global)** — with each limit edited in place by a `QSpinBox`
+**in the column it edits**. There is deliberately no separate edit column: it used to hold the
+editor while its own column showed read-only text, which made the column look like two unrelated
+things and left the default queue as the one row with a blank cell, which read as "not editable"
+rather than "deliberately pinned".
 
-The limit field shows **plain numbers, never a substituted word**. An earlier version used
+The colour swatch in the Queue column carries the queue's initial, upper-cased rather than taken
+from the name as typed — a queue can be called "work downloads", and a lowercase `w` beside a
+colour reads as a different queue from `W`.
+
+The bandwidth ceilings are **stored in bytes/sec and edited in KB/s**, because KB/s is the unit
+the global limit is set in everywhere else in the application, and a queue limit typed in a
+different unit from the global one it is compared against is a limit nobody can reason about.
+
+**Column widths are measured, not declared.** Three things had to be measured, and getting only
+the first two is what trimmed the headers in the first place:
+
+- `QHeaderView.setStretchLastSection` defaults to **True**, which forces the last section to the
+  leftover width and overrides `ResizeToContents`.
+- The **text**: header width follows the user's font, its size and the display's DPI, so a
+  hard-coded width cannot be right on more than one machine. `_fit_width_to_headers()` measures
+  each header with `fontMetrics().horizontalAdvance`.
+- **The chrome around the table**: the layout margins, the table's frame and a scrollbar
+  allowance. The table does not get the whole window, so a window sized from the header text alone
+  comes up short by exactly that much — and Qt resolves the shortfall by shrinking every section to
+  fit the *viewport*, which clipped the first and last letter of every header (`OWNLOADS`,
+  `UPLOAD LIMIT (0 = GLOBAL`). Computed rather than measured, because a widget that has never been
+  shown has no reliable viewport width; `tests/test_queues.py` checks the result after `show()`.
+
+`(0 = Global)` sits on its **own header line**. On one line the three limit headers are the widest
+thing in the dialog, so the window has to grow to hold text that is mostly punctuation — which is
+how the headers got squeezed in the first place. The header section is therefore sized from the
+live font too, since `QHeaderView` otherwise allows for one line and clips the second.
+
+`MAX_DIALOG_WIDTH` clamps the demand so a small screen gets a scrollbar rather than a window wider
+than the desktop.
+
+The limit fields show **plain numbers, never a substituted word**. An earlier version used
 `setSpecialValueText("Global")`, which was a mistake twice over: typing `0` displayed `Global`,
 and typing `Global` was rejected outright — the field stopped agreeing with itself, so "what I
 typed" was no longer "what I saw". The meaning of `0` now lives in the **column header**, the cell
 tooltip and the note, none of which are edited.
 
-A note under the table states the **live** global limit (not an abstract description of one) and
+A note under the table states the **live** global limits (not an abstract description of them) and
 spells out that a queue limit is a ceiling and never a reservation, since a download starts only
 when both limits allow it. It refreshes whenever a limit changes.
 
 Deleting a queue is **safe by construction**: the dialog states how many downloads will move, and
 `Database.delete_queue` reassigns them to Default in the same transaction as the delete.
 Downloads are never deleted with their queue.
+
+### Bandwidth ceilings
+
+`queues.download_limit` and `queues.upload_limit`, in bytes/sec, migrated in alongside `color` for
+the same reason: `CREATE TABLE IF NOT EXISTS` does not add a column to a table that already
+exists, so an existing install's queue list would otherwise raise on read.
+
+`0` means **Global** — the queue adds no ceiling of its own — which is deliberately the same word
+as `max_concurrent = 0`. Negative input is clamped rather than stored: a negative ceiling reads as
+unlimited while looking like a setting.
+
+Resolution lives in **one** place, `utils.effective_rate_limit(queue_limit, global_limit,
+allocation)`, because it used to be duplicated in `http_engine` and `torrent_engine` and the two
+had already drifted on the "no global limit" case. The rule:
+
+1. The ceiling is the **tightest non-zero** of the queue's and the global one, so a queue can lower
+   the global limit and never raise it — the whole point of the feature.
+2. Both being `0` means unlimited, and that is the only thing an allocation must not change.
+3. Otherwise the ceiling is scaled by the download's `bandwidth_allocation` share.
+
+Step 3 used to be **unreachable whenever the global limit was `0`**, which is the default:
+`http_engine._get_effective_download_limit` returned `0` from an early exit before reading the
+allocation, so a download set to "low" ran at full speed and nothing said so. A queue limit is now
+enough on its own for the allocation to mean something.
+
+The manager keeps a **snapshot** of `queue_id → (download_limit, upload_limit)` in both engines
+(`_push_queue_limits`) and re-pushes it on create, delete and every limit edit. A snapshot rather
+than a database handle because the HTTP chunk pacers read the ceiling once per chunk, and a query
+per chunk to learn a limit that changes when a user edits a dialog would be the hottest query in
+the transfer path. A blank `queue_id` resolves to Default, matching `Database.get_queue("")`.
+
+On the torrent side `TorrentEngine.apply_handle_limits` turns the ceiling into
+`handle.set_download_limit` / `set_upload_limit`, and is called on allocation change, on a limit
+edit, on a global-limit change, and when a handle appears. With no ceiling at all a `max` download
+is set unlimited (`-1`) and a reduced one keeps the long-standing 10 MB/s stand-in: a share of
+nothing is not zero, and zero would stall seeding outright.
+
+`AddQueueDialog` offers the two ceilings at creation, in KB/s, defaulting to 0.
 
 ### Seeing which queue a download is in
 
@@ -475,6 +554,7 @@ Signals: `queues_changed` (the list, its limits or its membership changed) and
 | `get_active_queue()` / `set_active_queue(id)` | scope; `""` means all |
 | `create_queue` / `rename_queue` / `delete_queue` | return `(ok, message)`; Default is protected |
 | `set_queue_max_concurrent(id, n)` | applies on the next 1 Hz tick rather than pre-emptively — pausing a running download to free a slot would be a worse surprise than a one-second delay |
+| `set_queue_limits(id, dl, ul)` | bytes/sec; `0` = no ceiling of its own. Reaches a running HTTP download on its next chunk and a torrent on its next handle refresh |
 | `move_queue_in_list(id, delta)` | reorder in the switcher |
 | `move_downloads_to_queue(ids, id)` | preserves the user's selection order and **continues** the target queue's numbering rather than restarting at 1, which would collide |
 
@@ -487,9 +567,11 @@ stale id survives in `ui_state`, and the view stays filtered to a queue that doe
 
 ## Tests
 
-`tests/test_queues.py` — 81 tests: schema and migration from a pre-queue database, CRUD refusals,
-queue-scoped reads, budget enforcement, dispatch ordering (asserted stable across repeated runs),
-reorder density, model scoping, and the window wiring.
+`tests/test_queues.py` — 232 tests: schema and migration from a pre-queue database (including one
+with no `color` column and no bandwidth columns), CRUD refusals, queue-scoped reads, budget
+enforcement, dispatch ordering (asserted stable across repeated runs), reorder density, model
+scoping, the bandwidth ceilings end to end (resolution rule, both engines, the manager's snapshot,
+the migration), the manager dialog's editors and header-fitting, and the window wiring.
 
 Useful seams when extending: `Database.resolve_queue_id`, `manager._may_start` and
 `manager._active_counts_by_queue` are all directly callable, so budget behaviour can be asserted
@@ -507,11 +589,10 @@ Designed in this document's original form, still to be built:
   call — the retry check already lives in that shape — with an **injected clock**, and it must
   read `datetime.now().astimezone()`, because `Database._now_iso()` writes UTC and the statistics
   layer already had to be taught about that (`_STATS_LOCAL_DAY`).
-- **Absolute per-download bandwidth caps.** Per-download rates exist only as a fraction of the
-  global limit (`http_engine._get_effective_download_limit`), and when the global limit is `0` —
-  the default — that fraction is a **silent no-op**, because the early return fires before the
-  allocation is read. A real cap wants `rate_limit_bps` in `metadata_json`, the shared fraction
-  table hoisted out of its two copies (`http_engine` and `torrent_engine`), and an honest note
+- **Absolute per-download bandwidth caps.** Per-download rates exist as a fraction of whatever
+  ceiling applies, so a download cannot be given its own rate independent of its queue and the
+  global setting — only its `bandwidth_allocation` share of one of them. A real per-download cap
+  wants `rate_limit_bps` in `metadata_json` on top of `effective_rate_limit`, and an honest note
   that the four chunk pacers are approximate and overshoot by roughly the segment count.
 
 ## Related documents

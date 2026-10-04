@@ -2821,7 +2821,8 @@ class MainWindow(QMainWindow):
         if not dlg.exec():
             return
         created, message = self._manager.create_queue(
-            dlg.name.strip(), dlg.max_concurrent, dlg.color
+            dlg.name.strip(), dlg.max_concurrent, dlg.color,
+            dlg.download_limit_kb * 1024, dlg.upload_limit_kb * 1024,
         )
         self._status_label.setText(message)
         if created:

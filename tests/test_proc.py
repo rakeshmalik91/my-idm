@@ -7,6 +7,7 @@ silent: the code still runs, it just stops responding to Ctrl-C.
 
 import os
 import subprocess
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -68,26 +69,36 @@ class TestBackgroundKwargs(unittest.TestCase):
     def test_the_helper_agrees_with_cpython_about_what_is_acceptable(self):
         """Whatever we return must be a legal Popen kwarg on the current interpreter.
 
-        A cheap end-to-end check that the platform branch we chose is actually valid, rather than
+        A cheap end-to-end check that the branch we choose is actually valid, rather than
         assuming it: this is the failure the whole helper exists to prevent.
+
+        **Only the host's own branch can be spawned.** Handing the Windows branch's
+        `creationflags=CREATE_NO_WINDOW` to a POSIX interpreter raises `ValueError:
+        creationflags is only supported on Windows platforms`, which says nothing about the
+        helper - it is the test handing a Windows answer to a Linux kernel. So the foreign branch
+        is checked by shape, and the real child is only started for the branch that matches this
+        interpreter.
         """
         with patch.object(proc.sys, "platform", "win32"):
             windows = proc.background_kwargs()
         with patch.object(proc.sys, "platform", "linux"):
             posix = proc.background_kwargs()
 
-        for label, kwargs in (("windows", windows), ("posix", posix)):
-            with self.subTest(platform=label):
-                # DEVNULL plus the helper's kwargs, no actual child of consequence.
-                p = subprocess.Popen(
-                    [os.sys.executable, "-c", "pass"],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    **kwargs,
-                )
-                p.wait(timeout=30)
-                self.assertEqual(p.returncode, 0)
+        # Shape of both branches, so neither is only covered on its own platform.
+        self.assertEqual(set(windows), {"creationflags"})
+        self.assertEqual(set(posix), {"start_new_session"})
+
+        kwargs = windows if sys.platform == "win32" else posix
+        # DEVNULL plus the helper's kwargs, no actual child of consequence.
+        p = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
+        p.wait(timeout=30)
+        self.assertEqual(p.returncode, 0)
 
 
 class TestDetachmentMatters(unittest.TestCase):

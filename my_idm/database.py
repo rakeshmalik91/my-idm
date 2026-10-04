@@ -399,12 +399,16 @@ SOURCE_QUEUE_IDS = frozenset(qid for qid, _name, _key in SOURCE_QUEUES)
 
 @dataclass
 class QueueInfo:
-    """A named download queue and its own concurrency budget.
+    """A named download queue, its concurrency budget, and its bandwidth ceilings.
 
     ``max_concurrent`` is a *local* ceiling; the global ``max_concurrent_downloads`` still
     applies on top. ``<= 0`` means unlimited *within this queue* rather than zero, because a
     queue exists precisely to say "this one is special" - and a user who set it to 0 would be
     expressing the opposite of what they mean.
+
+    ``download_limit`` and ``upload_limit`` are bytes/sec and follow exactly the same rule: ``0``
+    adds no ceiling of its own and the global ``NetworkConfig`` limit applies. When both are set
+    the *tightest* wins, so a queue can lower the global limit but never raise it.
     """
     id: str = DEFAULT_QUEUE_ID
     name: str = DEFAULT_QUEUE_NAME
@@ -414,6 +418,8 @@ class QueueInfo:
     #: `#rrggbb`, or "" when unset. Drives the swatch in the downloads list, so an unset colour
     #: must degrade to something visible rather than to an invisible cell.
     color: str = DEFAULT_QUEUE_COLOR
+    download_limit: int = 0
+    upload_limit: int = 0
     created_at: str = ""
 
     @property
@@ -671,6 +677,11 @@ CREATE TABLE IF NOT EXISTS segments (
                 position        INTEGER NOT NULL DEFAULT 0,
                 is_default      INTEGER NOT NULL DEFAULT 0,
                 color           TEXT NOT NULL DEFAULT '',
+                -- Bandwidth ceilings in bytes/sec. 0 means "no ceiling of its own", which is
+                -- deliberately the same word as max_concurrent = 0: the queue adds nothing and
+                -- the global NetworkConfig limit applies on top.
+                download_limit  INTEGER NOT NULL DEFAULT 0,
+                upload_limit    INTEGER NOT NULL DEFAULT 0,
                 created_at      TEXT NOT NULL DEFAULT ''
             );
 
@@ -712,6 +723,17 @@ CREATE TABLE IF NOT EXISTS segments (
         queue_cols = [r["name"] for r in cursor.fetchall()]
         if queue_cols and "color" not in queue_cols:
             self._conn.execute("ALTER TABLE queues ADD COLUMN color TEXT NOT NULL DEFAULT ''")
+        # ... and the same for the bandwidth ceilings. Guarded individually because a database
+        # can exist from before colours but after nothing else, and `queue_cols` is re-read only
+        # once; each ALTER is idempotent and only runs when its column is genuinely absent.
+        if queue_cols and "download_limit" not in queue_cols:
+            self._conn.execute(
+                "ALTER TABLE queues ADD COLUMN download_limit INTEGER NOT NULL DEFAULT 0"
+            )
+        if queue_cols and "upload_limit" not in queue_cols:
+            self._conn.execute(
+                "ALTER TABLE queues ADD COLUMN upload_limit INTEGER NOT NULL DEFAULT 0"
+            )
 
         # Create indexes after ensuring columns exist
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_downloads_infohash ON downloads(torrent_info_hash)")
@@ -827,12 +849,14 @@ CREATE TABLE IF NOT EXISTS segments (
         return self._row_to_queue(row) if row else None
 
     def create_queue(self, name: str, max_concurrent: int = 3,
-                     color: str = "") -> tuple[bool, str]:
+                     color: str = "", download_limit: int = 0,
+                     upload_limit: int = 0) -> tuple[bool, str]:
         """Create a queue. Returns ``(ok, message)``; a blank or duplicate name is refused.
 
         A blank *color* is assigned from a small rotating palette so a new queue is visible in
         the downloads list immediately rather than being an invisible swatch the user has to
-        think to go and colour.
+        think to go and colour. The bandwidth ceilings are bytes/sec, and ``<= 0`` is normalised
+        to ``0`` ("no ceiling of its own") rather than stored negative.
         """
         cleaned = (name or "").strip()
         if not cleaned:
@@ -847,11 +871,12 @@ CREATE TABLE IF NOT EXISTS segments (
         ).fetchone()
         next_pos = (row["max_pos"] + 1) if row and row["max_pos"] is not None else 0
         self._conn.execute(
-            "INSERT INTO queues (id, name, max_concurrent, position, is_default, color, created_at) "
-            "VALUES (?, ?, ?, ?, 0, ?, ?)",
+            "INSERT INTO queues (id, name, max_concurrent, position, is_default, color, "
+            "download_limit, upload_limit, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)",
             (
                 str(uuid.uuid4()), cleaned, int(max_concurrent), next_pos,
-                normalize_queue_color(color) or self._next_queue_color(), _now_iso(),
+                normalize_queue_color(color) or self._next_queue_color(),
+                max(0, int(download_limit)), max(0, int(upload_limit)), _now_iso(),
             ),
         )
         self._conn.commit()
@@ -908,6 +933,19 @@ CREATE TABLE IF NOT EXISTS segments (
         self._conn.execute(
             "UPDATE queues SET max_concurrent = ? WHERE id = ?",
             (int(max_concurrent), queue_id),
+        )
+        self._conn.commit()
+
+    def set_queue_limits(self, queue_id: str, download_limit: int, upload_limit: int) -> None:
+        """Set a queue's bandwidth ceilings in bytes/sec.
+
+        ``<= 0`` in either direction means "no ceiling of its own", so the global limit applies
+        on top. Negative input is clamped rather than stored: a queue limit is a ceiling, and a
+        negative ceiling would silently read as unlimited while looking like a setting.
+        """
+        self._conn.execute(
+            "UPDATE queues SET download_limit = ?, upload_limit = ? WHERE id = ?",
+            (max(0, int(download_limit)), max(0, int(upload_limit)), queue_id),
         )
         self._conn.commit()
 
@@ -1002,12 +1040,20 @@ CREATE TABLE IF NOT EXISTS segments (
 
     @staticmethod
     def _row_to_queue(row: sqlite3.Row) -> QueueInfo:
-        # `color` is read defensively: a row created before the migration, or a future schema
-        # that drops it, must not make every queue unreadable.
+        # `color`, `download_limit` and `upload_limit` are read defensively: a row created before
+        # a migration, or a future schema that drops one, must not make every queue unreadable.
         try:
             color = row["color"] or ""
         except (IndexError, KeyError):
             color = ""
+        try:
+            download_limit = int(row["download_limit"] or 0)
+        except (IndexError, KeyError):
+            download_limit = 0
+        try:
+            upload_limit = int(row["upload_limit"] or 0)
+        except (IndexError, KeyError):
+            upload_limit = 0
         return QueueInfo(
             id=row["id"],
             name=row["name"],
@@ -1015,6 +1061,8 @@ CREATE TABLE IF NOT EXISTS segments (
             position=int(row["position"]),
             is_default=bool(row["is_default"]),
             color=color or DEFAULT_QUEUE_COLOR,
+            download_limit=download_limit,
+            upload_limit=upload_limit,
             created_at=row["created_at"] or "",
         )
 

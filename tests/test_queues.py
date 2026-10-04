@@ -9,13 +9,15 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QHeaderView,
     QInputDialog,
     QMenu,
     QMessageBox,
@@ -36,9 +38,11 @@ from my_idm.database import (
     normalize_queue_color,
 )
 from my_idm.dialogs import AddQueueDialog, QueueManagerDialog
+from my_idm.http_engine import HTTPEngine
+from my_idm.network import NetworkConfig
 from my_idm.download_model import QUEUE_COLOR_ROLE, Col, DownloadTableModel
 from my_idm.manager import DownloadManager
-from my_idm.utils import create_color_swatch_icon
+from my_idm.utils import create_color_swatch_icon, effective_rate_limit
 from tests.test_main_window import _MainWindowTestCase
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -186,10 +190,232 @@ class TestQueueSchema(QueueDbMixin, unittest.TestCase):
         self.assertEqual(user_queues(self.db), [])
         self.assertEqual(len(self.db.get_queues()), 3)
 
+    def test_a_fresh_database_gives_every_queue_open_bandwidth_limits(self):
+        for queue in self.db.get_queues():
+            with self.subTest(queue=queue.name):
+                self.assertEqual(queue.download_limit, 0)
+                self.assertEqual(queue.upload_limit, 0)
+
+    def test_a_database_with_no_bandwidth_columns_is_migrated(self):
+        """`CREATE TABLE IF NOT EXISTS` will not add a column to a table that already exists.
+
+        The colour column had this migration; the two ceilings need their own or every existing
+        install's queue list raises on read.
+        """
+        path = self.make_temp_db("no-limits.db")
+        raw = sqlite3.connect(str(path))
+        raw.execute("""
+            CREATE TABLE queues (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                max_concurrent INTEGER NOT NULL DEFAULT 3,
+                position INTEGER NOT NULL DEFAULT 0,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                color TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        raw.execute(
+            "INSERT INTO queues (id, name, max_concurrent, position, is_default, color, "
+            "created_at) VALUES ('q-old', 'Old', 4, 1, 0, '#123456', '2026-01-01T00:00:00')"
+        )
+        raw.commit()
+        raw.close()
+
+        db = self.open_db(path)
+        migrated = db.get_queue("q-old")
+        self.assertIsNotNone(migrated)
+        self.assertEqual(migrated.name, "Old", "the migration must not lose the row")
+        self.assertEqual(migrated.max_concurrent, 4)
+        self.assertEqual(migrated.download_limit, 0)
+        self.assertEqual(migrated.upload_limit, 0)
+        columns = [
+            r["name"] for r in db._conn.execute("PRAGMA table_info(queues)").fetchall()
+        ]
+        self.assertIn("download_limit", columns)
+        self.assertIn("upload_limit", columns)
+
 
 # ---------------------------------------------------------------------------
-# CRUD
+# Bandwidth ceilings
 # ---------------------------------------------------------------------------
+
+class TestQueueBandwidthCeilings(QueueDbMixin, unittest.TestCase):
+    """`queues.download_limit` / `upload_limit`, and how they combine with everything else."""
+
+    def test_create_stores_the_ceilings(self):
+        ok, message = self.db.create_queue(
+            "Seed", 2, "#3fb950", download_limit=512 * 1024, upload_limit=64 * 1024
+        )
+        self.assertTrue(ok, message)
+        queue = self.db.get_queue_by_name("Seed")
+        self.assertEqual(queue.download_limit, 512 * 1024)
+        self.assertEqual(queue.upload_limit, 64 * 1024)
+
+    def test_a_negative_ceiling_is_clamped_rather_than_stored(self):
+        queue = self.other_queue()
+        self.db.set_queue_limits(queue.id, -1, -999)
+        stored = self.db.get_queue(queue.id)
+        self.assertEqual(stored.download_limit, 0)
+        self.assertEqual(stored.upload_limit, 0)
+
+    def test_set_queue_limits_leaves_the_other_direction_alone(self):
+        queue = self.other_queue()
+        self.db.set_queue_limits(queue.id, 1000, 2000)
+        self.db.set_queue_limits(queue.id, 3000, 2000)
+        stored = self.db.get_queue(queue.id)
+        self.assertEqual(stored.download_limit, 3000)
+        self.assertEqual(stored.upload_limit, 2000)
+
+    def test_the_seeded_source_queues_stay_unlimited(self):
+        """They exist for organisation, not capping, exactly as their `max_concurrent` says."""
+        for queue in self.db.get_queues():
+            with self.subTest(queue=queue.name):
+                self.assertEqual(queue.download_limit, 0)
+                self.assertEqual(queue.upload_limit, 0)
+
+
+class TestEffectiveRateLimit(unittest.TestCase):
+    """`utils.effective_rate_limit`, which owns the resolution rule for both engines."""
+
+    def test_no_ceiling_anywhere_is_unlimited(self):
+        self.assertEqual(effective_rate_limit(0, 0), 0)
+        self.assertEqual(effective_rate_limit(0, 0, "low"), 0)
+
+    def test_a_queue_ceiling_applies_when_the_global_one_is_unset(self):
+        # The global limit is 0 by default, and the old code returned 0 from an early exit before
+        # the allocation was even read - so a queue limit, and the allocation, did nothing.
+        self.assertEqual(effective_rate_limit(1000, 0), 1000)
+
+    def test_the_global_ceiling_applies_when_the_queue_has_none(self):
+        self.assertEqual(effective_rate_limit(0, 4000), 4000)
+
+    def test_the_tighter_of_the_two_wins(self):
+        self.assertEqual(effective_rate_limit(1000, 4000), 1000)
+        self.assertEqual(effective_rate_limit(4000, 1000), 1000)
+
+    def test_a_queue_can_never_raise_the_global_ceiling(self):
+        """A queue may only slow its downloads down; that is the entire point of the feature."""
+        self.assertEqual(effective_rate_limit(999_999, 1000), 1000)
+
+    def test_the_allocation_takes_its_share_of_the_ceiling(self):
+        self.assertEqual(effective_rate_limit(1000, 0, "low"), 250)
+        self.assertEqual(effective_rate_limit(1000, 0, "medium"), 500)
+        self.assertEqual(effective_rate_limit(1000, 0, "high"), 750)
+        self.assertEqual(effective_rate_limit(1000, 0, "max"), 1000)
+
+    def test_an_unknown_allocation_is_max_rather_than_a_stall(self):
+        for allocation in ("", None, "turbo", "MAXIMUM"):
+            with self.subTest(allocation=allocation):
+                self.assertEqual(effective_rate_limit(1000, 0, allocation), 1000)
+
+    def test_allocation_is_case_insensitive(self):
+        self.assertEqual(effective_rate_limit(1000, 0, "LOW"), 250)
+
+
+class TestTorrentEngineQueueCeiling(unittest.TestCase):
+    """The torrent side, where a queue ceiling becomes a libtorrent handle limit."""
+
+    def _engine(self, queue_id="", allocation=None):
+        from my_idm.torrent_engine import TorrentEngine
+
+        engine = TorrentEngine.__new__(TorrentEngine)  # no __init__: no session needed
+        entry = DownloadEntry(id="t1", url="magnet:?xt=urn:btih:da39a3ee", queue_id=queue_id)
+        entry.download_type = "torrent"
+        if allocation:
+            entry.metadata["bandwidth_allocation"] = allocation
+        engine._db = MagicMock()
+        engine._db.get_download.return_value = entry
+        engine._network_config = None
+        engine._queue_limits = {"q1": (2000, 500)}
+        handle = MagicMock()
+        handle.is_valid.return_value = True
+        engine._handles = {"t1": handle}
+        return engine, handle
+
+    def test_a_queue_ceiling_becomes_the_handle_limit(self):
+        engine, handle = self._engine("q1")
+        with patch("my_idm.torrent_engine._HAS_LIBTORRENT", True):
+            engine.apply_handle_limits("t1")
+        handle.set_download_limit.assert_called_once_with(2000)
+        handle.set_upload_limit.assert_called_once_with(500)
+
+    def test_the_tighter_ceiling_wins_on_the_handle_too(self):
+        engine, handle = self._engine("q1")
+        engine._network_config = NetworkConfig(download_limit=1000, upload_limit=100)
+        with patch("my_idm.torrent_engine._HAS_LIBTORRENT", True):
+            engine.apply_handle_limits("t1")
+        handle.set_download_limit.assert_called_once_with(1000)
+        handle.set_upload_limit.assert_called_once_with(100)
+
+    def test_no_ceiling_anywhere_leaves_the_handle_unlimited(self):
+        engine, handle = self._engine("q1")
+        engine._queue_limits = {}
+        with patch("my_idm.torrent_engine._HAS_LIBTORRENT", True):
+            engine.apply_handle_limits("t1")
+        handle.set_download_limit.assert_called_once_with(-1)
+        handle.set_upload_limit.assert_called_once_with(-1)
+
+    def test_a_reduced_allocation_without_a_ceiling_keeps_the_stand_in(self):
+        """A share of nothing is not zero, and zero would stall seeding outright."""
+        engine, handle = self._engine("q1", allocation="low")
+        engine._queue_limits = {}
+        with patch("my_idm.torrent_engine._HAS_LIBTORRENT", True):
+            engine.apply_handle_limits("t1")
+        handle.set_download_limit.assert_called_once_with(int(10_000_000 * 0.25))
+
+
+class TestHttpEngineQueueCeiling(unittest.TestCase):
+    """The engine's own resolution, which is what actually paces the chunks."""
+
+    def _engine(self):
+        return HTTPEngine.__new__(HTTPEngine)  # no __init__: nothing here needs a database
+
+    def _entry(self, queue_id, allocation=None):
+        item = DownloadEntry(id="d", url="https://example.com/a.zip", queue_id=queue_id)
+        if allocation:
+            item.metadata["bandwidth_allocation"] = allocation
+        return item
+
+    def test_a_limited_queue_caps_a_download_with_no_global_limit(self):
+        engine = self._engine()
+        engine._download_limit = 0
+        engine._queue_limits = {"q1": (2000, 0)}
+        self.assertEqual(
+            engine._get_effective_download_limit(self._entry("q1")), 2000
+        )
+
+    def test_an_unlimited_queue_follows_the_global_limit(self):
+        engine = self._engine()
+        engine._download_limit = 5000
+        engine._queue_limits = {"q1": (0, 0)}
+        self.assertEqual(
+            engine._get_effective_download_limit(self._entry("q1")), 5000
+        )
+
+    def test_a_queue_cannot_lift_the_global_limit(self):
+        engine = self._engine()
+        engine._download_limit = 1000
+        engine._queue_limits = {"q1": (999_999, 0)}
+        self.assertEqual(
+            engine._get_effective_download_limit(self._entry("q1")), 1000
+        )
+
+    def test_the_allocation_scales_a_queue_ceiling(self):
+        engine = self._engine()
+        engine._download_limit = 0
+        engine._queue_limits = {"q1": (4000, 0)}
+        self.assertEqual(
+            engine._get_effective_download_limit(self._entry("q1", "low")), 1000
+        )
+
+    def test_an_unset_queue_id_means_no_queue_ceiling(self):
+        engine = self._engine()
+        engine._download_limit = 0
+        engine._queue_limits = {"q1": (2000, 0)}
+        self.assertEqual(
+            engine._get_effective_download_limit(self._entry("")), 0
+        )
 
 class TestQueueCrud(QueueDbMixin, unittest.TestCase):
 
@@ -645,6 +871,43 @@ class TestManagerQueueApi(QueueManagerMixin, unittest.TestCase):
             "https://example.com/y.zip", queue_id="not-a-queue"
         )
         self.assertEqual(self.db.get_download(other).queue_id, DEFAULT_QUEUE_ID)
+
+
+class TestQueueLimitsReachTheEngines(QueueManagerMixin, unittest.TestCase):
+    """The manager pushes a snapshot; the engines must be holding it."""
+
+    def _make_queue(self, name="Seed", download_limit=0, upload_limit=0):
+        ok, message = self.manager.create_queue(name, 2, "#3fb950", download_limit, upload_limit)
+        self.assertTrue(ok, message)
+        return self.manager._db.get_queue_by_name(name)
+
+    def test_the_engines_start_with_the_queues_limits(self):
+        queue = self._make_queue("Seed", 300 * 1024, 40 * 1024)
+        self.assertEqual(
+            self.manager._http._queue_limits[queue.id], (300 * 1024, 40 * 1024)
+        )
+        self.assertEqual(
+            self.manager._torrent._queue_limits[queue.id], (300 * 1024, 40 * 1024)
+        )
+
+    def test_editing_a_queues_limits_reaches_both_engines(self):
+        queue = self._make_queue("Seed")
+        self.manager.set_queue_limits(queue.id, 1234, 5678)
+        self.assertEqual(self.manager._http._queue_limits[queue.id], (1234, 5678))
+        self.assertEqual(self.manager._torrent._queue_limits[queue.id], (1234, 5678))
+
+    def test_deleting_a_queue_drops_it_from_the_snapshot(self):
+        queue = self._make_queue("Seed", 100, 200)
+        self.manager.delete_queue(queue.id)
+        self.assertNotIn(queue.id, self.manager._http._queue_limits)
+        self.assertNotIn(queue.id, self.manager._torrent._queue_limits)
+
+    def test_a_blank_queue_id_means_the_default_queue(self):
+        """`DownloadEntry.queue_id` is '' until the backfill runs, so '' must mean Default."""
+        self.manager.set_queue_limits(DEFAULT_QUEUE_ID, 8000, 0)
+        blank = entry("q1")
+        blank.queue_id = ""
+        self.assertEqual(self.manager._http._get_effective_download_limit(blank), 8000)
 
 
 class TestQueueScopedReorder(QueueManagerMixin, unittest.TestCase):
@@ -1687,6 +1950,9 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
     def _spin_of(self, dialog, name: str) -> QSpinBox:
         return dialog._table.cellWidget(self._row_of(dialog, name), 2)
 
+    def _row_queue_id(self, dialog, name: str) -> str:
+        return dialog._table.item(self._row_of(dialog, name), 0).data(Qt.ItemDataRole.UserRole)
+
     def test_the_default_queue_cannot_be_renamed_or_deleted_from_the_ui(self):
         dialog = self._dialog()
         dialog._table.selectRow(0)
@@ -1725,20 +1991,218 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
         self.assertIn("0 = Global", header)
         self.assertIn("0 = follow the global limit", self._spin_of(dialog, "Torrents").toolTip())
 
-    def test_the_editor_lives_in_the_third_column(self):
-        # The 4th column was removed and the editor moved into "Max at once" itself.
+    def test_the_editors_live_in_the_columns_they_edit(self):
+        # The 4th column was removed and the concurrency editor moved into "Max at once"
+        # itself; the two bandwidth editors then took columns 4 and 5, again in place.
         dialog = self._dialog()
-        self.assertEqual(dialog._table.columnCount(), 3)
-        self.assertIn("Max at once", dialog._table.horizontalHeaderItem(2).text())
-        self.assertIsNone(dialog._table.horizontalHeaderItem(3))
+        table = dialog._table
+        self.assertEqual(table.columnCount(), 5)
+        self.assertIn("Max at once", table.horizontalHeaderItem(2).text())
+        self.assertIn("Download limit", table.horizontalHeaderItem(3).text())
+        self.assertIn("Upload limit", table.horizontalHeaderItem(4).text())
+
+    def _bandwidth_spin(self, dialog, name, column):
+        return dialog._table.cellWidget(self._row_of(dialog, name), column)
+
+    def test_the_bandwidth_editors_show_the_stored_value_in_kb(self):
+        """Stored in bytes, edited in KB/s - the unit the global limit is set in everywhere else.
+
+        A queue limit typed in a different unit from the global limit it is compared against is a
+        limit nobody can reason about.
+        """
+        dialog = self._dialog()
+        queue_id = self._row_queue_id(dialog, "Torrents")
+        self.manager.set_queue_limits(queue_id, 512 * 1024, 64 * 1024)
+        dialog._reload()
+        self.assertEqual(
+            self._bandwidth_spin(dialog, "Torrents", 3).value(), 512
+        )
+        self.assertEqual(
+            self._bandwidth_spin(dialog, "Torrents", 4).value(), 64
+        )
+
+    def test_editing_one_direction_leaves_the_other_alone(self):
+        """The editor that fired passes only its own direction.
+
+        Had it written both from its own two spin boxes, a `_reload` rebuild - or a second spin box
+        emitting during one - would silently reset the opposite ceiling to whatever the widget
+        happened to hold.
+        """
+        dialog = self._dialog()
+        queue_id = self._row_queue_id(dialog, "Torrents")
+        self.manager.set_queue_limits(queue_id, 512 * 1024, 64 * 1024)
+        dialog._reload()
+        self._bandwidth_spin(dialog, "Torrents", 3).setValue(256)
+        stored = self.manager._db.get_queue(queue_id)
+        self.assertEqual(stored.download_limit, 256 * 1024)
+        self.assertEqual(stored.upload_limit, 64 * 1024)
+
+    def test_the_bandwidth_tooltip_says_what_zero_means(self):
+        dialog = self._dialog()
+        for column in (3, 4):
+            with self.subTest(column=column):
+                self.assertIn(
+                    "0 = follow the global limit",
+                    self._bandwidth_spin(dialog, "Torrents", column).toolTip(),
+                )
+
+    def test_the_bandwidth_editor_carries_its_unit(self):
+        dialog = self._dialog()
+        for column in (3, 4):
+            with self.subTest(column=column):
+                self.assertEqual(
+                    self._bandwidth_spin(dialog, "Torrents", column).suffix(), " KB/s"
+                )
+
+    def test_the_qualifier_sits_on_its_own_header_line(self):
+        """"(0 = Global)" goes below its column, not beside it.
+
+        On one line the three limit headers are the widest thing in the dialog, so the window has
+        to grow to hold text that is mostly punctuation - which is how every header came to be
+        trimmed on a screen that could not spare the width. Two lines also keeps the meaning of
+        `0` present without making it the first thing the eye reads.
+        """
+        dialog = self._dialog()
+        for column in (2, 3, 4):
+            text = dialog._table.horizontalHeaderItem(column).text()
+            with self.subTest(column=column, header=text):
+                self.assertIn("\n", text, "the qualifier must be on its own line")
+                label, qualifier = text.split("\n")
+                self.assertTrue(label.strip())
+                self.assertEqual(qualifier, "(0 = Global)")
+
+    def test_the_header_is_tall_enough_for_two_lines(self):
+        """QHeaderView sizes itself for one line; without this the second is clipped."""
+        dialog = self._dialog()
+        header = dialog._table.horizontalHeader()
+        one_line = header.fontMetrics().height()
+        self.assertGreaterEqual(
+            header.height(), one_line * 2,
+            "a two-line header needs the section to grow or the second line is cut off",
+        )
+
+    def test_every_column_is_wide_enough_for_its_widest_header_line(self):
+        """The complaint this pins: the headers were trimmed ("OWNLOADS", "(0 = GLOBAL").
+
+        Two causes. `stretchLastSection` defaults to True and overrides `ResizeToContents`, so the
+        last section was given the leftover width instead of the width its header needs. And the
+        window was sized from the header text alone - ignoring the frame, the layout margins and
+        the scrollbar - so the table got less than the window and Qt shrank every section to fit
+        the *viewport*, clipping the first and last letter of each. The dialog now measures the
+        chrome as well, so the columns fit instead of being squeezed.
+        """
+        dialog = self._dialog()
+        dialog.show()
+        self.addCleanup(dialog.hide)
+        QApplication.processEvents()
+        metrics = dialog._table.horizontalHeader().fontMetrics()
+        for column in range(dialog._table.columnCount()):
+            text = dialog._table.horizontalHeaderItem(column).text()
+            widest = max(metrics.horizontalAdvance(line) for line in text.split("\n"))
+            with self.subTest(column=column, header=text):
+                self.assertGreaterEqual(
+                    dialog._table.columnWidth(column), widest,
+                    f"column {column} ({text!r}) is too narrow for its widest header line",
+                )
+
+
+    def test_the_headers_fit_at_any_font_size(self):
+        """The widths are measured from the live font, so this must hold at every size.
+
+        Both rounds of trimming were this test's property failing at a size it had never been
+        asked about: Qt's own `ResizeToContents` hint came up under the text at the user's DPI, and
+        the `MAX_DIALOG_WIDTH` clamp squeezed the name column on a large font. Asserting it once at
+        the default font would have passed both times, so the sizes are swept here.
+
+        18pt is past the default by a wide margin on purpose - that is where the clamp bites, and
+        it is where the name column has to be pinned rather than left to stretch.
+        """
+        original = QApplication.instance().font()
+        self.addCleanup(QApplication.instance().setFont, original)
+        for point_size in (10, 14, 18):
+            with self.subTest(point_size=point_size):
+                font = QFont(original)
+                font.setPointSize(point_size)
+                QApplication.instance().setFont(font)
+                dialog = QueueManagerDialog(self.manager)
+                try:
+                    dialog.show()
+                    QApplication.processEvents()
+                    metrics = dialog._table.horizontalHeader().fontMetrics()
+                    for column, text in enumerate(QueueManagerDialog.HEADERS):
+                        widest = max(
+                            metrics.horizontalAdvance(line) for line in text.split("\n")
+                        )
+                        self.assertGreaterEqual(
+                            dialog._table.columnWidth(column), widest,
+                            f"column {column} ({text!r}) is too narrow for its widest header "
+                            f"line at {point_size}pt",
+                        )
+                finally:
+                    dialog.hide()
+
+
+    def test_the_last_column_is_not_force_stretched_over_its_header(self):
+        dialog = self._dialog()
+        self.assertFalse(
+            dialog._table.horizontalHeader().stretchLastSection(),
+            "stretchLastSection gives the last column the leftover width instead of the width "
+            "its header needs, which is what elided 'Upload limit  (0 = Global)'",
+        )
+
+    def test_all_the_columns_fit_without_a_horizontal_scrollbar(self):
+        """The whole table visible at once, which is what "fits the headers" has to mean."""
+        dialog = self._dialog()
+        dialog.show()
+        self.addCleanup(dialog.hide)
+        QApplication.processEvents()
+        table = dialog._table
+        total = sum(table.columnWidth(c) for c in range(table.columnCount()))
+        self.assertLessEqual(
+            total, table.viewport().width(),
+            "the columns do not fit the viewport, so at least one header is cut off",
+        )
+
+    def test_the_queue_name_column_absorbs_the_spare_width(self):
+        """The name column is the only one that stretches; the rest keep measured widths.
+
+        `Interactive` rather than `ResizeToContents` on the others, because Qt's own hint is what
+        under-measured the headers twice. They still size themselves - just from this dialog's
+        measurement rather than the style's - so the slack still has nowhere to go but the name.
+        """
+        dialog = self._dialog()
+        # `Stretch` is resolved by the layout, so the leftover width only exists once the dialog
+        # is on screen - a hidden widget's viewport is still its creation size.
+        dialog.show()
+        self.addCleanup(dialog.hide)
+        QApplication.processEvents()
+        header = dialog._table.horizontalHeader()
+        self.assertEqual(
+            header.sectionResizeMode(0), QHeaderView.ResizeMode.Stretch
+        )
+        for column in range(1, dialog._table.columnCount()):
+            self.assertEqual(
+                header.sectionResizeMode(column), QHeaderView.ResizeMode.Interactive,
+                f"column {column} must keep its measured width rather than share the slack",
+            )
+        widest_fixed = max(
+            dialog._table.columnWidth(column)
+            for column in range(1, dialog._table.columnCount())
+        )
+        self.assertGreater(
+            dialog._table.columnWidth(0), widest_fixed,
+            "the name column is where the leftover width has to go",
+        )
 
     def test_every_queue_has_an_editor_including_the_default(self):
         dialog = self._dialog()
         for row in range(dialog._table.rowCount()):
             name = dialog._table.item(row, 0).text()
             with self.subTest(queue=name):
-                spin = dialog._table.cellWidget(row, 2)
-                self.assertIsInstance(spin, QSpinBox)
+                for column in (2, 3, 4):
+                    self.assertIsInstance(
+                        dialog._table.cellWidget(row, column), QSpinBox
+                    )
 
     def test_table_row_height_prevents_spinbox_cropping(self):
         """Table rows must be at least 32px tall to prevent spinbox bottom clipping."""
@@ -1784,6 +2248,8 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
         class _FakeAddDlg:
             name = "Staging"
             max_concurrent = 4
+            download_limit_kb = 0
+            upload_limit_kb = 0
             color = "#3fb950"
             def exec(self):
                 return True
@@ -1796,12 +2262,32 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
         self.assertEqual(st_q.color, "#3fb950")
         self.assertIn("Created queue", dialog.result_message)
 
+    def test_the_limits_chosen_in_the_add_dialog_reach_the_new_queue(self):
+        """The create dialog offers the ceilings, so they must not be dropped on the way in."""
+        dialog = self._dialog()
+        class _FakeAddDlg:
+            name = "Staging"
+            max_concurrent = 4
+            color = "#3fb950"
+            download_limit_kb = 512
+            upload_limit_kb = 64
+            def exec(self):
+                return True
+
+        with patch("my_idm.dialogs.AddQueueDialog", return_value=_FakeAddDlg()):
+            dialog._on_add()
+        st_q = next(q for q in self.manager.get_queues() if q.name == "Staging")
+        self.assertEqual(st_q.download_limit, 512 * 1024)
+        self.assertEqual(st_q.upload_limit, 64 * 1024)
+
     def test_cancelling_add_creates_nothing(self):
         dialog = self._dialog()
         before = len(self.manager.get_queues())
         class _FakeAddDlg:
             name = "Staging"
             max_concurrent = 4
+            download_limit_kb = 0
+            upload_limit_kb = 0
             color = "#3fb950"
             def exec(self):
                 return False
@@ -1831,6 +2317,28 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
 
         tor_q = next(q for q in self.manager.get_queues() if q.name == "Torrents")
         self.assertEqual(tor_q.color, "#db6d28")
+
+    def test_the_swatch_shows_a_capital_whatever_the_name_starts_with(self):
+        """The colour box carries the queue's initial, and it is always capitalised.
+
+        A queue can be named anything, including "work downloads" or something typed in a hurry,
+        so the letter is upper-cased rather than taken from the name as typed. Pinned because the
+        letter is the only thing that identifies a queue when the column is narrow - a lowercase
+        "w" next to a colour swatch reads as a different queue from "W".
+        """
+        dialog = self._dialog()
+        for name, expected in (("Default", "D"), ("Torrents", "T")):
+            with self.subTest(queue=name):
+                swatch = dialog._table.cellWidget(self._row_of(dialog, name), 0)
+                self.assertEqual(swatch.findChild(QPushButton).text(), expected)
+
+    def test_a_lowercase_name_still_gets_a_capital_letter(self):
+        dialog = self._dialog()
+        self.manager.create_queue("  overnight backups ", 2)
+        dialog._reload()
+        swatch = dialog._table.cellWidget(self._row_of(dialog, "overnight backups"), 0)
+        self.assertEqual(swatch.findChild(QPushButton).text(), "O")
+
 
     def test_renaming_from_the_dialog_works(self):
         # Same bug, same slot-swallowing, in `_on_rename`.
@@ -2151,6 +2659,8 @@ class TestQueueUiWiring(_MainWindowTestCase):
         class _FakeAddDlg:
             name = "Staging"
             max_concurrent = 4
+            download_limit_kb = 0
+            upload_limit_kb = 0
             color = "#3fb950"
             def exec(self):
                 return True
@@ -2170,6 +2680,8 @@ class TestQueueUiWiring(_MainWindowTestCase):
         class _FakeAddDlg:
             name = "Staging"
             max_concurrent = 4
+            download_limit_kb = 0
+            upload_limit_kb = 0
             color = "#3fb950"
             def exec(self):
                 return False
@@ -2189,6 +2701,9 @@ class TestAddQueueDialog(unittest.TestCase):
         self.assertEqual(dlg.color, "#a371f7")
         self.assertEqual(dlg.max_concurrent, 3)
         self.assertEqual(dlg._color_btn.text(), "W")
+        # Bandwidth ceilings default to 0 = follow the global limit, exactly like max_concurrent.
+        self.assertEqual(dlg.download_limit_kb, 0)
+        self.assertEqual(dlg.upload_limit_kb, 0)
 
         # Typing in name updates the letter
         dlg._name_edit.setText("Personal")

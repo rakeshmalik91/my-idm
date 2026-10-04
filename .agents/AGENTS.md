@@ -55,8 +55,8 @@ The canonical architecture documentation is organized under [`docs/architecture/
 
    | Tier | Command | Scope | Time |
    | :--- | :--- | :--- | :--- |
-   | Basic sanity | `run_all_tests.bat basic` | 1841 tests. No window, no tray, no real clipboard. | ~55 s |
-   | Full | `run_all_tests.bat` | All 2870 tests. | ~6 min |
+   | Basic sanity | `run_all_tests.bat basic` | 1881 tests. No window, no tray, no real clipboard. | ~60 s |
+   | Full | `run_all_tests.bat` | All 2910 tests. | ~7 min |
 
    **Read [`workflows/testing.md`](file:///d:/Projects/my-idm/.agents/workflows/testing.md) before writing a test or debugging a flake.** It holds the two-tier setup and the `ui` marker, the enforced hermeticity fixtures, the traps that have actually bitten this suite (destructive helpers resolving blank paths to the CWD, the silent `deleteLater()` widget leak, the locked-clipboard flake), the UTC-vs-local determinism rules, and the known-flaky areas.
 

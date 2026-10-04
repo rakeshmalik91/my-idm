@@ -52,7 +52,7 @@ The real blockers are narrower and sharper than "several subsystems use Win32 AP
 | 12 | **Fonts / menu bar** | `my_idm/fonts.py` resolver, 15 sites repointed | Same module | — | ✅ Done |
 | 13 | **Launch at login** | `HKCU\…\Run` via [`autostart.py`](file:///d:/Projects/my-idm/my_idm/autostart.py) | Same module: XDG `.desktop` / `launchd` agent | Low | ✅ Done |
 | 14 | **Background spawns** | `creationflags` at each site | Detached on POSIX via `my_idm/proc.py` | — | ✅ Done |
-| 15 | **CI** | `.github/workflows/ci.yml`: 3-OS matrix, `not ui` tier | Same; plus the Windows full tier, non-blocking | Med | ✅ Done |
+| 15 | **CI** | `.github/workflows/ci.yml`: 3-OS matrix, `not ui` tier | Same, and **green on all three**; plus the Windows full tier, non-blocking | Med | ✅ Done |
 | 16 | **Desktop identity** | `.desktop` absent; `WM_CLASS` unmatched | `my-idm.desktop` + `setDesktopFileName` | Low | ✅ Done |
 
 What remains is row 6 (global hotkeys — Carbon/X11/Wayland backends, and the Wayland activation
@@ -204,7 +204,7 @@ These were investigated and need no work:
   case it was written for. Note `utils.py` did not import `os` at all — inside the surrounding
   `try/except` that would have silently swallowed the `NameError` and disabled the retry.
 
-### 2.6 What the first CI run found — **Resolved**
+### 2.6 What the CI runs found — **Resolved**
 
 The matrix's first execution (2026-10-03, commit `558473a`) failed on all three platforms: 28 on
 Windows, 75 on Ubuntu, 85 on macOS. Nearly all of it was the suite asserting things about the
@@ -230,7 +230,17 @@ their own:
   path had no coverage on any platform. The assertion is replaced by a `_launchctl` stub, which is
   what was actually needed: nothing may touch the real launchd.
 
-The remainder were test-hygiene failures, catalogued in
+Runs 2 and 3 cut the remainder to one failure, and it is the one worth generalising:
+
+- **Faking `sys.platform` is not faking one function.** Tests steering the Defender branch patched
+  `sys.platform` to `"win32"`, which is one attribute on one shared module — so the standard library
+  believed the lie too. `shutil.which` took its own Windows branch and dereferenced `_winapi`,
+  which is `None` off Windows, and the ClamAV lookup (the very thing the POSIX leg exists to
+  exercise) became an `AttributeError` instead of a clean "not installed". `security` now has
+  `running_on_windows()` as a seam to patch instead, and the same reasoning is why
+  `tests/test_main_window.py` has `has_real_desktop()`.
+
+The rest were test-hygiene failures, catalogued in
 [`.agents/workflows/testing.md`](file:///d:/Projects/my-idm/.agents/workflows/testing.md) §1: two
 undeclared optional dependencies (`send2trash`, `curl_cffi`), Windows-only tests with no platform
 guard, tests that asserted the author's disk layout (`D:\Projects\animepahe-downloader`, a legacy
@@ -711,7 +721,9 @@ Two of the Phase 3 items existed only because their absence would have been invi
 
 The Windows-only full tier is wired but `continue-on-error`: a runner is not a desktop session, so
 the tray may be unavailable and those tests skip. A human still runs `run_all_tests.bat` before a
-release.
+release. Three tests in it — the window-geometry pair and the legacy-geometry restore — are now
+additionally gated on `tests/test_main_window.py::has_real_desktop()`, because they measure where
+the window landed on screen and a virtual screen answers that for itself rather than for the code.
 
 **Phase 4 is the first item that cannot be verified from Windows at all.** The Carbon, X11 and
 Wayland backends are platform FFI: they can be *written* on any host, but nothing here can execute
@@ -776,8 +788,24 @@ marked with how they were verified, since none of them can be fully verified fro
 
 - [x] **CI matrix wired** on `windows-latest`, `ubuntu-latest`, `macos-latest` running
       `pytest -m "not ui"`, plus the Windows full tier as non-blocking.
-- [ ] **CI matrix actually green** on all three platforms — first observable once the workflow has
-      run at least once. This is the gate for every remaining item, and specifically for Phase 4.
+- [x] **CI matrix actually green** on all three platforms. Three runs were needed:
+
+  | Run | windows | ubuntu | macos | windows-full |
+  | :--- | ---: | ---: | ---: | ---: |
+  | 1 (`558473a`) | 28 failed | 75 failed | 85 failed | 37 failed |
+  | 2 (`ae49b83`) | 2 failed | 8 failed | 8 failed | 4 failed |
+  | 3 (`eac35b3`) | **1838 passed, 3 skipped** | 1 failed | 1 failed | **2864 passed, 6 skipped** |
+
+  Run 3's remaining failure was `test_proc.py`'s end-to-end check, which built `Popen` kwargs for
+  both platforms and spawned a real child with each — so on Linux it handed
+  `creationflags=CREATE_NO_WINDOW` to a POSIX interpreter. `proc.py` was already correctly gated
+  (§4.7); the test now spawns only the host's branch and asserts the foreign one by shape. Fixed in
+  `7d2da78` and not yet re-run on the runners — that is the one item still unproven here.
+
+  Each run paid for the last. The rules they produced are written down in
+  [`.agents/workflows/testing.md`](file:///d:/Projects/my-idm/.agents/workflows/testing.md) §1,
+  because the failure mode was always the same: a test asserting something about the machine it ran
+  on rather than about the code.
 - [ ] **AppImage runs on a clean Ubuntu 24.04 image** with `xcb` and `wayland` Qt plugins bundled.
 - [ ] **`.app` bundle launches on Intel and Apple Silicon** and survives Gatekeeper notarization.
 - [ ] **Global hotkey backends verified on their platforms** (Carbon, X11, Wayland portal). Not

@@ -15,11 +15,13 @@ from typing import Optional, Callable, Any
 from urllib.parse import urlparse
 
 from my_idm.config import TorConfig, TorrentConfig
-from my_idm.database import Database, DownloadEntry
+from my_idm.database import Database, DEFAULT_QUEUE_ID, DownloadEntry
 from my_idm.network import NetworkConfig, is_interface_active
 from my_idm.paths import fastresume_dir
 from my_idm.utils import (
+    BANDWIDTH_ALLOCATION_FRACTIONS,
     check_disk_space,
+    effective_rate_limit,
     normalize_path,
     robust_move_download_files,
     unlock_path,
@@ -235,6 +237,9 @@ class TorrentEngine:
         self._torrent_config: Optional[TorrentConfig] = None
         self._general_config: Optional[object] = None  # GeneralConfig
         self._handles: dict[str, object] = {}   # download_id → lt.torrent_handle
+        #: queue_id -> (download_limit, upload_limit) in bytes/sec, pushed in by the manager.
+        #: A snapshot rather than a per-tick query for the same reason as the HTTP engine's copy.
+        self._queue_limits: dict[str, tuple[int, int]] = {}
         self._progress_cb: Optional[ProgressCallback] = None
         self._status_cb: Optional[StatusCallback] = None
         self._filename_cb: Optional[Callable[[str, str], None]] = None
@@ -518,6 +523,13 @@ class TorrentEngine:
             sett["upload_rate_limit"] = int(upload_limit or 0)
             self._session.apply_settings(sett)
             log.info("Applied libtorrent session limits: down=%d, up=%d", download_limit, upload_limit)
+            # The session limit is only the outer bound, so every live handle is re-resolved
+            # against the queue ceilings too. Before the seeding pass, deliberately: a seeding
+            # torrent's upload limit comes from `TorrentConfig` (an explicit value, or one derived
+            # from the download/seeding ratio) and must not be overwritten by the generic
+            # queue-derived one.
+            for download_id in list(self._handles):
+                self.apply_handle_limits(download_id)
             self._apply_seeding_limits()
         except Exception as exc:
             log.warning("Failed to apply session rate limits: %s", exc)
@@ -552,29 +564,66 @@ class TorrentEngine:
         if entry:
             entry.metadata["bandwidth_allocation"] = allocation
             self._db.update_download(entry)
+        self.apply_handle_limits(download_id)
 
+    def set_queue_limits(self, limits: dict[str, tuple[int, int]]):
+        """Supply the per-queue bandwidth ceilings, in bytes/sec per queue id.
+
+        Re-applied to every live handle rather than only to future ones: a queue limit that
+        appears while a torrent is seeding should take effect on the next tick, not the next time
+        the user happens to restart it. `_apply_seeding_limits` runs afterwards, so a seeding
+        torrent keeps the upload limit its `TorrentConfig` asks for.
+        """
+        self._queue_limits = {
+            queue_id: (int(dl or 0), int(ul or 0))
+            for queue_id, (dl, ul) in (limits or {}).items()
+        }
+        for download_id in list(self._handles):
+            self.apply_handle_limits(download_id)
+        self._apply_seeding_limits()
+
+    def apply_handle_limits(self, download_id: str):
+        """Push this download's resolved ceiling onto its libtorrent handle.
+
+        The ceiling is the tightest non-zero of the queue's limit and the global one, scaled by
+        the download's allocation share - `utils.effective_rate_limit` owns that rule. With no
+        ceiling at all the handle is unlimited (-1) for a "max" allocation, and keeps the
+        pre-existing 10 MB/s stand-in for a reduced one: a share of nothing is not zero, and
+        zero would stall seeding.
+        """
         handle = self._handles.get(download_id)
         if not handle or not _HAS_LIBTORRENT:
             return
-
-        fractions = {"low": 0.25, "medium": 0.50, "high": 0.75, "max": 1.0}
-        frac = fractions.get(allocation.lower(), 1.0)
+        entry = self._db.get_download(download_id)
+        alloc = (entry.metadata.get("bandwidth_allocation") if entry else None) or "max"
+        queue_dl, queue_ul = self._queue_limits.get(
+            (entry.queue_id if entry else "") or DEFAULT_QUEUE_ID, (0, 0)
+        )
+        global_dl = self._network_config.download_limit if self._network_config else 0
+        global_ul = self._network_config.upload_limit if self._network_config else 0
         try:
             if not handle.is_valid():
                 return
-            dl_limit = self._network_config.download_limit if self._network_config else 0
-            ul_limit = self._network_config.upload_limit if self._network_config else 0
-            if dl_limit > 0:
-                handle.set_download_limit(int(dl_limit * frac))
-            else:
-                handle.set_download_limit(-1 if frac >= 1.0 else int(10_000_000 * frac))
-
-            if ul_limit > 0:
-                handle.set_upload_limit(int(ul_limit * frac))
-            else:
-                handle.set_upload_limit(-1 if frac >= 1.0 else int(10_000_000 * frac))
+            self._push_limit(handle.set_download_limit,
+                             effective_rate_limit(queue_dl, global_dl, alloc), alloc)
+            self._push_limit(handle.set_upload_limit,
+                             effective_rate_limit(queue_ul, global_ul, alloc), alloc)
         except Exception as exc:
             log.warning("Failed to set bandwidth allocation for torrent %s: %s", download_id, exc)
+
+    @staticmethod
+    def _push_limit(apply_limit, ceiling: int, allocation: str) -> None:
+        """One handle limit, with the no-ceiling case spelled out.
+
+        ``-1`` is libtorrent for unlimited. A *reduced* allocation with no ceiling keeps the
+        pre-existing 10 MB/s stand-in, because a share of nothing is not zero and zero would stall
+        seeding outright.
+        """
+        if ceiling > 0:
+            apply_limit(ceiling)
+            return
+        fraction = BANDWIDTH_ALLOCATION_FRACTIONS.get((allocation or "max").lower(), 1.0)
+        apply_limit(-1 if fraction >= 1.0 else int(10_000_000 * fraction))
 
     # -- public API ----------------------------------------------------------
 

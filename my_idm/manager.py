@@ -450,6 +450,9 @@ class DownloadManager(QObject):
         self._torrent.apply_tor_config(self._tor_config)
         self._torrent.set_session_limits(self._network_config.download_limit, self._network_config.upload_limit)
         self._http.set_download_limit(self._network_config.download_limit)
+        # Seed the engines with the queues' own ceilings before the first download starts, so a
+        # limited queue is limited from its very first chunk rather than from the first edit.
+        self._push_queue_limits()
 
         # asyncio event loop runs in a background thread
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -2910,11 +2913,40 @@ class DownloadManager(QObject):
         self.queue_scope_changed.emit(resolved)
         self.queues_changed.emit()
 
-    def create_queue(self, name: str, max_concurrent: int = 3, color: str = "") -> tuple[bool, str]:
-        ok, message = self._db.create_queue(name, max_concurrent, color)
+    def create_queue(self, name: str, max_concurrent: int = 3, color: str = "",
+                       download_limit: int = 0, upload_limit: int = 0) -> tuple[bool, str]:
+        ok, message = self._db.create_queue(
+            name, max_concurrent, color, download_limit, upload_limit
+        )
         if ok:
+            self._push_queue_limits()
             self.queues_changed.emit()
         return ok, message
+
+    def _push_queue_limits(self):
+        """Hand both engines a snapshot of every queue's bandwidth ceilings.
+
+        A snapshot rather than a database handle: the HTTP chunk pacers read the ceiling once
+        per chunk and the torrent engine once per handle refresh, and neither rate changes at
+        anything like the frequency that would justify a query. Re-pushed whenever a queue is
+        created, deleted or re-limited.
+        """
+        limits = {
+            queue.id: (queue.download_limit, queue.upload_limit)
+            for queue in self._db.get_queues()
+        }
+        self._http.set_queue_limits(limits)
+        self._torrent.set_queue_limits(limits)
+
+    def set_queue_limits(self, queue_id: str, download_limit: int, upload_limit: int):
+        """Set a queue's bandwidth ceilings, in bytes/sec. ``0`` means "no ceiling of its own".
+
+        Takes effect on the next chunk for HTTP downloads and on the next handle refresh for
+        torrents, so a running download slows down rather than restarting.
+        """
+        self._db.set_queue_limits(queue_id, download_limit, upload_limit)
+        self._push_queue_limits()
+        self.queues_changed.emit()
 
 
     def rename_queue(self, queue_id: str, name: str) -> tuple[bool, str]:
@@ -2961,6 +2993,7 @@ class DownloadManager(QObject):
         stored_scope = self._db.get_ui_state("active_queue_id", "") or ""
         if stored_scope == queue_id:
             self.set_active_queue("")
+        self._push_queue_limits()
         self.queues_changed.emit()
         return True, message if not moved else f"{message} ({moved} moved)"
 

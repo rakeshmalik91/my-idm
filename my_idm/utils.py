@@ -155,6 +155,44 @@ def normalize_path(path: str | Path | None) -> str:
     return p_str.replace("\\", "/")
 
 
+#: One download's share of the ceiling, by ``metadata["bandwidth_allocation"]``. Was duplicated
+#: verbatim in `http_engine` and `torrent_engine`, which is how the two drifted on the "no global
+#: limit" case: one treated an absent allocation as "max" and the other invented a 10 MB/s
+#: stand-in. Single definition now, so a fifth call site cannot pick a third answer.
+BANDWIDTH_ALLOCATION_FRACTIONS = {
+    "low": 0.25,
+    "medium": 0.50,
+    "high": 0.75,
+    "max": 1.0,
+}
+
+
+def effective_rate_limit(queue_limit: int, global_limit: int, allocation: str = "max") -> int:
+    """Bytes/sec ceiling for one download, or 0 for unlimited.
+
+    Three inputs, resolved in this order:
+
+    1. The ceiling is the **tightest non-zero** of the queue's own limit and the global one. A
+       queue may lower the global limit; it may never raise it, because "put this in its own
+       queue so it cannot starve the others" is the entire point of the feature.
+    2. Both being 0 means unlimited, and that is the *only* thing an allocation must not change.
+    3. Otherwise the ceiling is scaled by the download's allocation share.
+
+    Step 3 is what used to be unreachable when the global limit was 0 - the default. The engine's
+    early return fired before the allocation was read, so a download set to "low" ran at full
+    speed and nothing said so. Here a queue limit is enough on its own for the allocation to mean
+    something.
+
+    Unknown or missing allocations are "max" rather than 0: a download should not be throttled to
+    a standstill by a typo in its metadata.
+    """
+    limits = [int(v) for v in (queue_limit, global_limit) if v and int(v) > 0]
+    if not limits:
+        return 0
+    fraction = BANDWIDTH_ALLOCATION_FRACTIONS.get((allocation or "max").lower(), 1.0)
+    return int(min(limits) * fraction)
+
+
 @lru_cache(maxsize=512)
 def create_emoji_icon(emoji: str, size: int = 32):
     """Create a high-DPI QIcon containing the specified emoji.

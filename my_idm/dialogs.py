@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QGuiApplication
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
 from my_idm.clipboard_monitor import looks_like_download_url
 from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR, TorConfig
 from my_idm.database import DEFAULT_QUEUE_COLOR, normalize_queue_color
+from my_idm.styles import themed_widget
 from my_idm.youtube_tool import detect_youtube_url
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
@@ -581,19 +583,41 @@ class RenameDialog(QDialog):
 class QueueManagerDialog(QDialog):
     """Create, rename, reorder, limit and delete named queues.
 
-    The limit is edited in place in the "Max at once" column itself, for every queue including
-    Default. A limit of 0 means **Global**: the queue adds no cap of its own and simply follows
-    the global concurrency limit. It does *not* mean "unlimited" - the global limit always
-    applies on top, which is why the note under the table spells that out.
+    The limits are edited in place in their own columns, for every queue including Default:
+
+    * "Max at once" caps how many of the queue's downloads run simultaneously.
+    * "Download limit" and "Upload limit" cap its bandwidth, in KB/s.
+
+    A 0 in any of them means **Global**: the queue adds no cap of its own and simply follows the
+    global setting. It does *not* mean "unlimited" - the global limit always applies on top,
+    which is why the note under the table spells that out. When both a queue limit and the global
+    one are set, the tighter of the two wins, so a queue can lower the global limit but never
+    raise it.
 
     Deleting a queue never deletes downloads - the manager moves them to Default and this
     dialog says how many, rather than making the user discover it afterwards.
     """
 
+    #: Column order. Named because the widths, the editors and `_reload` all index by position
+    #: and a bare 0/1/2/3/4 in five places is how the columns drift out of their headers.
+    COL_QUEUE, COL_DOWNLOADS, COL_MAX_CONCURRENT, COL_DOWNLOAD_LIMIT, COL_UPLOAD_LIMIT = range(5)
+
+    HEADERS = (
+        "Queue",
+        "Downloads",
+        "Max at once\n(0 = Global)",
+        "Download limit\n(0 = Global)",
+        "Upload limit\n(0 = Global)",
+    )
+
     def __init__(self, manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manage Queues")
-        self.setMinimumSize(660, 420)
+        # Height only: the width is derived from the headers in _fit_width_to_headers, because a
+        # fixed one cannot know what the user's font and DPI need. 460 fits four rows plus the
+        # note, the buttons and the dialog buttons without scrolling.
+        self.setMinimumHeight(460)
+        self.resize(880, 460)
         self._manager = manager
         self._result_message = ""
         # True only while _reload() rebuilds the widgets, so the rebuild cannot itself be read
@@ -602,9 +626,36 @@ class QueueManagerDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        self._table = QTableWidget(0, 3, self)
-        self._table.setHorizontalHeaderLabels(
-            ["Queue", "Downloads", "Max at once  (0 = Global)"]
+        self._table = QTableWidget(0, len(self.HEADERS), self)
+        self._table.setHorizontalHeaderLabels(list(self.HEADERS))
+        # Two lines per header, so the section has to be told to grow: QHeaderView sizes itself
+        # for one line and the second would be clipped. Set from the live font rather than
+        # guessed, for the same reason the width below is measured.
+        _header = self._table.horizontalHeader()
+        _line_height = _header.fontMetrics().height()
+        _header.setFixedHeight(_line_height * 2 + 12)
+        # The global stylesheet adds 22px right padding for filter funnels in the main table.
+        # This dialog's table has no funnels, so reset to symmetric padding so text is not
+        # pushed off-center or clipped against the left edge.
+        themed_widget(
+            _header,
+            """
+            QHeaderView::section {
+                background-color: {Colors.BG_MID};
+                color: {Colors.TEXT_SECONDARY};
+                border: none;
+                border-bottom: 2px solid {Colors.BORDER};
+                border-right: 1px solid {Colors.BORDER};
+                padding: 6px 10px;
+                font-weight: 600;
+                font-size: 12px;
+                text-transform: uppercase;
+            }
+            QHeaderView::section:hover {
+                color: {Colors.TEXT};
+                background-color: {Colors.BG_LIGHT};
+            }
+            """,
         )
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(34)
@@ -612,9 +663,20 @@ class QueueManagerDialog(QDialog):
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        # `stretchLastSection` defaults to True and force-fits the last section into the leftover
+        # width, overriding whatever the other sections were given.
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(
+            self.COL_QUEUE, QHeaderView.ResizeMode.Stretch
+        )
+        for column in range(self.COL_DOWNLOADS, len(self.HEADERS)):
+            # `Interactive`, **not** `ResizeToContents`. Qt's own size hint for a header cell is
+            # style-dependent and can come up under the text - it measured "DOWNLOADS" a character
+            # narrow and "Max at once" two, which is what trimmed the headers twice. Widening the
+            # window cannot fix that, because the window's width is derived from these very
+            # numbers, so the widths are measured from the live font and set explicitly in
+            # `_fit_width_to_headers`.
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._table)
 
@@ -653,10 +715,117 @@ class QueueManagerDialog(QDialog):
 
         self._reload()
         self._on_selection_changed()
+        self._fit_width_to_headers()
+
+    #: Smallest useful queue-name column. The point of the stretch column is to be the one that
+    #: gives up or gains width, so it needs a floor below which the name stops being readable.
+    MIN_NAME_COLUMN_WIDTH = 170
+    #: Never demand more than this, however wide the headers measure. On a small screen a window
+    #: wider than the desktop is worse than an elided header, and the name column scrolls.
+    MAX_DIALOG_WIDTH = 1400
+    #: Per-column slack for the cell frame and a spin box's arrows, on top of the text.
+    COLUMN_PADDING = 32
+
+    #: Floor widths per column so headers and editor controls (spinboxes) have comfortable breathing room.
+    MIN_COLUMN_WIDTHS = {
+        COL_DOWNLOADS: 110,
+        COL_MAX_CONCURRENT: 120,
+        COL_DOWNLOAD_LIMIT: 160,
+        COL_UPLOAD_LIMIT: 160,
+    }
+
+    def _header_column_widths(self):
+        """Width each header needs, measured from this widget's own font.
+
+        The widest *line*, because the headers are two lines deep and a header drawn into a
+        section narrower than its longest line is elided at the edge - which is exactly how
+        "DOWNLOADS" became "OWNLOADS".
+        """
+        header = self._table.horizontalHeader()
+        font = QFont(header.font())
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(font.pixelSize(), 12))
+        else:
+            font.setPointSize(max(font.pointSize(), 10))
+        font.setWeight(QFont.Weight.DemiBold)
+        metrics = QFontMetrics(font)
+
+        style = self._table.style()
+        # Qt paints a header inside `PM_HeaderMargin` of each edge, and a spin box's step buttons
+        # need room besides, so the text width alone is not the section width.
+        padding = 2 * style.pixelMetric(QStyle.PixelMetric.PM_HeaderMargin) + self.COLUMN_PADDING
+
+        widths = []
+        for column, text in enumerate(self.HEADERS):
+            # Measure both original and uppercase because the stylesheet applies text-transform: uppercase
+            widest = max(
+                max(metrics.horizontalAdvance(line), metrics.horizontalAdvance(line.upper()))
+                for line in text.split("\n")
+            )
+            widths.append(max(widest + padding, self.MIN_COLUMN_WIDTHS.get(column, 0)))
+        return widths
+
+    def _fit_width_to_headers(self):
+        """Size the columns and the window to what the headers actually need.
+
+        Three things have to be measured, and getting only the first two is what trimmed the
+        headers twice:
+
+        1. **The text**, per line - header width follows the user's font, its size and the display's
+           DPI, so a hard-coded width cannot be right on more than one machine.
+        2. **Qt's own header margin**, which is style-dependent and not included in (1).
+        3. **The chrome around the table** - the layout margins, its frame, a scrollbar. The
+           table does not get the whole window, and Qt resolves a shortfall by shrinking sections
+           to fit the *viewport*, which is what clipped the first and last letter of every header.
+
+        The column widths are therefore set here rather than left to `ResizeToContents`, whose hint
+        was the thing under-measuring in the first place.
+        """
+        widths = self._header_column_widths()
+        for column, width in enumerate(widths):
+            if column != self.COL_QUEUE:
+                self._table.setColumnWidth(column, width)
+
+        margins = self.layout().contentsMargins()
+        style = self._table.style()
+        chrome = (
+            margins.left()
+            + margins.right()
+            + 2 * self._table.frameWidth()
+            + style.pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        )
+        needed = sum(widths) + self.MIN_NAME_COLUMN_WIDTH + chrome
+
+        if needed > self.MAX_DIALOG_WIDTH:
+            # The clamp is about not demanding a window wider than a small desktop. But the name
+            # column is `Stretch`, so it is the one that would be squeezed below its own header -
+            # and the answer is not to elide it either. It is pinned to its measured width here and
+            # the table scrolls, because a scrollbar is a smaller loss than a trimmed header.
+            self._table.horizontalHeader().setSectionResizeMode(
+                self.COL_QUEUE, QHeaderView.ResizeMode.Interactive
+            )
+            self._table.setColumnWidth(self.COL_QUEUE, widths[self.COL_QUEUE])
+        else:
+            self._table.horizontalHeader().setSectionResizeMode(
+                self.COL_QUEUE, QHeaderView.ResizeMode.Stretch
+            )
+
+        self.setMinimumWidth(min(needed, self.MAX_DIALOG_WIDTH))
+        target = min(max(needed, self.width()), self.MAX_DIALOG_WIDTH)
+        if target != self.width():
+            self.resize(target, self.height())
 
     def _refresh_note(self):
-        """Explain how a queue limit interacts with the global limit, with the live value."""
-        global_max = self._manager.general_config.effective_max_concurrent
+        """Explain how a queue limit interacts with the global limit, with the live values."""
+        from my_idm.download_model import _format_speed
+
+        general = self._manager.general_config
+        net = self._manager.network_config
+        global_max = general.effective_max_concurrent
+        global_dl = net.download_limit or 0
+        global_ul = net.upload_limit or 0
+        dl_text = f"{_format_speed(global_dl)} (unlimited)" if global_dl > 0 else "unlimited"
+        ul_text = f"{_format_speed(global_ul)} (unlimited)" if global_ul > 0 else "unlimited"
         self._note.setText(
             "A queue's limit caps how many of its own downloads run at once. "
             "Leave it at 0 for Global: the queue adds no cap of its own and follows the "
@@ -664,7 +833,12 @@ class QueueManagerDialog(QDialog):
             "(Tools → Preferences → General & Downloads).\n"
             "A download starts only when both its queue's limit and the global limit allow "
             "it, so a queue limit is a ceiling and never a reservation. Default holds every "
-            "download that no other queue claims."
+            "download that no other queue claims.\n"
+            f"The bandwidth limits are in KB/s and follow the same rule: 0 follows the global "
+            f"limit, currently {dl_text} down and {ul_text} up. Where both are set the tighter "
+            "one wins, so a queue can slow its downloads down but never speed them up past the "
+            "global limit. A download's own allocation (Low/Medium/High/Max) then takes its "
+            "share of that."
         )
 
     @property
@@ -689,18 +863,23 @@ class QueueManagerDialog(QDialog):
             if queue.is_default:
                 name_item.setToolTip(
                     "The default queue. Every download starts here unless another queue "
-                    "claims it. Its limit and colour are editable like any other."
+                    "claims it. Its limits and colour are editable like any other."
                 )
-            self._table.setItem(row, 0, name_item)
-            self._table.setCellWidget(row, 0, self._name_cell(queue))
+            self._table.setItem(row, self.COL_QUEUE, name_item)
+            self._table.setCellWidget(row, self.COL_QUEUE, self._name_cell(queue))
             self._table.setItem(
-                row, 1, QTableWidgetItem(str(counts.get(queue.id, 0)))
+                row, self.COL_DOWNLOADS, QTableWidgetItem(str(counts.get(queue.id, 0)))
             )
-            # The editor lives in the "Max at once" column itself. There is no separate
-            # edit column: a blank fourth column with a control floating in it read as two
-            # unrelated things, and it made the Default queue look un-editable because it was
-            # the only row without a control there.
-            self._table.setCellWidget(row, 2, self._limit_editor(queue))
+            # Each editor lives in the column it edits. There is no separate edit column: a blank
+            # one with a control floating in it read as two unrelated things, and it made the
+            # Default queue look un-editable because it was the only row without a control there.
+            self._table.setCellWidget(row, self.COL_MAX_CONCURRENT, self._limit_editor(queue))
+            self._table.setCellWidget(
+                row, self.COL_DOWNLOAD_LIMIT, self._bandwidth_editor(queue, upload=False)
+            )
+            self._table.setCellWidget(
+                row, self.COL_UPLOAD_LIMIT, self._bandwidth_editor(queue, upload=True)
+            )
         self._table.blockSignals(False)
         self._loading = False
 
@@ -724,6 +903,33 @@ class QueueManagerDialog(QDialog):
         )
         spin.valueChanged.connect(
             lambda value, qid=queue.id: self._on_limit_changed(qid, value)
+        )
+        return spin
+
+    def _bandwidth_editor(self, queue, upload: bool):
+        """KB/s spin box for one direction of a queue's bandwidth ceiling.
+
+        KB/s rather than bytes/s because that is the unit the global limit is set in everywhere
+        else in this application, and a queue limit typed in a different unit from the global one
+        it is compared against is a limit nobody can reason about.
+        """
+        stored = queue.upload_limit if upload else queue.download_limit
+        spin = QSpinBox(self._table)
+        spin.setRange(0, 10_000_000)
+        spin.setSingleStep(64)
+        spin.setValue(max(0, int(stored or 0) // 1024))
+        spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        spin.setSuffix(" KB/s")
+        direction = "upload" if upload else "download"
+        spin.setToolTip(
+            f"Ceiling on this queue's total {direction} rate, in KB/s.\n"
+            "0 = follow the global limit (no limit of its own).\n"
+            "Where both are set, the tighter one wins."
+        )
+        spin.valueChanged.connect(
+            lambda value, qid=queue.id, up=upload: self._on_bandwidth_changed(
+                qid, up, value * 1024
+            )
         )
         return spin
 
@@ -825,6 +1031,23 @@ class QueueManagerDialog(QDialog):
         # A limit change can change what the toolbar combo shows, so keep the two in step.
         self._refresh_note()
 
+    def _on_bandwidth_changed(self, queue_id: str, upload: bool, value: int):
+        """Persist one direction of a queue's ceiling, leaving the other alone.
+
+        The caller passes only the direction it edited, so a spin box that emits during
+        `_reload` cannot clear the opposite one - and, more importantly, so raising the download
+        limit does not silently reset the upload limit to whatever it happened to be.
+        """
+        if self._loading:
+            return
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        download = value if not upload else queue.download_limit
+        upload_limit = value if upload else queue.upload_limit
+        self._manager.set_queue_limits(queue_id, download, upload_limit)
+        self._refresh_note()
+
     def _move_selected(self, delta: int):
         queue_id = self._selected_queue_id()
         if not queue_id:
@@ -838,7 +1061,8 @@ class QueueManagerDialog(QDialog):
         if not dlg.exec():
             return
         created, message = self._manager.create_queue(
-            dlg.name.strip(), dlg.max_concurrent, dlg.color
+            dlg.name.strip(), dlg.max_concurrent, dlg.color,
+            dlg.download_limit_kb * 1024, dlg.upload_limit_kb * 1024,
         )
         self._result_message = message
         if created:
@@ -946,6 +1170,35 @@ class AddQueueDialog(QDialog):
         form_layout.addWidget(limit_label)
         form_layout.addWidget(self._limit_spin)
 
+        # Bandwidth Limits
+        dl_label = QLabel("Download Limit (KB/s, 0 = Follow global limit):")
+        dl_label.setStyleSheet("font-weight: bold;")
+        self._dl_spin = QSpinBox()
+        self._dl_spin.setRange(0, 10_000_000)
+        self._dl_spin.setSingleStep(64)
+        self._dl_spin.setSuffix(" KB/s")
+        self._dl_spin.setToolTip(
+            "Ceiling on this queue's total download rate.\n"
+            "0 = follow the global limit (no cap of its own).\n"
+            "Where both are set, the tighter one wins."
+        )
+        form_layout.addWidget(dl_label)
+        form_layout.addWidget(self._dl_spin)
+
+        ul_label = QLabel("Upload Limit (KB/s, 0 = Follow global limit):")
+        ul_label.setStyleSheet("font-weight: bold;")
+        self._ul_spin = QSpinBox()
+        self._ul_spin.setRange(0, 10_000_000)
+        self._ul_spin.setSingleStep(64)
+        self._ul_spin.setSuffix(" KB/s")
+        self._ul_spin.setToolTip(
+            "Ceiling on this queue's total upload (seeding) rate.\n"
+            "0 = follow the global limit (no cap of its own).\n"
+            "Where both are set, the tighter one wins."
+        )
+        form_layout.addWidget(ul_label)
+        form_layout.addWidget(self._ul_spin)
+
         # Color Picker Section
         color_label = QLabel("Queue Color:")
         color_label.setStyleSheet("font-weight: bold;")
@@ -1035,6 +1288,14 @@ class AddQueueDialog(QDialog):
     @property
     def max_concurrent(self) -> int:
         return self._limit_spin.value()
+
+    @property
+    def download_limit_kb(self) -> int:
+        return self._dl_spin.value()
+
+    @property
+    def upload_limit_kb(self) -> int:
+        return self._ul_spin.value()
 
     @property
     def color(self) -> str:

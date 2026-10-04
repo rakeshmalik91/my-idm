@@ -26,9 +26,9 @@ from my_idm.config import (
     GeneralConfig,
     clamp_segment_start_delay,
 )
-from my_idm.database import Database, DownloadEntry, SegmentEntry
+from my_idm.database import Database, DEFAULT_QUEUE_ID, DownloadEntry, SegmentEntry
 from my_idm.network import NetworkConfig, is_interface_active
-from my_idm.utils import check_disk_space, get_unique_filename
+from my_idm.utils import check_disk_space, effective_rate_limit, get_unique_filename
 
 log = logging.getLogger(__name__)
 
@@ -84,19 +84,40 @@ class HTTPEngine:
         self._filename_cb: Optional[FilenameCallback] = None
         self._last_progress_emit: dict[str, float] = {}
         self._download_limit: int = 0
+        #: queue_id -> (download_limit, upload_limit) in bytes/sec, pushed in by the manager
+        #: rather than queried per chunk. Upload is carried for symmetry with the torrent
+        #: engine and for the queue dialog's "does this queue cap anything" check; HTTP downloads
+        #: do not upload, so only the download half is read here.
+        self._queue_limits: dict[str, tuple[int, int]] = {}
         self._general_config: Optional[GeneralConfig] = None
 
     def _get_effective_download_limit(self, entry: DownloadEntry) -> int:
-        if self._download_limit <= 0:
-            return 0
-        alloc = (entry.metadata.get("bandwidth_allocation") or "max").lower()
-        fracs = {"low": 0.25, "medium": 0.50, "high": 0.75, "max": 1.0}
-        frac = fracs.get(alloc, 1.0)
-        return int(self._download_limit * frac)
+        """Bytes/sec this download may use, or 0 for unlimited.
+
+        Resolved by `utils.effective_rate_limit`, which owns the rule: the tightest non-zero of
+        the queue's ceiling and the global one, scaled by the download's allocation share. The
+        queue half matters because the global limit is 0 by default, and the old early return
+        here made a queue limit - or an allocation - do nothing at all in that state.
+        """
+        queue_dl = self._queue_limits.get(entry.queue_id or DEFAULT_QUEUE_ID, (0, 0))[0]
+        alloc = entry.metadata.get("bandwidth_allocation") or "max"
+        return effective_rate_limit(queue_dl, self._download_limit, alloc)
 
     def set_download_limit(self, limit: int):
         """Set global download rate limit in bytes/sec (0 = unlimited)."""
         self._download_limit = limit
+
+    def set_queue_limits(self, limits: dict[str, tuple[int, int]]):
+        """Supply the per-queue bandwidth ceilings, in bytes/sec per queue id.
+
+        A snapshot, not a handle on the database: the chunk pacers read this per chunk, and a
+        query per chunk to learn a limit that changes only when the user edits a dialog would be
+        the single hottest query in the transfer path. The manager re-pushes on every change.
+        """
+        self._queue_limits = {
+            queue_id: (int(dl or 0), int(ul or 0))
+            for queue_id, (dl, ul) in (limits or {}).items()
+        }
 
     def set_download_bandwidth_allocation(self, download_id: str, allocation: str):
         """Set bandwidth allocation ('low', 'medium', 'high', 'max') for an HTTP download."""
