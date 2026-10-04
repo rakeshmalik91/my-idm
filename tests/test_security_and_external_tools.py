@@ -472,14 +472,16 @@ class TestScanFileEdges(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.target = Path(self._tmp.name) / "payload.bin"
         self.target.write_bytes(b"data")
-        # `scan_file` only reaches the Defender branch when `sys.platform == "win32"`; off
-        # Windows it looks for ClamAV instead, which no CI runner has, so every verdict test
-        # below silently degraded into "no scanner available". The scanner itself is faked
-        # (`subprocess.run` and `find_windows_defender_path`), so what is under test is the
-        # verdict logic, not the host - pinning the platform keeps that logic covered on all
-        # three runners instead of skipping it off Windows. The one test that wants the POSIX
-        # branch still patches the platform itself.
-        platform_patcher = patch.object(security.sys, "platform", "win32")
+        # `scan_file` only reaches the Defender branch on Windows; off Windows it looks for
+        # ClamAV instead, which no CI runner has, so every verdict test below silently degraded
+        # into "no scanner available". The scanner itself is faked (`subprocess.run` and
+        # `find_windows_defender_path`), so what is under test is the verdict logic, not the
+        # host - steering the branch keeps that logic covered on all three runners instead of
+        # skipping it off Windows. `security.running_on_windows` is patched rather than
+        # `sys.platform`, because pretending to be Windows process-wide also fools the standard
+        # library: `shutil.which` takes its Windows branch and hits `_winapi`, which is None here.
+        # The one test that wants the POSIX branch patches this to False.
+        platform_patcher = patch.object(security, "running_on_windows", lambda: True)
         platform_patcher.start()
         self.addCleanup(platform_patcher.stop)
 
@@ -776,9 +778,9 @@ class TestScanFileThreadSafety(unittest.TestCase):
             self.targets.append(path)
         self.index_by_key = {self._key(p): i for i, p in enumerate(self.targets)}
         # As in `TestScanFileEdges`: the Defender branch is the one under test, and it is only
-        # taken when `sys.platform == "win32"`. Off Windows `scan_file` looks for ClamAV, finds
-        # nothing on a runner, and returns no verdict at all.
-        platform_patcher = patch.object(security.sys, "platform", "win32")
+        # taken on Windows. Off Windows `scan_file` looks for ClamAV, finds nothing on a runner,
+        # and returns no verdict at all.
+        platform_patcher = patch.object(security, "running_on_windows", lambda: True)
         platform_patcher.start()
         self.addCleanup(platform_patcher.stop)
 

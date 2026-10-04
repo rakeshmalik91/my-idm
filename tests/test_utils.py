@@ -1,5 +1,6 @@
 """Unit tests for utility functions and filename resolution."""
 
+import os
 import shutil
 import sys
 import tempfile
@@ -492,9 +493,14 @@ class TestSendToTrash(unittest.TestCase):
         self.assertFalse(target.exists())
         self.assertTrue((self.trash_bin / target.name).exists())
         self.assertEqual(escaped, [], "no permanent delete may run")
-        # Qt is tried with both the native and backslash-separated spelling
-        # before falling through.
-        self.assertEqual(mock_qfile.moveToTrash.call_count, 2, mock_qfile.moveToTrash.call_args_list)
+        # Qt is tried with the native spelling everywhere, and with a backslash-separated one on
+        # Windows only, where some UNC and long paths need it. Asserting a flat 2 made this a
+        # Windows-only truth: on Linux and macOS a backslash is an ordinary filename character,
+        # so the retry is not attempted (utils.py:553) and the honest count is 1.
+        self.assertEqual(
+            mock_qfile.moveToTrash.call_count, 2 if os.name == "nt" else 1,
+            mock_qfile.moveToTrash.call_args_list,
+        )
         mock_s2t.assert_called_once_with(str(target))
 
     # -- tier 3: permanent deletion --------------------------------------
@@ -512,7 +518,7 @@ class TestSendToTrash(unittest.TestCase):
             (self.trash_bin / target.name).exists(),
             "nothing may reach a recycle bin on this path",
         )
-        self.assertEqual(mock_qfile.moveToTrash.call_count, 2)
+        self.assertEqual(mock_qfile.moveToTrash.call_count, 2 if os.name == "nt" else 1)
         mock_s2t.assert_called_once_with(str(target))
 
     def test_send_directory_permanently_deletes_when_both_trash_tiers_fail(self):
@@ -533,7 +539,27 @@ class TestSendToTrash(unittest.TestCase):
         self.assertTrue(result, "send_to_trash must report success once the tree is gone")
         self.assertFalse(target.exists(), "the permanent-delete tier must have rmtree'd it")
         self.assertEqual(calls, [str(target)], "rmtree, not unlink, is the directory path")
-        self.assertEqual(mock_qfile.moveToTrash.call_count, 2)
+        self.assertEqual(mock_qfile.moveToTrash.call_count, 2 if os.name == "nt" else 1)
+
+    def test_the_backslash_retry_follows_the_platform(self):
+        """`Path` hands Qt forward slashes; some Windows paths need the backslash form.
+
+        On POSIX a backslash is a legal filename character, so the retry would address a path that
+        cannot exist. `send_to_trash` guards it with `os.name == "nt"`, and that guard is what
+        this pins - the call counts above are only a side effect of it.
+        """
+        target = self._make_file()
+        with patch("PySide6.QtCore.QFile") as mock_qfile, \
+             patch("send2trash.send2trash", side_effect=OSError("no trash available")):
+            mock_qfile.moveToTrash.return_value = False
+            send_to_trash(target)
+        spellings = [call.args[0] for call in mock_qfile.moveToTrash.call_args_list]
+        self.assertEqual(spellings[0], str(target))
+        retries = spellings[1:]
+        if os.name == "nt":
+            self.assertEqual(retries, [str(target).replace("/", "\\")])
+        else:
+            self.assertEqual(retries, [], "no backslash spelling may be tried off Windows")
 
     # -- short-circuits ---------------------------------------------------
 

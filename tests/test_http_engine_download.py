@@ -84,6 +84,22 @@ def canceller_after(chunks: int, event: asyncio.Event):
     return _hook
 
 
+def _pretend_curl_cffi_installed(case):
+    """Assert `http_engine._HAS_CURL_CFFI` for the duration of one test.
+
+    curl_cffi is an optional dependency and nothing declares it, so the flag is False on every CI
+    runner - and because `_requires_curl_impersonation` and both `use_curl` branches short-circuit
+    on it, the curl tests were not testing curl at all. They can afford to assert it: every one of
+    them substitutes `FakeCurlSession` for `CurlAsyncSession` and none of them import the library.
+    Without this, `TestRequiresCurlImpersonation` asserted that four well-known CDN hosts do *not*
+    need browser impersonation, and passed - on every platform, including the one where it is
+    installed and they do.
+    """
+    patcher = patch.object(http_engine_module, "_HAS_CURL_CFFI", True)
+    patcher.start()
+    case.addCleanup(patcher.stop)
+
+
 class EngineTestCase(unittest.TestCase):
     """Shared engine, temp dir, callback wiring, and a zeroed retry backoff."""
 
@@ -131,9 +147,7 @@ class EngineTestCase(unittest.TestCase):
         # under test a property of the test rather than of the host's site-packages; the two
         # tests that care about the *absent* case still patch it back to False, which wins
         # over this outer patch for the duration of their `with` block.
-        curl_patcher = patch.object(http_engine_module, "_HAS_CURL_CFFI", True)
-        curl_patcher.start()
-        self.addCleanup(curl_patcher.stop)
+        _pretend_curl_cffi_installed(self)
 
     # -- helpers --------------------------------------------------------------
 
@@ -319,6 +333,12 @@ class TestPerDownloadTorRoute(EngineTestCase):
 
 class TestRequiresCurlImpersonation(unittest.TestCase):
     """The domain allow-list that switches a transfer onto curl_cffi's browser TLS."""
+
+    def setUp(self):
+        # A plain TestCase, not an EngineTestCase, so it does not inherit that class's engine
+        # fixture - and with it the `_HAS_CURL_CFFI` patch, which is why these two tests were the
+        # last ones in this file to fail on a runner.
+        _pretend_curl_cffi_installed(self)
 
     def test_known_domains_match(self):
         for url in (

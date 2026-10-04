@@ -170,6 +170,20 @@ class SecurityConfig:
         return cfg
 
 
+def running_on_windows() -> bool:
+    """Whether this process is running on Windows.
+
+    Deliberately behind a function rather than read inline at each branch. The Defender verdict
+    logic is worth testing on Linux and macOS - it is the fail-closed behaviour that decides
+    whether a downloaded file is reported clean - and steering it there means faking the platform.
+    Patching ``sys.platform`` to ``"win32"`` fakes it for the entire interpreter, standard library
+    included: ``shutil.which`` then takes its own Windows branch and dereferences ``_winapi``,
+    which is ``None`` off Windows. That turned the ClamAV lookup into an ``AttributeError`` rather
+    than a clean "not installed". Tests patch this one function instead.
+    """
+    return sys.platform == "win32"
+
+
 def find_windows_defender_path() -> Optional[str]:
     """Locate the Windows Defender command-line scanner (MpCmdRun.exe)."""
     candidates = [
@@ -497,7 +511,7 @@ def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool | None, str]
     # every existing configuration has stored - including on Linux and macOS, where Defender
     # cannot exist. Treating it there as "the system scanner" is what makes the default settings
     # work off Windows at all; the radio is relabelled per platform so the UI says so.
-    if scanner_type == "defender" and sys.platform != "win32":
+    if scanner_type == "defender" and not running_on_windows():
         log.info(
             "Scanner is set to 'defender' but this is %s; using the system scanner instead. "
             "The Settings label reads 'System scanner' on this platform.",
@@ -509,7 +523,7 @@ def scan_file(file_path: str, config: SecurityConfig) -> tuple[bool | None, str]
     # This is what makes the *default* configuration meaningful on Linux and macOS, rather than
     # every scan reporting "not scanned" because no antivirus happens to be installed.
     if scanner_type == "auto":
-        if sys.platform == "win32":
+        if running_on_windows():
             defender = find_windows_defender_path()
             if defender:
                 return _scan_with_defender(defender, abs_path, config)
