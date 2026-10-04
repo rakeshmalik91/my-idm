@@ -89,6 +89,13 @@ Receives intercepted download payloads from the browser extension.
   - `unsupported_url_scheme` — `blob:`, `data:`, `javascript:` and friends have no external
     transport, so queuing one only makes the user wait out the retry ladder.
   - `file_size_below_minimum` — probed size is below `min_file_size_kb`.
+  - `unknown_size` — a minimum is configured but the size could not be determined: the extension
+    usually reports `totalBytes: 0` at `onDeterminingFilename` time, and a chunked or
+    dynamically generated response has no `Content-Length` to probe for. Controlled by
+    `skip_unknown_size_downloads` (default on), so by default such a download is left to the
+    browser. Capturing it instead means cancelling the browser download, adding a row, and then
+    dropping it after the engine's probe — which is what the flag exists to stop. Turning it off
+    restores that, and the threshold is handed to the engine as `pending_min_bytes`.
   - `capture_paused` — `intercept_all` is off, i.e. the **🎯 Download Capture** tray row or the
     [global hotkey](capture.md) turned capture off. This gate runs *after* the `enabled` check
     and *before* body parsing, the scheme allow-list and the size probe, so a paused capture
@@ -114,15 +121,56 @@ Returns active user preferences for browser interception.
     "intercept_all": true,
     "intercept_torrent_files": true,
     "min_file_size_kb": 0,
+    "skip_unknown_size_downloads": true,
     "bypassed_extensions": [".crx"]
   }
   ```
+  Every key is also emitted in camelCase (`minFileSizeKb`, `skipUnknownSizeDownloads`, …) so the
+  extension can read the payload without knowing which casing My-IDM uses.
+
+#### 4. `POST /config`
+Applies capture preferences from the extension's options page, so the two front ends stay in
+agreement. Without it a change made in the extension is written to `chrome.storage.local` and
+then overwritten by the worker's next 30-second sync — the toggle appears to work and reverts.
+
+- **Request**: any subset of `intercept_all`, `intercept_torrent_files`,
+  `intercept_magnet_links`, `min_file_size_kb`, `skip_unknown_size_downloads`,
+  `bypassed_extensions` (camelCase accepted). Unknown keys are ignored.
+- **Response `200 OK`**: the effective config, same shape as `GET /config`.
+- **`400 Bad Request`**: unparseable body, a non-object body, or a payload with nothing writable
+  in it.
+- **Not writable**: `port`, `host` and `enabled`. They decide whether this endpoint is reachable,
+  so accepting them would let a stray write take the channel down instead of adjusting a
+  preference. The handler applies the new config to the server itself and then hands it to
+  `DownloadManager.set_browser_config`, which persists it to `QSettings` and emits
+  `browser_config_changed` so the main window's capture indicators follow. A Preferences dialog
+  that is already open keeps its own snapshot until it is reopened.
 
 ---
 
 ## 🧩 Chrome Extension (Manifest V3)
 
 The extension is stored in [`browser_extension/`](file:///d:/Projects/my-idm/browser_extension) within the repository.
+
+### Configuration is shared, not mirrored
+The extension's options page and **Preferences ➔ Browser Integration** are two front ends for the
+same settings, and neither owns them:
+
+- **My-IDM → extension**: the service worker reads `GET /config` on install, on browser startup
+  and every 30 seconds, and overwrites `chrome.storage.local` with what it finds. A setting
+  changed in My-IDM therefore reaches the extension within one sync, without a reload.
+- **Extension → My-IDM**: saving the options page `POST`s the capture settings to `/config`, and
+  My-IDM persists them and re-broadcasts them. This direction is not optional: storing the value
+  locally alone means the next sync silently reverts it, which is what the options page used to do
+  for every setting on it.
+
+`port`, `host` and `enabled` are excluded — they decide whether the loopback channel is reachable
+at all, so only the application may change them.
+
+> [!NOTE]
+> The `.xpi` in this directory is a **signed** release artifact and is rebuilt at release time,
+> not from these sources. An unpacked load (`chrome://extensions` → *Load unpacked*) always
+> reflects the working tree; the packaged copy lags until it is re-signed.
 
 ### Manifest Configuration (`manifest.json`)
 ```json
@@ -293,6 +341,8 @@ In My-IDM:
   - **Intercept .torrent files from browser** — when enabled, `.torrent` downloads are added as torrents.
   - **Intercept magnet links from browser** — when enabled, magnet clicks are captured.
   - **Minimum file size to intercept (KB, 0 = no limit)**.
+  - **Skip downloads whose size cannot be determined** — only editable while a minimum is set.
+    See the `unknown_size` decline above.
   - **Bypassed File Extensions** (default: `.crx`).
   - **Chromium Browsers Group (Chrome / Brave / Edge / Opera)**:
     - Interactive copy-on-click link for `chrome://extensions/`.

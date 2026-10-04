@@ -380,6 +380,25 @@ class TestBrowserServerLiveEndpoints:
                         assert data["status"] == "ignored", "10 KB must be below the 500 KB floor"
                         assert data["reason"] == "file_size_below_minimum"
 
+                    # 4b-bis. POST /config carries an extension-side change back into My-IDM.
+                    # Driven over a real socket on purpose: the handler unit tests cannot see a
+                    # route that was never registered, and this is the direction that has no other
+                    # caller.
+                    async with session.post(
+                        f"http://127.0.0.1:{test_port}/config",
+                        json={"skipUnknownSizeDownloads": False, "min_file_size_kb": 750},
+                    ) as resp:
+                        assert resp.status == 200, "POST /config must be routed"
+                        data = await resp.json()
+                        assert data["skip_unknown_size_downloads"] is False
+                        assert data["skipUnknownSizeDownloads"] is False
+                        assert data["min_file_size_kb"] == 750
+
+                    async with session.get(f"http://127.0.0.1:{test_port}/config") as resp:
+                        assert (await resp.json())["min_file_size_kb"] == 750, (
+                            "a value written by the extension has to survive the round trip"
+                        )
+
                     # 4c. POST /add with unknown total_bytes but probe returns size below threshold -> ignored
                     async def _mock_probe(*args, **kwargs):
                         return 46 * 1024  # 46 KB < 500 KB

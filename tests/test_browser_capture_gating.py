@@ -17,6 +17,12 @@ The same event explains the "10 MB minimum captured a smaller file" report: a ``
 reports no size at all, and every layer's minimum check is guarded by ``size > 0``, so an
 unsizeable URL walked straight past a configured threshold.
 
+That left the opposite problem: a download the capture path cannot size is captured, and the
+engine refuses it after its own probe. The browser download is cancelled, a row appears, and it
+is taken away again - for a file the minimum was configured to keep out. ``skip_unknown_size_
+downloads`` (on by default) declines the capture instead, so an unsizeable download is left to
+the browser whenever a minimum is configured.
+
 These tests pin the fixes at all three layers - the extension, the server, and the engine -
 because the extension can be stale relative to the app (users load an unpacked copy and it
 does not auto-update), so a server-side check is not redundant.
@@ -31,6 +37,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from my_idm import browser_server as bs_module
@@ -186,6 +193,20 @@ class TestExtensionSchemeGuard(unittest.TestCase):
         """The message has to tell the user what to do, not just that it failed."""
         self.assertIn("right-click the link", self.source)
         self.assertIn("copy the link address", self.source)
+
+    def test_a_server_side_decline_is_recorded_with_the_servers_reason(self):
+        """The server declines for reasons the extension cannot know.
+
+        ``sendDownloadToMyIdm`` used to collapse every non-``ok`` answer to ``false``, so a
+        refusal the server had already explained - below the minimum size, or a minimum that
+        cannot be applied because the size is unknown - was dropped on the floor. The browser
+        then downloaded the file and the popup said nothing, which is the invisible-skip problem
+        ``recordSkip`` was added for, reached by a different route.
+        """
+        sender = self.source.split("async function sendDownloadToMyIdm")[1].split("\n}")[0]
+        self.assertIn('data.status === "ignored"', sender)
+        self.assertIn("recordSkip(", sender, "the server's reason must reach the popup")
+        self.assertIn("data.reason", sender, "and it must be the server's reason, not a guess")
 
     def test_the_reason_is_not_hardcoded_to_one_site(self):
         """A skip fires for any page, so the advice must not name one host.
@@ -377,13 +398,14 @@ class TestServerMinimumSizeGate(unittest.TestCase):
         )
 
     def test_an_unknown_size_defers_the_minimum_to_the_engine(self):
-        """The bug: `total_bytes > 0` meant an unsizeable URL bypassed the threshold.
+        """The opt-out path: capture it anyway and let the engine's probe decide.
 
-        Chrome reports ``totalBytes: 0`` whenever the response has no Content-Length, and
-        for every blob URL. The capture path could not size it, so the comparison was
-        skipped and the download was queued regardless of the configured minimum. The
-        threshold is now handed to the engine, which always probes.
+        Chrome reports ``totalBytes: 0`` whenever the response has no Content-Length, and for
+        every blob URL. With ``skip_unknown_size_downloads`` off, that case is captured and the
+        threshold is handed to the engine, which always probes - so a sub-threshold file cannot
+        slip through just for being unsizeable at capture time.
         """
+        self.config.skip_unknown_size_downloads = False
         with patch.object(
             bs_module.BrowserServer, "_probe_content_length", new=AsyncMock(return_value=None)
         ):
@@ -395,8 +417,61 @@ class TestServerMinimumSizeGate(unittest.TestCase):
             "the threshold must reach the engine when the capture path cannot size the file",
         )
 
+    def test_an_unknown_size_is_not_captured_by_default(self):
+        """With a minimum configured, an unsizeable download is left to the browser.
+
+        The alternative is capture-then-refuse: the browser download is cancelled, a row appears
+        in My-IDM, and the engine drops it a moment later. A minimum the user configured is a
+        statement about what they want to see, so a download that cannot be shown to qualify
+        should not be captured at all.
+        """
+        with patch.object(
+            bs_module.BrowserServer, "_probe_content_length", new=AsyncMock(return_value=None)
+        ):
+            response = run_async(self._add({"url": "https://e.com/unknown.zip"}))
+        body = self._body(response)
+        self.assertEqual(body["status"], "ignored")
+        self.assertEqual(body["reason"], "unknown_size")
+        self.manager.add_download_from_browser.assert_not_called()
+
+    def test_the_unknown_size_refusal_names_the_setting_that_caused_it(self):
+        """The extension records this reason and the popup shows it, so it has to be actionable.
+
+        A skip the user cannot trace back to a setting is indistinguishable from My-IDM being
+        broken, which is the symptom `recordSkip` exists to prevent.
+        """
+        with patch.object(
+            bs_module.BrowserServer, "_probe_content_length", new=AsyncMock(return_value=None)
+        ):
+            response = run_async(self._add({"url": "https://e.com/unknown.zip"}))
+        message = self._body(response)["message"]
+        self.assertIn("Skip downloads of unknown size", message)
+        self.assertIn("10000", message)
+
+    def test_the_unknown_size_gate_needs_a_configured_minimum(self):
+        """With no minimum there is nothing to fail, so an unsizeable download is captured."""
+        self.config.min_file_size_kb = 0
+        with patch.object(
+            bs_module.BrowserServer, "_probe_content_length", new=AsyncMock(return_value=None)
+        ):
+            response = run_async(self._add({"url": "https://e.com/unknown.zip"}))
+        self.assertEqual(self._body(response)["status"], "ok")
+        self.manager.add_download_from_browser.assert_called_once()
+
+    def test_a_known_size_still_wins_over_the_unknown_size_default(self):
+        """The new gate is only about the unknown case; a real size is judged on its merits."""
+        response = run_async(self._add({
+            "url": "https://e.com/big.zip", "total_bytes": 50 * 1024 * 1024,
+        }))
+        self.assertEqual(self._body(response)["status"], "ok")
+        self.manager.add_download_from_browser.assert_called_once()
+
     def test_a_magnet_is_exempt_from_the_minimum_entirely(self):
-        """A magnet has no size to compare, and the setting is about file interception."""
+        """A magnet has no size to compare, and the setting is about file interception.
+
+        Exempt from both halves of it: the size comparison and the unknown-size gate, since a
+        magnet reaches neither branch.
+        """
         response = run_async(self._add({"url": "magnet:?xt=urn:btih:da39a3ee"}))
         self.assertEqual(self._body(response)["status"], "ok")
         self.assertEqual(
@@ -483,6 +558,225 @@ class TestServerCapturePausedGate(unittest.TestCase):
         tooltip = dlg._browser_intercept_cb.toolTip()
         self.assertIn("declines every capture", tooltip)
         self.assertIn("right-click", tooltip)
+
+
+class TestUnknownSizePreference(unittest.TestCase):
+    """The flag behind the unknown-size gate, end to end.
+
+    A gate that cannot be turned off is a bug report waiting to happen: the day a user wants a
+    chunked download captured, the only available answer is to clear the minimum entirely. So the
+    setting has to survive a restart, reach the config the server reads, and be editable where
+    the minimum itself is.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings = QSettings(
+            str(Path(self._tmp.name) / "prefs.ini"), QSettings.IniFormat
+        )
+        self.addCleanup(self.settings.clear)
+
+    def test_the_default_is_to_skip(self):
+        # The whole point of the change: a minimum the user set must not be bypassed by a
+        # response that happens to lack a Content-Length.
+        self.assertTrue(BrowserIntegrationConfig().skip_unknown_size_downloads)
+
+    def test_the_flag_survives_a_save_and_load(self):
+        cfg = BrowserIntegrationConfig(min_file_size_kb=500, skip_unknown_size_downloads=False)
+        cfg.save(self.settings)
+        loaded = BrowserIntegrationConfig.load(self.settings)
+        self.assertFalse(loaded.skip_unknown_size_downloads)
+        self.assertEqual(loaded.min_file_size_kb, 500)
+
+    def test_a_settings_file_written_before_the_flag_existed_still_loads(self):
+        # An upgrade must not read as "off" and silently restore capture-then-refuse for every
+        # existing user, so the absent key takes the default.
+        self.settings.beginGroup("BrowserIntegration")
+        self.settings.setValue("min_file_size_kb", 500)
+        self.settings.endGroup()
+        self.assertTrue(BrowserIntegrationConfig.load(self.settings).skip_unknown_size_downloads)
+
+    def test_the_flag_survives_a_dict_round_trip(self):
+        defaulted = BrowserIntegrationConfig.from_dict({"min_file_size_kb": 500})
+        self.assertTrue(defaulted.skip_unknown_size_downloads)
+        self.assertIn("skip_unknown_size_downloads", defaulted.to_dict())
+        off = BrowserIntegrationConfig.from_dict({"skip_unknown_size_downloads": False})
+        self.assertFalse(off.skip_unknown_size_downloads)
+        self.assertFalse(off.to_dict()["skip_unknown_size_downloads"])
+
+    def test_the_preferences_checkbox_reflects_and_saves_the_flag(self):
+        # The dialog edits its own copy of the config (`from_dict(to_dict())`), so the flag has
+        # to survive that round trip to be editable at all - and `_on_save` has to write it onto
+        # that copy, or the checkbox would revert on the next open.
+        cfg = BrowserIntegrationConfig(min_file_size_kb=500, skip_unknown_size_downloads=False)
+        dlg = SettingsDialog(browser_config=cfg)
+        self.addCleanup(dlg.deleteLater)
+        self.assertFalse(dlg._browser_skip_unknown_size_cb.isChecked())
+        self.assertFalse(dlg.browser_config.skip_unknown_size_downloads)
+        dlg._browser_skip_unknown_size_cb.setChecked(True)
+        dlg._on_save()
+        self.assertTrue(dlg.browser_config.skip_unknown_size_downloads)
+        self.assertTrue(
+            BrowserIntegrationConfig.load().skip_unknown_size_downloads,
+            "the flag must reach QSettings, or it is lost when the app restarts",
+        )
+
+    def test_the_checkbox_is_only_editable_while_a_minimum_is_set(self):
+        dlg = SettingsDialog(
+            browser_config=BrowserIntegrationConfig(min_file_size_kb=0)
+        )
+        self.addCleanup(dlg.deleteLater)
+        self.assertFalse(
+            dlg._browser_skip_unknown_size_cb.isEnabled(),
+            "with no minimum configured the choice has no effect, so offering it is a lie",
+        )
+        dlg._browser_min_size_spin.setValue(500)
+        self.assertTrue(dlg._browser_skip_unknown_size_cb.isEnabled())
+        dlg._browser_min_size_spin.setValue(0)
+        self.assertFalse(dlg._browser_skip_unknown_size_cb.isEnabled())
+
+    def test_the_checkbox_explains_both_choices(self):
+        dlg = SettingsDialog(browser_config=BrowserIntegrationConfig(min_file_size_kb=500))
+        self.addCleanup(dlg.deleteLater)
+        tooltip = dlg._browser_skip_unknown_size_cb.toolTip()
+        self.assertIn("Checked", tooltip)
+        self.assertIn("Unchecked", tooltip)
+
+
+class TestSettingIsSharedBothWays(unittest.TestCase):
+    """Changing the setting on either side has to change it on the other.
+
+    The extension's options page is a second front end for the same preferences. It used to write
+    only to ``chrome.storage.local``, and the background worker's 30-second sync overwrote that
+    with the server's value - so a toggle flipped in the extension appeared to work and then
+    reverted. Sharing therefore needs both directions: the extension pushes, and My-IDM answers
+    with what it actually stored.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.manager = MagicMock()
+        self.manager.add_download_from_browser.return_value = "new-id"
+        self.config = BrowserIntegrationConfig(enabled=True, min_file_size_kb=500)
+        self.server = bs_module.BrowserServer(self.manager, self.config)
+
+    def _get_config(self):
+        request = MagicMock()
+        return run_async(self.server._handle_config(request))
+
+    def _post_config(self, payload):
+        request = MagicMock()
+        request.json = AsyncMock(return_value=payload)
+        return run_async(self.server._handle_set_config(request))
+
+    def _body(self, response):
+        return json.loads(response.text)
+
+    def test_the_flag_is_in_the_config_the_extension_polls(self):
+        """My-IDM -> extension. Without this key the extension can never see the setting."""
+        body = self._body(self._get_config())
+        self.assertIn("skip_unknown_size_downloads", body)
+        self.assertIn("skipUnknownSizeDownloads", body)
+        self.assertTrue(body["skip_unknown_size_downloads"])
+
+    def test_an_extension_change_is_applied_and_announced(self):
+        """Extension -> My-IDM, then My-IDM -> extension: the round trip converges."""
+        response = self._post_config({"skipUnknownSizeDownloads": False})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(self._body(response)["skip_unknown_size_downloads"])
+        self.manager.set_browser_config.assert_called_once()
+        applied = self.manager.set_browser_config.call_args.args[0]
+        self.assertFalse(applied.skip_unknown_size_downloads)
+        self.assertEqual(
+            applied.min_file_size_kb, 500,
+            "a partial update must not reset the settings it does not mention",
+        )
+
+    def test_an_extension_change_reaches_the_running_server(self):
+        self._post_config({"min_file_size_kb": 4096})
+        self.assertEqual(self.server._config.min_file_size_kb, 4096)
+        self.assertEqual(self._body(self._get_config())["min_file_size_kb"], 4096)
+
+    def test_the_port_and_the_kill_switch_are_not_writable_from_the_extension(self):
+        """They decide whether this endpoint is reachable, so a stray write must not change them."""
+        response = self._post_config({"port": 1, "enabled": False, "host": "0.0.0.0"})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self._body(response)["status"], "error")
+        self.manager.set_browser_config.assert_not_called()
+        self.assertTrue(self.server._config.enabled)
+        self.assertNotEqual(self.server._config.port, 1)
+
+    def test_an_unknown_key_is_refused_rather_than_silently_dropped(self):
+        response = self._post_config({"intercept_all": False, "wipe_everything": True})
+        self.assertEqual(response.status, 200)
+        applied = self.manager.set_browser_config.call_args.args[0]
+        self.assertFalse(applied.intercept_all)
+        self.assertNotIn("wipe_everything", applied.to_dict())
+
+    def test_a_nonsense_size_is_rejected_without_discarding_the_rest(self):
+        response = self._post_config({"min_file_size_kb": "enormous", "intercept_magnet_links": False})
+        self.assertEqual(response.status, 200)
+        applied = self.manager.set_browser_config.call_args.args[0]
+        self.assertEqual(applied.min_file_size_kb, 500)
+        self.assertFalse(applied.intercept_magnet_links)
+
+    def test_an_empty_payload_is_refused(self):
+        response = self._post_config({"port": 1})
+        self.assertEqual(response.status, 400)
+        self.manager.set_browser_config.assert_not_called()
+
+    def test_a_malformed_body_is_a_400_not_a_500(self):
+        request = MagicMock()
+        request.json = AsyncMock(side_effect=ValueError("not json"))
+        response = run_async(self.server._handle_set_config(request))
+        self.assertEqual(response.status, 400)
+        self.manager.set_browser_config.assert_not_called()
+
+    def test_a_manager_without_the_setter_still_persists(self):
+        """The server must not depend on a manager shape it does not control."""
+        del self.manager.set_browser_config
+        response = self._post_config({"skip_unknown_size_downloads": False})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(self.server._config.skip_unknown_size_downloads)
+        self.assertFalse(BrowserIntegrationConfig.load().skip_unknown_size_downloads)
+
+    def test_the_extension_pushes_the_flag_rather_than_only_storing_it_locally(self):
+        """Asserted against the source: an options page that only writes chrome.storage.local
+        is exactly the bug."""
+        options = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "options.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("skip_unknown_size_downloads", options)
+        self.assertIn('method: "POST"', options)
+        self.assertIn("/config`", options)
+        self.assertIn(
+            "chrome.storage.local.set",
+            options,
+            "the local copy is still what the service worker reads between syncs",
+        )
+
+    def test_the_extension_reads_the_flag_back_from_the_server(self):
+        options = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "options.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("serverConfig.skip_unknown_size_downloads", options)
+        self.assertIn('document.getElementById("skipUnknownSizeDownloads")', options)
+
+    def test_both_interception_engines_honour_the_flag(self):
+        """The Chromium and Firefox engines are separate listeners and have drifted before."""
+        source = (
+            Path(__file__).resolve().parents[1] / "browser_extension" / "background.js"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            source.count("cfg.skipUnknownSizeDownloads !== false"), 2,
+            "both the Chromium and the Firefox engine must skip unsizeable downloads when a "
+            "minimum is set; the flag is synced from My-IDM and is useless if only one engine "
+            "reads it",
+        )
+        self.assertIn("skipUnknownSizeDownloads: true", source)
+        self.assertIn('"skipUnknownSizeDownloads",', source)
 
 
 class EngineMinSizeTestCase(unittest.TestCase):

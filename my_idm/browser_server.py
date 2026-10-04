@@ -83,7 +83,11 @@ class BrowserServer:
         return web.json_response(data, headers=self._cors_headers())
 
     async def _handle_config(self, request: web.Request) -> web.Response:
-        data = {
+        return web.json_response(self._config_payload(), headers=self._cors_headers())
+
+    def _config_payload(self) -> dict:
+        """The active config in both casings, so neither side has to know the other's."""
+        return {
             "status": "ok",
             "enabled": self._config.enabled,
             "port": self._config.port,
@@ -92,15 +96,110 @@ class BrowserServer:
             "intercept_torrent_files": self._config.intercept_torrent_files,
             "intercept_magnet_links": self._config.intercept_magnet_links,
             "min_file_size_kb": self._config.min_file_size_kb,
+            "skip_unknown_size_downloads": self._config.skip_unknown_size_downloads,
             "bypassed_extensions": self._config.bypassed_extensions,
             # camelCase aliases for direct JS extension access
             "interceptDownloads": self._config.intercept_all,
             "interceptTorrentFiles": self._config.intercept_torrent_files,
             "interceptMagnetLinks": self._config.intercept_magnet_links,
             "minFileSizeKb": self._config.min_file_size_kb,
+            "skipUnknownSizeDownloads": self._config.skip_unknown_size_downloads,
             "bypassExtensions": self._config.bypassed_extensions,
         }
-        return web.json_response(data, headers=self._cors_headers())
+
+    # What the extension may write back. `port`, `host` and `enabled` are deliberately absent:
+    # they decide whether this endpoint is reachable at all, so a stray write would take the
+    # channel down rather than adjust a preference.
+    _WRITABLE_BOOL_KEYS = (
+        "intercept_all",
+        "intercept_torrent_files",
+        "intercept_magnet_links",
+        "skip_unknown_size_downloads",
+    )
+    _WRITABLE_CAMEL_ALIASES = {
+        "interceptDownloads": "intercept_all",
+        "interceptTorrentFiles": "intercept_torrent_files",
+        "interceptMagnetLinks": "intercept_magnet_links",
+        "minFileSizeKb": "min_file_size_kb",
+        "skipUnknownSizeDownloads": "skip_unknown_size_downloads",
+        "bypassExtensions": "bypassed_extensions",
+    }
+
+    async def _handle_set_config(self, request: web.Request) -> web.Response:
+        """Apply capture settings pushed from the extension's options page.
+
+        The options page is a second front end for the same preferences, so a change made there
+        has to land here: it used to be written to `chrome.storage.local` only, and the
+        background worker's 30-second sync then overwrote it with the server's value - the toggle
+        appeared to work and then reverted. This makes the setting genuinely shared: whichever
+        side changes it, the other converges within one sync.
+        """
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response(
+                {"status": "error", "message": f"Invalid JSON payload: {e}"},
+                status=400,
+                headers=self._cors_headers(),
+            )
+        if not isinstance(body, dict):
+            return web.json_response(
+                {"status": "error", "message": "Expected a JSON object."},
+                status=400,
+                headers=self._cors_headers(),
+            )
+
+        merged = self._config.to_dict()
+        applied: list[str] = []
+        for key, value in body.items():
+            key = self._WRITABLE_CAMEL_ALIASES.get(key, key)
+            if key in self._WRITABLE_BOOL_KEYS:
+                merged[key] = bool(value)
+            elif key == "min_file_size_kb":
+                try:
+                    merged[key] = max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
+            elif key == "bypassed_extensions":
+                if isinstance(value, list):
+                    exts = [str(v).strip() for v in value if str(v).strip()]
+                    merged[key] = [e if e.startswith(".") else f".{e}" for e in exts]
+                continue
+            else:
+                # `enabled`, `port`, `host`, and anything unknown. Not writable on purpose.
+                continue
+            applied.append(key)
+
+        if not applied:
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": (
+                        "No writable settings in the payload. Accepted: "
+                        f"{', '.join(self._WRITABLE_BOOL_KEYS)}, min_file_size_kb, "
+                        "bypassed_extensions."
+                    ),
+                },
+                status=400,
+                headers=self._cors_headers(),
+            )
+
+        updated = BrowserIntegrationConfig.from_dict(merged)
+        # Apply locally first: the response is built from this server's own config, and a manager
+        # is not obliged to echo the object back. `set_browser_config` then persists it to
+        # QSettings and emits `browser_config_changed`, which the main window uses to re-derive
+        # its capture indicators - an already-open Preferences dialog keeps its own snapshot
+        # until it is reopened. Only a change to `port` or `enabled` can make the manager restart
+        # the server, and neither is writable here.
+        self.set_config(updated)
+        setter = getattr(self._manager, "set_browser_config", None)
+        if callable(setter):
+            setter(updated)
+        else:
+            updated.save()
+        log.info("Browser capture settings updated from the extension: %s", applied)
+
+        return web.json_response(self._config_payload(), headers=self._cors_headers())
 
     async def _probe_content_length(
         self, url: str, headers: Optional[dict] = None, cookies: str = ""
@@ -255,12 +354,41 @@ class BrowserServer:
                     headers=self._cors_headers(),
                 )
             if total_bytes <= 0:
-                # The size is still unknown, so the threshold cannot be applied here.
-                # Do NOT simply accept it: the `total_bytes > 0` guard above means an
-                # unsizeable URL walked straight past a configured minimum, which is how a
-                # sub-threshold file kept getting captured. Hand the threshold to the
-                # engine instead - it probes every download before transferring a byte, so
-                # it has the authoritative size and can refuse with a real reason.
+                # The size is still unknown, so the threshold cannot be applied here. Two very
+                # different things can follow, and which one is right is a user preference
+                # (`skip_unknown_size_downloads`).
+                if self._config.skip_unknown_size_downloads:
+                    # Answer `ignored` rather than queueing: the extension falls back to a
+                    # native browser download, which is the only outcome that honours a minimum
+                    # the user configured. Capturing first and refusing later - in the engine,
+                    # after its own probe - means cancelling the browser download, adding a row,
+                    # and then taking it away again, all for a file that was never wanted.
+                    log.info(
+                        "Not capturing browser download '%s': a minimum of %d KB is configured "
+                        "and the size could not be determined (no size from the extension, no "
+                        "Content-Length from the probe)",
+                        filename or url, self._config.min_file_size_kb,
+                    )
+                    return web.json_response(
+                        {
+                            "status": "ignored",
+                            "reason": "unknown_size",
+                            "message": (
+                                f"My-IDM cannot tell how large '{filename or url[:80]}' is, and a "
+                                f"minimum capture size of {self._config.min_file_size_kb} KB is "
+                                "configured, so the browser should download it natively. Turn off "
+                                "'Skip downloads of unknown size' in Preferences to capture these "
+                                "and let My-IDM check the size once it has probed the response."
+                            ),
+                        },
+                        status=200,
+                        headers=self._cors_headers(),
+                    )
+                # The user asked for these to be captured anyway: hand the threshold to the engine
+                # instead. It probes every download before transferring a byte, so it has the
+                # authoritative size and can refuse with a real reason. The `total_bytes > 0`
+                # guard above means an unsizeable URL used to walk straight past a configured
+                # minimum, which is how a sub-threshold file kept getting captured.
                 log.info(
                     "Size unknown for browser download '%s'; deferring the %d KB minimum "
                     "to the engine's own probe",
@@ -301,6 +429,7 @@ class BrowserServer:
             self._app.router.add_get("/", self._handle_health)
             self._app.router.add_get("/health", self._handle_health)
             self._app.router.add_get("/config", self._handle_config)
+            self._app.router.add_post("/config", self._handle_set_config)
             self._app.router.add_post("/add", self._handle_add)
 
             self._runner = web.AppRunner(self._app)

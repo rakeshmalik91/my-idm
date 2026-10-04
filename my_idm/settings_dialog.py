@@ -2441,6 +2441,28 @@ class SettingsDialog(QDialog):
         min_size_row.addStretch()
         server_layout.addLayout(min_size_row)
 
+        self._browser_skip_unknown_size_cb = QCheckBox(
+            "Skip downloads whose size cannot be determined"
+        )
+        self._browser_skip_unknown_size_cb.setToolTip(
+            "Only applies while a minimum size is set above.\n\n"
+            "The browser usually cannot report a size at the moment a download starts, and a "
+            "chunked or dynamically generated response has no Content-Length to look for either.\n\n"
+            "Checked: such a download is left to the browser, because a minimum you configured is "
+            "a statement about what you want to see in My-IDM.\n"
+            "Unchecked: it is captured anyway, and My-IDM checks the real size against the minimum "
+            "once it has probed the response - so it can still be dropped, but only after it "
+            "appears."
+        )
+        self._browser_skip_unknown_size_cb.setChecked(
+            self._browser_cfg.skip_unknown_size_downloads
+        )
+        self._browser_skip_unknown_size_cb.setEnabled(self._browser_cfg.min_file_size_kb > 0)
+        server_layout.addWidget(self._browser_skip_unknown_size_cb)
+        self._browser_min_size_spin.valueChanged.connect(
+            self._on_browser_min_size_changed
+        )
+
         bypass_lbl = QLabel("Bypassed File Extensions (comma-separated):")
         server_layout.addWidget(bypass_lbl)
 
@@ -2834,6 +2856,10 @@ class SettingsDialog(QDialog):
         self._browser_intercept_torrent_cb.setChecked(self._browser_cfg.intercept_torrent_files)
         self._browser_intercept_magnet_cb.setChecked(self._browser_cfg.intercept_magnet_links)
         self._browser_min_size_spin.setValue(self._browser_cfg.min_file_size_kb)
+        self._browser_skip_unknown_size_cb.setChecked(
+            self._browser_cfg.skip_unknown_size_downloads
+        )
+        self._browser_skip_unknown_size_cb.setEnabled(self._browser_cfg.min_file_size_kb > 0)
         self._browser_bypass_edit.setText(", ".join(self._browser_cfg.bypassed_extensions))
         if self._manager and getattr(self._manager, "browser_server", None) and self._manager.browser_server.is_running:
             self._browser_status_lbl.setText(f"🟢 Active (Listening on http://127.0.0.1:{self._browser_cfg.port})")
@@ -3246,6 +3272,15 @@ class SettingsDialog(QDialog):
         self._clipboard_min_size_spin.setEnabled(checked)
         self._clipboard_ignored_exts_edit.setEnabled(checked)
 
+    def _on_browser_min_size_changed(self, value: int):
+        """The unknown-size choice only means anything while a minimum is set.
+
+        With no minimum every size qualifies, so the checkbox would be a control with no
+        effect - and a user could turn it off there, believe they had relaxed a limit, and
+        change nothing.
+        """
+        self._browser_skip_unknown_size_cb.setEnabled(value > 0)
+
     def _on_capture_hotkey_toggled(self, checked: bool):
         self._capture_hotkey_edit.setEnabled(checked)
         if checked:
@@ -3608,6 +3643,9 @@ class SettingsDialog(QDialog):
         self._browser_cfg.intercept_torrent_files = self._browser_intercept_torrent_cb.isChecked()
         self._browser_cfg.intercept_magnet_links = self._browser_intercept_magnet_cb.isChecked()
         self._browser_cfg.min_file_size_kb = self._browser_min_size_spin.value()
+        self._browser_cfg.skip_unknown_size_downloads = (
+            self._browser_skip_unknown_size_cb.isChecked()
+        )
         bypassed_text = self._browser_bypass_edit.text().strip()
         self._browser_cfg.bypassed_extensions = [
             ext.strip() for ext in bypassed_text.split(",") if ext.strip()

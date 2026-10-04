@@ -8,6 +8,11 @@ const DEFAULT_CONFIG = {
   interceptTorrentFiles: true,
   interceptMagnetLinks: true,
   minFileSizeKb: 0,
+  // Applies only while minFileSizeKb > 0. True: a download whose size is unknown at
+  // interception time is left to the browser, because a minimum the user configured is a
+  // statement about what they want in My-IDM. False: hand it to My-IDM anyway and let it
+  // check the real size against the minimum once it has probed the response.
+  skipUnknownSizeDownloads: true,
   bypassExtensions: [".crx"]
 };
 
@@ -18,6 +23,7 @@ const SERVER_CONFIG_KEYS = [
   "interceptTorrentFiles",
   "interceptMagnetLinks",
   "minFileSizeKb",
+  "skipUnknownSizeDownloads",
   "bypassExtensions"
 ];
 
@@ -64,6 +70,12 @@ async function syncConfigWithServer() {
     const minSize = serverConfig.min_file_size_kb !== undefined ? serverConfig.min_file_size_kb : serverConfig.minFileSizeKb;
     if (minSize !== undefined) {
       merged.minFileSizeKb = parseInt(minSize, 10) || 0;
+    }
+    const skipUnknown = serverConfig.skip_unknown_size_downloads !== undefined
+      ? serverConfig.skip_unknown_size_downloads
+      : serverConfig.skipUnknownSizeDownloads;
+    if (skipUnknown !== undefined) {
+      merged.skipUnknownSizeDownloads = !!skipUnknown;
     }
     const bypassExts = serverConfig.bypassed_extensions !== undefined ? serverConfig.bypassed_extensions : serverConfig.bypassExtensions;
     if (bypassExts !== undefined) {
@@ -244,7 +256,18 @@ async function sendDownloadToMyIdm(payload, port) {
       return false;
     }
     const data = await resp.json();
-    return data.status === "ok";
+    if (data.status === "ok") return true;
+
+    // `ignored` is a decision, not a failure: the URL was understood and deliberately not
+    // captured - an uncapturable scheme, a size below the configured minimum, a minimum that
+    // cannot be applied because the size is unknown. Record the reason so the popup can say so.
+    // Without this the only symptom is a file the user can see the browser downloading and
+    // cannot see anywhere in My-IDM.
+    if (data.status === "ignored") {
+      recordSkip(data.reason || "ignored", payload.url);
+      console.log("[My-IDM] Not capturing:", data.reason, "-", data.message || "");
+    }
+    return false;
   } catch (err) {
     clearTimeout(timeoutId);
     console.warn("[My-IDM] Connection to local server failed:", err);
@@ -375,10 +398,21 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       if (minSizeKb > 0 && totalBytes > 0) {
         const sizeKb = totalBytes / 1024;
         if (sizeKb < minSizeKb) {
-          console.log(`[My-IDM] Skipping download (${sizeKb.toFixed(1)} KB < ${minSizeKb} KB threshold):`, item.filename);
+          recordSkip(`below the ${minSizeKb} KB minimum (${sizeKb.toFixed(1)} KB)`, downloadUrl);
           suggest({ filename: item.filename });
           return;
         }
+      }
+
+      // The size is unknown and a minimum is configured. `onDeterminingFilename` fires as the
+      // download starts, which is too early for a Content-Length to be there in most cases, so
+      // this is the common branch rather than the exception - and it is the one that used to end
+      // with My-IDM capturing the file and then dropping it after its own probe, leaving the
+      // user with a cancelled browser download and no row. Let the browser have it instead.
+      if (minSizeKb > 0 && totalBytes <= 0 && cfg.skipUnknownSizeDownloads !== false) {
+        recordSkip(`size unknown and a ${minSizeKb} KB minimum is set`, downloadUrl);
+        suggest({ filename: item.filename });
+        return;
       }
 
       // Extract cookies for authenticated downloads
@@ -442,7 +476,16 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
       const totalBytes = item.totalBytes !== undefined && item.totalBytes > 0
         ? item.totalBytes
         : (item.fileSize !== undefined && item.fileSize > 0 ? item.fileSize : 0);
-      if (minSizeKb > 0 && totalBytes > 0 && (totalBytes / 1024) < minSizeKb) return;
+      if (minSizeKb > 0 && totalBytes > 0 && (totalBytes / 1024) < minSizeKb) {
+        recordSkip(`below the ${minSizeKb} KB minimum (${(totalBytes / 1024).toFixed(1)} KB)`, downloadUrl);
+        return;
+      }
+      // Unknown size with a minimum configured: leave it to the browser. See the Chromium
+      // engine above for why this is the common branch and why capturing is the wrong answer.
+      if (minSizeKb > 0 && totalBytes <= 0 && cfg.skipUnknownSizeDownloads !== false) {
+        recordSkip(`size unknown and a ${minSizeKb} KB minimum is set`, downloadUrl);
+        return;
+      }
 
       // Extract cookies
       const cookies = await getCookiesForUrl(downloadUrl);

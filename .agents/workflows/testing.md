@@ -12,8 +12,8 @@ Two tiers. **Use basic sanity by default** — it is safe to leave running in th
 
 | Tier | Command | Scope | Time |
 | :--- | :--- | :--- | :--- |
-| **Basic sanity** | `run_all_tests.bat basic` | 1816 tests. No window, no tray, no real clipboard. | **~55 s** |
-| **Full** | `run_all_tests.bat` | All 2844 tests, including UI. | ~6 min |
+| **Basic sanity** | `run_all_tests.bat basic` | 1840 tests. No window, no tray, no real clipboard. | **~55 s** |
+| **Full** | `run_all_tests.bat` | All 2868 tests, including UI. | ~6 min |
 
 All three measured on 2026-10-02 via the wrapper. The tiers are **not** proportional: the 959
 `ui` tests alone take ~2 min 20 s, because each builds and tears down real Qt widget trees —
@@ -37,7 +37,7 @@ venv, switches to its own directory, and prints the result. Prefer it over calli
 directly. There is no `sync.bat`, no `webapp/` and no Android project — ignore runbooks that
 mention them. The suite is pure Python + PySide6 and needs no build step.
 
-**Current state: full `2841 passed, 3 skipped`; basic `1813 passed, 3 skipped, 1028 deselected`.**
+**Current state: full `2865 passed, 3 skipped`; basic `1837 passed, 3 skipped, 1028 deselected`.**
 The three skips are the opt-in real Windows Defender scan (`MYIDM_RUN_AV_TESTS=1`) and the
 `ui`-tier tray/clipboard tests that need a desktop session. Update these numbers when you add or
 remove tests, and treat a *sudden* drop as a signal that a module failed to import.

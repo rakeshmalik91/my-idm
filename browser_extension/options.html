@@ -56,6 +56,21 @@
       </div>
       <div class="hint">Downloads smaller than this size (in KB) will not be intercepted. Set to 0 for no limit.</div>
 
+      <div class="toggle-row">
+        <span>Skip downloads of unknown size</span>
+        <label class="switch">
+          <input type="checkbox" id="skipUnknownSizeDownloads">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="hint">
+        Only applies while a minimum size is set above. The browser often cannot report a size when a
+        download starts, and a chunked response has no size to look for either. On: those downloads
+        are left to the browser, because a minimum you configured is a statement about what you want
+        in My-IDM. Off: they are captured anyway and My-IDM checks the real size once it has probed
+        the response.
+      </div>
+
       <div class="form-group">
         <label for="bypassExts">Bypassed File Extensions</label>
         <input type="text" id="bypassExts" placeholder=".torrent, .crx, .pdf">

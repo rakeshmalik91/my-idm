@@ -893,6 +893,19 @@ class BrowserIntegrationConfig:
     intercept_torrent_files: bool = True
     intercept_magnet_links: bool = True
     min_file_size_kb: int = 0  # Minimum file size in KB to intercept (0 = no minimum)
+    # What to do when `min_file_size_kb` is set but the download's size cannot be determined -
+    # which is the common case, because Chrome reports `totalBytes: 0` at
+    # `onDeterminingFilename` time and a chunked or dynamically generated response has no
+    # Content-Length to probe for.
+    #
+    # True  (default): do not capture. A minimum the user configured is a statement about what
+    #   they want to see in My-IDM, and capturing something that may be a 4 KB stylesheet only to
+    #   drop it in the engine after the probe is worse than not capturing it: the browser download
+    #   is cancelled and a row appears and then disappears.
+    # False: capture it and defer the check to the engine's own probe
+    #   (`HTTPEngine._enforce_browser_min_size`), which keeps the threshold enforced for the
+    #   unsizeable majority at the cost of the capture-then-refuse churn.
+    skip_unknown_size_downloads: bool = True
     bypassed_extensions: list[str] = field(default_factory=lambda: [".crx"])
 
     def to_dict(self) -> dict[str, Any]:
@@ -904,6 +917,7 @@ class BrowserIntegrationConfig:
             "intercept_torrent_files": self.intercept_torrent_files,
             "intercept_magnet_links": self.intercept_magnet_links,
             "min_file_size_kb": self.min_file_size_kb,
+            "skip_unknown_size_downloads": self.skip_unknown_size_downloads,
             "bypassed_extensions": list(self.bypassed_extensions),
         }
 
@@ -917,6 +931,7 @@ class BrowserIntegrationConfig:
             intercept_torrent_files=bool(data.get("intercept_torrent_files", True)),
             intercept_magnet_links=bool(data.get("intercept_magnet_links", True)),
             min_file_size_kb=int(data.get("min_file_size_kb", 0)),
+            skip_unknown_size_downloads=bool(data.get("skip_unknown_size_downloads", True)),
             bypassed_extensions=list(data.get("bypassed_extensions", [".crx"])),
         )
 
@@ -932,6 +947,7 @@ class BrowserIntegrationConfig:
         settings.setValue("intercept_torrent_files", self.intercept_torrent_files)
         settings.setValue("intercept_magnet_links", self.intercept_magnet_links)
         settings.setValue("min_file_size_kb", self.min_file_size_kb)
+        settings.setValue("skip_unknown_size_downloads", self.skip_unknown_size_downloads)
         settings.setValue("bypassed_extensions", ",".join(self.bypassed_extensions))
         settings.endGroup()
 
@@ -948,6 +964,9 @@ class BrowserIntegrationConfig:
         intercept_torrent_files = settings.value("intercept_torrent_files", True, type=bool)
         intercept_magnet_links = settings.value("intercept_magnet_links", True, type=bool)
         min_file_size_kb = settings.value("min_file_size_kb", 0, type=int)
+        skip_unknown_size_downloads = settings.value(
+            "skip_unknown_size_downloads", True, type=bool
+        )
         bypassed_raw = settings.value("bypassed_extensions", ".crx", type=str)
         settings.endGroup()
 
@@ -960,6 +979,7 @@ class BrowserIntegrationConfig:
             intercept_torrent_files=bool(intercept_torrent_files),
             intercept_magnet_links=bool(intercept_magnet_links),
             min_file_size_kb=int(min_file_size_kb) if min_file_size_kb >= 0 else 0,
+            skip_unknown_size_downloads=bool(skip_unknown_size_downloads),
             bypassed_extensions=bypassed,
         )
 
