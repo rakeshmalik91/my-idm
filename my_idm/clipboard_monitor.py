@@ -5,8 +5,8 @@ most common way a user encounters a link — they copy it out of a page, a chat 
 terminal. This module watches ``QClipboard.dataChanged``, debounces it, and hands anything that
 looks like a list of downloadable URLs to ``DownloadManager.add_download()``.
 
-Two decisions worth stating, because both are the difference between a feature people keep
-and a feature people disable:
+Three decisions worth stating, because all of them are the difference between a feature people
+keep and a feature people disable:
 
 **The gate is all-or-nothing.** A copied text is accepted only when *every* non-blank line is
 a downloadable URL. A chat message that happens to contain one link must not be captured, and
@@ -14,6 +14,17 @@ neither must the 200-line log tail someone just copied — otherwise the monitor
 keystroke and the user stops trusting it. This is the same policy
 ``AddDownloadDialog._prefill_url`` already uses for its clipboard pre-fill, and the two share
 :func:`looks_like_download_url` so they cannot drift.
+
+**A URL has to prove it is a file before it becomes a row.** A copied link is text, and text
+does not say what it points at. ``https://example.com/`` is indistinguishable from
+``https://example.com/ubuntu.iso`` until somebody asks the server, so a URL copied out of a
+browser address bar used to land in the table as a download that failed — the user then had to
+find the row and delete it. :func:`decide_capture` resolves each candidate first (see
+:mod:`my_idm.http_probe`) and drops anything that is not a file, is smaller than the configured
+minimum, or names an ignored extension. The probe is what makes the size and extension settings
+mean anything: neither can be evaluated from a URL that redirects to a named file, and a URL
+with no extension has no extension to ignore. An unresolvable URL is dropped rather than
+queued, which is the point — a row the user has to delete is worse than no row.
 
 **The app's own clipboard writes are suppressed.** ``MainWindow._on_copy_url`` puts selected
 rows' URLs on the clipboard, and re-reading that would re-add them. Deduping inside
@@ -24,6 +35,7 @@ is therefore called by the writer, and the text it names is ignored on the next 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -32,6 +44,8 @@ from urllib.parse import unquote, urlparse
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
+
+from my_idm.http_probe import ProbeResult, is_probeable, probe_url
 
 log = logging.getLogger("my_idm")
 
@@ -159,11 +173,121 @@ def extract_download_urls(
     return urls
 
 
+#: Why a candidate URL was not captured. Surfaced to the user verbatim in the status bar: a
+#: silent drop reads as a bug, and a drop the user cannot explain is a drop they stop
+#: trusting.
+REASON_UNREACHABLE = "could not be reached"
+REASON_HTML_PAGE = "resolves to a web page, not a file"
+REASON_TOO_SMALL = "smaller than the minimum capture size"
+REASON_IGNORED_EXT = "extension is on the ignore list"
+
+
+def decide_capture(
+    url: str,
+    probe: Optional[ProbeResult],
+    *,
+    min_bytes: int = 0,
+    ignored_extensions: Optional[list[str] | set[str]] = None,
+) -> tuple[bool, str]:
+    """Should *url* be captured, given what the probe found? Returns (accept, reason).
+
+    The extension check runs against **both** the URL as copied and the resolved target,
+    because the two disagree exactly when it matters: ``/download?id=9`` has no extension to
+    ignore but serves ``report.pdf``, and a shortener has a ``.html`` path that serves a
+    ``.zip``. Either one can be the file the user actually meant.
+
+    ``min_bytes`` of 0 disables the size check, matching the setting's "no minimum" wording. A
+    probe that could not determine a size (``size == 0``) never fails this check: refusing
+    every unsizeable response would reject every chunked and gzip-encoded download there is.
+
+    An ``ok=False`` probe is a rejection. That is deliberately strict — it is what stops a
+    copied link to a page that 404s or sits behind a login from becoming a permanent error
+    row — but it does mean a capture whose host is briefly unreachable is dropped rather than
+    retried. The user can always paste the URL into Add Download, which is not gated at all.
+    """
+    if not probe or not probe.ok:
+        return False, REASON_UNREACHABLE
+
+    if probe.is_html:
+        return False, REASON_HTML_PAGE
+
+    if is_ignored_extension(url, ignored_extensions) or is_ignored_extension(
+        probe.filename, ignored_extensions
+    ):
+        return False, REASON_IGNORED_EXT
+
+    if min_bytes > 0 and 0 < probe.size < min_bytes:
+        return False, REASON_TOO_SMALL
+
+    return True, ""
+
+
+#: Ceiling on probes in flight for one copy. 20 URLs is a pasted list, and firing 20 requests
+#: at an origin at the same moment is how a capture gets rate-limited into dropping everything.
+MAX_CONCURRENT_PROBES = 4
+
+
+def _run_coroutine_blocking(coro):
+    """Drive *coro* to completion on a private loop and return its result.
+
+    The default ``run_async``, and the one tests rely on to make ``capture_now()``'s return
+    value meaningful. Production passes the manager's background loop instead, so the probe
+    does not block the UI thread for its timeout.
+    """
+    return asyncio.run(coro)
+
+
+async def resolve_candidates(
+    urls: list[str],
+    *,
+    probe: Optional[Callable] = None,
+    min_bytes: int = 0,
+    ignored_extensions: Optional[list[str] | set[str]] = None,
+    max_concurrent: int = MAX_CONCURRENT_PROBES,
+) -> list[tuple[str, Optional[ProbeResult], str]]:
+    """Resolve every URL and decide each one. Returns [(url, probe, reason)].
+
+    All three elements are kept: the caller needs the ``ProbeResult`` to name the file
+    ``add_download`` should save it as, and the empty ``reason`` marks an accepted URL.
+
+    A URL with no HTTP transport — ``magnet:``, ``ftp:``, a local ``.torrent`` — is not probed
+    and accepted as-is. There is no server to ask and no size to weigh, so a probe could only
+    ever report failure and drop a link the manager handles perfectly well.
+    """
+    probe = probe or probe_url
+    gate = asyncio.Semaphore(max(1, int(max_concurrent or MAX_CONCURRENT_PROBES)))
+    limit = max(0, int(min_bytes or 0))
+
+    async def one(url: str):
+        if not is_probeable(url):
+            return (url, None, "")
+        async with gate:
+            try:
+                result = await probe(url)
+            except Exception as exc:
+                # A probe that raises is a probe that failed; the URL is not capturable. Swallowed
+                # here rather than aborting the batch, so one bad host cannot cost the rest.
+                log.info("Clipboard probe raised for %s: %s", url, exc)
+                result = None
+        accepted, reason = decide_capture(
+            url, result, min_bytes=limit, ignored_extensions=ignored_extensions
+        )
+        return (url, result if accepted else None, "" if accepted else reason)
+
+    if not urls:
+        return []
+    return list(await asyncio.gather(*(one(u) for u in urls)))
+
+
 class ClipboardMonitor(QObject):
     """Watches the clipboard and captures text that is only downloadable URLs."""
 
     #: (urls, skipped) — ``skipped`` counts lines dropped by the configured maximum.
     urls_captured = Signal(list, int)
+    #: [(url, reason), ...] for candidates the probe rejected. Emitted even when nothing was
+    #: captured, because "I copied a link and nothing happened" is indistinguishable from a
+    #: broken feature unless the app says why.
+    urls_filtered = Signal(list)
 
     def __init__(
         self,
@@ -174,6 +298,8 @@ class ClipboardMonitor(QObject):
         queue_provider: Optional[Callable[[], str]] = None,
         min_file_size_kb: int = 1024,
         ignored_extensions: Optional[list[str]] = None,
+        run_async: Optional[Callable] = None,
+        probe: Optional[Callable] = None,
     ):
         super().__init__(parent)
         self._manager = manager
@@ -185,6 +311,15 @@ class ClipboardMonitor(QObject):
         # Injected rather than read off the manager so the monitor stays testable against a
         # fake manager that has no queue concept at all.
         self._queue_provider = queue_provider or (lambda: "")
+
+        # Resolving a URL needs an event loop and an HTTP client, neither of which belongs in a
+        # QObject. Both arrive as callables so this stays testable without a network: tests pass
+        # a synchronous ``run_async`` and a scripted ``probe``, production passes the manager's
+        # loop and the real probe. The default ``run_async`` drives the coroutine to completion
+        # on the calling thread, which is correct for a caller that has no loop and is what
+        # makes ``capture_now()``'s return value meaningful in tests.
+        self._run_async = run_async or _run_coroutine_blocking
+        self._probe = probe or probe_url
 
         # ``setSingleShot`` and a restart on every change is what makes this a debounce rather
         # than a poll: a burst of clipboard writes coalesces into one read.
@@ -213,6 +348,14 @@ class ClipboardMonitor(QObject):
     @property
     def ignored_extensions(self) -> list[str]:
         return list(self._ignored_extensions)
+
+    @property
+    def probe(self):
+        """The async URL resolver. A public seam so a test can install one without a network."""
+        return self._probe
+
+    def set_probe(self, probe: Optional[Callable]) -> None:
+        self._probe = probe or probe_url
 
     def set_max_urls(self, max_urls: int) -> None:
         self._max_urls = max(1, min(int(max_urls or DEFAULT_MAX_URLS), ABSOLUTE_MAX_URLS))
@@ -281,8 +424,15 @@ class ClipboardMonitor(QObject):
     def capture_now(self) -> list[str]:
         """Read the clipboard once and add anything captureable.
 
-        This is the debounce timer's slot, and the seam tests drive: no event loop and no real
-        clipboard round-trip required. Returns the URLs that were handed to the manager.
+        This is the debounce timer's slot. The clipboard read has to happen here, on the thread
+        that owns ``QClipboard``, but resolving the URLs cannot: it is HTTP work, and blocking
+        the GUI thread on it would freeze the window for the probe's whole timeout. So the
+        candidates go to the injected ``run_async`` — the manager's background loop in
+        production — and only the add happens back on the caller's thread.
+
+        Returns the URLs handed to the manager, which means the return value is empty whenever
+        ``run_async`` defers rather than completes. Tests use the blocking default so the value
+        is real; nothing in the app reads it.
         """
         if not self._debounce_ms:
             self._debounce.stop()
@@ -317,18 +467,51 @@ class ClipboardMonitor(QObject):
         non_blank = sum(1 for line in cleaned.splitlines() if line.strip())
         skipped = max(0, non_blank - self._max_urls)
 
+        try:
+            return self._run_async(self._capture(urls, skipped))
+        except Exception as exc:
+            # A failure here is a failed capture, not a failed app: the debounce timer must
+            # never propagate out of its slot, or Qt tears the connection down and stops firing.
+            log.warning("Clipboard capture aborted: %s", exc)
+            return []
+
+    async def _capture(self, urls: list[str], skipped: int) -> list[str]:
+        """Resolve each candidate, then hand the survivors to the manager.
+
+        Split out from :meth:`capture_now` so the whole decision is one awaitable unit that a
+        test can drive directly, with no event loop and no network.
+        """
+        resolved = await resolve_candidates(
+            urls,
+            probe=self._probe,
+            min_bytes=int(self._min_file_size_kb * 1024),
+            ignored_extensions=self._ignored_extensions,
+        )
+
+        accepted = [(url, probe) for url, probe, reason in resolved if not reason]
+        filtered = [(url, reason) for url, probe, reason in resolved if reason]
+        if filtered:
+            # Emitted whether or not anything survived, so the status bar can explain the silence.
+            self.urls_filtered.emit(filtered)
+
         added: list[str] = []
         # A copied URL is a foreground action like Ctrl+V, so it follows whichever queue the
         # view is scoped to. Browser captures deliberately do not - see
         # DownloadManager.add_download_from_browser.
         queue_id = self._queue_provider()
-        for url in urls:
+        for url, probe in accepted:
             try:
                 metadata = {"capture_source": "clipboard"}
                 if self._min_file_size_kb > 0:
+                    # Kept even when the probe already sized the file: the engine probes again
+                    # authoritatively, and a URL that shrank in between must still be refused.
                     metadata["pending_min_bytes"] = int(self._min_file_size_kb * 1024)
+                # The probe followed redirects and read Content-Disposition, so it often knows the
+                # real filename where the copied URL showed none. Passing it as an explicit
+                # filename stops the row appearing nameless until the engine's own probe lands.
+                filename = (probe.filename if probe else "") or ""
                 did = self._manager.add_download(
-                    url, queue_id=queue_id, metadata=metadata
+                    url, queue_id=queue_id, metadata=metadata, filename=filename
                 )
             except Exception as exc:
                 log.warning("Clipboard capture failed for %s: %s", url, exc)

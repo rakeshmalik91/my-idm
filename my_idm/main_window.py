@@ -1522,8 +1522,12 @@ class MainWindow(QMainWindow):
             ignored_extensions=self._manager.general_config.clipboard_ignored_extensions,
             parent=self,
             queue_provider=self._manager.get_active_queue,
+            # Resolving a copied URL is HTTP work; the manager's loop already exists and the
+            # GUI thread must not block on it.
+            run_async=self._manager.run_coro_threadsafe,
         )
         self._clipboard_monitor.urls_captured.connect(self._on_clipboard_urls_captured)
+        self._clipboard_monitor.urls_filtered.connect(self._on_clipboard_urls_filtered)
 
         self._hotkey = HotkeyRegistration(self)
         self._hotkey.triggered.connect(self._on_global_hotkey)
@@ -1632,6 +1636,21 @@ class MainWindow(QMainWindow):
         self._status_label.setText(message)
         self._update_count_label()
         self._notify_clipboard_captured(urls, skipped)
+
+    def _on_clipboard_urls_filtered(self, filtered: list):
+        """Say why a copied URL was not captured.
+
+        Silence here is what made this feature untrustworthy: the user copies a link, nothing
+        appears, and there is no way to tell a deliberate skip from a broken monitor. The
+        reasons come from :func:`my_idm.clipboard_monitor.decide_capture`, so they describe the
+        rule that actually fired rather than a guess.
+        """
+        if not filtered:
+            return
+        _, reason = filtered[0]
+        what = "URL" if len(filtered) == 1 else f"{len(filtered)} URLs"
+        log.info("Clipboard capture skipped %s: %s", what, reason)
+        self._status_label.setText(f"📋 Clipboard capture skipped {what}: {reason}")
 
     def _notify_clipboard_captured(self, urls: list, skipped: int):
         from my_idm.notifications import notify_clipboard_download_captured

@@ -9,6 +9,7 @@ import aiohttp
 from aiohttp import web
 
 from my_idm.config import BrowserIntegrationConfig
+from my_idm.http_probe import html_is_a_file, probe_url
 
 if TYPE_CHECKING:
     from my_idm.manager import DownloadManager
@@ -204,47 +205,26 @@ class BrowserServer:
     async def _probe_content_length(
         self, url: str, headers: Optional[dict] = None, cookies: str = ""
     ) -> Optional[int]:
-        """Perform a fast HEAD or range probe to determine file size in bytes."""
-        try:
-            req_headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            if headers and isinstance(headers, dict):
-                req_headers.update(headers)
-            if cookies:
-                req_headers["Cookie"] = cookies
+        """Perform a fast HEAD or range probe to determine file size in bytes.
 
-            timeout = aiohttp.ClientTimeout(total=1.8, connect=1.0)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                # 1. Try fast HEAD request
-                try:
-                    async with session.head(url, headers=req_headers, allow_redirects=True) as resp:
-                        if resp.status < 400:
-                            ct = resp.headers.get("Content-Type", "").lower()
-                            if "text/html" not in ct or url.lower().endswith((".htm", ".html")):
-                                cl = resp.headers.get("Content-Length")
-                                if cl and cl.isdigit() and int(cl) > 0:
-                                    return int(cl)
-                except Exception:
-                    pass
-
-                # 2. Try fast GET with byte range (bytes=0-0)
-                req_headers["Range"] = "bytes=0-0"
-                try:
-                    async with session.get(url, headers=req_headers, allow_redirects=True) as resp:
-                        if resp.status < 400:
-                            ct = resp.headers.get("Content-Type", "").lower()
-                            if "text/html" not in ct or url.lower().endswith((".htm", ".html")):
-                                cr = resp.headers.get("Content-Range")
-                                if cr and "/" in cr:
-                                    total_str = cr.split("/")[-1].strip()
-                                    if total_str.isdigit() and int(total_str) > 0:
-                                        return int(total_str)
-                                cl = resp.headers.get("Content-Length")
-                                if cl and cl.isdigit() and resp.status == 200 and int(cl) > 0:
-                                    return int(cl)
-                except Exception:
-                    pass
-        except Exception as exc:
-            log.debug("Probing size failed for %s: %s", url, exc)
+        Thin wrapper over :func:`my_idm.http_probe.probe_url`, which the clipboard monitor uses
+        for the same question and which must answer identically — a size probe that gave the two
+        capture paths different answers would be indistinguishable from a bug in one of them.
+        The ``Content-Type`` policy stays here: an origin serving ``text/html`` for
+        ``/api/export`` is answering a browser, not offering a file, and its Content-Length is
+        the size of a page rather than the size of a download.
+        """
+        req_headers: dict = {}
+        if headers and isinstance(headers, dict):
+            req_headers.update(headers)
+        if cookies:
+            req_headers["Cookie"] = cookies
+        result = await probe_url(
+            url, req_headers, timeout=1.8, connect_timeout=1.0,
+            accept_html=html_is_a_file(url),
+        )
+        if result.ok and result.size > 0:
+            return result.size
         return None
 
     async def _handle_add(self, request: web.Request) -> web.Response:

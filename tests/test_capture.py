@@ -24,11 +24,17 @@ import my_idm.hotkey as hotkey_module
 from my_idm.browser_server import BrowserServer
 from my_idm.clipboard_monitor import (
     ABSOLUTE_MAX_URLS,
+    REASON_HTML_PAGE,
+    REASON_IGNORED_EXT,
+    REASON_TOO_SMALL,
+    REASON_UNREACHABLE,
     ClipboardMonitor,
+    decide_capture,
     extract_download_urls,
     extract_url_extension,
     is_ignored_extension,
     looks_like_download_url,
+    resolve_candidates,
 )
 from my_idm.config import BrowserIntegrationConfig, GeneralConfig
 from my_idm.dialogs import AddDownloadDialog
@@ -40,8 +46,10 @@ from my_idm.hotkey import (
     describe_modifiers,
     parse_hotkey,
 )
+from my_idm.http_probe import ProbeResult, filename_from_headers, html_is_a_file, is_probeable
 from my_idm.manager import DownloadManager
 from my_idm.database import Database, DownloadEntry
+from tests.fake_http import run_async
 from tests.test_main_window import _MainWindowTestCase
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -169,6 +177,24 @@ class _FakeManager:
         if callable(self.result):
             return self.result(url)
         return self.result
+
+
+def permissive_probe(size: int = 64 * 1024 * 1024, **overrides):
+    """Build a probe that accepts everything, for tests about something other than filtering.
+
+    ``ClipboardMonitor`` resolves a URL before capturing it, so a test that only cares about
+    dedup or the per-copy limit would otherwise have to fake a network answer. The size is a
+    real 64 MB rather than 0 on purpose: a 0-byte probe means *unknown* and short-circuits the
+    size check, so tests would pass against a threshold they never exercised.
+    """
+
+    async def _probe(url: str) -> ProbeResult:
+        result = {"ok": True, "size": size, "content_type": "application/octet-stream"}
+        result.update(overrides)
+        return ProbeResult(url=url, filename="", final_url=url, **result)
+
+    _probe.calls = []
+    return _probe
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +349,7 @@ class TestClipboardMonitor(ConfigIsolationMixin, unittest.TestCase):
         self.addCleanup(QApplication.processEvents)
 
     def make(self, **kwargs):
+        kwargs.setdefault("probe", permissive_probe())
         monitor = ClipboardMonitor(self.manager, **kwargs)
         self.addCleanup(monitor.stop)
         return monitor
@@ -594,6 +621,300 @@ class TestClipboardMonitor(ConfigIsolationMixin, unittest.TestCase):
         self.clipboard.setText("https://example.com/doc.txt")
         assert monitor.capture_now() == ["https://example.com/doc.txt"]
         assert self.manager.kwargs_calls[-1]["metadata"]["pending_min_bytes"] == 2048 * 1024
+
+    # -- resolve-before-capture --------------------------------------------
+
+    def test_a_url_that_is_not_a_file_is_never_added(self):
+        # The bug this whole path exists for: a bare page link copied out of the address bar
+        # used to become a row that failed, and the user had to find it and delete it.
+        monitor = self.make(probe=permissive_probe(ok=True, size=4096,
+                                                   content_type="text/html"))
+        seen = []
+        monitor.urls_filtered.connect(seen.extend)
+        self.clipboard.setText("https://bag-buddy-f0896.firebaseapp.com/")
+        assert monitor.capture_now() == []
+        assert self.manager.calls == []
+        assert seen == [("https://bag-buddy-f0896.firebaseapp.com/", REASON_HTML_PAGE)]
+
+    def test_a_file_below_the_minimum_is_never_added(self):
+        # A real file, just a small one: the size minimum has to hold against a resolved URL,
+        # not only against one whose extension said so.
+        monitor = self.make(min_file_size_kb=1024,
+                            probe=permissive_probe(size=500 * 1024))
+        seen = []
+        monitor.urls_filtered.connect(seen.extend)
+        self.clipboard.setText("https://example.com/small.pdf")
+        assert monitor.capture_now() == []
+        assert self.manager.calls == []
+        assert seen == [("https://example.com/small.pdf", REASON_TOO_SMALL)]
+
+    def test_a_file_above_the_minimum_is_added(self):
+        monitor = self.make(min_file_size_kb=1024, probe=permissive_probe(size=2 * 1024 * 1024))
+        self.clipboard.setText("https://example.com/big.pdf")
+        assert monitor.capture_now() == ["https://example.com/big.pdf"]
+
+    def test_an_unreachable_url_is_dropped_rather_than_queued(self):
+        # A 404 or a login-walled link must not become a permanent error row either.
+        monitor = self.make(probe=permissive_probe(ok=False, size=0, status=404,
+                                                   error="HTTP 404"))
+        seen = []
+        monitor.urls_filtered.connect(seen.extend)
+        self.clipboard.setText("https://example.com/gone.zip")
+        assert monitor.capture_now() == []
+        assert self.manager.calls == []
+        assert seen == [("https://example.com/gone.zip", REASON_UNREACHABLE)]
+
+    def test_an_unknown_size_is_captured_not_refused(self):
+        # size == 0 means *unknown* (chunked, or a HEAD the origin refused). Refusing every
+        # unsizeable response would reject every gzip-encoded download there is.
+        monitor = self.make(min_file_size_kb=1024, probe=permissive_probe(size=0))
+        self.clipboard.setText("https://example.com/stream.bin")
+        assert monitor.capture_now() == ["https://example.com/stream.bin"]
+
+    def test_the_ignored_extension_catches_the_resolved_filename(self):
+        # /download?id=9 has no extension to ignore in the URL; the probe finds out it serves
+        # a .txt. Checking only the copied URL is what let these through.
+        async def probe(url):
+            return ProbeResult(url=url, ok=True, size=64 * 1024 * 1024,
+                               filename="notes.txt", content_type="text/plain")
+
+        monitor = self.make(ignored_extensions=[".txt"], probe=probe)
+        seen = []
+        monitor.urls_filtered.connect(seen.extend)
+        self.clipboard.setText("https://example.com/download?id=9")
+        assert monitor.capture_now() == []
+        assert seen == [("https://example.com/download?id=9", REASON_IGNORED_EXT)]
+
+    def test_the_probe_filename_is_handed_to_the_manager(self):
+        # Otherwise the row appears nameless until the engine's own probe lands.
+        async def probe(url):
+            return ProbeResult(url=url, ok=True, size=64 * 1024 * 1024,
+                               filename="ubuntu.iso", content_type="application/octet-stream")
+
+        monitor = self.make(probe=probe)
+        self.clipboard.setText("https://example.com/download?id=9")
+        assert monitor.capture_now() == ["https://example.com/download?id=9"]
+        assert self.manager.kwargs_calls[0]["filename"] == "ubuntu.iso"
+
+    def test_one_unreachable_url_does_not_cost_the_others(self):
+        async def probe(url):
+            if "bad" in url:
+                return ProbeResult(url=url, ok=False, error="HTTP 500")
+            return ProbeResult(url=url, ok=True, size=64 * 1024 * 1024,
+                               content_type="application/octet-stream")
+
+        monitor = self.make(probe=probe)
+        self.clipboard.setText(
+            "https://example.com/bad.zip\nhttps://example.com/good.zip"
+        )
+        assert monitor.capture_now() == ["https://example.com/good.zip"]
+
+    def test_a_probe_that_raises_is_treated_as_unreachable(self):
+        async def probe(url):
+            raise RuntimeError("dns exploded")
+
+        monitor = self.make(probe=probe)
+        seen = []
+        monitor.urls_filtered.connect(seen.extend)
+        self.clipboard.setText("https://example.com/a.zip")
+        assert monitor.capture_now() == []
+        assert self.manager.calls == []
+        assert seen == [("https://example.com/a.zip", REASON_UNREACHABLE)]
+
+    def test_a_magnet_link_is_not_probed(self):
+        # Nothing to ask and no size to weigh: probing it could only report failure.
+        calls = []
+
+        async def probe(url):
+            calls.append(url)
+            return ProbeResult(url=url, ok=True, size=64 * 1024 * 1024)
+
+        monitor = self.make(probe=probe)
+        magnet = "magnet:?xt=urn:btih:0123456789abcdef"
+        self.clipboard.setText(magnet)
+        assert monitor.capture_now() == [magnet]
+        assert calls == []
+
+    def test_pending_min_bytes_survives_a_resolved_size(self):
+        # The engine probes again authoritatively; a URL that shrank in between must still be
+        # refused there, so the deferral cannot be dropped just because the probe succeeded.
+        monitor = self.make(min_file_size_kb=1024, probe=permissive_probe(size=64 * 1024 * 1024))
+        self.clipboard.setText("https://example.com/big.pdf")
+        monitor.capture_now()
+        assert self.manager.kwargs_calls[0]["metadata"]["pending_min_bytes"] == 1024 * 1024
+
+    def test_a_deferred_run_async_does_not_lose_the_capture(self):
+        # Production schedules on the manager's loop and returns at once; capture_now must not
+        # report that as "nothing happened".
+        self.manager = _FakeManager()
+        monitor = ClipboardMonitor(
+            self.manager, debounce_ms=0, probe=permissive_probe(),
+            run_async=lambda coro: run_async(coro),
+        )
+        self.addCleanup(monitor.stop)
+        self.clipboard.setText("https://example.com/a.zip")
+        assert monitor.capture_now() == ["https://example.com/a.zip"]
+
+    def test_a_scheduler_that_raises_does_not_escape_the_timer_slot(self):
+        # This runs from a QTimer; an exception there tears down the connection and the
+        # monitor silently stops capturing forever.
+        def explode(coro):
+            coro.close()
+            raise RuntimeError("loop is gone")
+
+        monitor = ClipboardMonitor(self.manager, debounce_ms=0,
+                                  probe=permissive_probe(), run_async=explode)
+        self.addCleanup(monitor.stop)
+        self.clipboard.setText("https://example.com/a.zip")
+        assert monitor.capture_now() == []
+
+
+# ---------------------------------------------------------------------------
+# decide_capture
+# ---------------------------------------------------------------------------
+
+class TestDecideCapture(unittest.TestCase):
+    """The filter itself, independent of the monitor around it."""
+
+    BIG = ProbeResult(url="https://e.com/a.zip", ok=True, size=64 * 1024 * 1024,
+                      content_type="application/octet-stream")
+
+    def test_a_resolvable_file_is_accepted(self):
+        assert decide_capture("https://e.com/a.zip", self.BIG) == (True, "")
+
+    def test_missing_and_failed_probes_are_unreachable(self):
+        assert decide_capture("https://e.com/a.zip", None) == (False, REASON_UNREACHABLE)
+        assert decide_capture(
+            "https://e.com/a.zip", ProbeResult(url="https://e.com/a.zip", ok=False)
+        ) == (False, REASON_UNREACHABLE)
+
+    def test_html_is_a_page_however_small_the_setting(self):
+        # With no minimum configured the size check cannot catch it, so this has to stand alone.
+        page = ProbeResult(url="https://e.com/", ok=True, size=5_000_000,
+                           content_type="text/html; charset=utf-8")
+        assert decide_capture("https://e.com/", page, min_bytes=0) == (False, REASON_HTML_PAGE)
+
+    def test_the_size_check_is_off_when_the_minimum_is_zero(self):
+        tiny = ProbeResult(url="https://e.com/a.zip", ok=True, size=10)
+        assert decide_capture("https://e.com/a.zip", tiny, min_bytes=0) == (True, "")
+
+    def test_a_size_exactly_at_the_minimum_is_kept(self):
+        # The setting is a *minimum*: a file of exactly the threshold size is one the user asked
+        # for, and an off-by-one here silently drops the smallest file they configured to keep.
+        exact = ProbeResult(url="https://e.com/a.zip", ok=True, size=1024)
+        assert decide_capture("https://e.com/a.zip", exact, min_bytes=1024) == (True, "")
+
+    def test_the_extension_check_reads_the_resolved_name_too(self):
+        named = ProbeResult(url="https://e.com/d", ok=True, size=64 * 1024 * 1024,
+                            filename="page.html")
+        assert decide_capture("https://e.com/d", named,
+                              ignored_extensions=[".html"]) == (False, REASON_IGNORED_EXT)
+
+    def test_the_extension_check_normalises_a_bare_dotless_name(self):
+        # filename_from_headers can return "notes.txt"; is_ignored_extension adds the dot, so
+        # a user who typed "txt" and a user who typed ".txt" get the same answer.
+        named = ProbeResult(url="https://e.com/d", ok=True, size=1, filename="notes.txt")
+        assert decide_capture("https://e.com/d", named,
+                              ignored_extensions=["txt"])[0] is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_candidates
+# ---------------------------------------------------------------------------
+
+class TestResolveCandidates(unittest.TestCase):
+    def test_results_keep_url_probe_and_reason_in_order(self):
+        async def probe(url):
+            if url.endswith("page.html"):
+                return ProbeResult(url=url, ok=True, size=9000, content_type="text/html")
+            return ProbeResult(url=url, ok=True, size=8 << 20)
+
+        got = run_async(resolve_candidates(
+            ["https://e.com/a.zip", "https://e.com/page.html"],
+            probe=probe, min_bytes=1024 * 1024,
+        ))
+        assert [(u, r) for u, p, r in got] == [
+            ("https://e.com/a.zip", ""),
+            ("https://e.com/page.html", REASON_HTML_PAGE),
+        ]
+        # A rejected URL carries no probe: the caller must not act on a result it refused.
+        assert got[1][1] is None
+        assert got[0][1] is not None
+
+    def test_an_empty_list_needs_no_probe(self):
+        assert run_async(resolve_candidates([])) == []
+
+    def test_probes_run_concurrently(self):
+        # A pasted list of 20 URLs must not take 20 x the probe timeout; the semaphore is what
+        # stops that without turning the origin into a rate-limit target.
+        import asyncio
+
+        live = 0
+        peak = 0
+
+        async def probe(url):
+            nonlocal live, peak
+            live += 1
+            peak = max(peak, live)
+            await asyncio.sleep(0)
+            live -= 1
+            return ProbeResult(url=url, ok=True, size=1 << 30)
+
+        urls = [f"https://e.com/{i}.zip" for i in range(20)]
+        run_async(resolve_candidates(urls, probe=probe, max_concurrent=4))
+        assert peak <= 4
+
+
+# ---------------------------------------------------------------------------
+# http_probe helpers
+# ---------------------------------------------------------------------------
+
+class TestProbeHelpers(unittest.TestCase):
+    def test_only_http_schemes_are_probeable(self):
+        for url in ("http://e.com/a.zip", "https://e.com/a.zip", "HTTPS://E.COM/A.ZIP"):
+            assert is_probeable(url), url
+        for url in ("magnet:?xt=urn:btih:abc", "ftp://e.com/a.zip",
+                    "file:///c:/x.torrent", "blob:https://e.com/x", "", None):
+            assert not is_probeable(url), url
+
+    def test_html_counts_as_a_file_only_when_the_url_says_so(self):
+        # /api/export answering text/html is a browser answering, not a file being offered; its
+        # Content-Length is the size of a page and must not satisfy a minimum-size filter.
+        assert html_is_a_file("https://e.com/report.html") is True
+        assert html_is_a_file("https://e.com/report.htm?a=1") is True
+        assert html_is_a_file("https://e.com/api/export") is False
+        assert html_is_a_file("https://e.com/") is False
+
+    def test_content_disposition_wins_over_the_url(self):
+        assert filename_from_headers(
+            {"Content-Disposition": 'attachment; filename="ubuntu.iso"'}, "https://e.com/d?id=1"
+        ) == "ubuntu.iso"
+
+    def test_the_rfc5987_form_is_preferred(self):
+        # filename* survives non-ASCII names the quoted form is not allowed to carry.
+        assert filename_from_headers(
+            {"Content-Disposition": "attachment; filename*=UTF-8''r%C3%A9sum%C3%A9.pdf"},
+            "https://e.com/d",
+        ) == "résumé.pdf"
+
+    def test_a_bare_header_filename_still_yields_an_extension(self):
+        # Some origins send an unquoted `filename=report.pdf` plus a decorative
+        # `filename*=UTF-8''report` with no extension in it; the usable one must win.
+        assert filename_from_headers(
+            {"Content-Disposition": "attachment; filename*=UTF-8''report; filename=report.pdf"},
+            "https://e.com/d",
+        ) == "report.pdf"
+
+    def test_the_final_url_is_the_fallback(self):
+        assert filename_from_headers({}, "https://e.com/files/ubuntu.iso?sig=abc") == "ubuntu.iso"
+
+    def test_a_probe_result_defaults_to_unknown_not_empty(self):
+        r = ProbeResult(url="https://e.com/a.zip")
+        # 0 is "unknown" and False is "did not answer"; conflating them would make a caller
+        # treat a timeout as an empty file.
+        assert r.size == 0
+        assert r.ok is False
+        assert r.is_html is False
 
 
 
@@ -960,6 +1281,11 @@ class TestCaptureIntegration(_MainWindowTestCase):
         super().setUp()
         self.addCleanup(self._restore_user32)
         self.use_fake_user32()
+        # The window builds the real monitor, which means the real probe and therefore a real
+        # DNS lookup the moment anything is copied. Replaced here so the wiring tests stay
+        # hermetic; the probe's own behaviour is covered by TestClipboardMonitor below.
+        if self.win._clipboard_monitor is not None:
+            self.win._clipboard_monitor.set_probe(permissive_probe())
 
     def _restore_user32(self):
         hotkey_module._USER32 = self._real_user32

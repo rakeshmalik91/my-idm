@@ -64,6 +64,21 @@ log = logging.getLogger(__name__)
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
 
+def _log_coro_failure(future) -> None:
+    """Report a background coroutine that ended in an exception.
+
+    ``run_coro_threadsafe`` hands the work to a caller that has already returned, so nothing
+    would ever re-raise this. Consuming the exception here also stops asyncio logging the same
+    failure a second time as an unretrieved future.
+    """
+    try:
+        exc = future.exception()
+    except (asyncio.CancelledError, Exception):
+        return
+    if exc is not None:
+        log.warning("Background coroutine failed: %s", exc)
+
+
 def _pick_format(metadata: Any, format_selector: str):
     """Resolve a format selector against extracted metadata.
 
@@ -1648,6 +1663,34 @@ class DownloadManager(QObject):
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+    def run_coro_threadsafe(self, coro) -> Any:
+        """Schedule *coro* on the background loop, from any thread. Never blocks.
+
+        Exists so a UI-side caller can start HTTP work without owning a loop. The clipboard
+        monitor is the reason: it has to resolve a copied URL over HTTP, but doing that on the
+        GUI thread would freeze the window for the probe's timeout.
+
+        Falls back to running the coroutine to completion on a private loop when the manager's
+        loop is not up yet, which is the pre-:meth:`start` case — a caller that gets there
+        wants the work done more than it wants it scheduled. A coroutine that raises is
+        swallowed here: the caller is a Qt slot that has already returned, so an exception has
+        nowhere to propagate to and would only be logged by asyncio as an orphan.
+        """
+        if self._loop and self._loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+                future.add_done_callback(_log_coro_failure)
+                return future
+            except Exception as exc:
+                log.warning("Could not schedule coroutine on the background loop: %s", exc)
+                coro.close()
+                return None
+        try:
+            return asyncio.run(coro)
+        except Exception as exc:
+            log.warning("Background coroutine failed with no loop available: %s", exc)
+            return None
 
     # -- add downloads -------------------------------------------------------
 

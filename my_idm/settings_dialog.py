@@ -1427,8 +1427,9 @@ class SettingsDialog(QDialog):
         self._clipboard_min_size_spin.setSuffix(" KB")
         self._clipboard_min_size_spin.setSpecialValueText("0 KB (No minimum / capture all sizes)")
         self._clipboard_min_size_spin.setToolTip(
-            "Ignore captured download links whose content size is below this threshold (e.g. web pages, small images, scripts).\n"
-            "Downloads whose size cannot be determined beforehand will be checked during the initial HTTP probe."
+            "Ignore copied links whose resolved file is smaller than this threshold (e.g. web pages, small images, scripts).\n"
+            "Each copied link is checked with the server before it is added, so this applies to the real file — "
+            "including one behind a redirect or named only in a Content-Disposition header."
         )
         size_row.addWidget(self._clipboard_min_size_spin)
         size_row.addStretch(1)
@@ -1441,14 +1442,16 @@ class SettingsDialog(QDialog):
         self._clipboard_ignored_exts_edit.setPlaceholderText("txt, htm, html, jpg, jpeg, png, gif, webp")
         self._clipboard_ignored_exts_edit.setToolTip(
             "Comma-separated list of file extensions to ignore when copying URLs (e.g. txt, htm, html, jpg, jpeg, png, gif, webp).\n"
-            "URLs ending with these extensions will be skipped immediately."
+            "Applied to both the copied link and the filename the server reports for it, so a link with "
+            "no extension in its URL is still matched."
         )
         ext_layout.addWidget(self._clipboard_ignored_exts_edit)
         clip_layout.addLayout(ext_layout)
 
         helper_lbl = QLabel(
-            "💡 URLs matching ignored file extensions or files smaller than the minimum size threshold "
-            "will be automatically skipped to avoid capturing random web page links or assets."
+            "💡 Each copied link is resolved with the server before it is added, and anything that is not a "
+            "file — a web page, an ignored extension, or a file below the minimum size — is skipped with a "
+            "reason in the status bar rather than added as a download that would fail."
         )
         helper_lbl.setWordWrap(True)
         helper_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")

@@ -13,12 +13,12 @@ Three capture sources feed the same queue:
 
 | Source | Module | Opt-in? |
 | --- | --- | --- |
-| Browser extension (automatic + right-click) | [`browser_server.py`](file:///d:/Projects/my-idm/my_idm/browser_server.py) | `BrowserIntegrationConfig.enabled` (`config.py:773`) |
+| Browser extension (automatic + right-click) | [`browser_server.py`](file:///d:/Projects/my-idm/my_idm/browser_server.py) | `BrowserIntegrationConfig.enabled` (`config.py:886`) |
 | System-wide hotkey | [`hotkey.py`](file:///d:/Projects/my-idm/my_idm/hotkey.py) | `GeneralConfig.capture_hotkey_enabled` |
 | Clipboard | [`clipboard_monitor.py`](file:///d:/Projects/my-idm/my_idm/clipboard_monitor.py) | `GeneralConfig.clipboard_monitor_enabled` |
 
 The hotkey and the tray's **🎯 Download Capture** row both call
-`DownloadManager.set_capture_enabled()` (`manager.py:1252`), which flips
+`DownloadManager.set_capture_enabled()` (`manager.py:1338`), which flips
 `BrowserIntegrationConfig.intercept_all`. The clipboard monitor is a separate switch.
 
 **Both are off by default.** A global hotkey claims a chord system-wide and the clipboard
@@ -89,7 +89,7 @@ genuinely does need the shift `VkKeyScanW` reports for it.
 save does not drop and re-claim the binding. A *different* chord unregisters first, because
 leaving the old one claimed would make it unusable system-wide forever.
 
-`MainWindow.closeEvent` calls `_release_capture()` (`main_window.py:1382`), which unregisters.
+`MainWindow.closeEvent` calls `_release_capture()` (`main_window.py:1664`), which unregisters.
 **This is not optional**: Windows keeps a chord bound to the process id that claimed it, so a
 hotkey left registered outlives the app and the next launch then fails to claim it with nothing
 for the user to see.
@@ -145,6 +145,56 @@ change would otherwise grow it without bound.
 `SettingsDialog`'s own clipboard writes (copying an ID, a path, a file extension) need no
 suppression: none of them is a URL, so the gate rejects them.
 
+### Resolve before capture
+
+A copied URL is text, and text does not say what it points at. `https://example.com/` and
+`https://example.com/ubuntu.iso` are the same shape until somebody asks the server — so a link
+copied out of a browser address bar used to land in the table as a download that failed, and the
+user had to find the row and delete it.
+
+Each candidate is therefore resolved by `my_idm/http_probe.probe_url` **before** `add_download`:
+
+1. one `HEAD` with redirects followed;
+2. only if that produced no usable size, one single-byte ranged `GET` (`bytes=0-0`), which reads
+   the total out of `Content-Range` for the many origins that answer `HEAD` with 405 or omit
+   `Content-Length`.
+
+The probe is what makes the **size** and **extension** settings mean anything: neither can be
+evaluated from a URL that redirects to a named file, and a URL with no extension has no extension
+to ignore. It also hands `add_download` the resolved filename from `Content-Disposition`, so a row
+appears under its real name rather than nameless until the engine's own probe lands.
+
+`decide_capture(url, probe, …)` then rejects, in order:
+
+| Reason | Condition |
+| :--- | :--- |
+| `REASON_UNREACHABLE` | `ok=False` — transport failure, timeout, or any status ≥ 400 |
+| `REASON_HTML_PAGE` | the server answered `text/html` |
+| `REASON_IGNORED_EXT` | the copied URL **or** the resolved filename matches the ignore list |
+| `REASON_TOO_SMALL` | `0 < size < min_file_size_kb` |
+
+Two deliberate edges:
+
+- **`size == 0` means *unknown*, not *empty*** (chunked, or a HEAD the origin refused). It never
+  fails the size check — refusing every unsizeable response would reject every gzip-encoded
+  download there is. `ok` is the separate question of whether the server answered at all.
+- **The engine still probes authoritatively** and still receives `pending_min_bytes`, so a URL
+  that shrank between the two probes is refused there too. The pre-capture probe is a filter, not
+  a substitute for the download's own size check.
+
+An unresolvable URL is **dropped, not queued**. That is the point: a row the user has to delete is
+worse than no row. The cost is that a capture whose host is briefly unreachable is lost rather
+than retried — Add Download is not gated at all, so it remains the escape hatch.
+
+Probes run concurrently, capped at `MAX_CONCURRENT_PROBES` (4): a pasted list of 20 URLs must not
+take 20 × the probe timeout, nor become a rate-limit target. The whole resolve-and-add step is one
+coroutine run through the injected `run_async` — `DownloadManager.run_coro_threadsafe`, i.e. the
+manager's background loop — because the clipboard read has to happen on the GUI thread but the
+HTTP work must not block it.
+
+`magnet:`, `ftp:` and a local `.torrent` are **not probed**: there is no server to ask and no size
+to weigh, so a probe could only report failure.
+
 ### Limits and reporting
 
 - Per-copy ceiling, configurable (`clipboard_monitor_max_urls`, default 20) with a hard
@@ -155,6 +205,11 @@ suppression: none of them is a URL, so the gate rejects them.
 - `urls_captured(list, int)` reports what was added and how many lines the limit dropped, so
   capture is never silent. The count is measured against the cap, not the returned list: a
   duplicate line was collapsed, not skipped, and reporting it as "over the limit" would be a lie.
+- `urls_filtered(list)` reports each `[(url, reason)]` the probe rejected, **including when
+  nothing was captured**. Silence here is the failure mode that made the feature untrustworthy in
+  the first place: the user copies a link, nothing appears, and there is no way to tell a
+  deliberate skip from a broken monitor. `MainWindow._on_clipboard_urls_filtered` puts the reason
+  in the status bar.
 - `add_download` returns `None` for three different outcomes (empty URL, security-blocked,
   already-completed duplicate), so only a real id counts as "added".
 
@@ -162,8 +217,11 @@ suppression: none of them is a URL, so the gate rejects them.
 
 `start()` is inert when `QGuiApplication.clipboard()` returns `None` (it can, legitimately).
 `capture_now()` survives a clipboard that raises on read, and one bad URL does not abort the
-rest of a batch. `stop()` never raises — it runs from `closeEvent`, where an exception would
-abort teardown.
+rest of a batch. A probe that raises is treated as unreachable rather than aborting the batch, so
+one bad host cannot cost the other URLs. `capture_now()` also wraps `run_async`: an exception
+there would escape a `QTimer` slot, and Qt would drop the connection — leaving the monitor
+silently never firing again. `stop()` never raises — it runs from `closeEvent`, where an exception
+would abort teardown.
 
 ### It is never silent
 
@@ -186,7 +244,7 @@ by a setting the user has no reason to think is related.
 
 ## 3. `intercept_all` is now a hard app-side gate
 
-`BrowserServer._handle_add` (`browser_server.py:158`) now declines when `intercept_all` is off:
+`BrowserServer._handle_add` (`browser_server.py:230`) now declines when `intercept_all` is off:
 
 ```json
 { "status": "ignored", "reason": "capture_paused",
@@ -217,6 +275,8 @@ parsing, the scheme allow-list and the size probe — a paused capture must cost
 | `capture_hotkey_sequence` | `str` | `"Ctrl+Alt+D"` | The chord. Validated by `parse_hotkey` on save and again at registration. |
 | `clipboard_monitor_enabled` | `bool` | `False` | Watches the clipboard. |
 | `clipboard_monitor_max_urls` | `int` | `20` | Ceiling on one copy event. |
+| `clipboard_min_file_size_kb` | `int` | `1024` | Minimum capture size, applied to the **resolved** file. `0` disables. |
+| `clipboard_ignored_extensions` | `list[str]` | `.txt .htm .html .jpg .jpeg .png .gif .webp` | Applied to both the copied URL and the resolved filename. |
 
 `capture_hotkey_sequence` falls back to the default when empty (a stored empty string would
 otherwise disable the hotkey silently), and `clipboard_monitor_max_urls` is clamped to `>= 1` so
