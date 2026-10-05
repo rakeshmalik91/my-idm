@@ -57,6 +57,11 @@ from my_idm.security import (
     quarantine_or_delete_file,
 )
 from my_idm.torrent_engine import TorrentEngine
+from my_idm.torrent_sources import (
+    TorrentFolderWatcher,
+    canonical_torrent_path,
+    is_torrent_path,
+)
 from my_idm.utils import get_unique_filename, normalize_path, robust_move_download_files, send_to_trash, to_int, unlock_path, split_extension
 
 log = logging.getLogger(__name__)
@@ -423,6 +428,8 @@ class DownloadManager(QObject):
     browser_config_changed = Signal(object)  # BrowserIntegrationConfig
     process_backlogs_requested = Signal()    # Request to run process_backlogs on main thread
     youtube_error = Signal(str, str)         # source_url, error_message
+    #: (paths) — local .torrent files the watched folder yielded, for the UI to report.
+    torrent_folder_captured = Signal(list)
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -495,6 +502,17 @@ class DownloadManager(QObject):
         self._backlog_timer = QTimer(self)
         self._backlog_timer.timeout.connect(self._on_backlog_timer_tick)
         self._apply_backlog_timer_config()
+
+        # Watched-folder scanner for .torrent files. Armed by _apply_torrent_watch_config, which
+        # is the only thing that should ever start it — same invariant as the backlog timer, so a
+        # manager that is constructed but never started cannot scan the user's disk.
+        self._torrent_watcher = TorrentFolderWatcher(self)
+        self._torrent_watcher.torrents_found.connect(self._on_watched_folder_torrents)
+        #: Paths the watcher has already offered this session. An optimisation only:
+        #: `add_torrent_files(only_new=True)` re-checks the database, which is what actually
+        #: stops a paused torrent being restarted.
+        self._torrent_watch_seen: set[str] = set()
+        self._apply_torrent_watch_config()
 
         # AnimePahe periodic scraper timer
         self._animepahe_timer = QTimer(self)
@@ -584,6 +602,11 @@ class DownloadManager(QObject):
         if self._general_config.backlog_poll_enabled and self._general_config.backlog_poll_interval > 0:
             self._backlog_timer.start()
 
+        # The asyncio thread is alive from here on, which is the condition the watcher has been
+        # waiting for. Re-applied rather than started directly so there is one place that decides
+        # whether it should be running.
+        self._apply_torrent_watch_config()
+
         # Check if Tor should be activated at startup
         if self._tor_config.auto_start_at_startup:
             self.toggle_tor(True)
@@ -644,6 +667,9 @@ class DownloadManager(QObject):
         self._retry_timer.stop()
         self._backlog_timer.stop()
         self._animepahe_timer.stop()
+        # Before the drain below, like the other timers: the watcher's own scan adds rows through
+        # the database, so it must be finished before the caller can close it.
+        self._torrent_watcher.stop()
 
         # A timer callback that was already executing survives .stop(), so a
         # poll can still be mid-write when this method returns. Join it before
@@ -1627,6 +1653,7 @@ class DownloadManager(QObject):
         self._torrent.set_general_config(config)
         config.save()
         self._apply_backlog_timer_config()
+        self._apply_torrent_watch_config()
         self.general_config_changed.emit(config)
         self._process_queue()
 
@@ -1639,7 +1666,83 @@ class DownloadManager(QObject):
         self._torrent_config = config
         self._torrent.apply_torrent_config(config)
         config.save()
+        # A Preferences save hands over a *copy*, and the watch folder is one of the fields in
+        # it, so the watcher has to be re-pointed from the new object rather than kept on the one
+        # it read at startup.
+        self._apply_torrent_watch_config()
         self.torrent_config_changed.emit(config)
+
+    def torrent_watch_folder(self) -> str:
+        """The folder scanned for new ``.torrent`` files.
+
+        Falls back to the effective default download folder when the preference is blank, which is
+        the documented default: a blank setting means "wherever downloads go", not "nowhere".
+        Resolved on every call rather than cached, so a change to the download folder is followed
+        without having to re-arm the watcher.
+        """
+        configured = (getattr(self._torrent_config, "torrent_watch_folder", "") or "").strip()
+        if configured:
+            return configured
+        return self._general_config.get_effective_save_path()
+
+    def _apply_torrent_watch_config(self):
+        """Point the watcher at the configured folder and arm or disarm it.
+
+        Mirrors :meth:`_apply_backlog_timer_config`, including its most important property: the
+        watcher is only ever started when the asyncio thread is alive, so a manager built by a
+        test or by a headless import never scans the user's downloads directory. The folder is
+        still set, because ``start()`` re-applies this once the thread is up.
+        """
+        watcher = getattr(self, "_torrent_watcher", None)
+        if watcher is None:
+            return
+        watcher.set_folder(self.torrent_watch_folder())
+        max_age = getattr(self._torrent_config, "torrent_watch_max_age_days", 3)
+        watcher.set_max_age_days(max_age)
+        enabled = bool(getattr(self._torrent_config, "watch_torrent_folder", False))
+        running = bool(getattr(self, "_thread", None) and self._thread.is_alive())
+        watcher.set_enabled(enabled and running)
+        if enabled and not running:
+            log.debug(
+                "Torrent folder watching is configured but the manager is not running; "
+                "it will start with the manager"
+            )
+
+    def _on_watched_folder_torrents(self, paths: list):
+        """Ingest ``.torrent`` files the watcher reported, and tell the UI.
+
+        ``only_new`` is set: a watcher re-scans on a timer, and a plain re-add of a torrent the
+        user has since paused would silently restart it. The session ledger is a cheap pre-filter;
+        the database check inside ``add_torrent_files`` is the correctness boundary.
+        """
+        with self._timer_slot():
+            try:
+                fresh = [p for p in paths if p not in self._torrent_watch_seen]
+                if not fresh:
+                    return
+                self._torrent_watch_seen.update(fresh)
+                added = self.add_torrent_files(fresh, source="watch_folder", only_new=True)
+                if added:
+                    self.torrent_folder_captured.emit(list(added))
+                    if getattr(self._torrent_config, "clean_watched_torrent_files", False):
+                        self._clean_watched_torrent_files(added)
+            except Exception as exc:
+                log.error("Error ingesting watched-folder torrents: %s", exc)
+
+    def _clean_watched_torrent_files(self, paths: list[str]):
+        """Move ingested .torrent files from the watched folder to trash."""
+        for path in paths:
+            try:
+                if not os.path.isfile(path):
+                    continue
+                unlock_path(path)
+                success = send_to_trash(path)
+                if success:
+                    log.info("Cleaned up watched .torrent file to trash: %s", path)
+                else:
+                    log.warning("Could not move watched .torrent file to trash: %s", path)
+            except Exception as exc:
+                log.warning("Error cleaning up watched .torrent file %s: %s", path, exc)
 
     def _apply_backlog_timer_config(self):
         interval_ms = max(1, self._general_config.backlog_poll_interval) * 1000
@@ -1835,6 +1938,20 @@ class DownloadManager(QObject):
         self._db.add_download(entry)
         self.download_added.emit(entry.id)
 
+        # Cache local .torrent file to internal fastresume directory so it survives
+        # deletion/cleaning of the source file or temporary media.
+        if download_type == "torrent" and os.path.isfile(url):
+            try:
+                import my_idm.torrent_engine as te
+                cache_dir = getattr(te, "FASTRESUME_DIR", None)
+                if cache_dir:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    torrent_cache = cache_dir / f"{entry.id}.torrent"
+                    if not torrent_cache.exists():
+                        shutil.copyfile(url, str(torrent_cache))
+            except Exception as exc:
+                log.debug("Could not cache .torrent file for %s: %s", entry.id, exc)
+
         # Start if within the global and per-queue limits; otherwise stays queued.
         counts = self._active_counts_by_queue()
         limits = self._queue_limits()
@@ -1846,6 +1963,50 @@ class DownloadManager(QObject):
             self.status_changed.emit(entry.id, "queued", "")
 
         return entry.id
+
+    def add_torrent_files(
+        self, paths: list[str], *, source: str = "manual", only_new: bool = False
+    ) -> list[str]:
+        """Add local ``.torrent`` files. Returns the paths that became downloads.
+
+        The one ingestion policy for every route a ``.torrent`` file takes into the app — the Add
+        Torrent button, a drag onto the window, and the watched folder — so they cannot disagree
+        about what counts as new. Paths are canonicalised first: ``add_download`` de-duplicates on
+        an exact string match of the ``url`` column, and the same file arrives spelled with
+        backslashes from a drag and with forward slashes from a directory scan, which would
+        otherwise produce two rows and download the torrent twice.
+
+        *only_new* is for the watched folder. ``add_download`` treats a re-add of a paused or
+        errored row as a request to **resume** it, which is right for a deliberate Ctrl+V and
+        badly wrong for a watcher that rescans every minute: pausing a torrent would silently
+        restart it. With *only_new*, a path already in the table is skipped without being
+        touched, so a pause sticks.
+        """
+        added: list[str] = []
+        for raw in paths or []:
+            path = canonical_torrent_path(raw)
+            if not path or not is_torrent_path(path):
+                log.debug("Not a usable local .torrent path: %s", raw)
+                continue
+            if only_new and self._db.find_by_url(path) is not None:
+                continue
+            try:
+                did = self.add_download(
+                    path, metadata={"capture_source": f"torrent_{source}"}
+                )
+            except Exception as exc:
+                # One unreadable torrent must not cost the rest of a dropped batch.
+                log.warning("Could not add torrent file %s: %s", path, exc)
+                continue
+            if did:
+                added.append(path)
+            else:
+                # None is ambiguous: add_download also returns it for a completed duplicate and
+                # for a rejected URL, so it is deliberately not reported as "added".
+                log.info("Torrent file was not added: %s", path)
+        if added:
+            log.info("Added %d torrent file(s) from %s", len(added), source)
+        return added
 
     def add_download_from_browser(
         self,

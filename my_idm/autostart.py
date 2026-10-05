@@ -76,8 +76,13 @@ def _pythonw_path() -> str:
     return sys.executable
 
 
-def launch_command() -> list[str]:
-    """The argv that starts this installation of My-IDM again.
+def app_command() -> list[str]:
+    """The argv that starts this installation of My-IDM, with no behaviour flags.
+
+    The shared base for every way the OS is asked to launch the app. :func:`launch_command` adds
+    ``--autostart`` on top for the login item; a file-association entry does not, because
+    ``--autostart`` suppresses the main window whenever a tray is available (``main.py``), so
+    double-clicking a ``.torrent`` would add it invisibly with no feedback.
 
     Two shapes exist and they are not interchangeable:
 
@@ -90,10 +95,18 @@ def launch_command() -> list[str]:
       which the desktop entry cannot express.
     """
     if getattr(sys, "frozen", False):
-        return [sys.executable, "--autostart"]
+        return [sys.executable]
 
-    project_root = Path(__file__).resolve().parent.parent
-    return [_pythonw_path(), "-m", "my_idm.main", "--autostart"]
+    return [_pythonw_path(), "-m", "my_idm.main"]
+
+
+def launch_command() -> list[str]:
+    """The argv that starts this installation of My-IDM again.
+
+    :func:`app_command` plus ``--autostart``, which asks for a start with no window. See that
+    function for why the frozen and source-checkout shapes differ.
+    """
+    return [*app_command(), "--autostart"]
 
 
 def _command_cwd() -> Optional[str]:

@@ -440,6 +440,14 @@ class TorrentConfig:
     seeding_time_limit_minutes: int = 240  # max seeding duration in minutes (0 = unlimited, default 4 hours / 240 min)
     seeding_ratio_limit: float = 0.0  # max share ratio (total_upload / downloaded) (0.0 = unlimited)
     resume_seeding_on_startup: bool = True  # whether to resume seeding torrents on application startup
+    # -- .torrent ingress from the OS (drag-and-drop, file association, watched folder) --
+    # Default False for all three: they each act on the user's machine beyond the app's own
+    # window, so nothing is opted into until it is asked for. See docs/architecture/torrent.md.
+    associate_torrent_files: bool = False  # register My-IDM as a .torrent handler with the OS
+    watch_torrent_folder: bool = False  # watch a folder and add .torrent files that appear there
+    torrent_watch_folder: str = ""  # "" means "the effective default download folder"
+    clean_watched_torrent_files: bool = False  # move .torrent files to trash after adding from watched folder
+    torrent_watch_max_age_days: int = 3  # max age in days for .torrent files in watched folder (0 = unlimited)
 
     def get_effective_seeding_speed_limit(self, download_limit_bytes: int = 0) -> int:
         """Calculate effective upload/seeding speed limit in bytes/sec.
@@ -469,6 +477,11 @@ class TorrentConfig:
             "seeding_time_limit_minutes": self.seeding_time_limit_minutes,
             "seeding_ratio_limit": self.seeding_ratio_limit,
             "resume_seeding_on_startup": self.resume_seeding_on_startup,
+            "associate_torrent_files": self.associate_torrent_files,
+            "watch_torrent_folder": self.watch_torrent_folder,
+            "torrent_watch_folder": self.torrent_watch_folder,
+            "clean_watched_torrent_files": self.clean_watched_torrent_files,
+            "torrent_watch_max_age_days": self.torrent_watch_max_age_days,
         }
 
     @classmethod
@@ -481,6 +494,11 @@ class TorrentConfig:
             seeding_time_limit_minutes=int(data.get("seeding_time_limit_minutes", 240)),
             seeding_ratio_limit=float(data.get("seeding_ratio_limit", 0.0)),
             resume_seeding_on_startup=bool(data.get("resume_seeding_on_startup", True)),
+            associate_torrent_files=bool(data.get("associate_torrent_files", False)),
+            watch_torrent_folder=bool(data.get("watch_torrent_folder", False)),
+            torrent_watch_folder=str(data.get("torrent_watch_folder", "")),
+            clean_watched_torrent_files=bool(data.get("clean_watched_torrent_files", False)),
+            torrent_watch_max_age_days=int(data.get("torrent_watch_max_age_days", 3)),
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -495,6 +513,11 @@ class TorrentConfig:
         settings.setValue("seeding_time_limit_minutes", self.seeding_time_limit_minutes)
         settings.setValue("seeding_ratio_limit", self.seeding_ratio_limit)
         settings.setValue("resume_seeding_on_startup", self.resume_seeding_on_startup)
+        settings.setValue("associate_torrent_files", self.associate_torrent_files)
+        settings.setValue("watch_torrent_folder", self.watch_torrent_folder)
+        settings.setValue("torrent_watch_folder", self.torrent_watch_folder)
+        settings.setValue("clean_watched_torrent_files", self.clean_watched_torrent_files)
+        settings.setValue("torrent_watch_max_age_days", self.torrent_watch_max_age_days)
         settings.endGroup()
 
     @classmethod
@@ -511,6 +534,11 @@ class TorrentConfig:
         seeding_time_limit_minutes = settings.value("seeding_time_limit_minutes", 240, type=int)
         seeding_ratio_limit = settings.value("seeding_ratio_limit", 0.0, type=float)
         resume_seeding_on_startup = settings.value("resume_seeding_on_startup", True, type=bool)
+        associate_torrent_files = settings.value("associate_torrent_files", False, type=bool)
+        watch_torrent_folder = settings.value("watch_torrent_folder", False, type=bool)
+        torrent_watch_folder = settings.value("torrent_watch_folder", "", type=str) or ""
+        clean_watched_torrent_files = settings.value("clean_watched_torrent_files", False, type=bool)
+        torrent_watch_max_age_days = settings.value("torrent_watch_max_age_days", 3, type=int)
         settings.endGroup()
 
         if metadata_fetch_timeout_days is None:
@@ -528,6 +556,11 @@ class TorrentConfig:
             seeding_time_limit_minutes=int(seeding_time_limit_minutes),
             seeding_ratio_limit=float(seeding_ratio_limit),
             resume_seeding_on_startup=bool(resume_seeding_on_startup),
+            associate_torrent_files=bool(associate_torrent_files),
+            watch_torrent_folder=bool(watch_torrent_folder),
+            torrent_watch_folder=str(torrent_watch_folder),
+            clean_watched_torrent_files=bool(clean_watched_torrent_files),
+            torrent_watch_max_age_days=int(torrent_watch_max_age_days),
         )
 
 

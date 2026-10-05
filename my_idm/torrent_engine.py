@@ -713,9 +713,11 @@ class TorrentEngine:
                 except Exception as exc:
                     log.warning("Failed to parse fastresume for %s: %s", entry.id, exc)
 
-        elif os.path.isfile(url):
+        elif os.path.isfile(url) or (FASTRESUME_DIR / f"{entry.id}.torrent").is_file():
+            cached_path = FASTRESUME_DIR / f"{entry.id}.torrent"
+            source_file = url if os.path.isfile(url) else str(cached_path)
             try:
-                ti = lt.torrent_info(url)
+                ti = lt.torrent_info(source_file)
                 parsed_hash = str(ti.info_hash()).lower()
                 if parsed_hash:
                     expected_hash = parsed_hash
@@ -724,8 +726,14 @@ class TorrentEngine:
                         entry.metadata = {}
                     if not entry.metadata.get("original_name"):
                         entry.metadata["original_name"] = ti.name()
+                if os.path.isfile(url) and not cached_path.is_file():
+                    try:
+                        import shutil
+                        shutil.copyfile(url, str(cached_path))
+                    except Exception:
+                        pass
             except Exception as exc:
-                log.error("Failed to parse torrent file %s: %s", url, exc)
+                log.error("Failed to parse torrent file %s: %s", source_file, exc)
                 return False
 
             params = lt.add_torrent_params()
@@ -1082,10 +1090,13 @@ class TorrentEngine:
                 self._session.remove_torrent(handle, lt.options_t.delete_files)
             else:
                 self._session.remove_torrent(handle)
-        # Clean up fastresume
+        # Clean up fastresume and cached torrent file
         resume_path = FASTRESUME_DIR / f"{download_id}.fastresume"
         if resume_path.exists():
             resume_path.unlink(missing_ok=True)
+        cached_torrent = FASTRESUME_DIR / f"{download_id}.torrent"
+        if cached_torrent.exists():
+            cached_torrent.unlink(missing_ok=True)
 
     def recheck(self, download_id: str):
         handle = self._handles.get(download_id)

@@ -12,12 +12,15 @@ from unittest.mock import patch, MagicMock
 from PySide6.QtCore import (
     QEvent,
     QItemSelectionModel,
+    QMimeData,
+    QPoint,
     QPointF,
     QRect,
     QSettings,
     Qt,
+    QUrl,
 )
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -328,6 +331,145 @@ class TestMainWindowTeardownGuards(unittest.TestCase):
             "_force_exit must stop the details timer via closeEvent",
         )
 
+
+
+class TestTorrentDragAndDrop(_MainWindowTestCase):
+    """.torrent files dropped anywhere in the window.
+
+    The drop handlers are driven with synthesised `QDropEvent`s rather than a live drag: a real
+    one needs an OLE drag source, and the decision logic under test is "which paths in this
+    payload are torrents", which lives in `local_torrent_paths_from_mime`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from my_idm.notifications import unregister_notification_handler
+
+        self.addCleanup(unregister_notification_handler)
+        import tempfile
+
+        self._mimes: list[QMimeData] = []
+        self.tmp = Path(tempfile.mkdtemp())
+        self.torrent = self.tmp / "ubuntu.torrent"
+        self.torrent.write_bytes(b"d8:announce20:http://tracker/annce4:infod4:name4:testee")
+        self.text_file = self.tmp / "notes.txt"
+        self.text_file.write_text("not a torrent")
+
+    def _mime(self, *paths):
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+        # Keep it alive for the life of the test. QDragEnterEvent/QDropEvent do not take ownership
+        # of their QMimeData, so a temporary passed straight into the constructor is collected
+        # while the event still points at it, and event.mimeData() then dereferences freed memory
+        # — an access violation inside the drop handler that looks exactly like a Qt bug.
+        self._mimes.append(mime)
+        return mime
+
+    def _shown(self):
+        """Show the window so drop targets are armed, and return it.
+
+        Drops are armed in `showEvent`, and Qt only routes drag events to a widget that accepts
+        them — so a test that never shows the window would be asserting on an event that was
+        simply never delivered.
+        """
+        self.win.show()
+        QApplication.processEvents()
+        return self.win
+
+    def _drop(self, mime):
+        event = QDropEvent(
+            QPointF(10, 10),
+            Qt.DropAction.CopyAction,
+            mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self._shown().event(event)
+        return event
+
+    def test_the_window_accepts_drops_once_shown(self):
+        self._shown()
+        # Armed in showEvent rather than __init__: registering a drop target on Windows binds an
+        # OLE registration to the HWND, and doing that before the native handle exists made
+        # short-lived windows leave it behind.
+        self.assertTrue(self.win.acceptDrops())
+
+    def test_dropping_a_torrent_adds_a_torrent_row(self):
+        with patch("my_idm.notifications.notify_torrent_files_added") as notify:
+            event = self._drop(self._mime(self.torrent))
+        # isAccepted(), not the value widget.event() returns: that reports whether the handler
+        # *ran*, and dropEvent returns having handled every payload it was given.
+        self.assertTrue(event.isAccepted())
+        rows = self.db.get_all_downloads()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].download_type, "torrent")
+        # Canonicalised, because add_download de-duplicates on an exact string match of the url.
+        self.assertEqual(rows[0].url, os.path.normpath(str(self.torrent)))
+        notify.assert_called_once()
+
+    def test_dropping_several_torrents_adds_them_all(self):
+        other = self.tmp / "debian.torrent"
+        other.write_bytes(b"d8:announce20:http://tracker/annce4:infod4:name4:testee")
+        with patch("my_idm.notifications.notify_torrent_files_added"):
+            self._drop(self._mime(self.torrent, other))
+        self.assertEqual(len(self.db.get_all_downloads()), 2)
+
+    def test_dropping_a_non_torrent_adds_nothing(self):
+        with patch("my_idm.notifications.notify_torrent_files_added") as notify:
+            event = self._drop(self._mime(self.text_file))
+        self.assertFalse(event.isAccepted())
+        self.assertEqual(len(self.db.get_all_downloads()), 0)
+        notify.assert_not_called()
+
+    def test_a_torrent_dropped_alongside_other_files_still_works(self):
+        # A user dragging a mixed selection should get the torrent, not nothing.
+        with patch("my_idm.notifications.notify_torrent_files_added"):
+            event = self._drop(self._mime(self.text_file, self.torrent))
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(len(self.db.get_all_downloads()), 1)
+
+    def test_a_drag_with_no_torrent_is_refused_before_the_drop(self):
+        # Deciding at dragEnter is what keeps the window from lighting up a drop cursor for a
+        # payload it will then refuse on release.
+        event = QDragEnterEvent(
+            QPoint(10, 10),
+            Qt.DropAction.CopyAction,
+            self._mime(self.text_file),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self._shown().event(event)
+        self.assertFalse(event.isAccepted())
+
+    def test_a_drag_carrying_a_torrent_is_accepted(self):
+        event = QDragEnterEvent(
+            QPoint(10, 10),
+            Qt.DropAction.CopyAction,
+            self._mime(self.torrent),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        self._shown().event(event)
+        self.assertTrue(event.isAccepted())
+
+    def test_the_add_torrent_button_uses_the_same_ingestion_path(self):
+        with patch(
+            "my_idm.main_window.QFileDialog.getOpenFileNames",
+            return_value=([str(self.torrent)], ""),
+        ), patch("my_idm.notifications.notify_torrent_files_added"):
+            self.win._on_add_torrent()
+        self.assertEqual(len(self.db.get_all_downloads()), 1)
+
+    def test_the_watched_folder_signal_updates_the_status_line(self):
+        with patch("my_idm.notifications.notify_torrent_files_added") as notify:
+            self.win._on_watched_folder_torrents([os.path.normpath(str(self.torrent))])
+        self.assertIn("Watched folder added", self.win._status_label.text())
+        notify.assert_called_once()
+
+    def test_dropping_nothing_says_so_rather_than_being_silent(self):
+        self.win._add_torrent_paths([])
+        # An action the user performed deliberately must never produce no feedback at all.
+        self.assertIn("No .torrent files", self.win._status_label.text())
 
 
 class TestMainWindowToolbar(_MainWindowTestCase):

@@ -151,7 +151,7 @@ machine while they run.
 - [**Tor Privacy**](docs/architecture/tor.md) — SOCKS5 routing, daemon auto-discovery, startup gating, and exit termination.
 - [**VPN & Kill Switch**](docs/architecture/vpn.md) — Network interface binding, adapter watcher loop, and proxy configuration.
 - [**Antivirus & Security**](docs/architecture/antivirus.md) — Pre-download checks, Defender/custom scanning, and quarantine.
-- [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, and fastresume caching.
+- [**BitTorrent Engine**](docs/architecture/torrent.md) — libtorrent integration, file priority mapping, fastresume caching, and `.torrent` files arriving by drag-and-drop, OS file association, or a watched folder.
 - [**Browser Integration (Chrome & Firefox)**](docs/architecture/browser-integration.md) — Unpacked Manifest V3 extension, loopback REST API, cookie forwarding, and download interception.
 - [**Blob URL Handling**](docs/architecture/blob-urls.md) — Evaluation of browser `blob:` URLs, process-isolation limits, extension-assisted transfer, and native browser fallbacks.
 - [**Capture (Hotkey & Clipboard)**](docs/architecture/capture.md) — System-wide hotkey that toggles download capture, clipboard URL capture with an all-or-nothing gate and a resolve-before-capture probe, and the shared `intercept_all` switch.

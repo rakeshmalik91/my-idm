@@ -77,6 +77,7 @@ from my_idm.download_model import (
 )
 from my_idm.header_view import FilterHeaderView
 from my_idm.manager import DownloadManager
+from my_idm.torrent_sources import local_torrent_paths_from_mime
 from my_idm.resources import get_app_icon, get_app_logo_pixmap
 from my_idm.network import NetworkConfig, is_vpn_adapter_name
 from my_idm.network_dialog import NetworkSettingsDialog
@@ -539,6 +540,12 @@ class MainWindow(QMainWindow):
         self.resize(1400, 750)
         self.setWindowIcon(get_app_icon())
 
+        # .torrent files may be dropped anywhere in the window. `setAcceptDrops` on the window
+        # is what makes that one line work over the table, the details panel, the toolbar and the
+        # status bar: Qt hands a drag to the widget under the cursor and propagates it up the
+        # parent chain until something accepts, and no child here accepts, so it reaches us.
+        # The two regions this deliberately does not cover are documented on the handlers.
+        # .torrent drag-and-drop is armed in showEvent, not here — see the comment there.
         # Model
         self._model = DownloadTableModel(self)
 
@@ -1787,6 +1794,7 @@ class MainWindow(QMainWindow):
         self._manager.status_changed.connect(self._on_status_changed)
         self._manager.filename_resolved.connect(self._on_filename_resolved)
         self._manager.download_added.connect(self._on_download_added)
+        self._manager.torrent_folder_captured.connect(self._on_watched_folder_torrents)
         self._manager.download_removed.connect(self._on_download_removed)
         self._manager.download_moved.connect(self._on_download_moved)
         self._manager.download_renamed.connect(self._on_download_renamed)
@@ -2008,8 +2016,91 @@ class MainWindow(QMainWindow):
             self, "Select Torrent Files", "",
             "Torrent Files (*.torrent);;All Files (*)",
         )
+        # Routed through the shared ingestion policy so a button-chosen file, a dropped one and
+        # one found in the watched folder are all treated identically.
+        self._add_torrent_paths(paths, source="dialog")
+
+    # -- .torrent drag and drop -------------------------------------------------------------------
+    #
+    # Two regions cannot be covered by these handlers, both structural rather than oversight:
+    #
+    #   * The embedded browser. `DetailsPanel` reparents a native Chrome HWND into a Qt container
+    #     (`EmbeddedBrowserContainer.attach_window`), and a non-Qt window generates no Qt drag
+    #     events at all. No `setAcceptDrops` changes that.
+    #   * Modal dialogs. Add Download and Preferences are separate top-level windows with this
+    #     one as their parent, so a drop onto them is delivered to them, not here.
+    #
+    # Everything else in the window — the table, the details panel's Qt tabs, the toolbar, the
+    # status bar, the menu bar — propagates up to MainWindow and lands in these three methods.
+
+    def dragEnterEvent(self, event):
+        """Accept a drag only when it carries at least one real local ``.torrent`` file.
+
+        Deciding here rather than at drop time is what makes the window behave normally for
+        every other drag: a payload with nothing usable is ignored, so it does not light up a
+        drop cursor over the table and then do nothing when released.
+        """
+        if local_torrent_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        """Keep the accepted drag highlighted as the pointer moves.
+
+        Qt's default `dragMoveEvent` is a no-op, which makes an accepted drag stop looking
+        accepted as soon as the cursor moves within the window.
+        """
+        if local_torrent_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        """Add the dropped ``.torrent`` files and report what happened."""
+        paths = local_torrent_paths_from_mime(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._add_torrent_paths(paths, source="drop")
+
+    def _add_torrent_paths(self, paths: list, source: str = "manual"):
+        """Add local ``.torrent`` paths and tell the user.
+
+        Silently doing nothing is never an option for an action the user performed on purpose.
+        """
+        added = self._manager.add_torrent_files(paths, source=source)
+        if not added:
+            self._status_label.setText("No .torrent files to add")
+            return []
+        names = [Path(p).name for p in added]
+        what = names[0] if len(names) == 1 else f"{len(names)} torrent files"
+        self._status_label.setText(f"🧲 Added {what}")
+        self._update_count_label()
+        from my_idm.notifications import notify_torrent_files_added
+
+        notify_torrent_files_added(names, source)
+        return added
+
+    def _on_watched_folder_torrents(self, paths: list):
+        """Report ``.torrent`` files the watched folder picked up.
+
+        A watched folder is the least visible way to add a download there is — nothing was
+        clicked — so without this the new row has nothing to connect it to the file that caused
+        it. Names come from the table where possible: the entry is named after the torrent's own
+        metadata, not after the file the user happened to save.
+        """
+        names = []
         for path in paths:
-            self._manager.add_download(path)
+            entry = self._manager.find_by_url(path)
+            names.append((entry.filename or Path(path).name) if entry else Path(path).name)
+        what = names[0] if len(names) == 1 else f"{len(names)} torrent files"
+        self._status_label.setText(f"📂 Watched folder added {what}")
+        self._update_count_label()
+        from my_idm.notifications import notify_torrent_files_added
+
+        notify_torrent_files_added(names, "watched folder")
 
     def _on_pause(self):
         for did in self._selected_ids():
@@ -4024,6 +4115,19 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Arm .torrent drag-and-drop here rather than in __init__. `setAcceptDrops` is what makes
+        # one window-level handler cover the whole window: Qt delivers a drag to the widget under
+        # the cursor and propagates it up the parent chain until something accepts, and nothing
+        # in this window's children accepts, so it reaches these handlers.
+        #
+        # First show, not construction, on purpose. Registering a drop target on Windows binds an
+        # OLE registration to the window's HWND, and doing that from __init__ — before the native
+        # handle exists — made short-lived windows (the test harness builds and destroys dozens)
+        # leave that registration behind, which surfaced much later as an access violation inside
+        # an unrelated QWidget.show(). Deferring it means a window that is never shown never
+        # registers, and idempotence is free because setAcceptDrops ignores a repeated True.
+        if not self.acceptDrops():
+            self.setAcceptDrops(True)
         # Re-measured once the widgets are polished: at construction time the toolbar's
         # sizeHint under-reports (970px vs 1025px here, before the fonts are resolved), which
         # is exactly the overflow this prevents. The call only ever raises the minimum, so

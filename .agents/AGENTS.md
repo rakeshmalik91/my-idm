@@ -14,7 +14,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Tor Network Privacy** | [`tor.md`](file:///d:/Projects/my-idm/docs/architecture/tor.md) | SOCKS5 routing, service lifecycle, executable discovery, startup gating. |
 | **VPN & Kill Switch** | [`vpn.md`](file:///d:/Projects/my-idm/docs/architecture/vpn.md) | Adapter binding, live monitoring, instant kill switch, proxy support. |
 | **Antivirus & Security** | [`antivirus.md`](file:///d:/Projects/my-idm/docs/architecture/antivirus.md) | Pre-download warnings, double-extension inspection, Defender scanning, quarantine. |
-| **BitTorrent Engine** | [`torrent.md`](file:///d:/Projects/my-idm/docs/architecture/torrent.md) | `libtorrent` session, magnet/`.torrent` handling, priorities, swarm tracking, fastresume. |
+| **BitTorrent Engine** | [`torrent.md`](file:///d:/Projects/my-idm/docs/architecture/torrent.md) | `libtorrent` session, magnet/`.torrent` handling, priorities, swarm tracking, fastresume, and `.torrent` ingress by drag-drop, file association and watched folder. |
 | **State Machines & Lifecycle** | [`state-machines.md`](file:///d:/Projects/my-idm/docs/architecture/state-machines.md) | Mermaid state diagrams for HTTP and BitTorrent, transition triggers, backoff/seeding. |
 | **Backlog Processing** | [`backlog.md`](file:///d:/Projects/my-idm/docs/architecture/backlog.md) | Multi-location discovery, location delimiters & directives, queue lifecycle, IPC ingestion. |
 | **Database & Persistence** | [`database.md`](file:///d:/Projects/my-idm/docs/architecture/database.md) | Schema, constraints, indexing, `metadata_json` contract, migrations, self-healing. |

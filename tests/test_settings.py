@@ -439,6 +439,61 @@ class TestTorrentConfig(ConfigIsolationMixin, unittest.TestCase):
             "the default config is the pristine baseline the guard restores to",
         )
 
+    def test_torrent_file_integration_defaults_are_off(self):
+        # Each of these acts on the machine outside the app window — registering a handler,
+        # watching a folder — so nothing is opted into until it is asked for.
+        cfg = TorrentConfig()
+        self.assertFalse(cfg.associate_torrent_files)
+        self.assertFalse(cfg.watch_torrent_folder)
+        self.assertFalse(cfg.clean_watched_torrent_files)
+        self.assertEqual(cfg.torrent_watch_max_age_days, 3)
+        # Empty means "the effective default download folder", resolved at use time. Baking a
+        # path in here would freeze whatever the download folder was when the preference was
+        # first saved and never follow a later change.
+        self.assertEqual(cfg.torrent_watch_folder, "")
+
+    def test_torrent_file_integration_round_trips(self):
+        cfg = TorrentConfig(
+            associate_torrent_files=True,
+            watch_torrent_folder=True,
+            torrent_watch_folder="/torrents/in",
+            clean_watched_torrent_files=True,
+            torrent_watch_max_age_days=7,
+        )
+        cfg.save()
+        loaded = TorrentConfig.load()
+        self.assertTrue(loaded.associate_torrent_files)
+        self.assertTrue(loaded.watch_torrent_folder)
+        self.assertEqual(loaded.torrent_watch_folder, "/torrents/in")
+        self.assertTrue(loaded.clean_watched_torrent_files)
+        self.assertEqual(loaded.torrent_watch_max_age_days, 7)
+
+    def test_torrent_file_integration_survives_a_dict_round_trip(self):
+        cfg = TorrentConfig(
+            associate_torrent_files=True,
+            watch_torrent_folder=True,
+            torrent_watch_folder="/torrents/in",
+            clean_watched_torrent_files=True,
+            torrent_watch_max_age_days=7,
+        )
+        reconstructed = TorrentConfig.from_dict(cfg.to_dict())
+        self.assertTrue(reconstructed.associate_torrent_files)
+        self.assertTrue(reconstructed.watch_torrent_folder)
+        self.assertEqual(reconstructed.torrent_watch_folder, "/torrents/in")
+        self.assertTrue(reconstructed.clean_watched_torrent_files)
+        self.assertEqual(reconstructed.torrent_watch_max_age_days, 7)
+
+    def test_an_older_settings_file_without_the_new_keys_loads_defaults(self):
+        # A user upgrading from a build that predates these settings must not get a crash or a
+        # silently-enabled watcher on their downloads folder.
+        loaded = TorrentConfig.from_dict({"max_seeding_speed": 128})
+        self.assertFalse(loaded.associate_torrent_files)
+        self.assertFalse(loaded.watch_torrent_folder)
+        self.assertFalse(loaded.clean_watched_torrent_files)
+        self.assertEqual(loaded.torrent_watch_max_age_days, 3)
+        self.assertEqual(loaded.torrent_watch_folder, "")
+        self.assertEqual(loaded.max_seeding_speed, 128)
+
 
 class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
     """Test Preferences and SettingsDialog functionality."""
@@ -1125,6 +1180,138 @@ class TestManagerGeneralConfigIntegration(ConfigIsolationMixin, unittest.TestCas
         self.assertEqual(dlg.torrent_config.seeding_time_limit_minutes, 90)
         self.assertEqual(dlg.torrent_config.seeding_ratio_limit, 3.0)
         dlg.close()
+
+
+class TestTorrentFileIntegrationSettings(ConfigIsolationMixin, unittest.TestCase):
+    """The .torrent drag-and-drop / file-association / watched-folder controls.
+
+    Separate from `TestSettingsDialog` because the behaviour under test is the *policy* around
+    these three: the association is only reconciled when the checkbox actually moved, and the
+    watched folder is stored blank when it matches the default download folder.
+    """
+
+    def _dialog(self, torrent_cfg=None, general_cfg=None):
+        dlg = SettingsDialog(
+            torrent_config=torrent_cfg or TorrentConfig(),
+            general_config=general_cfg or GeneralConfig(),
+            initial_tab=TAB_TORRENT,
+        )
+        self.addCleanup(dlg.close)
+        return dlg
+
+    def test_the_watch_folder_field_defaults_to_the_download_folder(self):
+        with tempfile.TemporaryDirectory() as downloads:
+            dlg = self._dialog(general_cfg=GeneralConfig(default_save_path=downloads))
+            # A blank stored value means "the default download folder", and an empty field with a
+            # greyed Browse button reads as a setting that cannot be changed.
+            self.assertEqual(
+                dlg._torrent_watch_edit.text().strip(),
+                os.path.normpath(downloads),
+            )
+
+    def test_the_watch_folder_path_is_greyed_out_until_it_is_enabled(self):
+        dlg = self._dialog()
+        self.assertFalse(dlg._torrent_watch_edit.isEnabled())
+        self.assertFalse(dlg._torrent_watch_clean_cb.isEnabled())
+        self.assertFalse(dlg._torrent_watch_max_age_spin.isEnabled())
+        dlg._torrent_watch_cb.setChecked(True)
+        self.assertTrue(dlg._torrent_watch_edit.isEnabled())
+        self.assertTrue(dlg._torrent_watch_clean_cb.isEnabled())
+        self.assertTrue(dlg._torrent_watch_max_age_spin.isEnabled())
+
+    def test_saving_clean_watched_torrent_files_stores_it(self):
+        dlg = self._dialog(TorrentConfig(clean_watched_torrent_files=False))
+        self.assertFalse(dlg._torrent_watch_clean_cb.isChecked())
+        dlg._torrent_watch_clean_cb.setChecked(True)
+        with patch("os.path.exists", return_value=True):
+            dlg._on_save()
+        self.assertTrue(dlg.torrent_config.clean_watched_torrent_files)
+
+    def test_saving_torrent_watch_max_age_days_stores_it(self):
+        dlg = self._dialog(TorrentConfig(torrent_watch_max_age_days=3))
+        self.assertEqual(dlg._torrent_watch_max_age_spin.value(), 3)
+        dlg._torrent_watch_max_age_spin.setValue(14)
+        with patch("os.path.exists", return_value=True):
+            dlg._on_save()
+        self.assertEqual(dlg.torrent_config.torrent_watch_max_age_days, 14)
+
+    def test_the_association_is_only_reconciled_when_the_checkbox_moved(self):
+        dlg = self._dialog(TorrentConfig(associate_torrent_files=False))
+        with patch("my_idm.file_assoc.reconcile", return_value=(True, "")) as reconcile:
+            dlg._on_save()
+            reconcile.assert_not_called()
+
+        dlg2 = self._dialog(TorrentConfig(associate_torrent_files=False))
+        with patch("my_idm.file_assoc.reconcile", return_value=(True, "")) as reconcile:
+            dlg2._torrent_assoc_cb.setChecked(True)
+            dlg2._on_save()
+            reconcile.assert_called_once_with(True)
+
+    def test_a_failed_association_still_records_the_preference(self):
+        # Losing the toggle would be a worse lie than a failed registration the user is told
+        # about: the intent survives a transient locked-hive failure and is retried next time.
+        dlg = self._dialog(TorrentConfig(associate_torrent_files=False))
+        with patch("my_idm.file_assoc.reconcile", return_value=(False, "hive is locked")), \
+             patch("my_idm.settings_dialog.QMessageBox.warning"):
+            dlg._torrent_assoc_cb.setChecked(True)
+            dlg._on_save()
+        self.assertTrue(dlg.torrent_config.associate_torrent_files)
+
+    def test_saving_an_unchanged_watch_folder_stores_it_blank(self):
+        # Blank is what makes the folder follow a later change to the download folder instead of
+        # being pinned to whatever it was when the preference was first saved.
+        with tempfile.TemporaryDirectory() as downloads:
+            dlg = self._dialog(general_cfg=GeneralConfig(default_save_path=downloads))
+            with patch("os.path.exists", return_value=True):
+                dlg._on_save()
+            self.assertEqual(dlg.torrent_config.torrent_watch_folder, "")
+
+    def test_saving_a_custom_watch_folder_stores_it(self):
+        dlg = self._dialog()
+        dlg._torrent_watch_edit.setText("/torrents/in")
+        with patch("os.path.exists", return_value=True):
+            dlg._on_save()
+        self.assertEqual(dlg.torrent_config.torrent_watch_folder, "/torrents/in")
+
+    def test_the_association_status_line_reflects_the_real_state(self):
+        from my_idm.file_assoc import FileAssocState
+
+        dlg = self._dialog()
+        with patch("my_idm.file_assoc.status", return_value=FileAssocState.REGISTERED):
+            dlg._refresh_torrent_assoc_status()
+        # Registered-but-not-default is the normal Windows state and must not be reported as
+        # "it works", or double-clicking a .torrent would silently open something else.
+        self.assertIn("not the default", dlg._torrent_assoc_status_lbl.text())
+
+        with patch("my_idm.file_assoc.status", return_value=FileAssocState.DEFAULT):
+            dlg._refresh_torrent_assoc_status()
+        self.assertIn("open in My-IDM", dlg._torrent_assoc_status_lbl.text())
+
+        with patch("my_idm.file_assoc.status", return_value=FileAssocState.STALE):
+            dlg._refresh_torrent_assoc_status()
+        self.assertIn("points somewhere else", dlg._torrent_assoc_status_lbl.text())
+        # isHidden(), not isVisible(): the dialog is never shown, so isVisible() is False either
+        # way and would assert nothing about what the code asked for.
+        self.assertFalse(dlg._torrent_assoc_repair_btn.isHidden())
+
+    def test_an_unsupported_platform_disables_the_checkbox(self):
+        from my_idm.file_assoc import FileAssocState
+
+        dlg = self._dialog()
+        with patch("my_idm.file_assoc.status", return_value=FileAssocState.UNSUPPORTED):
+            dlg._refresh_torrent_assoc_status()
+        self.assertFalse(dlg._torrent_assoc_cb.isEnabled())
+
+    def test_the_default_apps_button_is_only_offered_where_it_can_help(self):
+        dlg = self._dialog()
+        with patch("my_idm.file_assoc.backend_name", return_value="windows"):
+            dlg._refresh_torrent_assoc_status()
+        self.assertFalse(dlg._torrent_assoc_default_btn.isHidden())
+        # On Linux the application really may set the default itself, so a button that opens a
+        # system settings page would have nothing for the user to click.
+        with patch("my_idm.file_assoc.backend_name", return_value="linux"):
+            dlg._refresh_torrent_assoc_status()
+        self.assertTrue(dlg._torrent_assoc_default_btn.isHidden())
 
 
 class TestExternalToolsSettings(ConfigIsolationMixin, unittest.TestCase):

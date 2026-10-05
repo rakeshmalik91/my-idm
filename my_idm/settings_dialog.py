@@ -1600,8 +1600,113 @@ class SettingsDialog(QDialog):
         self._disk_space_check_cb.toggled.connect(self._disk_space_headroom_spin.setEnabled)
 
         layout.addWidget(meta_group)
+
+        # 3. .torrent files coming in from the OS. One group because all three settings answer
+        # the same question — how does a .torrent file reach My-IDM without the Add dialog? —
+        # and because the status lines underneath each are the honest answer to "did that work",
+        # which a checkbox alone cannot give on any of the three platforms.
+        self._create_torrent_file_integration_group(layout)
+
         layout.addStretch()
         return tab
+
+    def _create_torrent_file_integration_group(self, layout):
+        """Build the drag-and-drop / file-association / watched-folder controls.
+
+        The checkbox is the user's intent; `my_idm.file_assoc` owns the OS-level registration
+        and decides whether that intent is actually in force — the two can disagree, and on
+        Windows they *permanently* do, because no application may set itself the default handler.
+        So each status line reports the real state rather than echoing its checkbox back, which is
+        the same split the launch-at-login control uses.
+        """
+        group = QGroupBox(".torrent Files from the System")
+        gl = QVBoxLayout(group)
+        gl.setSpacing(10)
+
+        # -- file association ------------------------------------------------
+        self._torrent_assoc_cb = QCheckBox("Open .torrent files with My-IDM")
+        self._torrent_assoc_cb.setToolTip(
+            "Register My-IDM with the operating system as a handler for .torrent files, so it "
+            "appears in that file type's 'Open with' list.\n\n"
+            "On Windows you will still need to choose My-IDM once in the Default Apps settings — "
+            "Windows does not allow any application to make that choice for you."
+        )
+        gl.addWidget(self._torrent_assoc_cb)
+
+        self._torrent_assoc_status_lbl = QLabel("")
+        self._torrent_assoc_status_lbl.setWordWrap(True)
+        self._torrent_assoc_status_lbl.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+        gl.addWidget(self._torrent_assoc_status_lbl)
+
+        # A "Repair" button and a "Make default" button answer two different failures: a
+        # registration pointing at a moved checkout, and a correct registration the OS has not
+        # made the default. Only the second one Windows can do anything about, and only by
+        # sending the user there.
+        self._torrent_assoc_repair_btn = QPushButton("Repair Registration")
+        self._torrent_assoc_repair_btn.setToolTip(
+            "Rewrite the .torrent registration so it points at this copy of My-IDM again.\n\n"
+            "Needed after the project folder or Python environment has been moved."
+        )
+        self._torrent_assoc_repair_btn.clicked.connect(self._on_repair_torrent_assoc)
+        self._torrent_assoc_default_btn = QPushButton("Open Default Apps Settings")
+        self._torrent_assoc_default_btn.setToolTip(
+            "Open the system settings where you choose which application opens .torrent files.\n\n"
+            "Windows protects that choice from applications, so it has to be made here."
+        )
+        self._torrent_assoc_default_btn.clicked.connect(self._on_open_default_apps)
+        assoc_row = QHBoxLayout()
+        assoc_row.addWidget(self._torrent_assoc_repair_btn)
+        assoc_row.addWidget(self._torrent_assoc_default_btn)
+        assoc_row.addStretch(1)
+        gl.addLayout(assoc_row)
+
+        # -- watched folder ---------------------------------------------------
+        self._torrent_watch_cb = QCheckBox("Watch a folder and add .torrent files that appear in it")
+        self._torrent_watch_cb.setToolTip(
+            "Add .torrent files automatically when they appear in the folder below.\n\n"
+            "Only files modified in the last few days are considered, so pointing this at a "
+            "folder that already holds a large number of torrents will not import its history."
+        )
+        gl.addWidget(self._torrent_watch_cb)
+
+        folder_row = QHBoxLayout()
+        self._torrent_watch_edit = QLineEdit()
+        self._torrent_watch_edit.setPlaceholderText(DEFAULT_DOWNLOADS_DIR)
+        self._torrent_watch_edit.setToolTip(
+            "The folder to watch for .torrent files. Leave empty to watch your default "
+            "download folder."
+        )
+        self._torrent_watch_browse_btn = QPushButton("Browse...")
+        self._torrent_watch_browse_btn.clicked.connect(self._on_browse_torrent_watch_folder)
+        folder_row.addWidget(self._torrent_watch_edit, 1)
+        folder_row.addWidget(self._torrent_watch_browse_btn)
+        gl.addLayout(folder_row)
+        self._torrent_watch_clean_cb = QCheckBox("Delete .torrent files after adding (move to Trash)")
+        self._torrent_watch_clean_cb.setToolTip(
+            "Automatically move .torrent files to the Trash / Recycle Bin after they are "
+            "picked up from the watched folder and added to downloads."
+        )
+        gl.addWidget(self._torrent_watch_clean_cb)
+
+        age_row = QHBoxLayout()
+        self._torrent_watch_max_age_lbl = QLabel("Ignore files older than:")
+        age_row.addWidget(self._torrent_watch_max_age_lbl)
+        self._torrent_watch_max_age_spin = QSpinBox()
+        self._torrent_watch_max_age_spin.setRange(1, 365)
+        self._torrent_watch_max_age_spin.setSuffix(" days")
+        self._torrent_watch_max_age_spin.setValue(3)
+        self._torrent_watch_max_age_spin.setToolTip(
+            "Only add .torrent files modified within this many days.\n\n"
+            "Prevents importing old history when pointing at an existing folder."
+        )
+        age_row.addWidget(self._torrent_watch_max_age_spin)
+        age_row.addStretch(1)
+        gl.addLayout(age_row)
+
+        # Controls under watched folder are only enabled when folder watching is on.
+        self._torrent_watch_cb.toggled.connect(self._on_torrent_watch_toggled)
+
+        layout.addWidget(group)
 
     def _create_vpn_tab(self) -> QWidget:
         """Network adapter / VPN binding and proxy settings.
@@ -2749,6 +2854,23 @@ class SettingsDialog(QDialog):
         self._seeding_ratio_spin.setValue(self._torrent_cfg.download_to_seeding_ratio)
         self._metadata_timeout_spin.setValue(self._torrent_cfg.metadata_fetch_timeout_days)
 
+        # .torrent file integration. The association checkbox records what was loaded so a Save
+        # that did not touch it can be distinguished from one that did — see `_on_save`.
+        self._torrent_assoc_cb.setChecked(self._torrent_cfg.associate_torrent_files)
+        self._torrent_assoc_as_loaded = self._torrent_cfg.associate_torrent_files
+        self._torrent_watch_cb.setChecked(self._torrent_cfg.watch_torrent_folder)
+        self._torrent_watch_clean_cb.setChecked(self._torrent_cfg.clean_watched_torrent_files)
+        self._torrent_watch_max_age_spin.setValue(self._torrent_cfg.torrent_watch_max_age_days)
+        # An empty stored value means "the default download folder", which is exactly what the
+        # effective resolver returns, so the field is seeded from it rather than left blank. A
+        # blank field with a greyed Browse button reads as a setting that cannot be changed.
+        self._torrent_watch_edit.setText(
+            self._torrent_cfg.torrent_watch_folder
+            or self._general_cfg.get_effective_save_path()
+        )
+        self._on_torrent_watch_toggled(self._torrent_cfg.watch_torrent_folder)
+        self._refresh_torrent_assoc_status()
+
         # Network tab. Only the default entry is seeded here; enumerating adapters walks psutil
         # and is done by the probe thread (see `_start_probe`).
         self._reset_interface_combo()
@@ -3275,6 +3397,121 @@ class SettingsDialog(QDialog):
         self._clipboard_min_size_spin.setEnabled(checked)
         self._clipboard_ignored_exts_edit.setEnabled(checked)
 
+    def _on_torrent_watch_toggled(self, checked: bool):
+        self._torrent_watch_edit.setEnabled(checked)
+        self._torrent_watch_browse_btn.setEnabled(checked)
+        self._torrent_watch_clean_cb.setEnabled(checked)
+        self._torrent_watch_max_age_lbl.setEnabled(checked)
+        self._torrent_watch_max_age_spin.setEnabled(checked)
+
+    def _on_browse_torrent_watch_folder(self):
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select Folder to Watch for .torrent Files",
+            self._torrent_watch_edit.text().strip() or DEFAULT_DOWNLOADS_DIR,
+        )
+        if folder:
+            self._torrent_watch_edit.setText(folder)
+
+    def _refresh_torrent_assoc_status(self):
+        """Report the real .torrent association state under its checkbox.
+
+        Mirrors :meth:`_refresh_autostart_status`, with one extra state that the launch-at-login
+        control does not need: ``REGISTERED`` without ``DEFAULT``. On Windows that is the normal
+        permanent condition — the ProgID is ours and correct, and Windows still hands the file to
+        another program — and collapsing it into "on" would tell the user double-clicking works
+        when it does not.
+        """
+        from my_idm import file_assoc
+
+        try:
+            state = file_assoc.status()
+            where = file_assoc.location()
+        except Exception as exc:  # a probe failure must not break the preferences dialog
+            self._torrent_assoc_status_lbl.setText(f"⚠️ Could not read the association: {exc}")
+            self._torrent_assoc_status_lbl.setStyleSheet("color: #e06c75; font-size: 11px;")
+            self._torrent_assoc_repair_btn.setVisible(False)
+            self._torrent_assoc_default_btn.setVisible(False)
+            return
+
+        label = self._torrent_assoc_status_lbl
+        # The "make it the default" button is only meaningful where the OS lets a person do that
+        # and the app cannot. Elsewhere it would open a page with nothing to click.
+        can_choose = file_assoc.backend_name() == "windows"
+        self._torrent_assoc_default_btn.setVisible(can_choose)
+
+        if state is file_assoc.FileAssocState.UNSUPPORTED:
+            self._torrent_assoc_cb.setEnabled(False)
+            self._torrent_assoc_cb.setChecked(False)
+            label.setText(
+                "⚠️ My-IDM cannot register itself for .torrent files on this platform. "
+                "Choose My-IDM from your file manager's 'Open with' menu."
+            )
+            label.setStyleSheet("color: #e0af68; font-size: 11px;")
+            self._torrent_assoc_repair_btn.setVisible(False)
+        elif state is file_assoc.FileAssocState.STALE:
+            label.setText(
+                f"⚠️ The saved .torrent entry points somewhere else and will not open "
+                f"My-IDM.\n{where}"
+            )
+            label.setStyleSheet("color: #e0af68; font-size: 11px;")
+            self._torrent_assoc_repair_btn.setVisible(True)
+        elif state is file_assoc.FileAssocState.DEFAULT:
+            label.setText(f"✅ .torrent files open in My-IDM.\n{where}")
+            label.setStyleSheet("color: #7ee787; font-size: 11px;")
+            self._torrent_assoc_repair_btn.setVisible(False)
+        elif state is file_assoc.FileAssocState.REGISTERED:
+            label.setText(
+                "⚠️ My-IDM is registered for .torrent files but is not the default, so "
+                "double-clicking still opens another program. Choose My-IDM once in the "
+                "system's Default Apps settings.\n" + where
+            )
+            label.setStyleSheet("color: #e0af68; font-size: 11px;")
+            self._torrent_assoc_repair_btn.setVisible(False)
+        else:
+            label.setText(
+                f"Not registered. When enabled, the handler is written to:\n{where}"
+            )
+            label.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+            self._torrent_assoc_repair_btn.setVisible(False)
+
+    def _on_repair_torrent_assoc(self):
+        from my_idm import file_assoc
+
+        ok, message = file_assoc.repair()
+        self._refresh_torrent_assoc_status()
+        if ok:
+            QMessageBox.information(
+                self,
+                "Registration Repaired",
+                message
+                or "The .torrent registration now points at this copy of My-IDM.",
+            )
+        else:
+            QMessageBox.warning(self, "Repair Failed", message)
+
+    def _on_open_default_apps(self):
+        """Send the user to the one place the .torrent default can actually be changed.
+
+        `ms-settings:defaultapps?registeredAppUser=` deep-links to this application's entry on
+        Windows 10 1809+; older builds ignore the query and show the full list, which is still a
+        usable answer. The plain scheme is the fallback so a host that rejects the parameter does
+        not produce a dead button.
+        """
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+
+        for target in (
+            "ms-settings:defaultapps?registeredAppUser=My-IDM",
+            "ms-settings:defaultapps",
+        ):
+            if QDesktopServices.openUrl(QUrl(target)):
+                return
+        QMessageBox.information(
+            self,
+            "Default Apps",
+            "Open Settings > Apps > Default apps, choose My-IDM, and set it for .torrent files.",
+        )
+
     def _on_browser_min_size_changed(self, value: int):
         """The unknown-size choice only means anything while a minimum is set.
 
@@ -3571,6 +3808,48 @@ class SettingsDialog(QDialog):
         self._torrent_cfg.max_seeding_speed = self._max_seeding_speed_spin.value()
         self._torrent_cfg.download_to_seeding_ratio = self._seeding_ratio_spin.value()
         self._torrent_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
+
+        # 2b. .torrent file integration. The association is an OS-level change, so it is
+        # reconciled only when the checkbox actually moved — the same rule the launch-at-login
+        # control above follows. Reconciling unconditionally would resurrect an association the
+        # user had removed in the system settings, merely because they opened Preferences and
+        # pressed Save.
+        self._torrent_cfg.associate_torrent_files = self._torrent_assoc_cb.isChecked()
+        if self._torrent_cfg.associate_torrent_files != self._torrent_assoc_as_loaded:
+            from my_idm import file_assoc
+
+            assoc_ok, assoc_message = file_assoc.reconcile(
+                self._torrent_cfg.associate_torrent_files
+            )
+            if not assoc_ok:
+                # As above: the preference is recorded regardless, so the user's intent survives
+                # a transient failure. Losing the toggle would be a worse lie than a failed
+                # registration the user is now told about.
+                QMessageBox.warning(
+                    self,
+                    "File Association Not Applied",
+                    f"{assoc_message}\n\n"
+                    "The preference has been saved and will be retried next time you change it.",
+                )
+            else:
+                self._torrent_assoc_as_loaded = self._torrent_cfg.associate_torrent_files
+                if assoc_message:
+                    QMessageBox.information(self, "File Association", assoc_message)
+                # Either way the label is now out of date, including after a *disable*.
+                self._refresh_torrent_assoc_status()
+
+        # The watched folder is resolved against the effective default download folder when the
+        # field is left blank, so saving an untouched field records "the default" and follows a
+        # later change to the download folder rather than pinning the path that was current when
+        # the preference was first saved.
+        self._torrent_cfg.watch_torrent_folder = self._torrent_watch_cb.isChecked()
+        self._torrent_cfg.clean_watched_torrent_files = self._torrent_watch_clean_cb.isChecked()
+        self._torrent_cfg.torrent_watch_max_age_days = self._torrent_watch_max_age_spin.value()
+        watch_folder = self._torrent_watch_edit.text().strip()
+        default_folder = self._general_cfg.get_effective_save_path()
+        self._torrent_cfg.torrent_watch_folder = (
+            "" if watch_folder == default_folder else watch_folder
+        )
         self._torrent_cfg.save()
 
         # 3. Collect Network settings

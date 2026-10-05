@@ -71,7 +71,7 @@ Selecting any torrent download in the main table activates rich diagnostic tabs 
   - **Maximum Seeding Speed**: Direct upload rate cap in KB/s (0 = unlimited).
   - **Download-to-Seeding Speed Ratio**: Dynamically derives upload limit from the global download speed limit (`upload_limit = download_limit / ratio`, e.g. `2:1`).
   - The effective upload rate applied to libtorrent handles (`handle.set_upload_limit(...)`) automatically chooses the lowest non-zero cap among configured limits.
-- **Dedicated Preferences Tab**: BitTorrent-specific settings (seeding behavior, upload limits, ratio, and metadata timeout) are organized in a dedicated **🧲 BitTorrent** tab in the Preferences window (`Ctrl+,` or `Tools -> BitTorrent Settings…`).
+- **Dedicated Preferences Tab**: BitTorrent-specific settings (seeding behavior, upload limits, ratio, metadata timeout, and `.torrent` file integration) are organized in a dedicated **🧲 BitTorrent** tab in the Preferences window (`Ctrl+,` or `Tools -> BitTorrent Settings…`).
 
 ### 6. Privacy & Network Integration
 - **VPN Binding & Kill Switch**: If interface binding is enabled in [VPN Settings](file:///d:/Projects/my-idm/docs/vpn.md), libtorrent binds both `listen_interfaces` and `outgoing_interfaces` strictly to the VPN adapter IP. If the VPN drops, torrent transfers freeze instantly.
@@ -86,6 +86,102 @@ Selecting any torrent download in the main table activates rich diagnostic tabs 
 2. Paste a `magnet:?xt=...` link into the URL field, or click **"📁 Browse Torrent…"** to select a `.torrent` file from your disk.
 3. Choose the target destination directory (or use the configured default download folder).
 4. Click **"OK"**. The torrent starts downloading immediately.
+
+A `.torrent` can also arrive without the dialog at all — see below.
+
+---
+
+## `.torrent` Files From the System
+
+A `.torrent` is the one download kind the user holds as a *file* rather than a URL, so it has three
+routes in that never touch Add Download. All three funnel through
+`DownloadManager.add_torrent_files`, which owns the ingestion policy so they cannot disagree.
+
+### Drag and drop, anywhere in the window
+
+Drop a `.torrent` on the table, the details panel, the toolbar or the status bar. `MainWindow`
+overrides `dragEnterEvent` / `dragMoveEvent` / `dropEvent`; `setAcceptDrops(True)` is armed in
+`showEvent` so one window-level handler covers the whole window (Qt propagates a drag up the parent
+chain until something accepts, and no child accepts).
+
+`dragEnterEvent` decides on the *payload*, not the drop, so a drag with nothing usable is ignored
+and never lights up a drop cursor. Only existing local `.torrent` files are taken; a mixed
+selection adds its torrents and ignores the rest. A `file://` URL goes through
+`QUrl.toLocalFile()` — a raw `file://` string does not survive `_detect_type` and would quietly
+become an HTTP download.
+
+Two regions are **not** covered, structurally rather than by oversight:
+
+- **The embedded browser.** `DetailsPanel` reparents a native Chrome HWND into a Qt container, and
+  a non-Qt window generates no Qt drag events at all.
+- **Modal dialogs.** Add Download and Preferences are separate top-level windows, so a drop onto
+  them is delivered to them.
+
+### A watched folder
+
+Preferences → BitTorrent → **.torrent Files from the System**. `TorrentFolderWatcher` adds
+`.torrent` files that appear in a chosen folder. The folder defaults to the effective default
+download folder, resolved live so a later change to that setting is followed rather than pinned.
+
+Three properties make it safe to point at a real downloads directory:
+
+- **Age-limited, not just new-file-limited.** Only files modified within
+  `MAX_TORRENT_AGE_DAYS` (3) are considered. A folder holding a hundred torrents from years past
+  imports nothing and starts nothing, while a file that arrived while the app was closed is still
+  picked up on the next start.
+- **A file must stop changing before it is believed.** A `.torrent` dropped into a watched folder
+  is usually still being copied, and a truncated one parses into an `error` row the user has to
+  delete. A file is reported only once its size is unchanged across two observations at least
+  `WATCH_STABILITY_MS` apart.
+- **A rescan never restarts a paused torrent.** `add_download` treats a re-add of a paused row as
+  a request to *resume* it — right for a deliberate Ctrl+V, badly wrong for a watcher that
+  rescans every minute. The watched folder passes `only_new=True`, which skips any path already
+  in the table without touching it.
+
+`QFileSystemWatcher` is used for responsiveness but is never trusted alone: events are missed
+across suspend/resume and cannot be watched on a network drive, so a periodic rescan
+(`WATCH_RESCAN_MS`) is what makes the feature dependable. The watcher is only ever started when the
+manager's asyncio thread is alive, so a manager built by a test or a headless import never scans
+the user's disk — the same invariant `_apply_backlog_timer_config` keeps for the backlog poll.
+
+### File association
+
+Preferences → BitTorrent → **Open .torrent files with My-IDM** (`associate_torrent_files`).
+`my_idm/file_assoc.py` mirrors `autostart.py`: one platform backend chosen at import, a `status()`
+comparing what is registered against what *this* build would register, and a public API that never
+raises.
+
+**An application cannot make itself the default handler.** This is the central fact of the feature:
+
+| Platform | What can be done | Reported state |
+| :--- | :--- | :--- |
+| Windows | Write `HKCU\Software\Classes\.torrent` + a `MyIDM.Torrent.1` ProgID under the *current user* (no elevation). Makes My-IDM appear in the file's **Open with** list. | `REGISTERED` normally; `DEFAULT` only after the user picks My-IDM in Default Apps |
+| Linux | Write a desktop entry and run `xdg-mime default` — the one platform where the application really may set the default. | `REGISTERED` / `DEFAULT` |
+| macOS | Nothing. LaunchServices reads `CFBundleDocumentTypes` from the bundle's `Info.plist`, which an unbundled Python application cannot reach. | `UNSUPPORTED`, pointing at Finder's Get Info |
+
+On Windows the user's choice lives in `...\FileExts\.torrent\UserChoice`, whose value is a hash the
+user generates by clicking through Default Apps; a program writing that key has its change silently
+discarded. So the checkbox records intent, `file_assoc` owns the registration, and the status line
+reports the **real** state — `REGISTERED` is deliberately distinct from `DEFAULT` and says so, with
+a button that opens the Default Apps page. Reporting that as "on" is the same lie
+`_refresh_autostart_status` avoids for the login item.
+
+Two details that are easy to get wrong and are covered by tests:
+
+- The registered command is `autostart.app_command()` — **not** `launch_command()`. The latter
+  carries `--autostart`, which suppresses the main window whenever a tray is available, so a
+  double-clicked `.torrent` would be added invisibly. Single-instance forwarding already handles the
+  case where My-IDM is already running.
+- `reconcile()` is called only when the checkbox actually *moved*, mirroring the launch-at-login
+  control. Reconciling unconditionally would resurrect an association the user removed in the
+  system settings merely because they opened Preferences and pressed Save.
+
+`is_enabled()` answers `False` for `STALE`, which is load-bearing: `reconcile` short-circuits on it,
+so a broken entry answering `True` would make Repair a no-op and the stale command would survive
+forever.
+
+---
+
 
 ### Managing Active Torrents
 - **Pause / Resume**: Click the toolbar buttons or right-click the row in the table.
@@ -103,14 +199,33 @@ Selecting any torrent download in the main table activates rich diagnostic tabs 
 | Component | File | Description |
 | :--- | :--- | :--- |
 | **Torrent Engine** | [`my_idm.torrent_engine.TorrentEngine`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Core engine wrapping `libtorrent.session`, managing handles, DHT/PEX, alerts, and periodic ticks. |
-| **Fastresume Cache** | [`FASTRESUME_DIR`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py#L26) | Directory `~/.my-idm/fastresume/` storing bencoded resume buffers for instant startup. |
+| **Fastresume Cache** | [`FASTRESUME_DIR`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py#L43) | Directory `~/.my-idm/fastresume/` storing bencoded resume buffers for instant startup. |
 | **Priority Controller** | [`set_torrent_file_priority`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Dynamically applies `lt.torrent_handle.file_priority()` across individual files. |
 | **Swarm Diagnostics** | [`get_torrent_peers`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) / [`get_torrent_trackers`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Queries `get_peer_info()` and `trackers()` for UI presentation. |
 | **Details Panel** | [`my_idm.details_panel.DetailsPanel`](file:///d:/Projects/my-idm/my_idm/details_panel.py) | Multi-tab inspection panel rendering files, peer tables, tracker metrics, and progress bars. |
 | **Download Manager** | [`my_idm.manager.DownloadManager`](file:///d:/Projects/my-idm/my_idm/manager.py) | Coordinates download lifecycle, transitions, speed aggregation, and database persistence. |
 | **Network Binding** | [`TorrentEngine.apply_network_config`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Sets `outgoing_interfaces` and `listen_interfaces` on `libtorrent.session_settings`. |
+| **File Ingress** | [`my_idm.torrent_sources`](file:///d:/Projects/my-idm/my_idm/torrent_sources.py) | `.torrent` paths from a drag payload, and the watched-folder scanner. |
+| **Ingestion Policy** | [`add_torrent_files`](file:///d:/Projects/my-idm/my_idm/manager.py) | The one add path for button, drop and watched folder; canonicalises and de-duplicates. |
+| **File Association** | [`my_idm.file_assoc`](file:///d:/Projects/my-idm/my_idm/file_assoc.py) | Per-platform `.torrent` handler registration, and the honest report of what the OS will actually do. |
 | **Tor Routing** | [`TorrentEngine.apply_tor_config`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Configures SOCKS5 proxy and privacy flags on `libtorrent.session_settings`. |
 | **State Machine & Lifecycle** | [`docs/architecture/state-machines.md`](file:///d:/Projects/my-idm/docs/architecture/state-machines.md) | Dedicated BitTorrent state diagram, metadata timeout lifecycle, seeding rules, and slot allocation. |
+
+### `.torrent` file integration settings
+
+All five live in `TorrentConfig` and default safely — each acts on the machine outside the app
+window, so nothing is opted into until asked for.
+
+| Key | Default | Description |
+| :--- | :--- | :--- |
+| `associate_torrent_files` | `False` | Register My-IDM as a `.torrent` handler. Intent only; `file_assoc` owns the registration. |
+| `watch_torrent_folder` | `False` | Watch a folder and add `.torrent` files that appear in it. |
+| `torrent_watch_folder` | `""` | The folder to watch. `""` means the effective default download folder, resolved live. |
+| `clean_watched_torrent_files` | `False` | Automatically move `.torrent` files to trash after adding them from the watched folder. |
+| `torrent_watch_max_age_days` | `3` | Maximum age in days for `.torrent` files picked up from the watched folder (0 = unlimited). |
+
+`WATCH_RESCAN_MS`, `WATCH_DEBOUNCE_MS` and `WATCH_STABILITY_MS` are module constants in
+`my_idm/torrent_sources.py` rather than settings — they are correctness bounds, not preferences.
 
 ---
 

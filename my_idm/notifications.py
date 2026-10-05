@@ -230,3 +230,27 @@ def notify_clipboard_download_captured(
     if skipped:
         message += f"\n{skipped} over the per-copy limit were skipped"
     return show_notification(title, message, duration=5)
+
+
+def notify_torrent_files_added(filenames: list[str], source: str = "") -> bool:
+    """Show notification when local ``.torrent`` files are added from outside the window.
+
+    A watched folder is the least visible way to add a download there is: nothing was clicked, and
+    the only sign is a row appearing. Same reasoning as
+    :func:`notify_clipboard_download_captured` — without a notification the user cannot connect
+    the new row to the file they dropped in the folder.
+
+    *source* names the route ("watched folder", "dropped") so the message says which of them
+    fired; a user with both enabled is otherwise told the same thing twice with no way to tell
+    them apart. Counted rather than listed beyond the first name, for the same reason as the
+    clipboard variant.
+    """
+    if not filenames:
+        return False
+    where = f" from the {source}" if source else ""
+    title = f"Added{where.title()}" if source else "Torrent Added"
+    if len(filenames) == 1:
+        message = f"Added: {filenames[0]}"
+    else:
+        message = f"Added {len(filenames)} torrent files{where}"
+    return show_notification(title, message, duration=5)
