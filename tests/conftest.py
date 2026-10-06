@@ -265,6 +265,22 @@ def block_non_loopback_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", guarded_connect, raising=True)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex, raising=True)
     monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo, raising=True)
+
+    try:
+        import my_idm.http_engine as _he
+        if getattr(_he, "CurlAsyncSession", None) is not None:
+            class _GuardedCurlAsyncSession:
+                def __init__(self, *args, **kwargs):
+                    detail = f"unmocked CurlAsyncSession instantiated"
+                    _record_violation("network", detail)
+                    raise AssertionError(
+                        f"Test suite attempted a {detail}. "
+                        "Tests must mock CurlAsyncSession with FakeCurlSession or mock transport."
+                    )
+            monkeypatch.setattr(_he, "CurlAsyncSession", _GuardedCurlAsyncSession, raising=False)
+    except Exception:
+        pass
+
     yield
 
 

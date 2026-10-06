@@ -798,6 +798,13 @@ class EngineMinSizeTestCase(unittest.TestCase):
             filename_cb=lambda *a: None,
         )
 
+        # Record backoff requests instead of honouring them, avoiding wall-clock delays
+        import asyncio
+        real_sleep = asyncio.sleep
+        patcher = patch("asyncio.sleep", new=lambda *a, **kw: real_sleep(0))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def add_entry(self, pending_min_bytes=None, total_size=0):
         entry = DownloadEntry(
             id="h1",
@@ -858,7 +865,7 @@ class EngineMinSizeTestCase(unittest.TestCase):
         """Refusing everything unsizeable would break chunked and gzip responses."""
         self.add_entry(pending_min_bytes=10 * 1024 * 1024)
         self.engine._session = FakeSession(
-            heads=[FakeResponse(403)],
+            heads=[FakeResponse(200, headers={})],
             gets=[FakeResponse(200, chunks=[b"x"])],
         )
         import asyncio
