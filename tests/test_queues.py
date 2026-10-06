@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PySide6.QtCore import Qt
@@ -1767,6 +1769,7 @@ class TestQueueColumnTooltip(unittest.TestCase):
         self.assertNotIn("Torrents", str(tip))
 
 
+@pytest.mark.ui
 class TestQueueMenuGrouping(_MainWindowTestCase):
     def test_move_up_and_down_share_the_queue_group(self):
         # They are ordering commands, not playback ones, so they belong with queue membership
@@ -1925,6 +1928,7 @@ class TestQueueMenuGrouping(_MainWindowTestCase):
         )
 
 
+@pytest.mark.ui
 class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
 
     def _dialog(self):
@@ -2371,6 +2375,7 @@ class TestQueueManagerDialog(QueueManagerMixin, unittest.TestCase):
         ])
 
 
+@pytest.mark.ui
 class TestQueueUiWiring(_MainWindowTestCase):
     """The window owns the switcher, so the wiring needs pinning rather than the model.
 
@@ -2691,6 +2696,7 @@ class TestQueueUiWiring(_MainWindowTestCase):
         self.assertEqual(len(self.manager.get_queues()), before)
 
 
+@pytest.mark.ui
 class TestAddQueueDialog(unittest.TestCase):
     """Direct UI and interaction tests for AddQueueDialog."""
 
@@ -2716,7 +2722,7 @@ class TestAddQueueDialog(unittest.TestCase):
     def test_blank_name_rejected_on_accept(self):
         dlg = AddQueueDialog(None, initial_name="   ")
         self.addCleanup(dlg.deleteLater)
-        with patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
+        with patch.object(QMessageBox, "warning") as mock_warn:
             dlg._on_accept()
             mock_warn.assert_called_once()
         self.assertFalse(dlg.result())

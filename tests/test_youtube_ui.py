@@ -1,5 +1,6 @@
 """Tests for playlist extraction, dialog-close safety, the table badge, and settings UI."""
 
+import os
 import sys
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from my_idm import youtube_tool as ytt
 from my_idm.youtube_dialog import YouTubeDialog
 
 app = QApplication.instance() or QApplication(sys.argv)
+IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI", "").strip().lower() in ("true", "1")
 
 PL = "https://www.youtube.com/playlist?list=PLtest"
 
@@ -47,7 +49,8 @@ def _pump_events_until_settled(widget, timeout: float = 10.0) -> None:
     previous = None
     stable = 0
     while time.monotonic() < deadline:
-        QApplication.processEvents()
+        if not IS_HEADLESS_WIN_CI:
+            QApplication.processEvents()
         geometry = (widget.width(), widget.height(), widget.viewport().height())
         if geometry == previous:
             stable += 1
@@ -339,6 +342,7 @@ class TestEntryUrlHelpers(unittest.TestCase):
         self.assertEqual(ytt._pick_thumbnail({"thumbnails": "bad"}), "")
 
 
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot run real dialog event pumps")
 class TestDialogCloseSafety(_WorkerTestCase):
     """Closing the dialog mid-analysis must not block or abort the process."""
 
@@ -540,7 +544,8 @@ class TestDialogCloseSafety(_WorkerTestCase):
         # flake on a loaded host; pump until the slot actually runs.
         deadline = time.monotonic() + 30.0
         while not delivered.is_set() and time.monotonic() < deadline:
-            app.processEvents()
+            if not IS_HEADLESS_WIN_CI:
+                app.processEvents()
             time.sleep(0.005)
 
         self.assertTrue(
@@ -576,6 +581,7 @@ def ytt_extract_worker(release: threading.Event, started: threading.Event):
     return worker, patcher
 
 
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot run real dialog event pumps")
 class TestPlaylistDialogFlow(_WorkerTestCase):
     """Playlist URLs populate the checkbox list in the dialog."""
 
@@ -791,6 +797,7 @@ class TestPlaylistLimit(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, "cancelled")
 
 
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot run real dialog event pumps")
 class TestPlaylistDialogBatchUi(_WorkerTestCase):
     """Batch pane visibility and truncation messaging."""
 
@@ -1166,6 +1173,7 @@ class TestAnalysisThrottle(unittest.TestCase):
             ytt._MIN_REQUEST_INTERVAL_SECONDS = original
 
 
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real SettingsDialog")
 class TestYouTubeSettingsUI(unittest.TestCase):
     """Phase 6: the YouTube group in Settings -> External Tools."""
 

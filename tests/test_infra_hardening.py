@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication
 
@@ -21,6 +23,7 @@ from my_idm.database import Database, DownloadEntry
 app = QApplication.instance() or QApplication(sys.argv)
 
 
+@pytest.mark.ui
 class TestKeyboardShortcuts(unittest.TestCase):
     """The main window advertises shortcuts; they must be bound and unique."""
 

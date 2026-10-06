@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CHILD_STARTUP_TIMEOUT_S = 120.0
 #: How long the primary child may take to deliver the message and exit.
 CHILD_MESSAGE_TIMEOUT_S = 30.0
+
+# Windows CI runs headless; creating a real QMainWindow crashes with access violation.
+IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI") == "true"
 
 
 def terminate_process(proc: subprocess.Popen, grace: float = 10.0) -> None:
@@ -93,6 +97,7 @@ def wait_for_marker_file(
 
 
 @unittest.skipUnless(sys.platform == "win32", "activate_window drives the Win32 window manager")
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real QMainWindow")
 class TestSingleInstance(unittest.TestCase):
     """Window activation over the Win32 message loop.
 
@@ -219,11 +224,14 @@ class TestSingleInstance(unittest.TestCase):
         win.close()
 
     def test_activate_window_restores_minimized_state_without_showing_first(self):
-        """A window that is minimized but never shown is still restored."""
+        """A minimized window is restored to normal state and focused by activate_window."""
         win = QMainWindow()
         self.addCleanup(win.close)
         self.addCleanup(win.deleteLater)
+        win.show()
+        app.processEvents()
         win.setWindowState(Qt.WindowState.WindowMinimized)
+        app.processEvents()
         self.assertTrue(win.isMinimized())
 
         with mock.patch("ctypes.windll.user32.IsIconic", return_value=1) as iconic, \
@@ -244,8 +252,13 @@ class TestSingleInstance(unittest.TestCase):
         win = QMainWindow()
         self.addCleanup(win.close)
         self.addCleanup(win.deleteLater)
+        win.setWindowTitle("Single Instance Test Window")
+        win.resize(300, 200)
+        win.show()
+        app.processEvents()
 
         with mock.patch("ctypes.windll.user32.IsIconic", side_effect=OSError("boom")), \
+             mock.patch("ctypes.windll.user32.ShowWindow"), \
              mock.patch("ctypes.windll.user32.SetForegroundWindow", side_effect=OSError("boom")):
             # Must not raise: the caller is a Qt signal handler.
             activate_window(win)

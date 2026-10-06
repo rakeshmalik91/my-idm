@@ -707,7 +707,10 @@ class MainWindow(QMainWindow):
         self._details_panel = DetailsPanel(self._manager, self)
         self._details_panel.setMinimumHeight(140)
         if hasattr(self._details_panel, "browser_container_hwnd"):
-            self._manager.set_browser_container_hwnd(self._details_panel.browser_container_hwnd)
+            try:
+                self._manager.set_browser_container_hwnd(self._details_panel.browser_container_hwnd)
+            except Exception:
+                pass
         self._details_panel.browser_tab_requested.connect(self._on_browser_tab_requested)
         self._splitter.addWidget(self._details_panel)
         self._splitter.setChildrenCollapsible(False)

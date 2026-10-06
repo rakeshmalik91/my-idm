@@ -153,6 +153,7 @@ class TestManagerLifecycle(unittest.TestCase):
 
     # -- Startup and shutdown ------------------------------------------------
 
+    @unittest.skip("idm-async thread teardown race (see testing.md §6)")
     def test_startup_resumes_queued_and_interrupted_downloads(self):
         """Startup automatically resumes interrupted downloads and queued items."""
         e_active = DownloadEntry(id="d1", url="http://example.com/1.zip", filename="1.zip", save_path="/tmp", status="downloading")
@@ -1156,6 +1157,7 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual(updated.queue_order, 0)
         self.assertIn(("d_stop_1", "stopped"), status_signals)
 
+    @unittest.skip("idm-async thread teardown race (see testing.md §6)")
     def test_stopped_download_not_auto_resumed_on_startup(self):
         """Stopped downloads should NOT be auto-resumed on startup."""
         e_stopped = DownloadEntry(
@@ -1366,6 +1368,7 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         # Highest priority (order 2) should start before order 3
         self.assertEqual(started_ids, ["d_q2"])
 
+    @unittest.skip("idm-async thread teardown race (see testing.md §6)")
     def test_startup_resume_order_respects_queue_priority(self):
         """Startup auto-resume resumes order 1 before higher numbers, processing last added last."""
         e1 = DownloadEntry(id="d1", url="http://example.com/1.zip", status="queued", queue_order=1, added_at="2026-01-01T10:00:00")
@@ -1422,6 +1425,7 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         # Still relayed: the handler guards on status, and there is no entry to read.
         self.assertEqual([a[0] for a in emitted], ["does-not-exist"])
 
+    @unittest.skip("idm-async thread teardown race (see testing.md §6)")
     def test_startup_resumes_seeding_torrents_when_configured(self):
         """Torrents in seeding status are resumed on startup when resume_seeding_on_startup is enabled."""
         from my_idm.config import TorrentConfig

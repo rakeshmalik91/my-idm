@@ -1,11 +1,13 @@
 """Unit tests for DownloadTableModel: column indexing, data formatting, sorting, and progress bar delegates."""
 
+import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
 from unittest.mock import patch
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import QApplication, QTableView
@@ -18,6 +20,8 @@ from my_idm.main_window import MainWindow
 from tests.conftest import rows_by_section
 
 app = QApplication.instance() or QApplication([])
+
+IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI") == "true"
 
 
 def _make_entry(id: str, name: str, size: int = 1000, progress: float = 0.0,
@@ -464,6 +468,8 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(display_val, "S:7 (35)  P:14 (70)")
 
 
+@pytest.mark.ui
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow")
 class TestMainWindowSortingIntegration(unittest.TestCase):
 
     def setUp(self):

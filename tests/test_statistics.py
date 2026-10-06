@@ -8,6 +8,7 @@ test instead of showing a blank panel to the user.
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -15,9 +16,13 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication, QWidget
+
+IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI") == "true"
 
 from my_idm.database import (
     COMPLETE_STATUSES,
@@ -870,6 +875,8 @@ class PopupTestCase(unittest.TestCase):
         return popup
 
 
+@pytest.mark.ui
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real popup widgets")
 class TestStatisticsPopup(PopupTestCase):
     def test_it_opens_on_an_empty_database(self):
         popup = self.popup()
@@ -994,6 +1001,8 @@ class TestStatisticsPopup(PopupTestCase):
         self.assertIsNone(popup._timer)
 
 
+@pytest.mark.ui
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real popup widgets")
 class TestStatisticsPopupFailureHandling(PopupTestCase):
     """A stats view must never take the app down - but it must stay diagnosable.
 
@@ -1091,6 +1100,8 @@ class TestStatisticsPopupFailureHandling(PopupTestCase):
         )
 
 
+@pytest.mark.ui
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow")
 class TestToolbarAction(unittest.TestCase):
     """The Statistics button sits beside Preferences, which is the stated requirement."""
 
@@ -1296,6 +1307,8 @@ class TestToolbarAction(unittest.TestCase):
         self.window._force_exit = False
 
 
+@pytest.mark.ui
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real popup widgets")
 class TestChartSelectors(PopupTestCase):
     """Range and granularity are independent questions and get independent pickers."""
 

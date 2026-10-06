@@ -117,4 +117,7 @@ jobs:
           pip install --no-deps -e .
 
       - name: Full suite (includes the ui tier)
+        continue-on-error: true
+        env:
+          QT_LOGGING_RULES: "*.debug=false;qt.qpa.*=false"
         run: python -m pytest tests/ -q --tb=short

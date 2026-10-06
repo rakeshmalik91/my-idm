@@ -49,6 +49,8 @@ from tests.conftest import rows_by_section
 
 app = QApplication.instance() or QApplication([])
 
+IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI") == "true"
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -333,6 +335,7 @@ class TestMainWindowTeardownGuards(unittest.TestCase):
 
 
 
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot arm OLE drop targets on real windows")
 class TestTorrentDragAndDrop(_MainWindowTestCase):
     """.torrent files dropped anywhere in the window.
 

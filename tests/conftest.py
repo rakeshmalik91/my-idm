@@ -61,6 +61,7 @@ _INTERACTIVE_MODULES = frozenset({
     "test_entrypoint_and_notifications",  # toast / tray notification paths
     "test_main_window",        # MainWindow + system tray
     "test_settings",           # SettingsDialog
+    "test_single_instance",    # QMainWindow + Win32 activation
     "test_splash",             # splash window
     "test_ui_tor_and_utils",   # widgets + real file moves
     "test_views_tab",          # MainWindow + SettingsDialog + apply_theme
@@ -98,12 +99,13 @@ def pytest_collection_modifyitems(items):
     reviewer can read, and so a new UI test module is opted out of unattended runs by
     default rather than by default *into* them.
     """
-    global _HAS_UI_TESTS
-    _HAS_UI_TESTS = any(item.get_closest_marker("ui") is not None for item in items)
     for item in items:
         module_name = (item.module.__name__ or "").rsplit(".", 1)[-1]
         if module_name in _INTERACTIVE_MODULES:
             item.add_marker(pytest.mark.ui)
+
+    global _HAS_UI_TESTS
+    _HAS_UI_TESTS = any(item.get_closest_marker("ui") is not None for item in items)
 
 # Global session fixture to isolate QSettings away from the host OS registry / config
 _orig_qsettings_init = QSettings.__init__

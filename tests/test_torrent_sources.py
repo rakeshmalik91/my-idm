@@ -185,6 +185,8 @@ class TestFindNewTorrents(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.fresh = self.tmp / "fresh.torrent"
         self.fresh.write_bytes(b"d1:ae")
+        # Backdate slightly so max_age_days=0 excludes it (mtime < now)
+        _age(self.fresh, 1)
         self.stale = self.tmp / "old.torrent"
         self.stale.write_bytes(b"d1:ae")
         _age(self.stale, (MAX_TORRENT_AGE_DAYS + 2) * 86400)
