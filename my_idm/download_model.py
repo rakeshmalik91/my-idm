@@ -1504,6 +1504,26 @@ class DownloadTableModel(QAbstractTableModel):
         right = self.index(row, Col.COUNT - 1)
         self.dataChanged.emit(left, right)
 
+    def update_url(self, download_id: str, new_url: str) -> bool:
+        """Update entry URL after user refreshes/edits download address."""
+        found = False
+        for e in self._all_entries:
+            if e.id == download_id:
+                e.url = new_url
+                found = True
+                break
+
+        row = self._id_to_row.get(download_id)
+        if row is not None:
+            self._entries[row].url = new_url
+            left = self.index(row, 0)
+            right = self.index(row, Col.COUNT - 1)
+            self.dataChanged.emit(
+                left, right,
+                [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole],
+            )
+        return found
+
     def refresh_entry(self, download_id: str, entry: DownloadEntry):
         """Full refresh of an entry (e.g. after move or recheck)."""
         if entry.download_type == "torrent" and entry.metadata:

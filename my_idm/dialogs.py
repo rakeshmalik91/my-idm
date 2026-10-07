@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 from my_idm.clipboard_monitor import looks_like_download_url
 from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR, TorConfig
 from my_idm.database import DEFAULT_QUEUE_COLOR, normalize_queue_color
-from my_idm.styles import themed_widget
+from my_idm.styles import Colors, themed_widget
 from my_idm.youtube_tool import detect_youtube_url
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
@@ -578,6 +578,97 @@ class RenameDialog(QDialog):
     @property
     def new_name(self) -> str:
         return self._new_name
+
+
+class RefreshAddressDialog(QDialog):
+    """Dialog to update/refresh the source URL of an expired or changed download."""
+
+    def __init__(self, current_url: str = "", filename: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Refresh Download Address")
+        self.setMinimumWidth(580)
+        self.setModal(True)
+
+        from my_idm.resources import get_app_icon
+        self.setWindowIcon(get_app_icon())
+
+        self._new_url = current_url
+        self._resume_immediately = True
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        if filename:
+            name_lbl = QLabel(f"<b>Download:</b> {filename}")
+            layout.addWidget(name_lbl)
+
+        layout.addWidget(QLabel("Current address:"))
+        self._current_url_edit = QLineEdit(current_url)
+        self._current_url_edit.setReadOnly(True)
+        layout.addWidget(self._current_url_edit)
+
+        layout.addWidget(QLabel("New address / URL:"))
+        self._url_edit = QLineEdit(current_url)
+        self._url_edit.setClearButtonEnabled(True)
+        self._url_edit.returnPressed.connect(self._accept)
+        layout.addWidget(self._url_edit)
+        self._url_edit.selectAll()
+
+        hint_lbl = QLabel(
+            "Existing downloaded bytes and completed segments will be preserved when resuming."
+        )
+        hint_lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
+        layout.addWidget(hint_lbl)
+
+        self._resume_cb = QCheckBox("Resume download immediately after updating address")
+        self._resume_cb.setChecked(True)
+        layout.addWidget(self._resume_cb)
+
+        layout.addSpacing(8)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("Update Address")
+        ok_btn.setObjectName("primaryButton")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self._accept)
+        btn_layout.addWidget(ok_btn)
+
+        layout.addLayout(btn_layout)
+
+    def _accept(self):
+        text = self._url_edit.text().strip()
+        if not text:
+            QMessageBox.warning(self, "Invalid URL", "Download address cannot be empty.")
+            return
+        if not (text.startswith("http://") or text.startswith("https://")):
+            QMessageBox.warning(
+                self,
+                "Invalid URL",
+                "Please enter a valid HTTP or HTTPS URL (starting with http:// or https://).",
+            )
+            return
+        self._new_url = text
+        self._resume_immediately = self._resume_cb.isChecked()
+        self.accept()
+
+    @property
+    def current_url(self) -> str:
+        return self._current_url_edit.text()
+
+    @property
+    def new_url(self) -> str:
+        return self._new_url
+
+    @property
+    def resume_immediately(self) -> bool:
+        return self._resume_immediately
 
 
 class QueueManagerDialog(QDialog):

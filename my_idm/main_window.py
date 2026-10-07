@@ -64,6 +64,7 @@ from my_idm.dialogs import (
     DeleteConfirmDialog,
     MoveDownloadDialog,
     QueueManagerDialog,
+    RefreshAddressDialog,
     RenameDialog,
 )
 from my_idm.download_model import (
@@ -807,6 +808,10 @@ class MainWindow(QMainWindow):
         self._act_copy_url.setToolTip("Copy download URL or Magnet link to clipboard (Ctrl+C)")
         self._act_copy_url.triggered.connect(self._on_copy_url)
 
+        self._act_refresh_address = QAction(_create_emoji_icon("🔗"), "Refresh Address…", self)
+        self._act_refresh_address.setToolTip("Edit or refresh expired download URL without losing progress")
+        self._act_refresh_address.triggered.connect(self._on_refresh_address)
+
         self._act_rename = QAction(_create_emoji_icon("✏️"), "Rename…", self)
         self._act_rename.setShortcut(QKeySequence("F2"))
         self._act_rename.setToolTip("Rename downloaded file or folder (F2)")
@@ -1084,6 +1089,7 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self._act_stop_all_seeding)
         edit_menu.addSeparator()
         edit_menu.addAction(self._act_copy_url)
+        edit_menu.addAction(self._act_refresh_address)
         edit_menu.addSeparator()
         # The file operations, in the same order the row context menu uses them: rename it,
         # move it, look at it, destroy it. Rename used to sit up with Copy URL, and Open File
@@ -1801,6 +1807,7 @@ class MainWindow(QMainWindow):
         self._manager.download_removed.connect(self._on_download_removed)
         self._manager.download_moved.connect(self._on_download_moved)
         self._manager.download_renamed.connect(self._on_download_renamed)
+        self._manager.download_url_updated.connect(self._on_download_url_updated)
         self._manager.network_config_changed.connect(
             self._update_network_status_badge
         )
@@ -2439,6 +2446,37 @@ class MainWindow(QMainWindow):
                 else:
                     self._status_label.setText(f"Copied {len(urls)} URLs/Magnets to clipboard")
 
+    def _on_refresh_address(self):
+        entry = self._first_selected_entry()
+        if not entry:
+            return
+        if entry.download_type != "http":
+            QMessageBox.information(
+                self,
+                "Refresh Address",
+                "Address refresh is only applicable to HTTP/HTTPS downloads.",
+            )
+            return
+        if entry.status in ("downloading", "scanning", "checking"):
+            QMessageBox.information(
+                self,
+                "Refresh Address",
+                "Please pause the download before refreshing its address.",
+            )
+            return
+        dlg = RefreshAddressDialog(
+            current_url=entry.url,
+            filename=entry.filename or entry.id,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_url = dlg.new_url.strip()
+            if new_url and new_url != entry.url:
+                if self._manager.update_download_url(entry.id, new_url, resume=dlg.resume_immediately):
+                    self._status_label.setText(f"Updated address for '{entry.filename or entry.id}'")
+            elif new_url == entry.url and dlg.resume_immediately and entry.status in ("paused", "error", "stopped"):
+                self._manager.resume_download(entry.id)
+
     def _on_rename(self):
         entry = self._first_selected_entry()
         if not entry:
@@ -2531,6 +2569,7 @@ class MainWindow(QMainWindow):
         menu.addAction(self._act_start_seeding)
         menu.addSeparator()
         menu.addAction(self._act_copy_url)
+        menu.addAction(self._act_refresh_address)
         menu.addAction(self._act_export_csv)
         menu.addSeparator()
         menu.addAction(self._act_scan_antivirus)
@@ -2867,6 +2906,12 @@ class MainWindow(QMainWindow):
         self._act_start_seeding.setEnabled(can_seed)
 
         self._act_copy_url.setEnabled(has_selection)
+        can_refresh_address = (
+            single_selection
+            and selected_entries[0].download_type == "http"
+            and selected_entries[0].status not in ("downloading", "scanning", "checking")
+        )
+        self._act_refresh_address.setEnabled(can_refresh_address)
         self._act_rename.setEnabled(single_has_existing_file)
         self._act_delete.setEnabled(has_selection)
         self._act_delete_file.setEnabled(has_selection and has_existing_file)
@@ -2978,6 +3023,16 @@ class MainWindow(QMainWindow):
             self._model.refresh_entry(download_id, entry)
         else:
             self._model.rename_entry(download_id, new_filename)
+        self._table.viewport().update()
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
+            self._details_panel.refresh()
+        self._update_action_states()
+
+    def _on_download_url_updated(self, download_id: str, new_url: str):
+        self._model.update_url(download_id, new_url)
+        fresh = self._manager.get_entry(download_id)
+        if fresh is not None:
+            self._model.refresh_entry(download_id, fresh)
         self._table.viewport().update()
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()

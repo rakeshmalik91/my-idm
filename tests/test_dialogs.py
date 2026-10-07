@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication, QDialog
 from PySide6.QtGui import QGuiApplication
 
 from my_idm.config import ExternalToolsConfig, GeneralConfig
-from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, RenameDialog
+from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, RefreshAddressDialog, RenameDialog
 
 app = QApplication.instance() or QApplication([])
 
@@ -447,6 +447,58 @@ class TestDeleteConfirmDialog(unittest.TestCase):
             dlg.close()
 
 
+class TestRefreshAddressDialog(unittest.TestCase):
+    """Test RefreshAddressDialog initialization, validation, and properties."""
+
+    def test_refresh_dialog_initialization(self):
+        old_url = "https://cdn.example.com/expired-token-123/video.mp4"
+        dlg = RefreshAddressDialog(current_url=old_url, filename="video.mp4")
+        try:
+            self.assertEqual(dlg._current_url_edit.text(), old_url)
+            self.assertEqual(dlg.current_url, old_url)
+            self.assertTrue(dlg.resume_immediately)
+            self.assertGreaterEqual(dlg.minimumWidth(), 560)
+        finally:
+            dlg.close()
+
+    def test_refresh_dialog_validation_empty_url(self):
+        dlg = RefreshAddressDialog(current_url="https://example.com/file.zip")
+        try:
+            dlg._url_edit.setText("   ")
+            with patch("my_idm.dialogs.QMessageBox.warning") as mock_warn:
+                dlg._accept()
+                mock_warn.assert_called_once()
+            self.assertEqual(dlg.result(), 0)
+        finally:
+            dlg.close()
+
+    def test_refresh_dialog_validation_invalid_scheme(self):
+        dlg = RefreshAddressDialog(current_url="https://example.com/file.zip")
+        try:
+            dlg._url_edit.setText("ftp://example.com/file.zip")
+            with patch("my_idm.dialogs.QMessageBox.warning") as mock_warn:
+                dlg._accept()
+                mock_warn.assert_called_once()
+            self.assertEqual(dlg.result(), 0)
+        finally:
+            dlg.close()
+
+    def test_refresh_dialog_accept_valid_url(self):
+        old_url = "https://example.com/expired.zip"
+        new_url = "https://example.com/fresh.zip"
+        dlg = RefreshAddressDialog(current_url=old_url)
+        try:
+            dlg._url_edit.setText(new_url)
+            dlg._resume_cb.setChecked(False)
+            dlg._accept()
+            self.assertEqual(dlg.result(), QDialog.DialogCode.Accepted)
+            self.assertEqual(dlg.new_url, new_url)
+            self.assertFalse(dlg.resume_immediately)
+        finally:
+            dlg.close()
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

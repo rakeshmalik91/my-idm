@@ -1805,7 +1805,168 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual(db_entry.status, "paused")
         self.assertEqual(db_entry.downloaded_size, 500_000)
 
+    def test_database_update_download_url(self):
+        """Database.update_download_url updates the URL column in SQLite."""
+        entry = DownloadEntry(
+            id="db-url-test",
+            url="https://old.example.com/file.zip",
+            filename="file.zip",
+            save_path=self.tmp_dir.name,
+            total_size=10_000,
+            downloaded_size=2_000,
+            status="paused",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        success = self.db.update_download_url("db-url-test", "https://new.example.com/file.zip")
+        self.assertTrue(success)
+
+        refreshed = self.db.get_download("db-url-test")
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(refreshed.url, "https://new.example.com/file.zip")
+
+        # Non-existent ID returns False
+        self.assertFalse(self.db.update_download_url("non-existent-id", "https://new.example.com/file.zip"))
+
+    def test_manager_update_download_url_paused_state(self):
+        """Updating URL on paused download updates cache and sets explicit_filename."""
+        entry = DownloadEntry(
+            id="mgr-url-test",
+            url="https://old.cdn.com/expired-token/data.tar",
+            filename="data.tar",
+            save_path=self.tmp_dir.name,
+            total_size=50_000,
+            downloaded_size=15_000,
+            status="paused",
+            download_type="http",
+            metadata_json='{"source": "direct"}',
+        )
+        self.db.add_download(entry)
+
+        # Attach segments to verify they are preserved
+        seg = SegmentEntry(
+            id="s1",
+            download_id="mgr-url-test",
+            index=0,
+            start_byte=0,
+            end_byte=49_999,
+            downloaded_bytes=15_000,
+            status="paused",
+        )
+        self.db.add_segments([seg])
+
+        url_signal_received = []
+        self.manager.download_url_updated.connect(
+            lambda did, nurl: url_signal_received.append((did, nurl))
+        )
+
+        new_url = "https://new.cdn.com/fresh-token/data.tar"
+        ok = self.manager.update_download_url("mgr-url-test", new_url)
+        self.assertTrue(ok)
+
+        # Verify signal
+        self.assertEqual(len(url_signal_received), 1)
+        self.assertEqual(url_signal_received[0], ("mgr-url-test", new_url))
+
+        # Verify entry in manager & DB
+        updated_entry = self.manager.get_entry("mgr-url-test")
+        self.assertIsNotNone(updated_entry)
+        self.assertEqual(updated_entry.url, new_url)
+        self.assertTrue(updated_entry.metadata.get("explicit_filename"))
+        self.assertEqual(updated_entry.downloaded_size, 15_000)
+
+        # Segments preserved
+        segs = self.db.get_segments("mgr-url-test")
+        self.assertEqual(len(segs), 1)
+        self.assertEqual(segs[0].downloaded_bytes, 15_000)
+
+    def test_manager_update_download_url_recovers_from_error_state(self):
+        """Updating URL on a failed download clears error message, resets retries, sets paused."""
+        entry = DownloadEntry(
+            id="mgr-err-test",
+            url="https://expired.cdn.com/stream.mp4",
+            filename="stream.mp4",
+            save_path=self.tmp_dir.name,
+            total_size=100_000,
+            downloaded_size=40_000,
+            status="error",
+            error_message="HTTP Error 403: Forbidden (expired token)",
+            retry_count=5,
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        new_url = "https://fresh.cdn.com/stream.mp4"
+        ok = self.manager.update_download_url("mgr-err-test", new_url, resume=False)
+        self.assertTrue(ok)
+
+        updated_entry = self.manager.get_entry("mgr-err-test")
+        self.assertEqual(updated_entry.url, new_url)
+        self.assertEqual(updated_entry.status, "paused")
+        self.assertEqual(updated_entry.error_message, "")
+        self.assertEqual(updated_entry.retry_count, 0)
+
+    def test_manager_update_download_url_validation_and_active_rejection(self):
+        """Rejects non-HTTP URLs, empty URLs, and currently active downloads."""
+        entry = DownloadEntry(
+            id="active-dl-test",
+            url="https://valid.com/video.mp4",
+            filename="video.mp4",
+            save_path=self.tmp_dir.name,
+            total_size=100_000,
+            downloaded_size=10_000,
+            status="downloading",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        # Active download must be paused first
+        self.assertFalse(
+            self.manager.update_download_url("active-dl-test", "https://new.com/video.mp4")
+        )
+
+        # Change to paused
+        self.db.update_status("active-dl-test", "paused")
+
+        # Invalid schemes
+        self.assertFalse(self.manager.update_download_url("active-dl-test", "ftp://new.com/video.mp4"))
+        self.assertFalse(self.manager.update_download_url("active-dl-test", "magnet:?xt=urn:btih:abc"))
+        self.assertFalse(self.manager.update_download_url("active-dl-test", "not_a_url"))
+        self.assertFalse(self.manager.update_download_url("active-dl-test", ""))
+
+        # Non-existent download
+        self.assertFalse(self.manager.update_download_url("ghost-id", "https://new.com/video.mp4"))
+
+    def test_download_table_model_update_url(self):
+        """DownloadTableModel.update_url updates entry.url and emits dataChanged."""
+        entry = DownloadEntry(
+            id="model-url-test",
+            url="https://old.com/file.pkg",
+            filename="file.pkg",
+            save_path=self.tmp_dir.name,
+            total_size=5_000,
+            downloaded_size=1_000,
+            status="paused",
+            download_type="http",
+        )
+        model = DownloadTableModel()
+        model.load_entries([entry])
+
+        signals = []
+        model.dataChanged.connect(lambda top_left, bottom_right: signals.append((top_left, bottom_right)))
+
+        new_url = "https://new.com/file.pkg"
+        ok = model.update_url("model-url-test", new_url)
+        self.assertTrue(ok)
+
+        m_entry = model.get_entry_by_id("model-url-test")
+        self.assertIsNotNone(m_entry)
+        self.assertEqual(m_entry.url, new_url)
+        self.assertGreaterEqual(len(signals), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

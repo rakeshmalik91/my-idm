@@ -51,9 +51,9 @@ Re-audited 2026-10-07 against 3075 tests.
 | Verdict | Count | Features |
 | --- | --- | --- |
 | **HAVE** | 5 | duplicate detection, history + search, exponential backoff, Firefox extension base, categories / file-type segregation (§4) |
-| **DONE** | 7 | **disk-space check** (§2), **bandwidth stats** (§3), **global hotkey [Win]** (§6), **clipboard monitoring** (§7), **named queues** (§1), **segment start staggering** (§12), **cross-platform core [Phases 0–3]** (§17) |
+| **DONE** | 8 | **disk-space check** (§2), **bandwidth stats** (§3), **global hotkey [Win]** (§6), **clipboard monitoring** (§7), **named queues** (§1), **segment start staggering** (§12), **cross-platform core [Phases 0–3]** (§17), **URL editing / refresh expired link** (§18) |
 | **PARTIAL** | 5 | resume UI gating (§9), adaptive segment sizing (§13), CLI subcommands / headless (§14), per-download absolute limits (§8), Firefox extension `browser.*` fallback (§16) |
-| **MISSING** | 2 | **download scheduler (off-peak hours)** (§5), **URL editing / refresh expired link** (§18) |
+| **MISSING** | 1 | **download scheduler (off-peak hours)** (§5) |
 | **REJECTED / N/A** | 2 | HTTP/2 multiplexing (§10), memory-mapped segment merge (§11) |
 
 ---
@@ -403,21 +403,28 @@ now fully cross-platform with Phases 0–3 implemented and active. Full design a
 - **Residual backlog:** Platform-native global capture hotkeys for Linux (X11 / Wayland portal) and
   macOS (Carbon), and standalone distribution packaging (AppImage, DMG).
 
-### 18. URL editing / Refresh expired address — MISSING
+### 18. URL editing / Refresh expired address — DONE
 RDM: "Refresh download link / Update download address for expired URLs."
 
 When an HTTP download URL expires mid-transfer (common with Google Drive, cloud storage, and
-token-gated CDNs answering 403 or 410), there is currently no way to update the URL on the existing
-`DownloadEntry` in the database or GUI. The user must start over from zero with a new entry.
+token-gated CDNs answering 403 or 410), users can now update the download URL on existing
+`DownloadEntry` instances directly from the GUI or manager without losing already downloaded
+bytes or segments.
 
-- YouTube Mode A already has an **automated** CDN URL refresher (`manager._refresh_youtube_url`,
-  `manager.py:1125`), but generic HTTP downloads have no equivalent.
-- **Missing components:**
-  - `Database.update_download_url(download_id, new_url)` to update `url` in SQLite without
-    resetting progress or removing segments.
-  - `DownloadManager.update_download_url(download_id, new_url)`.
-  - Context menu item **"Edit URL…"** / **"Refresh Address…"** in `MainWindow` for paused/failed
-    downloads, opening an input dialog and preserving existing downloaded bytes.
+- **Implemented Components:**
+  - `Database.update_download_url(download_id, new_url)` updates the `url` column in SQLite
+    in-place while preserving all segment progress.
+  - `DownloadManager.update_download_url(download_id, new_url, resume=False)` validates HTTP/HTTPS
+    scheme, ensures `explicit_filename: True` is stored in entry metadata (so resuming against the
+    new URL does not overwrite the existing partial target filename or on-disk path), resets error
+    states and retry counters if the download previously failed with an expired link error, emits
+    `download_url_updated`, and optionally resumes immediately.
+  - `DownloadTableModel.update_url(download_id, new_url)` updates in-memory model entries and emits
+    `dataChanged` for instant table and details view updates.
+  - `RefreshAddressDialog` in `my_idm/dialogs.py` displays current address, provides input validation,
+    and a checkbox to resume download immediately upon acceptance.
+  - `MainWindow` integrations in both the Edit menu and table context menu (**"Refresh Address…"**),
+    enabled for single non-active HTTP downloads.
 
 ---
 
@@ -487,7 +494,7 @@ The table below consolidates the remaining actionable feature tasks identified b
 | # | Task | Target Subsystems | Complexity | Priority | Description |
 |---|---|---|---|---|---|
 | **T1** | **Download scheduler (off-peak hours)** | `manager.py`, `config.py`, `settings_dialog.py` | Medium | **High** | Recurring time-of-day window (`schedule_start`, `schedule_end`) gating `_process_queue()`, `add_download()`, and `resume_download()`. Automatically wakes queued downloads when entering the window and pauses/holds them when leaving. |
-| **T2** | **URL editing / Refresh expired address** | `database.py`, `manager.py`, `main_window.py` | Low–Med | **High** | Context menu action to update expired/invalid URLs on paused/failed downloads without discarding already downloaded bytes or segments. (Mirrors YouTube Mode A's automated URL refresh for generic HTTP downloads). |
+| ~~**T2**~~ | ~~**URL editing / Refresh expired address**~~ | `database.py`, `manager.py`, `main_window.py` | Low–Med | **DONE** | **Shipped:** `Database.update_download_url`, `DownloadManager.update_download_url`, `RefreshAddressDialog`, and `MainWindow` Edit & context menu actions. Preserves on-disk bytes/segments and resumes cleanly. |
 | **T3** | **Resume capability surfaced in GUI** | `http_engine.py`, `database.py`, `main_window.py` | Low | **Medium** | Persist `supports_range` flag from probe into entry metadata. Warn user before pausing non-resumable downloads (which restart from 0%), or disable the pause button. |
 | **T4** | **Adaptive segment count based on file size** | `http_engine.py`, `config.py`, `settings_dialog.py` | Low | **Medium** | Implement `min_segment_size` (e.g. 1–2 MiB) so small downloads (<1 MiB) do not spawn 8 redundant connections. `num_segments = min(configured, max(1, total_size // min_segment_size))`. |
 | **T5** | **Per-download absolute bandwidth limits** | `http_engine.py`, `utils.py`, `main_window.py` | Medium | **Medium** | Allow setting specific download caps (e.g. 2 MB/s) via entry metadata `rate_limit_bps` independent of global limits. Implement token-bucket pacing across segments to prevent N× overshoot. |

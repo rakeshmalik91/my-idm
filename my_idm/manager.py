@@ -409,6 +409,7 @@ class DownloadManager(QObject):
     download_removed = Signal(str)        # download_id
     download_moved = Signal(str)          # download_id
     download_renamed = Signal(str, str)   # download_id, new_filename
+    download_url_updated = Signal(str, str)  # download_id, new_url
     general_config_changed = Signal(object)   # GeneralConfig
     torrent_config_changed = Signal(object)   # TorrentConfig
     network_config_changed = Signal(object)  # NetworkConfig
@@ -2919,6 +2920,78 @@ class DownloadManager(QObject):
         self.download_renamed.emit(download_id, new_name)
         log.info("Renamed download %s to '%s'", download_id, new_name)
         return True, ""
+
+    def update_download_url(
+        self, download_id: str, new_url: str, resume: bool = False
+    ) -> bool:
+        """Update the source URL/address for an existing download.
+
+        Used when an HTTP download link has expired (e.g. token-gated CDNs, Google Drive,
+        cloud storage answering 403 or 410) without discarding already written bytes or segments.
+
+        Args:
+            download_id: The ID of the download entry.
+            new_url: The new HTTP/HTTPS URL.
+            resume: Whether to resume the download immediately after updating the URL.
+
+        Returns:
+            True if updated successfully, False otherwise.
+        """
+        entry = self._db.get_download(download_id)
+        if not entry:
+            log.warning("Cannot update URL: download %s not found", download_id)
+            return False
+
+        new_url = (new_url or "").strip()
+        if not new_url:
+            log.warning("Cannot update URL: empty URL provided for %s", download_id)
+            return False
+
+        if not (new_url.startswith("http://") or new_url.startswith("https://")):
+            log.warning("Cannot update URL: '%s' is not an HTTP/HTTPS URL", new_url)
+            return False
+
+        if entry.status in ("downloading", "scanning", "checking"):
+            log.warning(
+                "Cannot update URL: download %s is currently active (%s)",
+                download_id, entry.status,
+            )
+            return False
+
+        old_url = entry.url
+        entry.url = new_url
+
+        # Ensure explicit_filename is set if filename exists so resuming with the new URL
+        # does not change the destination filename or file path.
+        if entry.filename:
+            if not isinstance(entry.metadata, dict):
+                entry.metadata = {}
+            entry.metadata["explicit_filename"] = True
+
+        # If download was in error state, reset diagnostic and retries
+        was_error = entry.status == "error"
+        if was_error:
+            entry.error_message = ""
+            entry.status = "paused"
+            entry.retry_count = 0
+            self._db.update_status(download_id, "paused", "")
+
+        self._db.update_download_url(download_id, new_url)
+        self._db.update_download(entry)
+
+        log.info(
+            "Updated URL for download %s from '%s' to '%s'",
+            download_id, old_url, new_url,
+        )
+        self.download_url_updated.emit(download_id, new_url)
+
+        if was_error:
+            self.status_changed.emit(download_id, "paused", "")
+
+        if resume:
+            self.resume_download(download_id)
+
+        return True
 
     def _relocate_youtube_file(self, entry: DownloadEntry) -> bool:
         """Try to find a YouTube download whose recorded path is wrong.

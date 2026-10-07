@@ -1116,6 +1116,15 @@ CREATE TABLE IF NOT EXISTS segments (
         ).fetchone()
         return queue_id if row else DEFAULT_QUEUE_ID
 
+    def update_download_url(self, download_id: str, new_url: str) -> bool:
+        """Update a download's URL in the database without altering progress or segments."""
+        cursor = self._conn.execute(
+            "UPDATE downloads SET url = ? WHERE id = ?",
+            (new_url, download_id),
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
     def update_progress(self, download_id: str, downloaded_size: int,
                         status: str | None = None):
         if status:
