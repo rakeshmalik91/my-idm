@@ -279,11 +279,14 @@ stateDiagram-v2
     seeding --> completed: Seeding Ratio / Time Reached or User Pauses/Stops
     completed --> seeding: User Clicks Start Seeding
     
-    completed --> file_not_found: Target File Moved/Deleted Externally
+    completed --> file_not_found: Target File Missing on Disk (Startup / Periodic / Open)
     file_not_found --> checking: User Rechecks / Re-locates File
+    file_not_found --> queued: User Resumes / Re-downloads
     
     completed --> [*]: User Deletes
     stopped --> [*]: User Deletes
+    error --> [*]: User Deletes
+    file_not_found --> [*]: User Deletes
 ```
 
 ### Lifecycle States
@@ -302,7 +305,7 @@ stateDiagram-v2
 | `paused` | HTTP & Torrent | Paused by user; network connections closed, progress halted. | No |
 | `stopped` | HTTP & Torrent | Stopped by user; excluded from automatic startup resumption. | No |
 | `suspended` | Torrent | Metadata resolution timed out (> configured days); paused with 0 network usage. | No |
-| `file_not_found` | HTTP & Torrent | Downloaded target file missing from configured destination path. | No |
+| `file_not_found` | HTTP & Torrent | Target file missing on disk (verified at app start, periodically every 60s, or on open). | No |
 | `error` | HTTP & Torrent | Unrecoverable failure or retry attempts exhausted. | No |
 
 > [!NOTE]

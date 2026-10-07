@@ -78,9 +78,14 @@ stateDiagram-v2
     seeding --> completed: Seeding Goal Reached / User Pauses or Stops
     completed --> seeding: User Clicks Start Seeding
 
+    completed --> file_not_found: Target File Missing on Disk (Startup / Periodic / Open)
+    file_not_found --> checking: User Rechecks / Re-locates File
+    file_not_found --> queued: User Resumes / Re-downloads
+
     completed --> [*]: User Removes / Deletes
     stopped --> [*]: User Removes / Deletes
     error --> [*]: User Removes / Deletes
+    file_not_found --> [*]: User Removes / Deletes
 ```
 
 ### Core Lifecycle Summary
@@ -163,13 +168,15 @@ stateDiagram-v2
     scanning --> completed: Scanner Reports Clean
     scanning --> threat_detected: Malware Signature Found
     
-    completed --> file_not_found: Target File Deleted/Moved Externally
+    completed --> file_not_found: Target File Missing on Disk (Startup / Periodic / Open)
     file_not_found --> checking: User Rechecks / Re-locates File
     file_not_found --> downloading: User Redownloads Missing File
+    file_not_found --> queued: User Resumes Missing File
     
     completed --> [*]: User Removes / Deletes
     stopped --> [*]: User Removes / Deletes
     error --> [*]: User Removes / Deletes
+    file_not_found --> [*]: User Removes / Deletes
     threat_detected --> [*]: File Quarantined or Deleted
 ```
 
@@ -202,8 +209,9 @@ stateDiagram-v2
 | `downloading` | `completed` | All segments complete & AV disabled | Releases slot | Marks `'completed'`, records completion timestamp. |
 | `scanning` | `completed` | Antivirus scan returns exit code 0 (clean) | None | Updates scan status to `'clean'`, marks completed. |
 | `scanning` | `threat_detected`| Antivirus detects malware signature | None | Quarantines file, sets status `'threat_detected'`. |
-| `completed` | `file_not_found` | User attempts to open file missing on disk | None | Updates status to `'file_not_found'`. |
+| `completed` | `file_not_found` | Target file missing on disk (verified at app start, periodically every 60s, or on file open) | None | Calls `mark_file_not_found()`, updates status to `'file_not_found'`. |
 | `file_not_found`| `checking` | User clicks Force Recheck | Consumes slot | Verifies disk path and existing byte boundaries. |
+| `file_not_found`| `queued` | User clicks Resume | None | Resets retries, assigns queue order, marks `'queued'`. |
 
 ### HTTP Retry & Backoff Mechanics
 
@@ -295,12 +303,14 @@ stateDiagram-v2
     downloading --> error: Fatal Alert / Storage Error
     fetching_metadata --> error: Fatal Swarm Error
     
-    completed --> file_not_found: Payload Deleted/Moved Externally
+    completed --> file_not_found: Payload Missing on Disk (Startup / Periodic / Open)
     file_not_found --> checking: User Rechecks / Re-locates File
+    file_not_found --> queued: User Resumes Missing File
     
     completed --> [*]: User Removes
     stopped --> [*]: User Removes
     error --> [*]: User Removes
+    file_not_found --> [*]: User Removes
     threat_detected --> [*]: Quarantined or Removed
 ```
 
@@ -344,6 +354,9 @@ stateDiagram-v2
 | `paused` | `queued` | User clicks Resume | None | Sets status `'queued'`, awaits queue processor. |
 | Any Downloading | `stopped` | User clicks Stop | Releases slot | Pauses handle, sets `queue_order = 0`. |
 | `completed` | `completed` | User clicks Pause or Stop | None | No-op (terminal completed state is preserved). |
+| `completed` | `file_not_found` | Payload files missing on disk (verified at app start, periodically every 60s, or on file open) | None | Updates status to `'file_not_found'`. |
+| `file_not_found` | `checking` | User clicks Force Recheck | Slot maintained | Calls `handle.force_recheck()`, begins piece hashing. |
+| `file_not_found` | `queued` | User clicks Resume | None | Sets status `'queued'`, awaits queue processor. |
 
 > [!NOTE]
 > **Completed State Idempotence**: Invoking Pause or Stop on a transfer that is already in the `completed` state is a no-op (the transfer remains safely completed). Invoking Pause or Stop on an actively `seeding` transfer halts upload activity and transitions it cleanly to `completed`.

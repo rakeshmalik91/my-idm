@@ -1213,6 +1213,13 @@ CREATE TABLE IF NOT EXISTS segments (
             ).fetchall()
         return [self._row_to_entry(r) for r in rows]
 
+    def get_completed_downloads(self) -> list[DownloadEntry]:
+        """Return all downloads currently in 'completed' status."""
+        rows = self._conn.execute(
+            "SELECT * FROM downloads WHERE status = 'completed'"
+        ).fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
     # -- statistics ---------------------------------------------------------
 
     #: One bucket per cut-off, in the order the popup shows them, as (name, days back).

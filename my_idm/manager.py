@@ -519,6 +519,11 @@ class DownloadManager(QObject):
         self._animepahe_timer.timeout.connect(self._on_animepahe_timer_tick)
         self._apply_animepahe_timer_config()
 
+        # Completed downloads verification timer — periodically checks completed files on disk
+        self._verify_completed_timer = QTimer(self)
+        self._verify_completed_timer.setInterval(60_000)  # 60 seconds
+        self._verify_completed_timer.timeout.connect(self._on_verify_completed_timer_tick)
+
         # Connect process_backlogs_requested signal to run process_backlogs on main thread
         self.process_backlogs_requested.connect(self.process_backlogs)
 
@@ -643,6 +648,10 @@ class DownloadManager(QObject):
         # Start periodic AnimePahe scraper if enabled
         self._apply_animepahe_timer_config()
 
+        # Verify completed downloads at startup and arm periodic verification
+        self.verify_completed_downloads()
+        self._verify_completed_timer.start()
+
         # Start browser integration loopback server if enabled
         if self._browser_config.enabled:
             try:
@@ -667,6 +676,7 @@ class DownloadManager(QObject):
         self._retry_timer.stop()
         self._backlog_timer.stop()
         self._animepahe_timer.stop()
+        self._verify_completed_timer.stop()
         # Before the drain below, like the other timers: the watcher's own scan adds rows through
         # the database, so it must be finished before the caller can close it.
         self._torrent_watcher.stop()
@@ -3001,6 +3011,55 @@ class DownloadManager(QObject):
         entry.error_message = "File not found on disk"
         self._db.update_status(download_id, "file_not_found", "File not found on disk")
         self.status_changed.emit(download_id, "file_not_found", "File not found on disk")
+
+    def verify_completed_downloads(self) -> int:
+        """Verify that completed downloads still exist on disk.
+
+        Checks every entry currently in 'completed' status. If the target file
+        or directory on disk is missing, transitions the entry to 'file_not_found'
+        (giving YouTube entries an opportunity to relocate if sanitised differently).
+
+        Returns:
+            The number of entries transitioned to 'file_not_found'.
+        """
+        if getattr(self, "_stopped", False):
+            return 0
+
+        completed_entries = self._db.get_completed_downloads()
+        missing_count = 0
+        for entry in completed_entries:
+            file_path = entry.file_path
+            if not file_path and entry.save_path and entry.filename:
+                file_path = str(Path(entry.save_path) / entry.filename)
+
+            if file_path:
+                try:
+                    expanded = os.path.expandvars(os.path.expanduser(file_path))
+                    p = Path(expanded)
+                    exists = p.exists()
+                except Exception:
+                    exists = False
+            else:
+                exists = False
+
+            if not exists:
+                self.mark_file_not_found(entry.id)
+                updated = self._db.get_download(entry.id)
+                if updated and updated.status == "file_not_found":
+                    missing_count += 1
+            elif not entry.file_path and file_path:
+                entry.file_path = normalize_path(file_path)
+                self._db.update_download(entry)
+
+        return missing_count
+
+    def _on_verify_completed_timer_tick(self):
+        """Timer callback to periodically verify completed downloads on disk."""
+        with self._timer_slot():
+            try:
+                self.verify_completed_downloads()
+            except Exception as exc:
+                log.error("Error during periodic completed downloads verification: %s", exc)
 
     def move_queue_up(self, download_id: str) -> bool:
         """Move a download up in its queue's priority order.

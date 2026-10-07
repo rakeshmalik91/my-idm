@@ -14,6 +14,7 @@ import my_idm.config as config_module
 from my_idm.database import Database, DownloadEntry, SegmentEntry
 from my_idm.download_model import DownloadTableModel, Col
 from my_idm.manager import DownloadManager
+from my_idm.utils import normalize_path
 
 app = QApplication.instance() or QApplication([])
 
@@ -318,6 +319,129 @@ class TestManagerLifecycle(unittest.TestCase):
 
         self.assertIn(("d1", "file_not_found"), statuses)
         self.assertEqual(self.db.get_download("d1").status, "file_not_found")
+
+    def test_verify_completed_downloads_missing_file_transitions_to_file_not_found(self):
+        """verify_completed_downloads marks missing completed files as file_not_found."""
+        missing_file = Path(self.tmp_dir.name) / "missing_file.zip"
+        e = DownloadEntry(
+            id="d_missing",
+            url="http://example.com/missing.zip",
+            filename="missing_file.zip",
+            file_path=str(missing_file),
+            save_path=self.tmp_dir.name,
+            status="completed",
+        )
+        self.db.add_download(e)
+
+        statuses = []
+        self.manager.status_changed.connect(lambda did, st, err: statuses.append((did, st, err)))
+
+        missing_count = self.manager.verify_completed_downloads()
+        self.assertEqual(missing_count, 1)
+        self.assertIn(("d_missing", "file_not_found", "File not found on disk"), statuses)
+        self.assertEqual(self.db.get_download("d_missing").status, "file_not_found")
+
+    def test_verify_completed_downloads_existing_file_preserved(self):
+        """verify_completed_downloads leaves existing completed files intact."""
+        real_file = Path(self.tmp_dir.name) / "real_file.zip"
+        real_file.write_bytes(b"hello world")
+        e = DownloadEntry(
+            id="d_real",
+            url="http://example.com/real.zip",
+            filename="real_file.zip",
+            file_path=str(real_file),
+            save_path=self.tmp_dir.name,
+            status="completed",
+        )
+        self.db.add_download(e)
+
+        statuses = []
+        self.manager.status_changed.connect(lambda did, st, err: statuses.append((did, st, err)))
+
+        missing_count = self.manager.verify_completed_downloads()
+        self.assertEqual(missing_count, 0)
+        self.assertEqual(len(statuses), 0)
+        self.assertEqual(self.db.get_download("d_real").status, "completed")
+
+    def test_verify_completed_downloads_non_completed_ignored(self):
+        """verify_completed_downloads does not touch queued/paused/downloading downloads."""
+        missing_file = Path(self.tmp_dir.name) / "not_started.zip"
+        e1 = DownloadEntry(
+            id="d_queued",
+            url="http://example.com/not_started.zip",
+            filename="not_started.zip",
+            file_path=str(missing_file),
+            save_path=self.tmp_dir.name,
+            status="queued",
+        )
+        e2 = DownloadEntry(
+            id="d_paused",
+            url="http://example.com/not_started2.zip",
+            filename="not_started2.zip",
+            file_path=str(missing_file),
+            save_path=self.tmp_dir.name,
+            status="paused",
+        )
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+
+        missing_count = self.manager.verify_completed_downloads()
+        self.assertEqual(missing_count, 0)
+        self.assertEqual(self.db.get_download("d_queued").status, "queued")
+        self.assertEqual(self.db.get_download("d_paused").status, "paused")
+
+    def test_verify_completed_downloads_backfills_missing_file_path(self):
+        """verify_completed_downloads backfills entry.file_path if it exists on disk."""
+        real_file = Path(self.tmp_dir.name) / "backfill.zip"
+        real_file.write_bytes(b"data")
+        e = DownloadEntry(
+            id="d_backfill",
+            url="http://example.com/backfill.zip",
+            filename="backfill.zip",
+            file_path="",
+            save_path=self.tmp_dir.name,
+            status="completed",
+        )
+        self.db.add_download(e)
+
+        missing_count = self.manager.verify_completed_downloads()
+        self.assertEqual(missing_count, 0)
+        updated = self.db.get_download("d_backfill")
+        self.assertEqual(updated.status, "completed")
+        self.assertEqual(updated.file_path, normalize_path(real_file))
+
+    def test_verify_completed_timer_tick(self):
+        """Periodic verification timer tick runs verify_completed_downloads."""
+        missing_file = Path(self.tmp_dir.name) / "periodic_missing.zip"
+        e = DownloadEntry(
+            id="d_periodic",
+            url="http://example.com/periodic.zip",
+            filename="periodic_missing.zip",
+            file_path=str(missing_file),
+            save_path=self.tmp_dir.name,
+            status="completed",
+        )
+        self.db.add_download(e)
+
+        self.manager._on_verify_completed_timer_tick()
+        self.assertEqual(self.db.get_download("d_periodic").status, "file_not_found")
+
+    def test_startup_verifies_completed_downloads(self):
+        """Startup automatically verifies completed downloads and transitions missing files."""
+        missing_file = Path(self.tmp_dir.name) / "missing_startup.zip"
+        e = DownloadEntry(
+            id="d_startup_missing",
+            url="http://example.com/startup.zip",
+            filename="missing_startup.zip",
+            file_path=str(missing_file),
+            save_path=self.tmp_dir.name,
+            status="completed",
+        )
+        self.db.add_download(e)
+
+        self.manager.start()
+        self.assertEqual(self.db.get_download("d_startup_missing").status, "file_not_found")
+        self.assertTrue(self.manager._verify_completed_timer.isActive())
 
     # -- Recheck engine ------------------------------------------------------
 
