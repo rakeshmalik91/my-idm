@@ -35,6 +35,9 @@ erDiagram
         INTEGER max_concurrent "Local concurrency ceiling (0 = unlimited)"
         INTEGER position "Order in the switcher"
         INTEGER is_default "1 for the single default queue"
+        TEXT color "Swatch hex color (#rrggbb)"
+        INTEGER download_limit "Download bandwidth ceiling in bytes/sec (0 = global)"
+        INTEGER upload_limit "Upload bandwidth ceiling in bytes/sec (0 = global)"
         TEXT created_at "ISO-8601 UTC creation timestamp"
     }
 
@@ -46,8 +49,9 @@ erDiagram
         TEXT file_path "Full absolute path to file"
         INTEGER total_size "File size in bytes (0 if unknown)"
         INTEGER downloaded_size "Downloaded bytes on disk"
-         INTEGER uploaded_size "Total cumulative uploaded/seeded bytes"
-         TEXT last_seeded_at "ISO timestamp of last seed"
+        INTEGER uploaded_size "Total cumulative uploaded/seeded bytes"
+        TEXT last_seeded_at "ISO timestamp of last seed"
+        TEXT seeding_started_at "ISO timestamp current seed started"
         TEXT status "Current lifecycle state"
         TEXT download_type "http | torrent"
         INTEGER num_segments "Configured HTTP segment count"
@@ -116,9 +120,10 @@ The primary entity table storing download tasks, progress state, connection para
 | `queue_order`             | `INTEGER` | **NO**   | `0`        | Sequential order position in the active download queue (`1` = highest).                      |
 | `fetching_metadata_since` | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp when magnet metadata fetching began.                                  |
 | `last_seeded_at`          | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp of the most recent seed. Stamped when a seed session begins — on `TorrentEngine.start_seeding()` and on the completion→seeding transition — and backfilled from libtorrent's `last_seen_complete` only when that is strictly newer. Torrents only; empty for HTTP/YouTube rows and for every row that predates this column. |
+| `seeding_started_at`      | `TEXT`    | **NO**   | `''`       | ISO-8601 UTC timestamp of when the current/active seeding session began. Stamped on entering seeding (torrents only). |
 | `queue_id`                | `TEXT`    | **NO**   | `''`       | Membership of a named queue — see [`queues.md`](queues.md). Distinct from `queue_order`, which is priority *within* the queue. `''` is resolved to the default queue by `Database.resolve_queue_id` on every write, so this column is never observably empty. |
 
-> `last_seeded_at` and `queue_id` were both **appended**, never inserted, so every pre-existing
+> `last_seeded_at`, `seeding_started_at`, and `queue_id` were all **appended**, never inserted, so every pre-existing
 > logical index is unchanged. The migrations are the usual idempotent `PRAGMA table_info` guard
 > (`ALTER TABLE downloads ADD COLUMN <name> ... NOT NULL DEFAULT ''`), so existing rows are left
 > untouched and read back with the default.
@@ -187,7 +192,7 @@ A lightweight key-value store used to preserve desktop GUI layout, window coordi
 
 ### 4. `queues` Table
 
-Added 2026-10-01. Holds each named download queue and its local concurrency budget.
+Added 2026-10-01. Holds each named download queue, its local concurrency budget, and its bandwidth ceilings.
 
 | Column | Type | Nullable | Default | Description |
 | :--- | :--- | :---: | :--- | :--- |
@@ -197,6 +202,8 @@ Added 2026-10-01. Holds each named download queue and its local concurrency budg
 | `position` | `INTEGER` | **NO** | `0` | User-defined order in the switcher. |
 | `is_default` | `INTEGER` | **NO** | `0` | Exactly one row has `1`. Pinned first by `get_queues()`, and protected from rename/delete. |
 | `color` | `TEXT` | **NO** | `''` | Swatch colour as `#rrggbb`, appended 2026-10-01. Drives the swatch in the downloads list. Seeded distinctly per queue and never overwritten once set; `normalize_queue_color` rejects junk so an unparseable value cannot paint as an invisible swatch. See [`queues.md`](queues.md). |
+| `download_limit` | `INTEGER` | **NO** | `0` | Local download bandwidth ceiling in bytes/sec. `0` means no ceiling of its own (the global limit applies). |
+| `upload_limit` | `INTEGER` | **NO** | `0` | Local upload bandwidth ceiling in bytes/sec. `0` means no ceiling of its own (the global limit applies). |
 | `created_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC creation timestamp. |
 
 Deliberately **no foreign key** from `downloads.queue_id`: `downloads` is created earlier in the
@@ -388,8 +395,20 @@ if "uploaded_size" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN uploaded_size INTEGER NOT NULL DEFAULT 0")
 if "last_seeded_at" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN last_seeded_at TEXT NOT NULL DEFAULT ''")
+if "seeding_started_at" not in cols:
+    self._conn.execute("ALTER TABLE downloads ADD COLUMN seeding_started_at TEXT NOT NULL DEFAULT ''")
 if "queue_id" not in cols:
     self._conn.execute("ALTER TABLE downloads ADD COLUMN queue_id TEXT NOT NULL DEFAULT ''")
+
+# Same guard for `queues`:
+cursor = self._conn.execute("PRAGMA table_info(queues)")
+queue_cols = [r["name"] for r in cursor.fetchall()]
+if queue_cols and "color" not in queue_cols:
+    self._conn.execute("ALTER TABLE queues ADD COLUMN color TEXT NOT NULL DEFAULT ''")
+if queue_cols and "download_limit" not in queue_cols:
+    self._conn.execute("ALTER TABLE queues ADD COLUMN download_limit INTEGER NOT NULL DEFAULT 0")
+if queue_cols and "upload_limit" not in queue_cols:
+    self._conn.execute("ALTER TABLE queues ADD COLUMN upload_limit INTEGER NOT NULL DEFAULT 0")
 ```
 
 Every guard is **additive and idempotent** — it runs only when the column is missing, and a `NOT NULL
@@ -471,11 +490,11 @@ Full semantics in [`queues.md`](queues.md).
 - `get_queue(queue_id: str) -> Optional[QueueInfo]`: Blank or unknown resolves to the default queue, never `None`.
 - `get_queue_by_name(name: str) -> Optional[QueueInfo]`: Case-insensitive lookup by display name. Backlog files name queues rather than ids, because a uuid in a hand-editable text file would be unusable. Returns `None` for an unknown name rather than creating one.
 - `get_default_queue() -> QueueInfo`.
-- `create_queue(name: str, max_concurrent: int = 3) -> tuple[bool, str]`: Refuses a blank or case-insensitively duplicate name.
+- `create_queue(name: str, max_concurrent: int = 3, color: str = "", download_limit: int = 0, upload_limit: int = 0) -> tuple[bool, str]`: Refuses a blank or case-insensitively duplicate name. A blank `color` takes the first unused entry from `QUEUE_COLOR_PALETTE`. Bandwidth ceilings are bytes/sec (`0` = unlimited within this queue).
 - `rename_queue(queue_id: str, name: str) -> tuple[bool, str]`: The default queue cannot be renamed.
 - `set_queue_max_concurrent(queue_id: str, max_concurrent: int)`: `<= 0` means unlimited within the queue.
+- `set_queue_limits(queue_id: str, download_limit: int, upload_limit: int) -> None`: Sets download and upload bandwidth ceilings in bytes/sec (`0` = unlimited within this queue, global limit applies).
 - `set_queue_color(queue_id: str, color: str) -> tuple[bool, str]`: Normalises via `normalize_queue_color` and refuses a value that is not a colour, so an unparseable swatch cannot be stored.
-- `create_queue(name, max_concurrent=3, color="")`: A blank `color` takes the first unused entry from `QUEUE_COLOR_PALETTE`, so a new queue is never invisible in the downloads list.
 - `move_queue_position(queue_id: str, delta: int)`: Reorder in the switcher; the default stays pinned.
 - `delete_queue(queue_id: str) -> tuple[bool, str]`: Re-homes the queue's downloads to Default **in the same transaction as the delete**, then deletes. Downloads are never deleted with their queue. The default queue cannot be deleted.
 - `reassign_queue(download_ids: list[str], queue_id: str) -> int`: Preserves the caller's order and **continues** the target queue's numbering rather than restarting at 1, which would collide with rows already there.

@@ -21,7 +21,9 @@ My-IDM employs a decoupled Qt Model-View architecture powered by PySide6:
 │  │  │    └── Segregation Engine: Status-based OR Date-based         │  │
 │  │  ├── Delegates:                                                  │  │
 │  │  │    ├── ProgressBarDelegate (Col.PROGRESS)                     │  │
-│  │  │    └── DownloadNameDelegate (Col.NAME)                        │  │
+│  │  │    ├── DownloadNameDelegate (Col.NAME)                        │  │
+│  │  │    ├── SavePathDelegate (Col.SAVE_PATH)                       │  │
+│  │  │    └── QueueColumnDelegate (Col.QUEUE_NAME)                   │  │
 │  │  └── Spanning: Full-row section headers via setSpan()           │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
@@ -38,26 +40,28 @@ My-IDM employs a decoupled Qt Model-View architecture powered by PySide6:
 
 ## 📊 Primary Download Table Columns
 
-The main download table exposes 13 columns indexed by the `Col` class:
+The main download table exposes 18 columns indexed by the `Col` class:
 
 | Column | Index | Header | Width | Alignment | Description |
 | :--- | :---: | :--- | :---: | :--- | :--- |
-| `QUEUE` | 0 | `#` | 45 px | Center | Active queue order (1, 2, 3...) or expand/collapse indicator (`▼` / `▶`) in section headers. |
-| `NAME` | 1 | `Name` | 270 px | Left | Filename or resource title with type icon (`📦`, `🎬`, `🧲`) and Tor routing badge (`🧅`). YouTube downloads additionally show an engine tooltip on hover. |
-| `SOURCE_DOMAIN` | 2 | `Source Domain` | 160 px | Left | Normalized domain/hostname extracted from the source URL or magnet tracker. |
-| `SIZE` | 3 | `Size` | 90 px | Right | Total size formatted via `humanize.naturalsize()` (e.g., `450.2 MiB`). |
-| `PROGRESS` | 4 | `Progress` | 160 px | Center | Custom progress bar drawn by `ProgressBarDelegate` with status-based gradient. |
+| `QUEUE` | 0 | `#` | 30 px | Center | Active queue order (1, 2, 3...) or expand/collapse indicator (`▼` / `▶`) in section headers. |
+| `NAME` | 1 | `Name` | 412 px | Left | Filename or resource title with type icon (`📦`, `🎬`, `🧲`) and Tor routing badge (`🧅`). YouTube downloads additionally show an engine tooltip on hover. |
+| `SOURCE_DOMAIN` | 2 | `Source Domain` | 187 px | Left | Normalized domain/hostname extracted from the source URL or magnet tracker. |
+| `SIZE` | 3 | `Size` | 82 px | Right | Total size formatted via `humanize.naturalsize()` (e.g., `450.2 MiB`). |
+| `PROGRESS` | 4 | `Progress` | 214 px | Center | Custom progress bar drawn by `ProgressBarDelegate` with status-based gradient. |
 | `STATUS` | 5 | `Status` | 135 px | Left | Capitalized status text with status-specific semantic color coding. |
-| `SPEED` | 6 | `Speed` | 110 px | Right | Active transfer rate (`12.4 MiB/s`) or seeding upload rate (`1.2 MiB/s`). |
-| `ETA` | 7 | `ETA` | 85 px | Right | Estimated time remaining (`4m 12s`, `1h 05m`), or `—` when paused/inactive. |
-| `SEEDS_PEERS` | 8 | `Seeds / Peers` | 110 px | Right | Connected seeds/peers (`S:15 P:42`) for torrents, or segment count (`8 seg`) for HTTP. |
-| `ADDED` | 9 | `Added` | 130 px | Center | Localized ISO-8601 datetime (`YYYY-MM-DD HH:MM`) of creation. |
+| `SPEED` | 6 | `Speed` | 166 px | Right | Active transfer rate (`12.4 MiB/s`) or seeding upload rate (`1.2 MiB/s`). |
+| `ETA` | 7 | `ETA` | 80 px | Right | Estimated time remaining (`4m 12s`, `1h 05m`), or `—` when paused/inactive. |
+| `SEEDS_PEERS` | 8 | `Seeds / Peers` | 140 px | Right | Connected seeds/peers (`S:15 P:42`) for torrents, or segment count (`8 seg`) for HTTP. |
+| `ADDED` | 9 | `Added` | 123 px | Center | Localized ISO-8601 datetime (`YYYY-MM-DD HH:MM`) of creation. |
 | `LAST_TRIED` | 10 | `Last Tried` | 130 px | Center | Localized datetime of most recent connection/transfer attempt. |
 | `COMPLETED` | 11 | `Completed` | 130 px | Center | Localized datetime of successful download completion. |
-| `SAVE_PATH` | 12 | `Save Path` | 200 px | Left | Target destination path shortened with leaf-node priority. |
-| `LAST_SEEDED` | 14 | `Last Seeded` | 130 px | Center | When the torrent last started or completed a seed. `—` for non-torrents. |
-| `SOURCE` | 15 | `Source` | 100 px | Left | Where the download originated: `Chrome`, `Firefox`, `Edge`, `AnimePahe`, or `YouTube`. Blank for manually added and legacy rows. |
-| `QUEUE_NAME` | 17 | `Queue` | 120 px | Left | The named queue the download belongs to, painted by `QueueColumnDelegate` as a colour swatch plus the name — **collapsing to the swatch alone when the column is too narrow**, because the colour still identifies the queue whereas an elided name does not. Colours live on the `queues` row and reach the model via `set_queue_colors`; the delegate reads them from a dedicated `QUEUE_COLOR_ROLE`, not `UserRole` (already column-specific) and not by decoding the cell text. See [`queues.md`](queues.md). |
+| `SAVE_PATH` | 12 | `Save Path` | 262 px | Left | Target destination path shortened with leaf-node priority by `SavePathDelegate`. |
+| `FILE_NAME` | 13 | `File / Folder Name` | 546 px | Left | Full resolved local file or root folder name on disk (`entry.filename`). |
+| `LAST_SEEDED` | 14 | `Last Seeded` | 131 px | Center | When the torrent last started or completed a seed. `—` for non-torrents. |
+| `SOURCE` | 15 | `Source` | 110 px | Left | Where the download originated: `Chrome`, `Firefox`, `Edge`, `AnimePahe`, or `YouTube`. Blank for manually added and legacy rows. |
+| `SEEDING_STARTED_AT` | 16 | `Seeding Started At` | 173 px | Center | Localized datetime when current seeding session began. Stamped on entering seeding (torrents only). |
+| `QUEUE_NAME` | 17 | `Queue` | 30 px | Left | The named queue the download belongs to, painted by `QueueColumnDelegate` as a colour swatch plus the name — **collapsing to the swatch alone when the column is too narrow**, because the colour still identifies the queue whereas an elided name does not. Colours live on the `queues` row and reach the model via `set_queue_colors`; the delegate reads them from a dedicated `QUEUE_COLOR_ROLE`, not `UserRole` (already column-specific) and not by decoding the cell text. See [`queues.md`](queues.md). |
 
 ### Column Tail & Upgrades
 
@@ -361,6 +365,18 @@ Renders color-coded progress bars for `Col.PROGRESS`:
 Renders filename and file metadata in `Col.NAME`:
 - Eliminates redundant string tags (e.g. `(Tor 🧅)`) when Tor routing is visually indicated by decoration role icons.
 - Ensures text clipping with clean ellipsis (`...`) during horizontal window compaction.
+
+### 3. `SavePathDelegate` (`my_idm.delegates`)
+Renders destination filesystem paths in `Col.SAVE_PATH`:
+- Uses intelligent shortening (`_shorten_path`) that preserves the leaf directory component when the column is narrowed.
+- Collapses intermediate parent paths into ellipsis markers (e.g., `C:/…/Movies`) before eliding the leaf node itself.
+
+### 4. `QueueColumnDelegate` (`my_idm.delegates`)
+Renders the queue membership badge in `Col.QUEUE_NAME`:
+- Reads the swatch `#rrggbb` color from `QUEUE_COLOR_ROLE` and display name from `Qt.DisplayRole`.
+- Paints a rounded rectangle swatch with the uppercase first character of the queue name in high-contrast text.
+- **Intelligent Compaction**: When the column is narrower than `MIN_TEXT_WIDTH` (28 px), gracefully collapses to the swatch alone without rendering broken, half-elided text.
+- Supplies a hover tooltip combining the full queue name with its swatch hex code.
 
 ---
 

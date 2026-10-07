@@ -11,6 +11,7 @@ Both engines are orchestrated by [`DownloadManager`](file:///d:/Projects/my-idm/
 ## Table of Contents
 
 - [Overview](#overview)
+- [Simplified State Machine](#simplified-state-machine)
 - [HTTP Download State Machine](#http-download-state-machine)
   - [Segment launch](#segment-launch)
   - [HTTP State Diagram](#http-state-diagram)
@@ -45,6 +46,57 @@ While HTTP and BitTorrent transfers share a common representation in the GUI (`D
 | **Post-Download** | Terminal state reached (`completed`) | Uploads payload to swarm peers (`seeding`) |
 | **Startup Discovery** | Direct HTTP HEAD/GET probe | DHT, PEX, LSD, and multi-tier tracker announces |
 | **Stall Condition** | Connection timeout or HTTP error code | Swarm starvation (0 seeds, 0 B/s for >45s) |
+
+---
+
+## Simplified State Machine
+
+Across both HTTP and BitTorrent transfers, My-IDM shares a unified high-level state model for queue management, user interaction, and lifecycle progression.
+
+This simplified diagram abstracts away low-level sub-states (such as HTTP range probing, segment chunking, antivirus background scanning, magnet metadata resolution timeouts, and piece verification) to present the primary operator-facing lifecycle:
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued: Add Download (URL / Magnet / Backlog)
+
+    queued --> downloading: Concurrency Slot Available (active < max)
+
+    downloading --> completed: Transfer Complete (HTTP / Verified)
+    downloading --> seeding: Transfer Complete (BitTorrent with Seeding)
+
+    downloading --> queued: Transient Error (Exponential Backoff Retry)
+    downloading --> error: Fatal Failure / Max Retries Exhausted
+
+    downloading --> paused: User Pauses (Preserves Queue Order)
+    queued --> paused: User Pauses
+    paused --> queued: User Resumes
+
+    downloading --> stopped: User Stops (Clears Queue Order)
+    queued --> stopped: User Stops
+    stopped --> queued: User Resumes
+
+    seeding --> completed: Seeding Goal Reached / User Pauses or Stops
+    completed --> seeding: User Clicks Start Seeding
+
+    completed --> [*]: User Removes / Deletes
+    stopped --> [*]: User Removes / Deletes
+    error --> [*]: User Removes / Deletes
+```
+
+### Core Lifecycle Summary
+
+| Lifecycle Phase | Active State(s) | Slot Consumed? | Primary Triggers & Mechanics |
+| :--- | :--- | :---: | :--- |
+| **Queued / Idle** | `queued` | No | Registered in SQLite, awaiting an open concurrency slot (`active < max_concurrent_downloads`) or backoff retry window. |
+| **Active Transfer** | `downloading` | **Yes** | Active connection streaming payload over network sockets (async HTTP chunks or peer swarm connections). |
+| **User Suspended** | `paused` | No | User paused transfer; network connections close cleanly and progress offsets are saved while preserving queue position. |
+| **User Stopped** | `stopped` | No | User stopped transfer; network connections halt and `queue_order` is reset to 0 (excluded from auto-resume). |
+| **Terminal / Completed** | `completed` | No | 100% of payload written and verified on disk. Terminal state for HTTP. |
+| **P2P Sharing** | `seeding` | No | 100% verified BitTorrent payload serving upload pieces to swarm peers. Does not consume download concurrency slots. |
+| **Failure** | `error` | No | Fatal disk or network error, or transient retry attempts exceeded `max_retries`. |
+
+> [!NOTE]
+> Protocol-specific sub-states (e.g. HTTP HEAD probing, segmented-to-single-stream fallback, post-download antivirus `scanning`, BitTorrent magnet `fetching_metadata`, swarm starvation `stalled`, and hash `checking`) expand upon this foundational model and are documented in the respective sections below.
 
 ---
 

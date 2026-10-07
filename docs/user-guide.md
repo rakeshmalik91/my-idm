@@ -8,8 +8,10 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 
 - [Getting Started](#getting-started)
 - [Adding Downloads](#adding-downloads)
+  - [.torrent Drag-and-Drop, File Association & Watched Folder](#torrent-drag-and-drop-file-association--watched-folder)
   - [YouTube & Video-Site Downloads](#youtube--video-site-downloads)
 - [Managing Downloads](#managing-downloads)
+  - [Named Queues & Concurrency Budgets](#named-queues--concurrency-budgets)
 - [Bottom Details Panel](#bottom-details-panel)
 - [Preferences & Settings](#preferences--settings)
 - [Browser Integration (Chrome / Brave / Edge / Firefox)](#browser-integration-chrome--brave--edge--firefox)
@@ -56,12 +58,20 @@ The main window opens with an empty download list. The status bar at the bottom 
 
 ### Add a Download (URL, Magnet Link, or .torrent File)
 
-1. Click **➕ Add Download** in the toolbar (or press **Ctrl+N**)
-2. The dialog **automatically detects and prefills** any valid URL, magnet link, or `.torrent` file path found in your clipboard (with the text pre-selected for quick replacement).
-3. For `.torrent` files, you can paste the file path directly or click the built-in **Browse .torrent …** button (or use File → **Add Torrent File…** / **Ctrl+T**).
+1. Click **➕ Add Download** in the toolbar (or press **Ctrl+N**).
+2. The dialog **automatically detects and prefills** any valid URL, magnet link, or `.torrent` file path found in your clipboard (with the text pre-selected for quick replacement). Copied URLs are verified via a safe probe before capture, ensuring HTML web pages are never captured as files by accident.
+3. For `.torrent` files, you can paste the file path directly, click **Browse .torrent …** (or use File → **Add Torrent File…** / **Ctrl+T**), or drag and drop files directly onto the window.
 4. Choose a save directory (prefilled with your configured default or last used directory). Check **"Set as default download folder"** to permanently save this folder as your new default.
-5. Set the number of segments for parallel downloading (1–32, default 8 for HTTP)
-6. Click **Download** (or press Enter)
+5. Optionally assign the download to a specific [Named Queue](#named-queues--concurrency-budgets).
+6. Set the number of segments for parallel downloading (1–32, default 8 for HTTP).
+7. Click **Download** (or press Enter).
+
+### .torrent Drag-and-Drop, File Association & Watched Folder
+
+In addition to the Add Download dialog, My-IDM supports three fast ingress paths for `.torrent` files:
+- **Drag-and-Drop**: Drag one or more `.torrent` files directly from File Explorer into the main My-IDM window or download table to immediately open the Add Download dialog with the payload pre-selected.
+- **OS File Association**: Under **Preferences → BitTorrent**, enable **"Open .torrent files with My-IDM"**. This registers My-IDM with your operating system (Windows, Linux, macOS) so double-clicking `.torrent` files opens them in My-IDM. Dedicated **Repair Registration** and **Open Default Apps Settings** buttons assist with OS file associations.
+- **Watched Folder**: Enable folder watching in **Preferences → BitTorrent** to automatically scan a designated folder (e.g. `Downloads/torrents/`). When a `.torrent` file is saved there, My-IDM picks it up within seconds, adds it to the active queue, and optionally moves the source `.torrent` to Trash to keep the watched directory clean. Files older than the configured age limit (default 3 days) are ignored to prevent re-importing old history.
 
 ### Supported Input Types
 
@@ -244,7 +254,24 @@ Rechecking verifies existing files:
 
 ### Context Menu
 
-Right-click any download to access all actions (Pause, Resume, Recheck, Move, Rename, Export Selected as CSV, Open File, Open Folder, Delete).
+Right-click any download to access all actions (Pause, Resume, Recheck, Move, Rename, Move to Queue, Export Selected as CSV, Open File, Open Folder, Delete).
+
+### Named Queues & Concurrency Budgets
+
+My-IDM allows organizing downloads into distinct named queues, each with its own local concurrency ceiling and bandwidth limits:
+
+- **Queue Switcher**: Use the queue dropdown in the toolbar to scope the table view to **All Queues**, **Default**, **AnimePahe**, **YouTube**, or any custom queue you create. Each queue displays its current download count and colored swatch.
+- **Source Queues**: Two built-in queues exist out of the box:
+  - **AnimePahe**: Automatically receives downloads initiated by the AnimePahe scraper.
+  - **YouTube**: Automatically receives video downloads from `yt-dlp` or YouTube links.
+- **Managing Queues**: Select **Tools → Manage Queues…** (or right-click the queue dropdown) to open the Queue Manager:
+  - **Create & Rename**: Add new queues with custom display names and color swatches.
+  - **Concurrency Ceilings**: Set the maximum concurrent downloads for each queue. Setting `0` means unlimited within that queue (the global `max_concurrent_downloads` limit still governs total active downloads).
+  - **Bandwidth Ceilings**: Set separate **Download Limit** and **Upload Limit** in KB/s for the queue. Setting `0` follows global bandwidth limits. When both are configured, the strictest ceiling applies.
+  - **Reordering**: Move queues up and down to change their switcher ordering (the Default queue stays pinned first).
+  - **Safe Deletion**: Deleting a custom queue automatically re-homes all its active and completed downloads back into the **Default** queue without deleting files or losing progress. The Default queue cannot be deleted.
+- **Moving Downloads Between Queues**: Right-click any selected download(s) in the table and choose **Move to Queue → [Queue Name]** to immediately reassign them.
+- **Backlog Directives**: Backlog files can assign queues using `# queue: QueueName` on a header line, or per-line using `queue=QueueName`.
 
 ---
 
@@ -325,7 +352,14 @@ Open the comprehensive preferences dialog anytime via:
 - Menu: **Tools → ⚙️ Preferences…**
 - Shortcut: **Ctrl+,**
 
-The settings popup is organized into six tabs:
+## Preferences & Settings
+
+Open the comprehensive preferences dialog anytime via:
+- Toolbar: **⚙️ Preferences** button
+- Menu: **Tools → ⚙️ Preferences…**
+- Shortcut: **Ctrl+,**
+
+The settings dialog is organized into ten dedicated tabs:
 
 ### 1. General & Downloads Tab
 
@@ -333,88 +367,104 @@ The settings popup is organized into six tabs:
   - Sets your permanent default download directory.
   - Click **Browse …** to choose any folder on your computer.
   - Click **📁 Open Folder** to open the current download directory directly in File Explorer.
-  - **Remember last used folder when adding downloads**: When enabled, if you select a different directory in the Add Download dialog, My-IDM remembers that folder for subsequent downloads.
+  - **Remember last used folder when adding downloads**: When enabled, choosing a different folder in Add Download updates subsequent default choices.
 - **Download Performance & Engine Defaults**:
   - **Default parallel connections (segments)**: Configure the default number of HTTP segments (1–32, default 8).
-  - **Delay between starting each segment**: Spacing between segment connections, 0–2000 ms (default 0 = every segment starts at once). Raise it only if a host rate-limits connection bursts and answers a starting download with 429/503 — the last of N segments then waits (N-1) × this before its first request, and the step is scaled down to keep the total under 2 s.
-  - **Maximum concurrent active downloads**: Limit simultaneous active downloads (1–20, default 3) to prevent saturating bandwidth.
-  - **Maximum automatic retries**: Number of automatic reconnection attempts before marking a download as errored (1–20, default 5).
+  - **Delay between starting each segment**: Spacing between segment connections, 0–2000 ms (default 0 = every segment starts at once). Staggers connection bursts to avoid rate-limiting on sensitive hosts.
+  - **Maximum concurrent active downloads**: Global limit on simultaneous active transfers (1–20, default 3) across all queues.
+  - **Maximum automatic retries**: Reconnection attempts before marking a download as errored (1–20, default 5).
   - **Exponential backoff**: Toggle between exponential multiplier backoff and constant linear retry delay.
   - **Initial retry delay (s)**: Initial wait duration before retrying (0.1–120.0s, default 2.0s).
   - **Backoff multiplier**: Factor multiplied after each retry attempt (1.0–10.0x, default 2.0x).
   - **Maximum delay cap (s)**: Upper ceiling for exponential backoff wait times (1–3600s, default 60s).
-- **Application Behavior**:
-  - **Automatically resume incomplete downloads when application starts**: Interrupted or actively downloading items resume immediately on launch.
-  - **Show desktop / status notification when a download completes**: Native Windows toast notification when transfers complete.
-- **System Tray & Window Behavior**:
-  - **Enable Windows system tray icon**: Displays the My-IDM icon in the Windows notification area with quick controls.
-  - **Minimize window to system tray instead of taskbar**: Hides the window completely to the system tray on minimize.
-  - **Close window to system tray**: Hides window on close (`X`), keeping downloads, seeding, and browser interception running uninterrupted in the background.
-  - **Start My-IDM minimized to system tray**: Silently launches directly into the background on startup.
 - **Backlog Files Auto-Processing**:
-  - Auto-discover backlog files on startup and optionally clear processed URLs.
+  - Automatically discover backlog files on startup and optionally clear processed URLs.
 
-### 2. BitTorrent Tab
-Configure seeding behavior after download completion, seeding time and ratio limits, maximum seeding speed, and startup seeding resumption.
+### 2. App & Behavior Tab
 
-### 3. Browser Integration Tab
-Configure Chrome, Brave, Edge, Opera, and Mozilla Firefox browser integration:
-- **Enable Browser Integration**: Toggle the local HTTP loopback server (`127.0.0.1:19582`) on or off.
-- **Port**: Configure loopback port (default `19582`).
+- **Launch at Login (Autostart)**:
+  - **Start My-IDM automatically when you log in**: Cross-platform registration for Windows (`Run` key), Linux (`.config/autostart`), and macOS (`LaunchAgents`).
+  - **Live Status Indicator**: Shows whether the startup entry is active, stale, or unsupported.
+  - **Repair Startup Entry**: Rewrites the autostart registration if the application or Python environment path changed.
+- **System Tray & Window Execution**:
+  - **Enable system tray icon**: Displays the tray icon in the system notification area.
+  - **Minimize window to system tray instead of taskbar**: Minimizing hides the window directly to the tray.
+  - **Close window to system tray**: Closing (`X`) keeps My-IDM running in the background.
+  - **Start My-IDM minimized to system tray**: Silently launches directly into the background on startup.
+- **Application Startup & Notifications**:
+  - **Automatically resume incomplete downloads when application starts**: Resumes interrupted transfers on launch.
+  - **Show desktop / status notification when a download completes**: System toast notification on transfer completion.
+
+### 3. Hotkey & Clipboard Tab
+
+- **Global Intercept Hotkey**: Configure the system-wide shortcut (default `Ctrl+Shift+D`) to capture clipboard URLs from any application.
+- **Clipboard Monitoring**: Automatically inspect the system clipboard for URLs, magnet links, or `.torrent` file paths.
+- **Resolve-Before-Capture Probe**: Automatically performs a lightweight probe on copied links to verify they point to real downloadable files rather than capturing HTML web pages.
+
+### 4. Table Views & Appearance Tab
+
+- **Theme Selection**: Choose from curated high-contrast dark themes: **Dark (Default)**, **Dracula**, **Nord**, **GitHub Dark**, **Slate**, **Monokai**, and **Solarized Dark**.
+- **Column Visibility & Ordering**: Toggle column visibility and reorder table columns with an interactive list manager.
+- **Segregated View Mode**: Configure default section grouping (**Status**, **Date**, or **File Type**) and persistence.
+
+### 5. BitTorrent Tab
+
+- **Seeding & Bandwidth Limits**:
+  - **Seed torrents after downloading finishes**: Transition completed torrents into the `seeding` state.
+  - **Resume seeding torrents on startup**: Automatically resumes seeding for previously active torrents.
+  - **Maximum seeding duration**: Auto-stop seeding after a set time limit (minutes, 0 = indefinite).
+  - **Maximum share ratio limit**: Auto-stop seeding when upload/download ratio is reached (0.0x = unlimited).
+  - **Maximum upload / seeding speed**: Cap upload speed in KB/s (0 = unlimited).
+  - **Download to seeding speed ratio**: Derives upload limit as a ratio of global download speed.
+- **Metadata Fetching & Timeouts**:
+  - **Auto-suspend BitTorrent after stuck in metadata fetch**: Automatically suspends dead magnet links after a configured duration (days, default 1) to free concurrency slots.
+  - **Check free disk space before downloading**: Verifies available disk capacity before starting transfers, with configurable **Safety margin to keep free** (MB).
+- **.torrent Files from the System**:
+  - **Open .torrent files with My-IDM**: Registers My-IDM as the OS default handler for `.torrent` files, with **Repair Registration** and **Open Default Apps Settings** shortcuts.
+  - **Watched Folder**: Automatically scans a designated folder for `.torrent` files, imports them into the queue, applies max-age filters, and optionally moves processed `.torrent` files to the Trash.
+
+### 6. Browser Integration Tab
+
+- **Local Integration Server**: Toggle the loopback REST server (`127.0.0.1:19582`) on or off.
 - **Chromium Browsers Group (Chrome / Brave / Edge / Opera)**:
-  - Copy-on-click inline links for `chrome://extensions/`, `edge://extensions/`, and the `browser_extension` folder path.
-  - **📁 Open Extension Folder**: Opens Windows Explorer directly to the unpacked extension directory.
+  - Copy-on-click links and directory shortcut to load the unpacked Manifest V3 extension.
 - **Mozilla Firefox Group**:
-  - Copy-on-click inline links for `about:debugging#/runtime/this-firefox` and `manifest.json` (temporary mode).
-  - Copy-on-click inline links for `about:config`, `xpinstall.signatures.required`, `false`, and `about:addons` (permanent mode).
-  - **📦 Package Firefox Add-on (.xpi)**: Generates `my-idm-firefox.xpi` packaged specifically for Firefox.
-  - **🦊 Permanent Firefox Guide**: Opens an interactive modal guide with full setup instructions for developer editions, privacy forks, and standard release AMO signing.
+  - Links and instructions for temporary loading via `about:debugging` and permanent unsigned installations via `about:config`.
+  - **📦 Package Firefox Add-on (.xpi)**: Generates `my-idm-firefox.xpi`.
+  - **🦊 Permanent Firefox Guide**: Interactive modal guide for developer and signed Firefox editions.
 - **Interception Filters**:
-  - **Automatically intercept downloads from Chrome/Edge/Firefox**.
-  - **Intercept .torrent files from browser**.
-  - **Intercept magnet links from browser**.
-  - **Minimum file size to intercept (KB)** (0 = no limit; smaller files download directly via browser).
+  - **Automatically intercept downloads**.
+  - **Intercept .torrent files and magnet links**.
+  - **Minimum file size to intercept (KB)** (0 = no limit; smaller files stay in browser).
   - **Bypassed File Extensions**: Comma-separated list of extensions to ignore (e.g. `.crx, .pdf`).
 
-### 4. Network & Privacy (VPN & Tor) Tab
-Unified privacy and network routing tab combining VPN and Tor controls:
-- **VPN Adapter Binding**: Bind downloads exclusively to a selected network interface (e.g., WireGuard, OpenVPN, TAP-Windows).
-- **Kill Switch**: Automatically freezes and pauses all active downloads if the bound VPN adapter disconnects or drops, preventing IP leakage.
-- **Proxy Server Configuration**: Configure standard HTTP or SOCKS5 proxies with optional authentication.
-- **🧅 Tor Onion Routing & Privacy**:
-  - **Enable Tor network routing (SOCKS5 proxy)**: Instantly routes download traffic through local Tor SOCKS5.
-  - **Activate Tor automatically on startup**.
-  - **Traffic Routing**: Choose to route HTTP/HTTPS web downloads, BitTorrent swarms/trackers, or both.
-  - **Tor Port Presets**: Quick switch between Tor Service (`9050`) and Tor Browser (`9150`).
-  - **Tor Executable (Optional)**: Specify or auto-discover `tor.exe` for silent background daemon launching.
+### 7. VPN & Kill Switch Tab
 
-### 5. Antivirus & Security Tab
-Configure pre-download safety checks, executable warnings, double-extension blocking, and post-download antivirus scanning engines (Windows Defender or custom scanner).
+- **Network Adapter Binding**: Bind downloads exclusively to a selected network interface (WireGuard, OpenVPN, TAP).
+- **Instant Kill Switch**: Automatically freezes and pauses active downloads if the bound VPN adapter drops, preventing IP exposure.
+- **Proxy Server Configuration**: Configure HTTP or SOCKS5 proxies with optional authentication.
 
-### 6. External Tools Tab
-Manage integration with external scrapers and download tools (e.g. AnimePahe Auto-Downloader).
+### 8. Tor Network Tab
 
-Contains two groups:
+- **🧅 Tor Network Routing (SOCKS5)**: Routes download traffic through local Tor SOCKS5 proxy.
+- **Activate Tor automatically on startup**: Starts Tor proxy routing on launch.
+- **Traffic Routing**: Route HTTP downloads, BitTorrent swarms/trackers, or both.
+- **Port Presets**: Quick-switch between Tor Service (`9050`) and Tor Browser (`9150`).
+- **Tor Executable (Optional)**: Specify or auto-discover `tor.exe` for silent background daemon launching.
 
-**AnimePahe Auto-Downloader / Scraper** — repository path, launch-on-startup, periodic execution
-with a configurable interval, and embedded console/debug log viewers.
+### 9. Antivirus & Security Tab
 
-**🎬 YouTube Downloader (yt-dlp)** — configuration for video-site downloads:
+- **Pre-Download Safety Inspection**: Warn on high-risk executable formats (`.exe`, `.msi`, `.bat`, `.cmd`, `.scr`, `.vbs`) or double-extension disguises (e.g. `document.pdf.exe`).
+- **Post-Download Antivirus Scanner**: Automatically scans completed downloads with Windows Defender (`MpCmdRun.exe`) or a custom CLI scanner command before marking them clean.
+- **Malware Isolation**: Automatically quarantines or deletes files flagged by the scanner.
 
-| Control | Purpose |
-|---------|---------|
-| Enable YouTube integration | Master switch; greys out the rest of the group. Disabling it also stops the Add Download banner from appearing for YouTube links. |
-| yt-dlp path | Leave empty to auto-detect. Browse for a standalone binary or `pip`-installed copy. |
-| ffmpeg path | Leave empty to auto-detect on `PATH`. Required to merge video + audio. |
-| Live status | A ✓/✗ indicator per tool, refreshed whenever a path changes. |
-| Version / Update yt-dlp | Shows the detected version; the button runs `pip install -U yt-dlp` (or `yt-dlp -U` for a binary install). |
-| Default quality | The quality preset applied to new video downloads. |
-| Prefer direct URL mode | Use My-IDM's engine when a single self-contained stream exists. In practice YouTube serves no combined streams, so video still uses ffmpeg merging. |
-| Embed thumbnail / subtitles | Post-processing performed by yt-dlp (needs ffmpeg), with a subtitle language list. |
-| Cookie source | Browser to extract cookies from, for private, members-only, age-restricted, or geo-restricted videos. |
-| Auto-detect YouTube URLs | Show the YouTube hand-off banner when a YouTube link is pasted into Add Download. |
-| Playlist entries to list | How many playlist/channel entries are listed per analysis. The limit affects only how many are *displayed* — a listing costs at most two requests regardless. |
-| Extra yt-dlp args | Free-form arguments appended to every yt-dlp call. |
+### 10. External Tools Tab
+
+- **AnimePahe Auto-Downloader / Scraper**: Repository path, launch-on-startup, periodic execution interval, and embedded console/debug log viewers.
+- **🎬 YouTube Downloader (yt-dlp)**:
+  - Tool path detection and live status indicators for `yt-dlp` and `ffmpeg`.
+  - Version checker and inline **Update yt-dlp** button.
+  - Default quality selector, thumbnail embedding, subtitle language selection, and browser cookie source.
 
 ---
 
@@ -706,15 +756,20 @@ Duplicate URLs are automatically skipped or resumed. See [backlog.txt.example](.
 ## Command-Line Options
 
 ```
-usage: python -m my_idm.main [-h] [--backlog BACKLOG] [--verbose]
+usage: python -m my_idm.main [-h] [--backlog BACKLOG] [--verbose] [--no-splash] [--autostart] [urls ...]
 
 My-IDM — A full-featured download manager
+
+positional arguments:
+  urls                  Optional download URL(s), magnet link(s), or .torrent file(s)
 
 options:
   -h, --help            show this help message and exit
   --backlog BACKLOG, -b BACKLOG
                         Path to a backlog file with URLs (one per line)
   --verbose, -v         Enable verbose (debug) logging
+  --no-splash           Disable the startup splash screen
+  --autostart           Start minimized to the tray (used by launch-at-login)
 ```
 
 ### Examples
@@ -723,8 +778,14 @@ options:
 # Launch normally
 python -m my_idm.main
 
+# Launch and immediately queue one or more URLs or torrents
+python -m my_idm.main "https://example.com/file.zip" "magnet:?xt=urn:btih:..."
+
 # Launch with a specific backlog file
 python -m my_idm.main --backlog urls.txt
+
+# Launch silently in background without splash screen
+python -m my_idm.main --no-splash --autostart
 
 # Launch with debug logging
 python -m my_idm.main -v
