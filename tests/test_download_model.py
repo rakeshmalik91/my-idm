@@ -208,7 +208,7 @@ class TestDownloadModel(unittest.TestCase):
                 )
 
     def test_continuous_queue_numbers_without_gaps(self):
-        """Inactive items (completed, paused, error) show no order, only downloading items show continuous 1, 2, 3."""
+        """Inactive items (completed, error) show no order, downloading and queued items show continuous 1, 2, 3."""
         items = [
             DownloadEntry(id="1", filename="a.zip", status="downloading"),
             DownloadEntry(id="2", filename="b.zip", status="completed"),
@@ -222,14 +222,14 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(self.model.data(self.model.index(0, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
         # Row 1: completed -> ""
         self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
-        # Row 2: paused -> ""
+        # Row 2: paused -> "" (inactive)
         self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
-        # Row 3: queued -> "" (only downloading shows queue order)
-        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
+        # Row 3: queued -> "2" (shows position in queue)
+        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
         # Row 4: error -> ""
         self.assertEqual(self.model.data(self.model.index(4, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
-        # Row 5: downloading -> "2" (continuous for downloading items only)
-        self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+        # Row 5: downloading -> "3" (continuous for downloading+queued items)
+        self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "3")
 
     def test_save_path_normalized_forward_slashes(self):
         """Save path column and data entries are unified with forward slashes."""
