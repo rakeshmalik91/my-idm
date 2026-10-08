@@ -11,9 +11,10 @@ from typing import Any, Optional
 
 import humanize
 from datetime import datetime, timedelta, timezone
-from PySide6.QtCore import Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor
+from PySide6.QtCore import Qt, Signal, QTimer, QSize
+from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -689,6 +691,12 @@ class DetailsPanel(QWidget):
         self._lbl_badge.setVisible(False)
         header_layout.addWidget(self._lbl_badge)
 
+        # Status label for temporary messages (e.g., "Copied to clipboard")
+        self._status_label = QLabel("", header_widget)
+        self._status_label.setStyleSheet(f"color: {Colors.ACCENT}; font-size: 11px;")
+        self._status_label.setVisible(False)
+        header_layout.addWidget(self._status_label)
+
         self._btn_open_folder = QPushButton("📁 Open Folder", header_widget)
         self._btn_open_folder.setToolTip("Open containing directory in File Explorer")
         self._btn_open_folder.clicked.connect(self._on_open_folder_clicked)
@@ -762,14 +770,14 @@ class DetailsPanel(QWidget):
         left_col = QVBoxLayout()
         left_col.setSpacing(6)
 
-        self._ov_status = self._create_info_row(left_col, "Status:")
-        self._ov_size = self._create_info_row(left_col, "Size:")
-        self._ov_downloaded = self._create_info_row(left_col, "Downloaded:")
-        self._ov_seeded = self._create_info_row(left_col, "Total Seeded / Uploaded:")
-        self._ov_speed = self._create_info_row(left_col, "Speed:")
-        self._ov_eta = self._create_info_row(left_col, "ETA:")
-        self._ov_added = self._create_info_row(left_col, "Added:")
-        self._ov_completed = self._create_info_row(left_col, "Completed:")
+        self._ov_status, _ = self._create_info_row(left_col, "Status:")
+        self._ov_size, _ = self._create_info_row(left_col, "Size:")
+        self._ov_downloaded, _ = self._create_info_row(left_col, "Downloaded:")
+        self._ov_seeded, _ = self._create_info_row(left_col, "Total Seeded / Uploaded:")
+        self._ov_speed, _ = self._create_info_row(left_col, "Speed:")
+        self._ov_eta, _ = self._create_info_row(left_col, "ETA:")
+        self._ov_added, _ = self._create_info_row(left_col, "Added:")
+        self._ov_completed, _ = self._create_info_row(left_col, "Completed:")
         left_col.addStretch()
         grid_layout.addLayout(left_col, stretch=1)
 
@@ -777,15 +785,15 @@ class DetailsPanel(QWidget):
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
 
-        self._ov_filename = self._create_info_row(right_col, "File / Folder Name:")
-        self._ov_anime_title = self._create_info_row(right_col, "Anime Title:")
-        self._ov_type = self._create_info_row(right_col, "Transfer Type:")
-        self._ov_swarm = self._create_info_row(right_col, "Swarm / Parts:")
-        self._ov_save_path = self._create_info_row(right_col, "Save Directory:")
-        self._ov_hash = self._create_info_row(right_col, "Content Hash / Infohash:")
-        self._ov_security = self._create_info_row(right_col, "Malware Scan:")
-        self._ov_url = self._create_info_row(right_col, "Source URL / Magnet:")
-        self._ov_anime_url = self._create_info_row(right_col, "Anime URL:")
+        self._ov_filename, self._ov_filename_copy_btn = self._create_info_row(right_col, "File / Folder Name:", copyable=True)
+        self._ov_anime_title, self._ov_anime_title_copy_btn = self._create_info_row(right_col, "Anime Title:", copyable=True)
+        self._ov_type, _ = self._create_info_row(right_col, "Transfer Type:")
+        self._ov_swarm, _ = self._create_info_row(right_col, "Swarm / Parts:")
+        self._ov_save_path, self._ov_save_path_copy_btn = self._create_info_row(right_col, "Save Directory:", copyable=True)
+        self._ov_hash, self._ov_hash_copy_btn = self._create_info_row(right_col, "Content Hash / Infohash:", copyable=True)
+        self._ov_security, _ = self._create_info_row(right_col, "Malware Scan:")
+        self._ov_url, self._ov_url_copy_btn = self._create_info_row(right_col, "Source URL / Magnet:", copyable=True)
+        self._ov_anime_url, self._ov_anime_url_copy_btn = self._create_info_row(right_col, "Anime URL:", copyable=True)
         right_col.addStretch()
         grid_layout.addLayout(right_col, stretch=1)
 
@@ -793,19 +801,46 @@ class DetailsPanel(QWidget):
         scroll.setWidget(container)
         return scroll
 
-    def _create_info_row(self, parent_layout: QVBoxLayout, label_text: str) -> QLabel:
+    def _create_info_row(self, parent_layout: QVBoxLayout, label_text: str, copyable: bool = False) -> tuple[QLabel, QPushButton]:
         row = QHBoxLayout()
-        row.setSpacing(8)
+        row.setSpacing(6)
         lbl = QLabel(label_text)
         lbl.setFixedWidth(160)
         lbl.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-weight: 500;")
         val = QLabel("—")
         val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        val.setWordWrap(True)
+        val.setWordWrap(False)
+        val.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         row.addWidget(lbl)
-        row.addWidget(val, stretch=1)
+        row.addWidget(val)  # No stretch - let it size to content
+        
+        copy_btn = None
+        if copyable:
+            # Copy button
+            copy_btn = QPushButton()
+            copy_btn.setIcon(QApplication.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
+            copy_btn.setFixedSize(18, 18)
+            copy_btn.setIconSize(QSize(12, 12))
+            copy_btn.setToolTip(f"Copy {label_text.strip(':')}")
+            copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            copy_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    border: none;
+                    padding: 0px;
+                }}
+                QPushButton:hover {{
+                    background-color: {Colors.BG_HOVER};
+                    border-radius: 3px;
+                }}
+            """)
+            copy_btn.clicked.connect(lambda _, v=val: self._copy_to_clipboard(v.text()))
+            copy_btn.setVisible(False)  # Hidden by default
+            row.addWidget(copy_btn)
+        
+        row.addStretch()  # Push everything left
         parent_layout.addLayout(row)
-        return val
+        return val, copy_btn
 
     def _create_files_tab(self) -> QWidget:
         container = QWidget()
@@ -1051,6 +1086,18 @@ class DetailsPanel(QWidget):
         self._btn_open_folder.setText("📁 Open Folder")
         self._btn_open_folder.setVisible(bool(entry.save_path or entry.file_path))
 
+    def _copy_to_clipboard(self, text: str):
+        """Copy text to clipboard and show confirmation in status label."""
+        if not text or text == "—":
+            return
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QTimer
+        QApplication.clipboard().setText(text)
+        # Show message in header status label
+        self._status_label.setText("Copied to clipboard")
+        self._status_label.setVisible(True)
+        QTimer.singleShot(2000, lambda: self._status_label.setVisible(False))
+
     def _update_overview(self, entry: DownloadEntry):
         # Status with color
         status_color = Colors.ACCENT
@@ -1175,6 +1222,14 @@ class DetailsPanel(QWidget):
             self._ov_anime_url.setText(anime_url)
         else:
             self._ov_anime_url.setText("—")
+
+        # Show/hide copy buttons based on whether value is not "—"
+        self._ov_filename_copy_btn.setVisible(self._ov_filename.text() != "—")
+        self._ov_anime_title_copy_btn.setVisible(self._ov_anime_title.text() != "—")
+        self._ov_save_path_copy_btn.setVisible(self._ov_save_path.text() != "—")
+        self._ov_hash_copy_btn.setVisible(self._ov_hash.text() != "—")
+        self._ov_url_copy_btn.setVisible(self._ov_url.text() != "—")
+        self._ov_anime_url_copy_btn.setVisible(self._ov_anime_url.text() != "—")
 
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id)
