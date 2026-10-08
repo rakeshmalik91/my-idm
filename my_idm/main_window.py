@@ -92,6 +92,7 @@ from my_idm.settings_dialog import (
     TAB_TOR,
     TAB_TORRENT,
     TAB_VPN,
+    TAB_BANDWIDTH,
     SettingsDialog,
 )
 from my_idm.external_tools import launch_animepahe_gui
@@ -575,6 +576,9 @@ class MainWindow(QMainWindow):
         # flash on screen during startup.
         self._init_queue_scope()
 
+        # Check bandwidth limits initially to populate warning badge if needed
+        self._manager.check_all_bandwidth_limits()
+
     # -- UI setup ------------------------------------------------------------
 
     def _setup_ui(self):
@@ -890,6 +894,14 @@ class MainWindow(QMainWindow):
         )
         self._act_security_settings.triggered.connect(
             self._on_open_security_settings
+        )
+
+        self._act_bandwidth_settings = QAction(_create_emoji_icon("📊"), "Bandwidth Limit Settings…", self)
+        self._act_bandwidth_settings.setToolTip(
+            "Configure daily, weekly, or monthly bandwidth limits per queue or globally"
+        )
+        self._act_bandwidth_settings.triggered.connect(
+            self._on_open_bandwidth_settings
         )
 
         self._act_scan_antivirus = QAction(_create_emoji_icon("🛡"), "Scan with Antivirus", self)
@@ -1273,6 +1285,7 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         tools_menu.addAction(self._act_network_settings)
         tools_menu.addAction(self._act_security_settings)
+        tools_menu.addAction(self._act_bandwidth_settings)
         tools_menu.addSeparator()
         self._act_launch_animepahe_gui = QAction(_create_emoji_icon("🎬"), "Launch AnimePahe Downloader…", self)
         self._act_launch_animepahe_gui.triggered.connect(self._on_launch_animepahe_gui)
@@ -1293,6 +1306,28 @@ class MainWindow(QMainWindow):
         about_act = QAction(_create_emoji_icon("ℹ️"), "About My-IDM", self)
         about_act.triggered.connect(self._on_about)
         help_menu.addAction(about_act)
+
+        # Bandwidth Warning Corner Widget at the right edge of menubar
+        self._bw_warning_btn = QPushButton("")
+        self._bw_warning_btn.setFlat(True)
+        self._bw_warning_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._bw_warning_btn.setVisible(False)
+        self._bw_warning_btn.setStyleSheet("""
+            QPushButton {
+                color: #ffb86c;
+                font-weight: bold;
+                padding: 2px 8px;
+                border: 1px solid #ffb86c;
+                border-radius: 3px;
+                background-color: rgba(255, 184, 108, 0.15);
+                margin: 2px 4px;
+            }
+            QPushButton:hover {
+                background-color: rgba(255, 184, 108, 0.3);
+            }
+        """)
+        self._bw_warning_btn.clicked.connect(self._on_open_bandwidth_settings)
+        menubar.setCornerWidget(self._bw_warning_btn, Qt.Corner.TopRightCorner)
 
     def _setup_statusbar(self):
         self._status_label = QLabel("Ready")
@@ -1817,6 +1852,9 @@ class MainWindow(QMainWindow):
         self._manager.queues_changed.connect(self._on_queues_changed)
         self._manager.queue_scope_changed.connect(self._on_queue_scope_changed)
         self._manager.bandwidth_limits_changed.connect(self._on_bandwidth_limits_changed)
+        self._manager.bandwidth_warning.connect(self._on_bandwidth_warning)
+        self._manager.bandwidth_limit_exceeded.connect(self._on_bandwidth_limit_exceeded)
+        self._manager.bandwidth_warning_cleared.connect(self._on_bandwidth_warning_cleared)
         self._manager.animepahe_status_changed.connect(
             self._on_animepahe_status_changed
         )
@@ -3098,6 +3136,77 @@ class MainWindow(QMainWindow):
 
     def _on_bandwidth_limits_changed(self, download_limit: int, upload_limit: int):
         self._update_speed_label()
+
+    def _on_bandwidth_warning(self, queue_id: str, message: str, percentage: float, is_global: bool):
+        """Show bandwidth warning at right edge of menubar and status bar."""
+        scope = "Global" if is_global else f"Queue '{queue_id}'"
+        warning_text = f"⚠️ Bandwidth Warning: {scope} at {percentage:.1f}% — {message}"
+        
+        if hasattr(self, "_bw_warning_btn"):
+            self._bw_warning_btn.setText(f"⚠️ Bandwidth: {percentage:.0f}%")
+            self._bw_warning_btn.setToolTip(f"{warning_text}\nClick to configure Bandwidth Limits.")
+            self._bw_warning_btn.setStyleSheet("""
+                QPushButton {
+                    color: #ffb86c;
+                    font-weight: bold;
+                    padding: 2px 8px;
+                    border: 1px solid #ffb86c;
+                    border-radius: 3px;
+                    background-color: rgba(255, 184, 108, 0.15);
+                    margin: 2px 4px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255, 184, 108, 0.3);
+                }
+            """)
+            self._bw_warning_btn.setVisible(True)
+
+        # Show in status bar temporarily
+        self._status_label.setText(warning_text)
+        QTimer.singleShot(10000, lambda: self._status_label.setText("Ready"))
+
+    def _on_bandwidth_limit_exceeded(self, queue_id: str, message: str, percentage: float, is_global: bool):
+        """Show bandwidth limit exceeded notification and stop downloads."""
+        scope = "Global" if is_global else f"Queue '{queue_id}'"
+        warning_text = f"🚫 Bandwidth Limit Exceeded: {scope} — {message}"
+        
+        if hasattr(self, "_bw_warning_btn"):
+            self._bw_warning_btn.setText("🚫 Bandwidth (100%)")
+            self._bw_warning_btn.setToolTip(f"{warning_text}\nAll downloads paused. Click to configure limits.")
+            self._bw_warning_btn.setStyleSheet("""
+                QPushButton {
+                    color: #ff5555;
+                    font-weight: bold;
+                    padding: 2px 8px;
+                    border: 1px solid #ff5555;
+                    border-radius: 3px;
+                    background-color: rgba(255, 85, 85, 0.2);
+                    margin: 2px 4px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(255, 85, 85, 0.35);
+                }
+            """)
+            self._bw_warning_btn.setVisible(True)
+
+        # Show in status bar
+        self._status_label.setText(warning_text)
+        
+        # Show a message box
+        QMessageBox.warning(
+            self,
+            "Bandwidth Limit Exceeded",
+            f"{warning_text}\n\nAll downloads have been paused."
+        )
+
+    def _on_bandwidth_warning_cleared(self):
+        """Hide the bandwidth warning button in the menubar."""
+        if hasattr(self, "_bw_warning_btn"):
+            self._bw_warning_btn.setVisible(False)
+
+    def _on_open_bandwidth_settings(self):
+        """Open Preferences dialog on the Bandwidth Limit tab."""
+        self._on_open_preferences(TAB_BANDWIDTH)
 
     def _show_speed_context_menu(self, pos):
         menu = QMenu(self)

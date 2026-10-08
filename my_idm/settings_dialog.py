@@ -53,6 +53,7 @@ from my_idm.config import (
     TorrentConfig,
     ExternalToolsConfig,
     BrowserIntegrationConfig,
+    BandwidthLimitConfig,
     clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
@@ -104,6 +105,7 @@ TAB_SECURITY = "security"
 TAB_EXTERNAL_TOOLS = "external_tools"
 TAB_YOUTUBE = "youtube"
 TAB_QUEUES = "queues"
+TAB_BANDWIDTH = "bandwidth"
 
 #: Name -> insertion index. Order here *is* the tab order; ``SettingsDialog._setup_ui``
 #: adds the pages in exactly this sequence and the tests pin the two against each other.
@@ -120,6 +122,7 @@ TAB_ORDER: tuple[str, ...] = (
     TAB_EXTERNAL_TOOLS,
     TAB_YOUTUBE,
     TAB_QUEUES,
+    TAB_BANDWIDTH,
 )
 
 #: Titles as shown in the sidebar, keyed by the same names. Used by the tests and by
@@ -137,6 +140,7 @@ TAB_TITLES: dict[str, str] = {
     TAB_EXTERNAL_TOOLS: "🌐 AnimePahe Scraper",
     TAB_YOUTUBE: "▶️ YouTube (yt-dlp)",
     TAB_QUEUES: "⚙️ Queues",
+    TAB_BANDWIDTH: "📊 Bandwidth Limit",
 }
 
 
@@ -715,6 +719,7 @@ class SettingsDialog(QDialog):
             (TAB_EXTERNAL_TOOLS, self._create_external_tools_tab),
             (TAB_YOUTUBE, self._create_youtube_tab),
             (TAB_QUEUES, self._create_queues_tab),
+            (TAB_BANDWIDTH, self._create_bandwidth_tab),
         )
         self._tab_names: list[str] = []
         for name, builder in self._tab_builders:
@@ -2645,6 +2650,239 @@ class SettingsDialog(QDialog):
         target = min(max(needed, self.width()), MAX_DIALOG_WIDTH)
         if target != self.width():
             self.resize(target, self.height())
+
+    def _create_bandwidth_tab(self) -> QWidget:
+        """Bandwidth Limit - configure daily/weekly/monthly bandwidth limits (global and per-queue)."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        bw_group = QGroupBox("Bandwidth Limits")
+        bw_layout = QVBoxLayout(bw_group)
+        bw_layout.setSpacing(12)
+        bw_layout.setContentsMargins(14, 16, 14, 14)
+
+        # 8 columns: Queue, Enabled, Limit, Limit Type, Progress, Percetage for Warning, Edit, Delete
+        self._bw_table = QTableWidget(0, 8, self)
+        self._bw_table.setHorizontalHeaderLabels([
+            "Queue",
+            "Enabled",
+            "Limit",
+            "Limit Type",
+            "Progress",
+            "Percetage for Warning",
+            "Edit",
+            "Delete",
+        ])
+        _header = self._bw_table.horizontalHeader()
+        _line_height = _header.fontMetrics().height()
+        _header.setFixedHeight(_line_height + 10)
+        themed_widget(
+            _header,
+            """
+            QHeaderView::section {
+                background-color: {Colors.BG_MID};
+                color: {Colors.TEXT_SECONDARY};
+                border: none;
+                border-bottom: 2px solid {Colors.BORDER};
+                border-right: 1px solid {Colors.BORDER};
+                padding: 6px 10px;
+                font-weight: 600;
+                font-size: 12px;
+                text-transform: uppercase;
+            }
+            QHeaderView::section:hover {
+                color: {Colors.TEXT};
+                background-color: {Colors.BG_LIGHT};
+            }
+            """,
+        )
+        self._bw_table.verticalHeader().setVisible(False)
+        self._bw_table.verticalHeader().setDefaultSectionSize(36)
+        self._bw_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._bw_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._bw_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        _header.setStretchLastSection(False)
+        _header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        _header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        _header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        bw_layout.addWidget(self._bw_table)
+
+        btn_row = QHBoxLayout()
+        self._bw_add_btn = QPushButton("➕ Add Limit…")
+        self._bw_add_btn.clicked.connect(self._on_bw_add_limit)
+        btn_row.addWidget(self._bw_add_btn)
+        btn_row.addStretch(1)
+        bw_layout.addLayout(btn_row)
+
+        note_lbl = QLabel(
+            "ℹ️ Global limits apply across all queues combined and override per-queue limits. "
+            "When the warning percentage is reached, a warning badge appears at the top right of the menu bar. "
+            "If 100% is reached, all active downloads and uploads are stopped automatically."
+        )
+        note_lbl.setWordWrap(True)
+        note_lbl.setStyleSheet("color: #8fa0b5;")
+        bw_layout.addWidget(note_lbl)
+
+        layout.addWidget(bw_group, 1)
+        layout.addStretch()
+
+        self._reload_bandwidth_limits()
+        return tab
+
+    # -- Bandwidth Limit methods ----------------------------------------------
+
+    def _reload_bandwidth_limits(self):
+        """Reload the bandwidth limits table from the database."""
+        db = self._db or (self._manager._db if self._manager else None)
+        if not db:
+            return
+
+        try:
+            limits = db.get_all_bandwidth_limits()
+            queues = self._manager.get_queues() if self._manager and hasattr(self._manager, "get_queues") else db.get_queues()
+            queue_names = {q.id: q.name for q in queues}
+        except Exception:
+            return
+
+        self._bw_table.blockSignals(True)
+        self._bw_table.setRowCount(0)
+
+        for limit in limits:
+            row = self._bw_table.rowCount()
+            self._bw_table.insertRow(row)
+
+            qid = limit["queue_id"]
+            if not qid or qid == "global":
+                q_name = "Global (All Queues)"
+            else:
+                q_name = queue_names.get(qid, qid)
+
+            # 0. Queue
+            item_q = QTableWidgetItem(q_name)
+            item_q.setData(Qt.ItemDataRole.UserRole, limit["id"])
+            if not qid or qid == "global":
+                font = item_q.font()
+                font.setBold(True)
+                item_q.setFont(font)
+            self._bw_table.setItem(row, 0, item_q)
+
+            # 1. Enabled
+            cb_container = QWidget()
+            cb_layout = QHBoxLayout(cb_container)
+            cb_layout.setContentsMargins(0, 0, 0, 0)
+            cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cb = QCheckBox()
+            cb.setChecked(bool(limit["enabled"]))
+            cb.toggled.connect(lambda checked, l_id=limit["id"]: self._on_bw_toggle_enabled(l_id, checked))
+            cb_layout.addWidget(cb)
+            self._bw_table.setCellWidget(row, 1, cb_container)
+
+            # 2. Limit
+            lim_bytes = limit["limit_bytes"]
+            lim_text = humanize.naturalsize(lim_bytes, binary=True) if lim_bytes > 0 else "Unlimited"
+            item_lim = QTableWidgetItem(lim_text)
+            item_lim.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._bw_table.setItem(row, 2, item_lim)
+
+            # 3. Limit Type
+            pt = limit["limit_type"].capitalize()
+            item_pt = QTableWidgetItem(pt)
+            item_pt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._bw_table.setItem(row, 3, item_pt)
+
+            # 4. Progress
+            dl, ul = db.get_current_period_usage(qid, limit["limit_type"])
+            used = dl + ul
+            pct = (used / lim_bytes * 100) if lim_bytes > 0 else 0.0
+            prog_text = f"{humanize.naturalsize(used, binary=True)} / {lim_text} ({pct:.1f}%)"
+            item_prog = QTableWidgetItem(prog_text)
+            item_prog.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if pct >= 100.0:
+                item_prog.setForeground(QColor("#ef4444"))
+            elif pct >= limit["warning_percent"]:
+                item_prog.setForeground(QColor("#f59e0b"))
+            self._bw_table.setItem(row, 4, item_prog)
+
+            # 5. Percetage for Warning
+            warn_text = f"{limit['warning_percent']}%"
+            item_warn = QTableWidgetItem(warn_text)
+            item_warn.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._bw_table.setItem(row, 5, item_warn)
+
+            # 6. Edit button
+            btn_edit = QPushButton("✏️ Edit")
+            btn_edit.clicked.connect(lambda checked, l=limit: self._on_bw_edit_limit(l))
+            self._bw_table.setCellWidget(row, 6, btn_edit)
+
+            # 7. Delete button
+            btn_del = QPushButton("🗑️ Delete")
+            btn_del.clicked.connect(lambda checked, l_id=limit["id"]: self._on_bw_delete_limit(l_id))
+            self._bw_table.setCellWidget(row, 7, btn_del)
+
+        self._bw_table.blockSignals(False)
+
+    def _on_bw_toggle_enabled(self, limit_id: int, enabled: bool):
+        db = self._db or (self._manager._db if self._manager else None)
+        if not db:
+            return
+        limits = db.get_all_bandwidth_limits()
+        limit = next((l for l in limits if l["id"] == limit_id), None)
+        if limit:
+            db.update_bandwidth_limit(
+                limit_id, enabled, limit["limit_bytes"],
+                limit["limit_type"], limit["warning_percent"]
+            )
+            if self._manager and hasattr(self._manager, "check_all_bandwidth_limits"):
+                self._manager.check_all_bandwidth_limits()
+            self._reload_bandwidth_limits()
+
+    def _on_bw_add_limit(self):
+        """Add a new bandwidth limit."""
+        db = self._db or (self._manager._db if self._manager else None)
+        dlg = BandwidthLimitDialog(self, manager=self._manager, db=db)
+        if dlg.exec():
+            if db:
+                db.create_bandwidth_limit(
+                    dlg.queue_id, dlg.enabled, dlg.limit_bytes,
+                    dlg.limit_type, dlg.warning_percent
+                )
+            if self._manager and hasattr(self._manager, "check_all_bandwidth_limits"):
+                self._manager.check_all_bandwidth_limits()
+            self._reload_bandwidth_limits()
+
+    def _on_bw_edit_limit(self, limit: dict):
+        """Edit an existing bandwidth limit."""
+        db = self._db or (self._manager._db if self._manager else None)
+        dlg = BandwidthLimitDialog(self, manager=self._manager, db=db, limit=limit)
+        if dlg.exec():
+            if db:
+                db.update_bandwidth_limit(
+                    limit["id"], dlg.enabled, dlg.limit_bytes,
+                    dlg.limit_type, dlg.warning_percent
+                )
+            if self._manager and hasattr(self._manager, "check_all_bandwidth_limits"):
+                self._manager.check_all_bandwidth_limits()
+            self._reload_bandwidth_limits()
+
+    def _on_bw_delete_limit(self, limit_id: int):
+        """Delete selected bandwidth limit."""
+        if QMessageBox.question(self, "Delete Limit", "Delete this bandwidth limit?") != QMessageBox.StandardButton.Yes:
+            return
+
+        db = self._db or (self._manager._db if self._manager else None)
+        if db:
+            db.delete_bandwidth_limit(limit_id)
+            if self._manager and hasattr(self._manager, "check_all_bandwidth_limits"):
+                self._manager.check_all_bandwidth_limits()
+            self._reload_bandwidth_limits()
+
 
     def _create_youtube_tab(self) -> QWidget:
         """YouTube / yt-dlp settings, split out of the combined External Tools tab.
@@ -4596,4 +4834,160 @@ class FirefoxInstallGuideDialog(QDialog):
                     QMessageBox.warning(self, "Folder Error", msg)
         except Exception as e:
             QMessageBox.critical(self, "Packaging Error", f"Failed to package Firefox extension:\n{e}")
+
+
+# -- Bandwidth Limit Dialog -----------------------------------------------
+
+class BandwidthLimitDialog(QDialog):
+    """Dialog to create or edit a bandwidth limit."""
+
+    def __init__(self, parent=None, manager=None, db=None, limit=None):
+        super().__init__(parent)
+        self._manager = manager
+        self._db = db or (manager._db if manager else None)
+        self._limit = limit
+        self.setWindowTitle("Edit Bandwidth Limit" if limit else "Add Bandwidth Limit")
+        self.setMinimumWidth(420)
+        self.setModal(True)
+
+        self.queue_id = ""
+        self.enabled = True
+        self.limit_bytes = 10 * 1024 * 1024 * 1024  # default 10 GB
+        self.limit_type = "monthly"
+        self.warning_percent = 80
+
+        self._setup_ui()
+        if limit:
+            self._populate_from_limit(limit)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        layout.setContentsMargins(18, 18, 18, 18)
+
+        # Queue
+        q_row = QHBoxLayout()
+        q_lbl = QLabel("Queue:")
+        q_lbl.setMinimumWidth(120)
+        q_row.addWidget(q_lbl)
+        self._queue_combo = QComboBox()
+        self._queue_combo.addItem("Global (All Queues)", "")
+        queues = []
+        if self._manager and hasattr(self._manager, "get_queues"):
+            try:
+                queues = self._manager.get_queues()
+            except Exception:
+                pass
+        elif self._db and hasattr(self._db, "get_queues"):
+            try:
+                queues = self._db.get_queues()
+            except Exception:
+                pass
+        for q in queues:
+            self._queue_combo.addItem(f"{q.name} ({q.id})", q.id)
+        q_row.addWidget(self._queue_combo, 1)
+        layout.addLayout(q_row)
+
+        # Enabled
+        en_row = QHBoxLayout()
+        en_lbl = QLabel("Status:")
+        en_lbl.setMinimumWidth(120)
+        en_row.addWidget(en_lbl)
+        self._enabled_cb = QCheckBox("Enable this limit")
+        self._enabled_cb.setChecked(True)
+        en_row.addWidget(self._enabled_cb, 1)
+        layout.addLayout(en_row)
+
+        # Limit value + unit
+        lim_row = QHBoxLayout()
+        lim_lbl = QLabel("Bandwidth Limit:")
+        lim_lbl.setMinimumWidth(120)
+        lim_row.addWidget(lim_lbl)
+        self._limit_spin = QSpinBox()
+        self._limit_spin.setRange(1, 1_000_000)
+        self._limit_spin.setValue(10)
+        lim_row.addWidget(self._limit_spin, 1)
+        self._unit_combo = QComboBox()
+        self._unit_combo.addItems(["GB", "MB"])
+        lim_row.addWidget(self._unit_combo)
+        layout.addLayout(lim_row)
+
+        # Limit period
+        type_row = QHBoxLayout()
+        type_lbl = QLabel("Limit Period:")
+        type_lbl.setMinimumWidth(120)
+        type_row.addWidget(type_lbl)
+        self._type_combo = QComboBox()
+        self._type_combo.addItems(["Daily", "Weekly", "Monthly"])
+        self._type_combo.setCurrentText("Monthly")
+        type_row.addWidget(self._type_combo, 1)
+        layout.addLayout(type_row)
+
+        # Warning percentage
+        warn_row = QHBoxLayout()
+        warn_lbl = QLabel("Warning Threshold:")
+        warn_lbl.setMinimumWidth(120)
+        warn_row.addWidget(warn_lbl)
+        self._warn_spin = QSpinBox()
+        self._warn_spin.setRange(50, 99)
+        self._warn_spin.setValue(80)
+        self._warn_spin.setSuffix("%")
+        warn_row.addWidget(self._warn_spin, 1)
+        layout.addLayout(warn_row)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        ok_btn = QPushButton("Save" if self._limit else "Add")
+        ok_btn.setObjectName("primaryButton")
+        ok_btn.setDefault(True)
+        ok_btn.clicked.connect(self._on_accept)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+    def _populate_from_limit(self, limit: dict):
+        self.queue_id = limit["queue_id"]
+        self.enabled = bool(limit["enabled"])
+        self.limit_bytes = limit["limit_bytes"]
+        self.limit_type = limit["limit_type"]
+        self.warning_percent = limit["warning_percent"]
+
+        idx = self._queue_combo.findData(self.queue_id)
+        if idx >= 0:
+            self._queue_combo.setCurrentIndex(idx)
+
+        self._enabled_cb.setChecked(self.enabled)
+
+        # Set value and unit
+        gb = 1024 * 1024 * 1024
+        mb = 1024 * 1024
+        if self.limit_bytes >= gb and self.limit_bytes % gb == 0:
+            self._limit_spin.setValue(self.limit_bytes // gb)
+            self._unit_combo.setCurrentText("GB")
+        else:
+            self._limit_spin.setValue(max(1, self.limit_bytes // mb))
+            self._unit_combo.setCurrentText("MB")
+
+        t_idx = {"daily": 0, "weekly": 1, "monthly": 2}.get(self.limit_type.lower(), 2)
+        self._type_combo.setCurrentIndex(t_idx)
+        self._warn_spin.setValue(self.warning_percent)
+
+    def _on_accept(self):
+        self.queue_id = self._queue_combo.currentData() or ""
+        self.enabled = self._enabled_cb.isChecked()
+        val = self._limit_spin.value()
+        multiplier = 1024 * 1024 * 1024 if self._unit_combo.currentText() == "GB" else 1024 * 1024
+        self.limit_bytes = val * multiplier
+        self.limit_type = self._type_combo.currentText().lower()
+        self.warning_percent = self._warn_spin.value()
+
+        if self.limit_bytes <= 0:
+            QMessageBox.warning(self, "Invalid Limit", "Bandwidth limit must be greater than 0.")
+            return
+
+        self.accept()
 

@@ -692,6 +692,31 @@ CREATE TABLE IF NOT EXISTS segments (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            -- Bandwidth limits: global (queue_id = '') or per-queue
+            CREATE TABLE IF NOT EXISTS bandwidth_limits (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id        TEXT NOT NULL DEFAULT '',
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                limit_bytes     INTEGER NOT NULL DEFAULT 0,
+                limit_type      TEXT NOT NULL DEFAULT 'monthly',  -- 'daily', 'weekly', 'monthly'
+                warning_percent INTEGER NOT NULL DEFAULT 80,      -- percentage at which to warn
+                created_at      TEXT NOT NULL DEFAULT ''
+            );
+
+            -- Bandwidth usage tracking per period
+            CREATE TABLE IF NOT EXISTS bandwidth_usage (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id        TEXT NOT NULL DEFAULT '',
+                period_start    TEXT NOT NULL,  -- ISO date of period start
+                period_type     TEXT NOT NULL,  -- 'daily', 'weekly', 'monthly'
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                uploaded_bytes   INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(queue_id, period_start, period_type)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_bandwidth_limits_queue ON bandwidth_limits(queue_id);
+            CREATE INDEX IF NOT EXISTS idx_bandwidth_usage_queue_period ON bandwidth_usage(queue_id, period_type, period_start);
         """)
 
         # Migration check for columns in existing databases
@@ -1065,6 +1090,195 @@ CREATE TABLE IF NOT EXISTS segments (
             upload_limit=upload_limit,
             created_at=row["created_at"] or "",
         )
+
+    # -- bandwidth limits -------------------------------------------------------
+
+    def get_bandwidth_limits(self, queue_id: str = "") -> list[dict]:
+        """Get all bandwidth limits for a queue (or global if queue_id is empty)."""
+        rows = self._conn.execute(
+            "SELECT * FROM bandwidth_limits WHERE queue_id = ? ORDER BY id",
+            (queue_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_bandwidth_limits(self) -> list[dict]:
+        """Get all bandwidth limits across all queues."""
+        rows = self._conn.execute(
+            "SELECT * FROM bandwidth_limits ORDER BY queue_id, id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_bandwidth_limit(self, queue_id: str, enabled: bool, limit_bytes: int,
+                               limit_type: str, warning_percent: int) -> int:
+        """Create a new bandwidth limit. Returns the new limit id."""
+        cursor = self._conn.execute(
+            "INSERT INTO bandwidth_limits (queue_id, enabled, limit_bytes, limit_type, warning_percent, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (queue_id, 1 if enabled else 0, limit_bytes, limit_type, warning_percent, _now_iso())
+        )
+        self._conn.commit()
+        return cursor.lastrowid
+
+    def update_bandwidth_limit(self, limit_id: int, enabled: bool, limit_bytes: int,
+                               limit_type: str, warning_percent: int) -> bool:
+        """Update a bandwidth limit. Returns True if updated."""
+        cursor = self._conn.execute(
+            "UPDATE bandwidth_limits SET enabled = ?, limit_bytes = ?, limit_type = ?, warning_percent = ? WHERE id = ?",
+            (1 if enabled else 0, limit_bytes, limit_type, warning_percent, limit_id)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def delete_bandwidth_limit(self, limit_id: int) -> bool:
+        """Delete a bandwidth limit. Returns True if deleted."""
+        cursor = self._conn.execute(
+            "DELETE FROM bandwidth_limits WHERE id = ?", (limit_id,)
+        )
+        self._conn.commit()
+        return cursor.rowcount > 0
+
+    def get_bandwidth_usage(self, queue_id: str, period_type: str, period_start: str) -> Optional[dict]:
+        """Get bandwidth usage for a specific queue, period type, and period start."""
+        row = self._conn.execute(
+            "SELECT * FROM bandwidth_usage WHERE queue_id = ? AND period_type = ? AND period_start = ?",
+            (queue_id, period_type, period_start)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def add_bandwidth_usage(self, queue_id: str, period_type: str, period_start: str,
+                            downloaded_bytes: int = 0, uploaded_bytes: int = 0) -> None:
+        """Add or update bandwidth usage for a period."""
+        self._conn.execute(
+            "INSERT INTO bandwidth_usage (queue_id, period_type, period_start, downloaded_bytes, uploaded_bytes) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(queue_id, period_start, period_type) DO UPDATE SET "
+            "downloaded_bytes = downloaded_bytes + excluded.downloaded_bytes, "
+            "uploaded_bytes = uploaded_bytes + excluded.uploaded_bytes",
+            (queue_id, period_type, period_start, downloaded_bytes, uploaded_bytes)
+        )
+        self._conn.commit()
+
+    def get_current_period_usage(self, queue_id: str, period_type: str,
+                                 now: Optional[Union[datetime, date]] = None) -> tuple[int, int]:
+        """Get current period usage (downloaded, uploaded) for a queue (or global if queue_id is empty)."""
+        period_start = self._get_period_start(period_type, now)
+        if not queue_id or queue_id == "global":
+            row = self._conn.execute(
+                "SELECT SUM(downloaded_bytes) as dl, SUM(uploaded_bytes) as ul "
+                "FROM bandwidth_usage WHERE period_type = ? AND period_start = ?",
+                (period_type, period_start)
+            ).fetchone()
+            if row:
+                return (int(row["dl"] or 0), int(row["ul"] or 0))
+            return (0, 0)
+        else:
+            usage = self.get_bandwidth_usage(queue_id, period_type, period_start)
+            if usage:
+                return (int(usage["downloaded_bytes"] or 0), int(usage["uploaded_bytes"] or 0))
+            return (0, 0)
+
+    def _get_period_start(self, period_type: str, now: Optional[Union[datetime, date]] = None) -> str:
+        """Get the ISO date string for the start of the current period in local time."""
+        if now is None:
+            now_dt = datetime.now().astimezone()
+        elif isinstance(now, datetime):
+            now_dt = now.astimezone() if now.tzinfo else now
+        else:
+            now_dt = datetime.combine(now, datetime.min.time())
+
+        d = now_dt.date()
+        if period_type == "daily":
+            return d.isoformat()
+        elif period_type == "weekly":
+            # Start of week (Monday)
+            start = d - timedelta(days=d.weekday())
+            return start.isoformat()
+        elif period_type == "monthly":
+            return d.replace(day=1).isoformat()
+        return d.isoformat()
+
+    def check_bandwidth_limit(self, queue_id: str = "", bytes_to_add: int = 0,
+                              is_upload: bool = False,
+                              now: Optional[Union[datetime, date]] = None) -> tuple[bool, str, float]:
+        """Check if adding bytes would exceed any bandwidth limit.
+
+        Enforces global limits first ("global overrides per queue limit"), then
+        per-queue limits.
+        
+        Returns (allowed, message, usage_percentage).
+        """
+        # 1. Check Global limits first ("global overrides per queue limit")
+        global_limits = [
+            l for l in (self.get_bandwidth_limits("") + self.get_bandwidth_limits("global"))
+            if l["enabled"] and l["limit_bytes"] > 0
+        ]
+        for limit in global_limits:
+            pt = limit["limit_type"]
+            dl, ul = self.get_current_period_usage("", pt, now)
+            used = dl + ul + bytes_to_add
+            limit_bytes = limit["limit_bytes"]
+            pct = (used / limit_bytes * 100) if limit_bytes > 0 else 0.0
+            if pct >= 100.0:
+                return (False, f"Global {pt} bandwidth limit exceeded ({limit_bytes:,} bytes)", 100.0)
+
+        # 2. Check per-queue limits if queue_id specified
+        target_qid = queue_id if (queue_id and queue_id != "global") else ""
+        if target_qid:
+            q_limits = [
+                l for l in self.get_bandwidth_limits(target_qid)
+                if l["enabled"] and l["limit_bytes"] > 0
+            ]
+            for limit in q_limits:
+                pt = limit["limit_type"]
+                dl, ul = self.get_current_period_usage(target_qid, pt, now)
+                used = dl + ul + bytes_to_add
+                limit_bytes = limit["limit_bytes"]
+                pct = (used / limit_bytes * 100) if limit_bytes > 0 else 0.0
+                if pct >= 100.0:
+                    return (False, f"Queue '{target_qid}' {pt} bandwidth limit exceeded ({limit_bytes:,} bytes)", 100.0)
+
+        # 3. Check for warning thresholds (>= warning_percent and < 100%)
+        # Global warnings first
+        for limit in global_limits:
+            pt = limit["limit_type"]
+            dl, ul = self.get_current_period_usage("", pt, now)
+            used = dl + ul + bytes_to_add
+            limit_bytes = limit["limit_bytes"]
+            pct = (used / limit_bytes * 100) if limit_bytes > 0 else 0.0
+            if pct >= limit["warning_percent"]:
+                return (True, f"Global {pt} bandwidth at {pct:.1f}%", pct)
+
+        # Per-queue warnings next
+        if target_qid:
+            q_limits = [
+                l for l in self.get_bandwidth_limits(target_qid)
+                if l["enabled"] and l["limit_bytes"] > 0
+            ]
+            for limit in q_limits:
+                pt = limit["limit_type"]
+                dl, ul = self.get_current_period_usage(target_qid, pt, now)
+                used = dl + ul + bytes_to_add
+                limit_bytes = limit["limit_bytes"]
+                pct = (used / limit_bytes * 100) if limit_bytes > 0 else 0.0
+                if pct >= limit["warning_percent"]:
+                    return (True, f"Queue '{target_qid}' {pt} bandwidth at {pct:.1f}%", pct)
+
+        return (True, "", 0.0)
+
+    def record_bandwidth(self, queue_id: str, downloaded_bytes: int = 0,
+                         uploaded_bytes: int = 0,
+                         now: Optional[Union[datetime, date]] = None) -> tuple[bool, str, float]:
+        """Record bandwidth usage and check limits.
+        
+        Returns (allowed, warning_message, usage_percentage).
+        """
+        target_qid = queue_id if (queue_id and queue_id != "global") else "default"
+        if downloaded_bytes > 0 or uploaded_bytes > 0:
+            for period_type in ("daily", "weekly", "monthly"):
+                period_start = self._get_period_start(period_type, now)
+                self.add_bandwidth_usage(target_qid, period_type, period_start, downloaded_bytes, uploaded_bytes)
+
+        return self.check_bandwidth_limit(target_qid, 0, False, now)
 
     # -- downloads -----------------------------------------------------------
 

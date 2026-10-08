@@ -1020,3 +1020,71 @@ class BrowserIntegrationConfig:
             bypassed_extensions=bypassed,
         )
 
+
+@dataclass
+class BandwidthLimitConfig:
+    """Stores configuration for daily/weekly/monthly bandwidth limits.
+    
+    Limits are stored in the database (bandwidth_limits table) rather than QSettings
+    because they are per-queue and support multiple limit types. This config class
+    handles the global defaults and persistence.
+    """
+    # Global bandwidth limits (0 = unlimited)
+    global_download_limit: int = 0  # bytes per period
+    global_upload_limit: int = 0    # bytes per period
+    global_limit_type: str = "monthly"  # daily, weekly, monthly
+    global_enabled: bool = False
+    global_warning_percent: int = 80
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "global_download_limit": self.global_download_limit,
+            "global_upload_limit": self.global_upload_limit,
+            "global_limit_type": self.global_limit_type,
+            "global_enabled": self.global_enabled,
+            "global_warning_percent": self.global_warning_percent,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> BandwidthLimitConfig:
+        return cls(
+            global_download_limit=int(data.get("global_download_limit", 0)),
+            global_upload_limit=int(data.get("global_upload_limit", 0)),
+            global_limit_type=str(data.get("global_limit_type", "monthly")),
+            global_enabled=bool(data.get("global_enabled", False)),
+            global_warning_percent=int(data.get("global_warning_percent", 80)),
+        )
+
+    def save(self, settings: Optional[QSettings] = None):
+        """Persists bandwidth limit preferences into QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("BandwidthLimits")
+        settings.setValue("global_download_limit", self.global_download_limit)
+        settings.setValue("global_upload_limit", self.global_upload_limit)
+        settings.setValue("global_limit_type", self.global_limit_type)
+        settings.setValue("global_enabled", self.global_enabled)
+        settings.setValue("global_warning_percent", self.global_warning_percent)
+        settings.endGroup()
+
+    @classmethod
+    def load(cls, settings: Optional[QSettings] = None) -> BandwidthLimitConfig:
+        """Loads bandwidth limit preferences from QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("BandwidthLimits")
+        global_download_limit = settings.value("global_download_limit", 0, type=int)
+        global_upload_limit = settings.value("global_upload_limit", 0, type=int)
+        global_limit_type = settings.value("global_limit_type", "monthly", type=str) or "monthly"
+        global_enabled = settings.value("global_enabled", False, type=bool)
+        global_warning_percent = settings.value("global_warning_percent", 80, type=int)
+        settings.endGroup()
+
+        return cls(
+            global_download_limit=int(global_download_limit or 0),
+            global_upload_limit=int(global_upload_limit or 0),
+            global_limit_type=str(global_limit_type),
+            global_enabled=bool(global_enabled),
+            global_warning_percent=int(global_warning_percent or 80),
+        )
+

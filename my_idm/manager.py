@@ -41,6 +41,7 @@ from my_idm.config import (
     TorrentConfig,
     ExternalToolsConfig,
     BrowserIntegrationConfig,
+    BandwidthLimitConfig,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
 )
@@ -435,6 +436,9 @@ class DownloadManager(QObject):
     browser_config_changed = Signal(object)  # BrowserIntegrationConfig
     process_backlogs_requested = Signal()    # Request to run process_backlogs on main thread
     youtube_error = Signal(str, str)         # source_url, error_message
+    bandwidth_warning = Signal(str, str, float, bool)    # queue_id, message, percentage, is_global
+    bandwidth_limit_exceeded = Signal(str, str, float, bool)  # queue_id, message, percentage, is_global
+    bandwidth_warning_cleared = Signal()
     #: (paths) — local .torrent files the watched folder yielded, for the UI to report.
     torrent_folder_captured = Signal(list)
 
@@ -466,6 +470,7 @@ class DownloadManager(QObject):
         self._tor_probe_result.connect(self._on_tor_probe_result)
         self._stopped = False
         self._starting_downloads: set[str] = set()
+        self._last_progress_bytes: dict[str, int] = {}
         self._ytdlp_jobs: dict[str, dict[str, Any]] = {}
         self._ytdlp_lock = threading.RLock()
         self._http = HTTPEngine(db)
@@ -530,6 +535,11 @@ class DownloadManager(QObject):
         self._verify_completed_timer = QTimer(self)
         self._verify_completed_timer.setInterval(60_000)  # 60 seconds
         self._verify_completed_timer.timeout.connect(self._on_verify_completed_timer_tick)
+
+        # Bandwidth limit check timer — periodically checks bandwidth usage against limits
+        self._bandwidth_timer = QTimer(self)
+        self._bandwidth_timer.setInterval(5_000)  # 5 seconds
+        self._bandwidth_timer.timeout.connect(self._check_bandwidth_limits)
 
         # Connect process_backlogs_requested signal to run process_backlogs on main thread
         self.process_backlogs_requested.connect(self.process_backlogs)
@@ -659,6 +669,9 @@ class DownloadManager(QObject):
         self.verify_completed_downloads()
         self._verify_completed_timer.start()
 
+        # Start bandwidth limit check timer
+        self._bandwidth_timer.start()
+
         # Start browser integration loopback server if enabled
         if self._browser_config.enabled:
             try:
@@ -684,6 +697,7 @@ class DownloadManager(QObject):
         self._backlog_timer.stop()
         self._animepahe_timer.stop()
         self._verify_completed_timer.stop()
+        self._bandwidth_timer.stop()
         # Before the drain below, like the other timers: the watcher's own scan adds rows through
         # the database, so it must be finished before the caller can close it.
         self._torrent_watcher.stop()
@@ -2121,11 +2135,17 @@ class DownloadManager(QObject):
         other - ``_process_queue``, ``add_download`` and ``resume_download`` - and a check
         written into only one of them is a check that will be bypassed.
         """
+        qid = self._db.resolve_queue_id(entry.queue_id)
+        # Bandwidth limit gate: global overrides per-queue, stops entry from starting if limit exceeded
+        allowed, _msg, _pct = self._db.check_bandwidth_limit(qid, 0, False)
+        if not allowed:
+            return False
+
         if sum(counts.values()) >= global_max:
             return False
-        limit = limits.get(self._db.resolve_queue_id(entry.queue_id), 0)
+        limit = limits.get(qid, 0)
         # limit 0 == unlimited within the queue; only the global ceiling can stop it.
-        if limit > 0 and counts.get(self._db.resolve_queue_id(entry.queue_id), 0) >= limit:
+        if limit > 0 and counts.get(qid, 0) >= limit:
             return False
         return True
 
@@ -3140,6 +3160,99 @@ class DownloadManager(QObject):
             except Exception as exc:
                 log.error("Error during periodic completed downloads verification: %s", exc)
 
+    def _check_bandwidth_limits(self):
+        """Timer callback to check bandwidth limits and update warnings.
+        
+        Checks if any bandwidth limit has been reached or exceeded, and emits
+        warnings or stops downloads as needed.
+        """
+        with self._timer_slot():
+            try:
+                self._enforce_bandwidth_limits()
+            except Exception as exc:
+                log.error("Error checking bandwidth limits: %s", exc)
+
+    def _enforce_bandwidth_limits(self):
+        """Enforce bandwidth limits by checking current usage against limits."""
+        self.check_all_bandwidth_limits()
+
+    def check_all_bandwidth_limits(self):
+        """Evaluate all active bandwidth limits and emit warning/exceeded/cleared signals."""
+        # 1. Check global limits first ("global overrides per queue limit")
+        allowed, msg, pct = self._db.check_bandwidth_limit("", 0, False)
+        if not allowed:
+            self._on_bandwidth_limit_exceeded("", msg, pct, is_global=True)
+            return
+        if msg:
+            self._on_bandwidth_warning("", msg, pct, is_global=True)
+            return
+
+        # 2. Check all queues
+        queues = self._db.get_queues()
+        highest_warn_pct = 0.0
+        highest_warn_msg = ""
+        highest_warn_qid = ""
+        for q in queues:
+            allowed, msg, pct = self._db.check_bandwidth_limit(q.id, 0, False)
+            if not allowed:
+                self._on_bandwidth_limit_exceeded(q.id, msg, pct, is_global=False)
+                return
+            if msg and pct > highest_warn_pct:
+                highest_warn_pct = pct
+                highest_warn_msg = msg
+                highest_warn_qid = q.id
+
+        if highest_warn_msg:
+            self._on_bandwidth_warning(highest_warn_qid, highest_warn_msg, highest_warn_pct, is_global=False)
+        else:
+            self.bandwidth_warning_cleared.emit()
+
+    def record_bandwidth_usage(self, download_id: str, downloaded_bytes: int = 0, uploaded_bytes: int = 0):
+        """Record bandwidth usage for a download and check limits."""
+        if downloaded_bytes <= 0 and uploaded_bytes <= 0:
+            return
+
+        entry = self._db.get_download(download_id)
+        if not entry:
+            return
+
+        qid = self._db.resolve_queue_id(entry.queue_id)
+        allowed, msg, pct = self._db.record_bandwidth(qid, downloaded_bytes, uploaded_bytes)
+        if not allowed:
+            is_global = "Global" in msg
+            self._on_bandwidth_limit_exceeded(qid if not is_global else "", msg, pct, is_global)
+        elif msg:
+            is_global = "Global" in msg
+            self._on_bandwidth_warning(qid if not is_global else "", msg, pct, is_global)
+
+    def _on_bandwidth_warning(self, queue_id: str, message: str, percentage: float, is_global: bool):
+        """Handle bandwidth warning - emit signal for UI to show warning badge."""
+        self.bandwidth_warning.emit(queue_id, message, percentage, is_global)
+
+    def _on_bandwidth_limit_exceeded(self, queue_id: str, message: str, percentage: float, is_global: bool):
+        """Handle bandwidth limit exceeded - stop active downloads/uploads and emit signal."""
+        if is_global:
+            self._stop_all_downloads_for_bandwidth_limit()
+        else:
+            self._stop_downloads_for_queue(queue_id)
+
+        self.bandwidth_limit_exceeded.emit(queue_id, message, percentage, is_global)
+
+    def _stop_all_downloads_for_bandwidth_limit(self):
+        """Stop all active downloads and uploads due to global bandwidth limit."""
+        active = self._db.get_all_downloads()
+        for entry in active:
+            if entry.status in ("downloading", "checking", "fetching_metadata", "stalled", "seeding"):
+                self.pause_download(entry.id)
+
+    def _stop_downloads_for_queue(self, queue_id: str):
+        """Stop all active downloads and uploads for a specific queue."""
+        resolved = self._db.resolve_queue_id(queue_id)
+        active = self._db.get_all_downloads(resolved)
+        for entry in active:
+            if entry.status in ("downloading", "checking", "fetching_metadata", "stalled", "seeding"):
+                self.pause_download(entry.id)
+
     def move_queue_up(self, download_id: str) -> bool:
         """Move a download up in its queue's priority order.
 
@@ -3681,6 +3794,12 @@ class DownloadManager(QObject):
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta, 0, 0, 0.0
         )
+        # Record bandwidth delta
+        prev = self._last_progress_bytes.get(download_id)
+        self._last_progress_bytes[download_id] = downloaded
+        delta = (downloaded - prev) if (prev is not None and downloaded > prev) else 0
+        if delta > 0:
+            self.record_bandwidth_usage(download_id, downloaded_bytes=delta)
 
     def _on_http_status(self, download_id: str, status: str,
                           error_msg: str):
@@ -3691,6 +3810,7 @@ class DownloadManager(QObject):
             return
         if current and current.status != status and status in ("completed", "paused", "stopped", "error"):
             self._db.update_status(download_id, status)
+            self._last_progress_bytes.pop(download_id, None)
         if (
             status == "completed"
             and self._security_config.scan_after_download
@@ -3700,6 +3820,7 @@ class DownloadManager(QObject):
         else:
             self.status_changed.emit(download_id, status, error_msg)
         if status in ("completed", "paused", "stopped", "error"):
+            self._last_progress_bytes.pop(download_id, None)
             self._process_queue()
 
     def _on_torrent_progress(self, download_id: str, downloaded: int,
@@ -3712,6 +3833,13 @@ class DownloadManager(QObject):
             download_id, downloaded, total, speed, eta,
             seeds, peers, upload_speed,
         )
+        # Record bandwidth delta (download + upload)
+        prev_dl = self._last_progress_bytes.get(download_id)
+        self._last_progress_bytes[download_id] = downloaded
+        delta_dl = (downloaded - prev_dl) if (prev_dl is not None and downloaded > prev_dl) else 0
+        delta_ul = int(upload_speed) if upload_speed > 0 else 0
+        if delta_dl > 0 or delta_ul > 0:
+            self.record_bandwidth_usage(download_id, downloaded_bytes=delta_dl, uploaded_bytes=delta_ul)
 
     def _on_torrent_status(self, download_id: str, status: str,
                            error_msg: str):
@@ -3731,6 +3859,7 @@ class DownloadManager(QObject):
                 return
         self.status_changed.emit(download_id, status, error_msg)
         if status in ("completed", "seeding", "paused", "stopped", "error", "suspended"):
+            self._last_progress_bytes.pop(download_id, None)
             self._process_queue()
 
     def _handle_completed_scan(self, download_id: str, is_torrent: bool = False):

@@ -43,6 +43,7 @@ from my_idm.settings_dialog import (
     TAB_TOR,
     TAB_TORRENT,
     TAB_VPN,
+    TAB_BANDWIDTH,
     tab_index,
 )
 from tests.conftest import rows_by_section
@@ -1241,6 +1242,35 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         lbl_text = self.win._speed_label.text()
         self.assertIn("Limit: 1.0 MiB/s", lbl_text)
         self.assertIn("Limit: 50.0 KiB/s", lbl_text)
+
+    def test_menubar_corner_bandwidth_warning_badge(self):
+        """Right edge of menubar shows warning badge on warning/limit exceeded, hides on clear, and opens settings."""
+        from PySide6.QtWidgets import QMessageBox
+        btn = self.win._bw_warning_btn
+        self.assertIsNotNone(btn)
+        self.assertFalse(btn.isVisible())
+
+        # Trigger warning
+        self.win._on_bandwidth_warning("default", "Global monthly bandwidth at 85.0%", 85.0, is_global=True)
+        self.assertFalse(btn.isHidden())
+        self.assertIn("85%", btn.text())
+        self.assertIn("85.0%", btn.toolTip())
+
+        # Trigger exceeded
+        with patch.object(QMessageBox, "warning") as mock_box:
+            self.win._on_bandwidth_limit_exceeded("default", "Limit exceeded", 100.0, is_global=True)
+            self.assertFalse(btn.isHidden())
+            self.assertIn("100%", btn.text())
+            mock_box.assert_called_once()
+
+        # Trigger cleared
+        self.win._on_bandwidth_warning_cleared()
+        self.assertTrue(btn.isHidden())
+
+        # Test click opens preferences bandwidth tab
+        with patch.object(self.win, "_on_open_preferences") as mock_open:
+            self.win._on_open_bandwidth_settings()
+            mock_open.assert_called_once_with(TAB_BANDWIDTH)
 
     def test_menubar_actions_icons_and_alignment(self):
         """Menubar actions have icons to maintain uniform vertical text indentation."""

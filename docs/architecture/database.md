@@ -229,6 +229,35 @@ would silently send that whole source to Default and look like the routing had s
 `CREATE TABLE IF NOT EXISTS` above it: that statement will not add a column to a table that
 already exists, so a database created before queues had a colour needs the guard.
 
+### 4. Bandwidth Limits (`bandwidth_limits`)
+
+Stores user-configured periodic bandwidth ceilings (daily, weekly, monthly) for global use or per-queue.
+
+| Column | Type | Nullable? | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `INTEGER` | **NO** | `PRIMARY KEY AUTOINCREMENT` | Unique limit identifier. |
+| `queue_id` | `TEXT` | **NO** | `''` | Target queue ID, or `''` / `'global'` for global limits. |
+| `enabled` | `INTEGER` | **NO** | `1` | `1` if limit is active, `0` if disabled. |
+| `limit_bytes` | `INTEGER` | **NO** | `0` | Ceiling in bytes. |
+| `limit_type` | `TEXT` | **NO** | `'monthly'` | Periodic cadence: `'daily'`, `'weekly'`, or `'monthly'`. |
+| `warning_percent`| `INTEGER` | **NO** | `80` | Usage percentage that triggers the menubar warning badge. |
+| `created_at` | `TEXT` | **NO** | `''` | ISO-8601 UTC creation timestamp. |
+
+### 5. Bandwidth Usage (`bandwidth_usage`)
+
+Tracks aggregated transferred bytes (download and upload) per queue, period type, and local start date.
+
+| Column | Type | Nullable? | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `INTEGER` | **NO** | `PRIMARY KEY AUTOINCREMENT` | Unique usage record identifier. |
+| `queue_id` | `TEXT` | **NO** | `''` | Queue ID accounting for this usage. |
+| `period_start` | `TEXT` | **NO** | `''` | Local ISO date of period start (`YYYY-MM-DD`). |
+| `period_type` | `TEXT` | **NO** | `''` | Cadence: `'daily'`, `'weekly'`, or `'monthly'`. |
+| `downloaded_bytes`| `INTEGER` | **NO** | `0` | Total downloaded bytes accumulated in period. |
+| `uploaded_bytes` | `INTEGER` | **NO** | `0` | Total uploaded bytes accumulated in period. |
+
+A unique constraint on `(queue_id, period_start, period_type)` enables upserts via `INSERT ... ON CONFLICT DO UPDATE`.
+
 ---
 
 ## ⚡ Indexing Strategy

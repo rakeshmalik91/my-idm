@@ -251,14 +251,13 @@ class TestExternalTools(unittest.TestCase):
         self.assertEqual(dialog._animepahe_url_edit.text(), "https://animepahe.ru/anime/test")
         self.assertEqual(dialog._animepahe_episodes_edit.text(), "1-3")
 
-        with patch.object(QMessageBox, "information") as mock_info, \
-             patch("my_idm.settings_dialog.launch_animepahe_cli", return_value=(True, "Started", MagicMock())) as mock_launch:
+        with patch("my_idm.settings_dialog.launch_animepahe_cli", return_value=(True, "Started", MagicMock())) as mock_launch:
             dialog._on_download_animepahe_url()
             mock_launch.assert_called_once()
             kwargs = mock_launch.call_args.kwargs
             self.assertEqual(kwargs.get("url"), "https://animepahe.ru/anime/test")
             self.assertEqual(kwargs.get("episodes"), "1-3")
-            mock_info.assert_called_once()
+            self.assertTrue(dialog.animepahe_download_started)
 
 
 class TestManagerExternalToolsLifecycle(unittest.TestCase):
@@ -728,16 +727,14 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         dialog._animepahe_url_edit.setText("https://animepahe.ru/anime/5678")
         dialog._animepahe_episodes_edit.setText("1-10")
 
-        with patch.object(QMessageBox, "information") as mock_info:
-            dialog._on_download_animepahe_url()
-            mock_mgr.start_animepahe_scraper.assert_called_once_with(
-                url="https://animepahe.ru/anime/5678",
-                episodes="1-10",
-                quality=None,
-                lang=None,
-            )
-            mock_info.assert_called_once()
-            self.assertEqual(mock_info.call_args[0][1], "AnimePahe Download Queued")
+        dialog._on_download_animepahe_url()
+        mock_mgr.start_animepahe_scraper.assert_called_once_with(
+            url="https://animepahe.ru/anime/5678",
+            episodes="1-10",
+            quality=None,
+            lang=None,
+        )
+        self.assertTrue(dialog.animepahe_download_started)
 
     def test_external_tools_config_periodic_settings(self):
         """ExternalToolsConfig supports periodic scraper run toggle and interval."""

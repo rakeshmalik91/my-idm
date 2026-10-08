@@ -38,6 +38,7 @@ from my_idm.settings_dialog import (
     TAB_VIEWS,
     TAB_VPN,
     TAB_YOUTUBE,
+    TAB_BANDWIDTH,
     SettingsDialog,
     tab_index,
 )
@@ -901,6 +902,26 @@ class TestPreferencesDialogOpensTheNamedPage(ConfigIsolationMixin, unittest.Test
 
     def test_opening_with_no_page_defaults_to_general(self):
         self.assertEqual(self.dialog().current_tab_name(), TAB_GENERAL)
+
+    def test_the_bandwidth_tab_sits_last(self):
+        self.assertEqual(tab_index(TAB_BANDWIDTH), len(TAB_ORDER) - 1)
+
+    def test_bandwidth_tab_has_expected_columns(self):
+        dlg = self.dialog(initial_tab=TAB_BANDWIDTH)
+        table = dlg._bw_table
+        self.assertEqual(table.columnCount(), 8)
+        headers = [table.horizontalHeaderItem(i).text() for i in range(8)]
+        expected = [
+            "Queue",
+            "Enabled",
+            "Limit",
+            "Limit Type",
+            "Progress",
+            "Percetage for Warning",
+            "Edit",
+            "Delete",
+        ]
+        self.assertEqual(headers, expected)
 
     def test_current_tab_name_is_empty_without_any_pages(self):
         """Must not IndexError on a dialog whose tab widget was never built."""

@@ -469,6 +469,16 @@ nothing is not zero, and zero would stall seeding outright.
 
 `AddQueueDialog` offers the two ceilings at creation, in KB/s, defaulting to 0.
 
+### Periodic Bandwidth Quotas (Daily / Weekly / Monthly)
+
+In addition to instantaneous speed caps (bytes/sec), My-IDM supports periodic total bandwidth limits (quotas):
+- **Cadence Options**: Daily, Weekly, or Monthly.
+- **Scope**: Can be applied to specific queues or globally across all queues combined.
+- **Global Precedence**: Global limits sum usage across all queues and **strictly override** per-queue limits. If a global limit is reached, all queue transfers are halted even if an individual queue has not reached its local budget.
+- **Warning Threshold**: Configurable warning percentage (default 80%). When reached, an indicator badge appears at the **top right corner of the menubar** (`menubar.setCornerWidget(...)`) and the status bar displays a transient notification. Clicking this badge opens Preferences directly on the **Bandwidth Limit** tab.
+- **Limit Exceeded (100%)**: When 100% of the quota is reached, active downloads and uploads are automatically paused, the menubar badge shifts to a distinct red limit-exceeded indicator, and the start gate (`_may_start`) refuses to launch any queued transfers.
+- **Preferences UI**: Configured under the **Bandwidth Limit** tab (`TAB_BANDWIDTH`), which displays an 8-column management table: `Queue`, `Enabled`, `Limit`, `Limit Type`, `Progress`, `Percetage for Warning`, `Edit`, `Delete`.
+
 ### Seeing which queue a download is in
 
 Two places, because this is the question the feature exists to answer:
