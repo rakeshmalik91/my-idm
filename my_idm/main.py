@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import glob
+import os
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
@@ -18,7 +21,17 @@ from my_idm.styles import DARK_STYLESHEET
 
 DEFAULT_BACKLOG = backlog_path()
 LOGS_DIR = logs_dir()
-LOG_FILE = LOGS_DIR / "my-idm.log"
+
+
+def _rotate_logs():
+    """Keep only the last 10 log files, named with start timestamp."""
+    log_files = sorted(glob.glob(str(LOGS_DIR / "my-idm-*.log")))
+    if len(log_files) > 10:
+        for old_log in log_files[:-10]:
+            try:
+                os.remove(old_log)
+            except OSError:
+                pass
 
 
 def setup_logging(verbose: bool = False):
@@ -28,18 +41,27 @@ def setup_logging(verbose: bool = False):
     ensure_data_dir()
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Rotate old logs
+    _rotate_logs()
+
     level = logging.DEBUG if verbose else logging.INFO
+    # Use local time in format
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt = "%Y-%m-%d %H:%M:%S"
+
+    # New log file for this run with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    LOG_FILE = LOGS_DIR / f"my-idm-{timestamp}.log"
 
     # File handler
     file_handler = logging.FileHandler(str(LOG_FILE), encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(fmt))
+    file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
 
     # Console handler
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(level)
-    console_handler.setFormatter(logging.Formatter(fmt))
+    console_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
 
     logging.root.setLevel(logging.DEBUG)
     logging.root.addHandler(file_handler)
@@ -48,6 +70,8 @@ def setup_logging(verbose: bool = False):
     # Quiet noisy loggers
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("PySide6").setLevel(logging.WARNING)
+
+    return LOG_FILE
 
 
 def parse_args():
@@ -91,10 +115,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    setup_logging(args.verbose)
+    log_file = setup_logging(args.verbose)
 
     log = logging.getLogger("my_idm")
     log.info("Starting My-IDM v1.0.0")
+    log.info("Log file: %s", log_file)
 
     # Windows taskbar icon integration
     if sys.platform == "win32":

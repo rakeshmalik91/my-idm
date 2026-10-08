@@ -708,27 +708,27 @@ class TestSetupLogging(unittest.TestCase):
 
         before = len(logging.root.handlers)
         with patch.object(self.module, "APP_DIR", self.log_dir), \
-             patch.object(self.module, "LOGS_DIR", self.log_dir), \
-             patch.object(self.module, "LOG_FILE", self.log_dir / "my-idm.log"):
+             patch.object(self.module, "LOGS_DIR", self.log_dir):
             self.module.setup_logging(verbose=True)
         added = logging.root.handlers[before:]
         self.assertEqual(len(added), 2)
         self.assertIsInstance(added[0], FileHandler)
         self.assertIsInstance(added[1], StreamHandler)
-        self.assertTrue((self.log_dir / "my-idm.log").exists())
+        # Log file should be named with timestamp pattern
+        log_files = list(self.log_dir.glob("my-idm-*.log"))
+        self.assertEqual(len(log_files), 1)
+        self.assertTrue(log_files[0].exists())
 
     def test_quietens_the_noisy_loggers(self):
         with patch.object(self.module, "APP_DIR", self.log_dir), \
-             patch.object(self.module, "LOGS_DIR", self.log_dir), \
-             patch.object(self.module, "LOG_FILE", self.log_dir / "my-idm.log"):
+             patch.object(self.module, "LOGS_DIR", self.log_dir):
             self.module.setup_logging(verbose=False)
         self.assertEqual(logging.getLogger("aiohttp").level, logging.WARNING)
         self.assertEqual(logging.getLogger("PySide6").level, logging.WARNING)
 
     def test_verbose_selects_debug_for_the_console(self):
         with patch.object(self.module, "APP_DIR", self.log_dir), \
-             patch.object(self.module, "LOGS_DIR", self.log_dir), \
-             patch.object(self.module, "LOG_FILE", self.log_dir / "my-idm.log"):
+             patch.object(self.module, "LOGS_DIR", self.log_dir):
             self.module.setup_logging(verbose=True)
         console = [h for h in logging.root.handlers
                    if isinstance(h, logging.StreamHandler)
@@ -737,8 +737,7 @@ class TestSetupLogging(unittest.TestCase):
 
     def test_non_verbose_selects_info_for_the_console(self):
         with patch.object(self.module, "APP_DIR", self.log_dir), \
-             patch.object(self.module, "LOGS_DIR", self.log_dir), \
-             patch.object(self.module, "LOG_FILE", self.log_dir / "my-idm.log"):
+             patch.object(self.module, "LOGS_DIR", self.log_dir):
             self.module.setup_logging(verbose=False)
         console = [h for h in logging.root.handlers
                    if isinstance(h, logging.StreamHandler)
@@ -747,8 +746,7 @@ class TestSetupLogging(unittest.TestCase):
 
     def test_the_file_handler_always_records_debug(self):
         with patch.object(self.module, "APP_DIR", self.log_dir), \
-             patch.object(self.module, "LOGS_DIR", self.log_dir), \
-             patch.object(self.module, "LOG_FILE", self.log_dir / "my-idm.log"):
+             patch.object(self.module, "LOGS_DIR", self.log_dir):
             self.module.setup_logging(verbose=False)
         file_handler = [h for h in logging.root.handlers
                         if isinstance(h, logging.FileHandler)][-1]
