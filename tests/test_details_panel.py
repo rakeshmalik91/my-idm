@@ -1422,6 +1422,79 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertIn("NEEDLE", text, "filter must jump to the session that matches")
         self.assertNotIn("B1", text)
 
+    def test_console_session_title_survives_a_split_banner_rule(self):
+        """Regression: the scraper writes each banner without a closing rule
+        after the Command line, so a rule-based splitter absorbed the banner
+        lines into the previous session's body and surfaced them as a
+        headerless "Earlier output" session — which is exactly why some
+        session tabs showed no timestamp.
+
+        Uses the exact banner text the scraper writes, including the long
+        Command line, so the rule length (55 chars) is what the live
+        line-buffered stdout actually splits mid-line.
+        """
+        panel = self._reset_console()
+
+        def banner(ts, target):
+            rule = "=" * 55
+            # No closing rule: the scraper writes rule, Session Started, Command,
+            # blank, body — and the next banner opens with its own rule.
+            return (
+                f"\n{rule}\n"
+                f"  AnimePahe CLI Scraper Session Started: {ts}\n"
+                f"  Command: python animepahe_download.py --my-idm --url {target} -y\n"
+                f"\n"
+            )
+
+        new = banner("2026-10-08 15:42:02", "https://animepahe.si/anime/abc")
+        old = banner("2026-10-08 14:00:00", "https://animepahe.si/anime/def")
+
+        # First chunk: the complete older session + first 30 chars of the
+        # newest banner's opening rule (no trailing newline — the rest is
+        # pending in the next poll). This is what live line-buffered stdout
+        # actually produces: the banner currently being written is split.
+        chunk1 = old + "old line\n" + new[:30]
+        # Second chunk: the rest of the newest banner + its body.
+        chunk2 = new[30:] + "new line\n"
+
+        for chunk in (chunk1, chunk2):
+            panel._append_log_text(chunk)
+
+        tabs = panel._console_session_tabs
+        titles = [tabs.tabText(i) for i in range(tabs.count())]
+        # Both real sessions must keep their timestamp; the phantom
+        # "Earlier output" must not swallow a banner. Newest first.
+        self.assertTrue(any("15:42" in t for t in titles), titles)
+        self.assertTrue(any("14:00" in t for t in titles), titles)
+        self.assertNotIn("Earlier output", titles)
+        self.assertTrue("15:42" in titles[0], titles)
+
+    def test_console_session_splitter_handles_real_console_log(self):
+        """Pinned against the real console_log.txt: every banner must surface
+        as a timestamped session, never as "Earlier output".
+        """
+        panel = self._reset_console()
+        log_path = self.tmp_path / "console_log.txt"
+        log_path.write_text(
+            "\n=======================================================\n"
+            "  AnimePahe CLI Scraper Session Started: 2026-10-08 15:42:02\n"
+            "  Command: python animepahe_download.py --my-idm --url https://animepahe.si/anime/abc -y\n"
+            "\nChecking AnimePahe mirrors...\n"
+            " - animepahe.org... OK (redirected to animepahe.pw)\n"
+            "\n=======================================================\n"
+            "  AnimePahe CLI Scraper Session Started: 2026-10-08 14:00:00\n"
+            "  Command: python animepahe_download.py --my-idm --url https://animepahe.si/anime/def -y\n"
+            "\nold line\n",
+            encoding="utf-8",
+        )
+        panel._append_log_text(log_path.read_text(encoding="utf-8"))
+
+        tabs = panel._console_session_tabs
+        titles = [tabs.tabText(i) for i in range(tabs.count())]
+        self.assertTrue(any("15:42" in t for t in titles), titles)
+        self.assertTrue(any("14:00" in t for t in titles), titles)
+        self.assertNotIn("Earlier output", titles)
+
     def test_animepahe_console_keeps_your_selection_when_a_session_starts(self):
         """A new run must not yank the user off the session they are reading."""
         panel = self._reset_console()

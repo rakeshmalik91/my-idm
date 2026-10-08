@@ -1425,6 +1425,57 @@ class TestExternalToolsSettings(ConfigIsolationMixin, unittest.TestCase):
 
         dlg.close()
 
+    def test_download_via_animepahe_button_closes_dialog_silently(self):
+        """The Download via AnimePahe button must not pop a confirm dialog.
+
+        Instead it starts the scraper and closes Preferences, leaving the main
+        window to switch the bottom panel to the live console. Only failures
+        warn, and a missing repository warns without starting anything.
+        """
+        from unittest.mock import MagicMock
+        mock_mgr = MagicMock()
+        mock_mgr.is_animepahe_running.return_value = False
+        mock_mgr.start_animepahe_scraper.return_value = (True, "Started PID: 1234")
+
+        cfg = ExternalToolsConfig(animepahe_repo_path="/valid/path")
+        dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5, manager=mock_mgr)
+        self.assertFalse(dlg.animepahe_download_started)
+        dlg._animepahe_url_edit.setText("https://animepahe.ru/anime/4380")
+
+        with patch("os.path.isdir", return_value=True), \
+             patch("PySide6.QtWidgets.QMessageBox.information") as mock_info, \
+             patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
+            dlg._on_download_animepahe_url()
+            # No confirm dialog on success.
+            mock_info.assert_not_called()
+            mock_warn.assert_not_called()
+            # The dialog is closed and the flag is set so the main window can
+            # switch to the console panel.
+            self.assertTrue(dlg.animepahe_download_started)
+            mock_mgr.start_animepahe_scraper.assert_called_once()
+
+        dlg.close()
+
+    def test_download_via_animepahe_button_warns_on_failure(self):
+        from unittest.mock import MagicMock
+        mock_mgr = MagicMock()
+        mock_mgr.is_animepahe_running.return_value = False
+        mock_mgr.start_animepahe_scraper.return_value = (False, "tor.exe not found")
+
+        cfg = ExternalToolsConfig(animepahe_repo_path="/valid/path")
+        dlg = SettingsDialog(external_tools_config=cfg, initial_tab=5, manager=mock_mgr)
+        dlg._animepahe_url_edit.setText("https://animepahe.ru/anime/4380")
+
+        with patch("os.path.isdir", return_value=True), \
+             patch("PySide6.QtWidgets.QMessageBox.warning") as mock_warn:
+            dlg._on_download_animepahe_url()
+            mock_warn.assert_called_once()
+            self.assertIn("tor.exe not found", mock_warn.call_args[0][2])
+            # A failure must not close the dialog or claim a download started.
+            self.assertFalse(dlg.animepahe_download_started)
+
+        dlg.close()
+
 
 class TestLaunchAtLoginPreference(ConfigIsolationMixin, unittest.TestCase):
     """Preferences -> Application: launch at login.

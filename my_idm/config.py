@@ -751,8 +751,9 @@ class ExternalToolsConfig:
         settings.setValue("animepahe_launch_on_startup", self.animepahe_launch_on_startup)
         settings.setValue("animepahe_periodic_run", self.animepahe_periodic_run)
         settings.setValue("animepahe_interval_hours", self.animepahe_interval_hours)
-        settings.setValue("animepahe_last_url", self.animepahe_last_url)
-        settings.setValue("animepahe_last_episodes", self.animepahe_last_episodes)
+        # Don't persist last URL and episode range - only for current session
+        # settings.setValue("animepahe_last_url", self.animepahe_last_url)
+        # settings.setValue("animepahe_last_episodes", self.animepahe_last_episodes)
         settings.setValue("animepahe_last_quality", self.animepahe_last_quality)
         settings.setValue("animepahe_last_lang", self.animepahe_last_lang)
         settings.setValue("ytdlp_enabled", self.ytdlp_enabled)
@@ -781,8 +782,11 @@ class ExternalToolsConfig:
         animepahe_launch_on_startup = settings.value("animepahe_launch_on_startup", False, type=bool)
         animepahe_periodic_run = settings.value("animepahe_periodic_run", False, type=bool)
         animepahe_interval_hours = settings.value("animepahe_interval_hours", 6, type=int)
-        animepahe_last_url = settings.value("animepahe_last_url", "", type=str)
-        animepahe_last_episodes = settings.value("animepahe_last_episodes", "", type=str)
+        # Don't persist last URL and episode range - only for current session
+        # animepahe_last_url = settings.value("animepahe_last_url", "", type=str)
+        # animepahe_last_episodes = settings.value("animepahe_last_episodes", "", type=str)
+        animepahe_last_url = ""
+        animepahe_last_episodes = ""
         animepahe_last_quality = settings.value("animepahe_last_quality", "Auto", type=str)
         animepahe_last_lang = settings.value("animepahe_last_lang", "Auto", type=str)
         ytdlp_enabled = settings.value("ytdlp_enabled", True, type=bool)

@@ -789,6 +789,43 @@ class TestManagerLifecycle(unittest.TestCase):
             ("https://example.com/file.iso", normalize_path("D:/Space/Dir"), None),
         )
 
+    def test_parse_backlog_entry_extracts_anime_url_and_title(self):
+        """animepahe-downloader writes anime_url= and anime_title= as trailing pipe columns.
+
+        Without these being parsed into .headers, load_backlog never populates
+        entry.metadata, so the details panel shows "—" for Anime Title and Anime URL
+        even on freshly queued downloads.
+        """
+        from my_idm.manager import parse_backlog_entry
+        line = (
+            "https://vault-123.owocdn.top/stream/anime_ep1.mp4"
+            " | D:/Anime/Series | Ep01.mp4"
+            " | anime_url=https://animepahe.pw/anime/123"
+            " | anime_title=Frieren: Beyond Journey's End"
+            " | queue=AnimePahe"
+        )
+        p = parse_backlog_entry(line)
+        self.assertEqual(p[0], "https://vault-123.owocdn.top/stream/anime_ep1.mp4")
+        self.assertEqual(p.filename, "Ep01.mp4")
+        self.assertEqual(p.queue, "AnimePahe")
+        self.assertEqual(p.headers.get("anime_url"), "https://animepahe.pw/anime/123")
+        self.assertEqual(p.headers.get("anime_title"), "Frieren: Beyond Journey's End")
+
+        # The values must survive a round-trip through load_backlog -> add_download
+        # into entry.metadata, which is what the details panel reads.
+        bf = Path(self.tmp_dir.name) / "anime_backlog.txt"
+        bf.write_text(
+            "# Frieren: Beyond Journey's End - Episode 1 (Frieren_01_1080p.mp4)\n"
+            f"{line}\n",
+            encoding="utf-8",
+        )
+        added = self.manager.load_backlog(str(bf))
+        self.assertEqual(added, 1)
+        entry = self.db.find_by_url("https://vault-123.owocdn.top/stream/anime_ep1.mp4")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.metadata.get("anime_url"), "https://animepahe.pw/anime/123")
+        self.assertEqual(entry.metadata.get("anime_title"), "Frieren: Beyond Journey's End")
+
     def test_load_backlog_with_custom_download_locations(self):
         from my_idm.utils import normalize_path
         dest1 = normalize_path(Path(self.tmp_dir.name) / "folder1")

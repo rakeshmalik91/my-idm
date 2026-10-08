@@ -1975,6 +1975,13 @@ class MainWindow(QMainWindow):
         if dlg.exec() != AddDownloadDialog.DialogCode.Accepted:
             return
 
+        # The Add Download dialog can hand a pasted AnimePahe URL straight to
+        # the AnimePahe section of Preferences. When it does, the scraper is
+        # started there and the dialog closes — nothing should be added as a
+        # plain HTTP download in that case.
+        if getattr(dlg, "animepahe_handoff", False) is True:
+            return
+
         yt_selection = getattr(dlg, "youtube_selection", None)
         if isinstance(yt_selection, dict) and yt_selection.get("videos"):
             self._queue_youtube_selection(yt_selection)
@@ -3250,6 +3257,15 @@ class MainWindow(QMainWindow):
                     self._tray_icon.show()
                 else:
                     self._tray_icon.hide()
+            # The Download via AnimePahe button no longer pops a confirm dialog:
+            # it closes Preferences and drops the user into the live console, which
+            # is where the scraper's progress is visible.
+            if getattr(dlg, "animepahe_download_started", False):
+                if not self._details_panel.isVisible():
+                    self._details_panel.setVisible(True)
+                    self._act_toggle_details.setChecked(True)
+                self._details_panel.set_mode("console")
+                self._act_toggle_details.setChecked(True)
 
     def _on_open_torrent_settings(self):
         self._on_open_preferences(TAB_TORRENT)

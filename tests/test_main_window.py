@@ -1423,6 +1423,46 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
                 mock_add.assert_not_called()
         self.assertIsNone(self.db.find_by_url("https://example.com/should_not_appear.zip"))
 
+    def test_on_add_skips_direct_add_for_animepahe_handoff(self):
+        """A pasted AnimePahe URL routed through Preferences must not add a plain download.
+
+        The Add Download dialog can hand an animepahe.* URL to the AnimePahe
+        section of Preferences; when the scraper is started there the dialog
+        closes with `animepahe_handoff=True` and `_on_add` must not treat the
+        URL as a normal HTTP download.
+        """
+        mock_dlg = MagicMock()
+        mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+        mock_dlg.animepahe_handoff = True
+        mock_dlg.urls = ["https://animepahe.si/anime/ef667bb4-3a9b-449e-1a22-26156a642e47"]
+        mock_dlg.save_path = "D:/Downloads"
+        mock_dlg.num_segments = 8
+
+        with patch("my_idm.main_window.AddDownloadDialog") as mock_cls:
+            mock_cls.return_value = mock_dlg
+            mock_cls.DialogCode = QDialog.DialogCode
+            with patch.object(self.manager, "add_download") as mock_add:
+                self.win._on_add()
+                mock_add.assert_not_called()
+
+    def test_on_add_adds_urls_when_handoff_is_false(self):
+        """The guard above must not swallow a normal accepted Add Download dialog."""
+        mock_dlg = MagicMock()
+        mock_dlg.exec.return_value = QDialog.DialogCode.Accepted
+        mock_dlg.animepahe_handoff = False
+        mock_dlg.urls = ["https://example.com/batch1.zip"]
+        mock_dlg.save_path = "D:/Downloads"
+        mock_dlg.num_segments = 8
+
+        with patch("my_idm.main_window.AddDownloadDialog") as mock_cls:
+            mock_cls.return_value = mock_dlg
+            mock_cls.DialogCode = QDialog.DialogCode
+            with patch.object(self.manager, "add_download") as mock_add:
+                self.win._on_add()
+                mock_add.assert_called_once_with(
+                    "https://example.com/batch1.zip", "D:/Downloads", 8, queue_id=""
+                )
+
     def test_speed_label_left_click_opens_menu(self):
         """Left clicking the footer speed label should invoke _show_speed_context_menu."""
         from PySide6.QtGui import QMouseEvent

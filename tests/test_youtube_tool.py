@@ -163,6 +163,54 @@ class TestURLDetection(unittest.TestCase):
         self.assertFalse(yt.is_playlist_url(""))
 
 
+class TestAnimePaheURLDetection(unittest.TestCase):
+    """detect_animepahe_url() regex behaviour.
+
+    Mirrors TestURLDetection: a pasted animepahe.* series/episode page is
+    detected and offered a one-click route into the AnimePahe section of
+    Preferences from the Add Download dialog, instead of being treated as a
+    plain HTTP download.
+    """
+
+    def test_detects_canonical_series_forms(self):
+        for url in (
+            "https://animepahe.pw/anime/ef667bb4-3a9b-449e-1a22-26156a642e47",
+            "https://animepahe.si/anime/1234abcd",
+            "https://animepahe.com/anime/abcdef01-2345-6789-abcd-ef0123456789",
+            "https://animepahe.org/anime/4380",
+        ):
+            self.assertEqual(yt.detect_animepahe_url(url), url, url)
+
+    def test_detects_alt_path_forms(self):
+        for url in (
+            "https://animepahe.si/a/ef667bb4-3a9b-449e-1a22-26156a642e47",
+            "https://animepahe.pw/play/ep-12345",
+        ):
+            self.assertEqual(yt.detect_animepahe_url(url), url, url)
+
+    def test_extracts_url_from_surrounding_text(self):
+        text = "here is the series https://animepahe.si/anime/1234abcd later"
+        self.assertEqual(yt.detect_animepahe_url(text), "https://animepahe.si/anime/1234abcd")
+
+    def test_rejects_non_animepahe_urls(self):
+        for url in (
+            "https://example.com/video.mp4",
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://animepahe.si/",
+            "https://animepahe.si/anime/",
+            "https://notanimepahe.pw/anime/1234abcd",
+            "https://animepahe.si.evil.com/anime/1234abcd",
+            "ftp://animepahe.pw/anime/1234abcd",
+            "",
+            "just some text",
+        ):
+            self.assertIsNone(yt.detect_animepahe_url(url), url)
+
+    def test_handles_non_string_input(self):
+        self.assertIsNone(yt.detect_animepahe_url(None))
+        self.assertIsNone(yt.detect_animepahe_url(12345))
+
+
 class TestAvailabilityChecks(unittest.TestCase):
     """Tool availability and version detection."""
 

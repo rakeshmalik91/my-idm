@@ -35,7 +35,7 @@ from my_idm.clipboard_monitor import looks_like_download_url
 from my_idm.config import GeneralConfig, DEFAULT_DOWNLOADS_DIR, TorConfig
 from my_idm.database import DEFAULT_QUEUE_COLOR, normalize_queue_color
 from my_idm.styles import Colors, themed_widget
-from my_idm.youtube_tool import detect_youtube_url
+from my_idm.youtube_tool import detect_animepahe_url, detect_youtube_url
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
@@ -60,6 +60,10 @@ class AddDownloadDialog(QDialog):
         self._url = ""
         self._urls: list[str] = []
         self._yt_result: dict = {}
+        # Set True by _on_open_animepahe_dialog when the scraper was actually
+        # started from within Preferences, so the caller can skip the direct
+        # URL add that would otherwise treat the pasted animepahe URL as HTTP.
+        self.animepahe_handoff = False
         self._save_path = self._config.get_effective_save_path()
         self._num_segments = self._config.default_segments
         self._tor_enabled = (
@@ -122,6 +126,30 @@ class AddDownloadDialog(QDialog):
         yt_layout.addWidget(self._yt_open_btn)
         self._yt_banner.setVisible(False)
         url_layout.addWidget(self._yt_banner)
+
+        # AnimePahe hand-off banner. Mirrors the YouTube banner: a pasted
+        # animepahe.* series/episode URL is detected and offered a one-click
+        # route into the AnimePahe section of Preferences, with the URL
+        # prefilled so the user only has to pick episodes and hit Download.
+        self._ap_banner = QFrame()
+        self._ap_banner.setFrameShape(QFrame.Shape.StyledPanel)
+        self._ap_banner.setStyleSheet(
+            "QFrame { background:#26141a; border:1px solid #ff7b72; border-radius:4px; }"
+        )
+        ap_layout = QHBoxLayout(self._ap_banner)
+        ap_layout.setContentsMargins(10, 8, 10, 8)
+        self._ap_banner_label = QLabel("This looks like an AnimePahe link.")
+        self._ap_banner_label.setStyleSheet("color:#ffa99a; font-weight:bold;")
+        ap_layout.addWidget(self._ap_banner_label, 1)
+        self._ap_open_btn = QPushButton("Open AnimePahe Downloader")
+        self._ap_open_btn.setObjectName("primaryButton")
+        self._ap_open_btn.setToolTip(
+            "Resolve the series/episodes and forward download jobs to My-IDM."
+        )
+        self._ap_open_btn.clicked.connect(self._on_open_animepahe_dialog)
+        ap_layout.addWidget(self._ap_open_btn)
+        self._ap_banner.setVisible(False)
+        url_layout.addWidget(self._ap_banner)
 
         layout.addWidget(url_group)
 
@@ -299,7 +327,9 @@ class AddDownloadDialog(QDialog):
             self._url_edit.selectAll()
 
         self._update_youtube_banner()
+        self._update_animepahe_banner()
         self._url_edit.textChanged.connect(self._update_youtube_banner)
+        self._url_edit.textChanged.connect(self._update_animepahe_banner)
 
     # -- YouTube detection / redirect ----------------------------------------
 
@@ -358,6 +388,64 @@ class AddDownloadDialog(QDialog):
     def youtube_selection(self) -> dict:
         """Selection returned by the YouTube dialog, if it was used."""
         return getattr(self, "_yt_result", {}) or {}
+
+    # -- AnimePahe detection / redirect --------------------------------------
+
+    def _detected_animepahe_url(self) -> str:
+        """Return the AnimePahe URL currently in the input box, or an empty string."""
+        text = self._url_edit.toPlainText() if hasattr(self, "_url_edit") else ""
+        if not text.strip():
+            return ""
+        return detect_animepahe_url(text) or ""
+
+    def _update_animepahe_banner(self):
+        """Show or hide the AnimePahe hand-off banner based on the pasted text."""
+        banner = getattr(self, "_ap_banner", None)
+        if banner is None:
+            return
+        url = self._detected_animepahe_url()
+        banner.setVisible(bool(url))
+        if url:
+            self._ap_banner_label.setText("AnimePahe link detected — open the downloader to pick episodes.")
+
+    def _on_open_animepahe_dialog(self):
+        """Hand the pasted AnimePahe URL to the AnimePahe section of Preferences.
+
+        Mirrors the YouTube hand-off: dismissing the preferences dialog leaves
+        this Add Download dialog open with the banner still showing, so the
+        link can be re-opened without re-pasting. The URL is prefilled into
+        the AnimePahe URL field so the user only picks episodes and hits
+        Download.
+        """
+        url = self._detected_animepahe_url()
+        if not url:
+            return
+        from my_idm.settings_dialog import SettingsDialog, TAB_EXTERNAL_TOOLS
+
+        dlg = SettingsDialog(
+            general_config=self._manager.general_config if self._manager else None,
+            torrent_config=self._manager.torrent_config if self._manager else None,
+            network_config=self._manager.network_config if self._manager else None,
+            security_config=self._manager.security_config if self._manager else None,
+            tor_config=self._manager.tor_config if self._manager else None,
+            external_tools_config=self._manager.external_tools_config if self._manager else None,
+            browser_config=self._manager.browser_config if self._manager else None,
+            db=self._manager._db if (self._manager and hasattr(self._manager, "_db")) else None,
+            parent=self,
+            initial_tab=TAB_EXTERNAL_TOOLS,
+            manager=self._manager,
+        )
+        dlg._animepahe_url_edit.setText(url)
+        if dlg.exec() == QDialog.DialogCode.Accepted and getattr(dlg, "animepahe_download_started", False):
+            # The scraper was started from within Preferences, so the Add
+            # Download dialog's job is done — close it rather than leaving the
+            # user with two dialogs to dismiss.
+            self.animepahe_handoff = True
+            self.accept()
+        else:
+            # User closed Preferences without downloading: keep this dialog
+            # open with the banner so the link can be re-opened.
+            self._update_animepahe_banner()
 
     def _accept(self):
         raw_text = self._url_edit.toPlainText().strip()

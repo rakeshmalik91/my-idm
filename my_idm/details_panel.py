@@ -786,14 +786,14 @@ class DetailsPanel(QWidget):
         right_col.setSpacing(6)
 
         self._ov_filename, self._ov_filename_copy_btn = self._create_info_row(right_col, "File / Folder Name:", copyable=True)
-        self._ov_anime_title, self._ov_anime_title_copy_btn = self._create_info_row(right_col, "Anime Title:", copyable=True)
+        self._ov_anime_title, self._ov_anime_title_copy_btn = self._create_info_row(right_col, "Show Title:", copyable=True)
         self._ov_type, _ = self._create_info_row(right_col, "Transfer Type:")
         self._ov_swarm, _ = self._create_info_row(right_col, "Swarm / Parts:")
         self._ov_save_path, self._ov_save_path_copy_btn = self._create_info_row(right_col, "Save Directory:", copyable=True)
         self._ov_hash, self._ov_hash_copy_btn = self._create_info_row(right_col, "Content Hash / Infohash:", copyable=True)
         self._ov_security, _ = self._create_info_row(right_col, "Malware Scan:")
         self._ov_url, self._ov_url_copy_btn = self._create_info_row(right_col, "Source URL / Magnet:", copyable=True)
-        self._ov_anime_url, self._ov_anime_url_copy_btn = self._create_info_row(right_col, "Anime URL:", copyable=True)
+        self._ov_anime_url, self._ov_anime_url_copy_btn = self._create_info_row(right_col, "Show URL:", copyable=True)
         right_col.addStretch()
         grid_layout.addLayout(right_col, stretch=1)
 
@@ -2498,38 +2498,79 @@ class DetailsPanel(QWidget):
     def _split_sessions(cls, lines):
         """Split raw log lines into ``(header_lines, body_lines)`` per session.
 
-        A banner is the block *between* two ``====`` rules, so the body has to be
-        held until the following banner is seen in full. Flushing on the closing
-        rule instead would attach each session's output to the *next* banner,
-        because the blank separator before that banner has already been read.
+        A session is introduced by the banner line::
+
+            AnimePahe CLI Scraper Session Started: <timestamp>
+
+        optionally preceded by a rule line. Everything from that banner up to
+        the next banner is one session; the banner's own header is the optional
+        preceding rule plus the banner line itself.
+
+        The scraper writes the banner *without* a closing rule after the Command
+        line, so relying on rule lines alone was wrong: the banner lines were
+        absorbed into the previous session's body and surfaced as a headerless
+        "Earlier output" session, losing the timestamp. The banner line itself
+        is the reliable marker, so sessions are keyed on it rather than on
+        rules.
         """
         sessions: list[tuple[list[str], list[str]]] = []
-        pending_header: list[str] = []
-        block: list[str] = []
-        in_block = False
-        body: list[str] = []
+        current_header: list[str] = []
+        current_body: list[str] = []
+        seen_first_banner = False
+        carry: str = ""
+        preamble: list[str] = []
 
-        for line in lines:
-            if cls._is_session_rule(line):
-                if in_block:
-                    # The banner is complete. Whatever came before it belongs to
-                    # the previously seen banner (or to "earlier output").
-                    if pending_header or body:
-                        sessions.append((pending_header, body))
-                    pending_header = block
-                    body = []
-                    in_block = False
-                else:
-                    block = [line]
-                    in_block = True
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = carry + lines[i]
+            carry = ""
+            # A rule that is not newline-terminated is incomplete (the rest of
+            # it is in the next chunk). Hold it rather than treating it as a
+            # complete rule, which would otherwise open a phantom block.
+            if cls._is_session_rule(line) and not line.endswith("\n"):
+                carry = line
+                i += 1
                 continue
-            (block if in_block else body).append(line)
 
-        if in_block:  # trailing banner with no closing rule
-            block.append("")
-            pending_header = block
-        if pending_header or body:
-            sessions.append((pending_header, body))
+            if "Session Started:" in line:
+                if carry:
+                    # The carried incomplete rule is the banner's opening
+                    # rule; it belongs in the header with this banner line.
+                    header = [carry, line]
+                else:
+                    start = i
+                    if i > 0 and cls._is_session_rule(lines[i - 1]):
+                        start = i - 1
+                    header = lines[start:i + 1]
+                if seen_first_banner:
+                    sessions.append((current_header, current_body))
+                elif preamble:
+                    # Anything before the first banner is undated preamble. It
+                    # is its own headerless session (empty header, content in
+                    # the body), kept rather than dropped on a guess, and
+                    # surfaced as an "Earlier output" tab. The banner's own
+                    # preceding rule is never part of it.
+                    pre = list(preamble)
+                    while pre and cls._is_session_rule(pre[-1]):
+                        pre.pop()
+                    if any(line.strip() for line in pre):
+                        sessions.append(([], pre))
+                    seen_first_banner = True
+                else:
+                    seen_first_banner = True
+                current_header = header
+                current_body = []
+                carry = ""
+                i += 1
+                continue
+            (current_body if seen_first_banner else preamble).append(line)
+            i += 1
+
+        sessions.append((current_header, current_body))
+        # A log with no banner at all is itself one undated preamble session.
+        if not seen_first_banner and any(line.strip() for line in preamble):
+            sessions.append(([], preamble))
         return sessions
 
     @classmethod

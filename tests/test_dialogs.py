@@ -14,6 +14,7 @@ from PySide6.QtGui import QGuiApplication
 
 from my_idm.config import ExternalToolsConfig, GeneralConfig
 from my_idm.dialogs import AddDownloadDialog, DeleteConfirmDialog, RefreshAddressDialog, RenameDialog
+from my_idm.settings_dialog import SettingsDialog, TAB_EXTERNAL_TOOLS
 
 app = QApplication.instance() or QApplication([])
 
@@ -303,6 +304,91 @@ class TestAddDownloadDialogYouTubeBanner(unittest.TestCase):
             dlg._on_open_youtube_dialog()
 
         self.assertEqual(dlg.youtube_selection, sentinel)
+        dlg.close()
+
+
+class TestAddDownloadDialogAnimePaheBanner(unittest.TestCase):
+    """Paste-detection banner and its hand-off to the AnimePahe section of Preferences.
+
+    Mirrors TestAddDownloadDialogYouTubeBanner: a pasted animepahe.* URL is
+    detected and offered a one-click route into Preferences with the URL
+    prefilled, and dismissing Preferences leaves this dialog open with the
+    banner still showing.
+    """
+
+    AP_URL = "https://animepahe.si/anime/ef667bb4-3a9b-449e-1a22-26156a642e47"
+
+    def _dialog(self):
+        mgr = MagicMock()
+        mgr.external_tools_config = ExternalToolsConfig(ytdlp_auto_detect_urls=True)
+        mgr.general_config.get_effective_save_path.return_value = "."
+        return AddDownloadDialog(manager=mgr)
+
+    def test_banner_appears_for_animepahe_url(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.AP_URL)
+        dlg._update_animepahe_banner()
+        self.assertFalse(dlg._ap_banner.isHidden())
+        self.assertEqual(dlg._detected_animepahe_url(), self.AP_URL)
+        self.assertFalse(dlg.animepahe_handoff)
+        dlg.close()
+
+    def test_banner_disappears_for_non_animepahe_url(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText("https://example.com/file.zip")
+        dlg._update_animepahe_banner()
+        self.assertTrue(dlg._ap_banner.isHidden())
+        self.assertEqual(dlg._detected_animepahe_url(), "")
+        dlg.close()
+
+    def test_hand_off_prefills_url_and_starts_scraper(self):
+        """Clicking the banner opens Preferences on the AnimePahe tab with the URL set."""
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.AP_URL)
+        dlg._update_animepahe_banner()
+
+        with patch("my_idm.settings_dialog.SettingsDialog") as mock_cls:
+            mock_dlg = mock_cls.return_value
+            mock_dlg.exec.return_value = SettingsDialog.DialogCode.Accepted
+            mock_dlg.animepahe_download_started = True
+            dlg._on_open_animepahe_dialog()
+
+        # Preferences was opened on the External Tools tab with the URL prefilled.
+        self.assertEqual(mock_cls.call_count, 1)
+        self.assertEqual(mock_cls.call_args.kwargs.get("initial_tab"), TAB_EXTERNAL_TOOLS)
+        self.assertEqual(mock_dlg._animepahe_url_edit.setText.call_args.args[0], self.AP_URL)
+        # Scraper started → Add Download dialog closes via the hand-off flag.
+        self.assertTrue(dlg.animepahe_handoff)
+        dlg.close()
+
+    def test_banner_survives_cancelled_preferences(self):
+        """Regression: closing Preferences without downloading hides nothing."""
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.AP_URL)
+        dlg._update_animepahe_banner()
+
+        with patch("my_idm.settings_dialog.SettingsDialog") as mock_cls:
+            mock_dlg = mock_cls.return_value
+            mock_dlg.exec.return_value = SettingsDialog.DialogCode.Rejected
+            mock_dlg.animepahe_download_started = False
+            dlg._on_open_animepahe_dialog()
+
+        self.assertFalse(dlg._ap_banner.isHidden(), "banner must remain after cancel")
+        self.assertFalse(dlg.animepahe_handoff)
+        dlg.close()
+
+    def test_banner_still_tracks_input_after_cancel(self):
+        dlg = self._dialog()
+        dlg._url_edit.setPlainText(self.AP_URL)
+        with patch("my_idm.settings_dialog.SettingsDialog") as mock_cls:
+            mock_cls.return_value.exec.return_value = SettingsDialog.DialogCode.Rejected
+            mock_cls.return_value.animepahe_download_started = False
+            dlg._on_open_animepahe_dialog()
+
+        dlg._url_edit.setPlainText("https://example.com/file.zip")
+        self.assertTrue(dlg._ap_banner.isHidden())
+        dlg._url_edit.setPlainText(self.AP_URL)
+        self.assertFalse(dlg._ap_banner.isHidden())
         dlg.close()
 
 

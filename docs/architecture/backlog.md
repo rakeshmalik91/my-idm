@@ -96,6 +96,24 @@ Any download line can override the active destination folder, specify an explici
 | **Semicolon (`;`)** | `https://example.com/file.zip;D:\Downloads\ISO` |
 | **Space Separated** | `https://example.com/file.iso D:\Downloads\ISO` |
 
+### 3.2.1 AnimePahe Metadata Columns
+
+`animepahe-downloader/modules/my_idm.py` appends two trailing `key=value` columns so the
+details panel can show the anime's title and page URL. They are read into
+`entry.metadata` by `parse_backlog_entry` and surfaced by `details_panel.py`:
+
+```text
+https://vault-123.owocdn.top/stream/anime_ep1.mp4 | D:\Anime\Series | Ep01.mp4 | anime_url=https://animepahe.pw/anime/123 | anime_title=Frieren: Beyond Journey's End | queue=AnimePahe
+```
+
+- `anime_url=` — the AnimePahe series page URL, shown under **Show URL** in the Overview tab.
+- `anime_title=` — the anime title, shown under **Show Title**.
+
+Both are trailing columns (after `queue=`) and are never mistaken for a save path or
+filename, because the pipe parser only treats `dir/save_path/path/folder`,
+`filename/file/out/name`, `queue`, `referer/referrer`, `header*`, `anime_url` and
+`anime_title` as recognized keys — anything else is silently dropped.
+
 ### 3.3 Queue Assignment
 
 A download line can name the [named queue](queues.md) it belongs to, and a queue directive

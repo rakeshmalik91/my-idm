@@ -74,6 +74,31 @@ _YOUTUBE_URL_RE = re.compile(
 
 _PLAYLIST_PATH_RE = re.compile(r"(?:^|[?&])list=[A-Za-z0-9_-]+")
 
+# Matches an AnimePahe series/episode page: the animepahe.* hosts plus the
+# /anime/<id>, /a/<id> and /play/<ep_id> path shapes the scraper accepts.
+# The id is a hex UUID or a numeric id, so the pattern is permissive enough to
+# catch both without swallowing arbitrary paths.
+_ANIMEPAHE_URL_RE = re.compile(
+    r"""(?ix)
+    \A
+    https?://
+    (?:
+        animepahe\.pw
+      | animepahe\.com
+      | animepahe\.org
+      | animepahe\.si
+      | pahe\.win
+    )
+    (?:
+        /anime/[A-Za-z0-9_-]+
+      | /a/[A-Za-z0-9_-]+
+      | /play/[A-Za-z0-9_-]+
+    )
+    [^\s<>"]*
+    \Z
+    """
+)
+
 # Minimum gap between extraction requests. YouTube rate-limits aggressive clients
 # (HTTP 429 / bot checks), so analyses are spaced out and identical URLs are
 # served from a short-lived cache instead of re-fetched.
@@ -365,6 +390,26 @@ def detect_youtube_url(text: str) -> Optional[str]:
         if not candidate:
             continue
         if _YOUTUBE_URL_RE.match(candidate):
+            return candidate
+    return None
+
+
+def detect_animepahe_url(text: str) -> Optional[str]:
+    """Return the first AnimePahe series/episode URL found in *text*, else None.
+
+    Mirrors :func:`detect_youtube_url` for the AnimePahe scraper: the
+    animepahe.* hosts plus the /anime/<id>, /a/<id> and /play/<ep_id> path
+    shapes the scraper accepts. Used by the Add Download dialog to hand a
+    pasted AnimePahe URL to the scraper instead of treating it as a plain
+    HTTP download.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    for token in re.split(r"[\s<>\"']+", text.strip()):
+        candidate = token.strip().rstrip(".,;)")
+        if not candidate:
+            continue
+        if _ANIMEPAHE_URL_RE.match(candidate):
             return candidate
     return None
 

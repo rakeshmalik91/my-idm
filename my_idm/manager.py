@@ -281,6 +281,12 @@ def parse_backlog_entry(
                     if ":" in v_clean:
                         hn, _, hv = v_clean.partition(":")
                         headers[hn.strip()] = hv.strip()
+                elif k_clean in ("anime_url", "anime_title"):
+                    # Written by animepahe-downloader/modules/my_idm.py as trailing
+                    # key=value columns so My-IDM can surface them in the details panel.
+                    # Without this branch they silently fall through and the panel
+                    # shows "—" even for freshly queued downloads.
+                    headers[k_clean] = v_clean
             else:
                 # Positional
                 if not save_path and not filename:

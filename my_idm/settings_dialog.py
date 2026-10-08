@@ -365,6 +365,10 @@ class SettingsDialog(QDialog):
         self.setModal(True)
         self._db = db
         self._manager = manager if manager is not None else getattr(parent, "_manager", None)
+        # Set by _on_download_animepahe_url when the scraper was actually started
+        # from within the dialog, so the main window can switch the bottom panel
+        # to the live console instead of leaving the user hunting for progress.
+        self.animepahe_download_started = False
 
         from my_idm.resources import get_app_icon
         self.setWindowIcon(get_app_icon())
@@ -3160,24 +3164,11 @@ class SettingsDialog(QDialog):
             )
 
         if ok:
-            ep_info = f" (Episodes: {episodes})" if episodes else " (All Episodes)"
-            if "queued" in msg.lower():
-                QMessageBox.information(
-                    self,
-                    "AnimePahe Download Queued",
-                    f"AnimePahe task has been queued for:\n{url}{ep_info}\n\n"
-                    f"{msg}\n\n"
-                    "It will automatically start once the currently running task completes.\n"
-                    "You can monitor live progress from the bottom console panel."
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "AnimePahe Download Started",
-                    f"AnimePahe scraper started for:\n{url}{ep_info}\n\n"
-                    "Discovered episodes will be queued directly into My-IDM for high-speed download.\n"
-                    "You can monitor live progress using 'View Console Logs' or from the bottom console panel."
-                )
+            # No confirm dialog: closing Preferences here lets the caller (the main
+            # window) react to the accepted result and switch the bottom panel to the
+            # live AnimePahe console, which is where the scraper's progress is visible.
+            self.animepahe_download_started = True
+            self.accept()
         else:
             QMessageBox.warning(self, "Download Failed to Start", msg)
 
