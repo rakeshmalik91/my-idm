@@ -778,12 +778,14 @@ class DetailsPanel(QWidget):
         right_col.setSpacing(6)
 
         self._ov_filename = self._create_info_row(right_col, "File / Folder Name:")
+        self._ov_anime_title = self._create_info_row(right_col, "Anime Title:")
         self._ov_type = self._create_info_row(right_col, "Transfer Type:")
         self._ov_swarm = self._create_info_row(right_col, "Swarm / Parts:")
         self._ov_save_path = self._create_info_row(right_col, "Save Directory:")
         self._ov_hash = self._create_info_row(right_col, "Content Hash / Infohash:")
         self._ov_security = self._create_info_row(right_col, "Malware Scan:")
         self._ov_url = self._create_info_row(right_col, "Source URL / Magnet:")
+        self._ov_anime_url = self._create_info_row(right_col, "Anime URL:")
         right_col.addStretch()
         grid_layout.addLayout(right_col, stretch=1)
 
@@ -1012,10 +1014,12 @@ class DetailsPanel(QWidget):
         self._ov_type.setText("—")
         self._ov_swarm.setText("—")
         self._ov_filename.setText("—")
+        self._ov_anime_title.setText("—")
         self._ov_save_path.setText("—")
         self._ov_hash.setText("—")
         self._ov_security.setText("—")
         self._ov_url.setText("—")
+        self._ov_anime_url.setText("—")
 
         self._table_files.setRowCount(0)
         self._table_peers.setRowCount(0)
@@ -1149,6 +1153,28 @@ class DetailsPanel(QWidget):
         if len(url_text) > 80:
             url_text = url_text[:77] + "..."
         self._ov_url.setText(url_text)
+
+        # Anime Title (from metadata)
+        anime_title = ""
+        if entry.metadata:
+            anime_title = entry.metadata.get("anime_title", "")
+        if anime_title:
+            if len(anime_title) > 80:
+                anime_title = anime_title[:77] + "..."
+            self._ov_anime_title.setText(anime_title)
+        else:
+            self._ov_anime_title.setText("—")
+
+        # Anime URL (from metadata)
+        anime_url = ""
+        if entry.metadata:
+            anime_url = entry.metadata.get("anime_url", "")
+        if anime_url:
+            if len(anime_url) > 80:
+                anime_url = anime_url[:77] + "..."
+            self._ov_anime_url.setText(anime_url)
+        else:
+            self._ov_anime_url.setText("—")
 
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id)

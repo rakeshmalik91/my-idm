@@ -3501,6 +3501,15 @@ class DownloadManager(QObject):
             entry_source: dict[str, str] = {}
             if "animepahe" in last_comment.lower():
                 entry_source["added_by"] = "animepahe"
+            
+            # Also extract anime_url and anime_title from parsed headers if present
+            # (added by AnimePahe downloader as custom key=value in backlog line)
+            if hasattr(parsed, "headers") and parsed.headers:
+                if "anime_url" in parsed.headers:
+                    entry_source["anime_url"] = parsed.headers["anime_url"]
+                if "anime_title" in parsed.headers:
+                    entry_source["anime_title"] = parsed.headers["anime_title"]
+            
             # Clear last_comment after being consumed by a download line
             last_comment = ""
 
