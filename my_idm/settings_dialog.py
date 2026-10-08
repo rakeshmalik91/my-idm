@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal
+from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal, QTime
 from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTimeEdit,
     QAbstractItemView,
     QHeaderView,
     QVBoxLayout,
@@ -54,6 +55,7 @@ from my_idm.config import (
     ExternalToolsConfig,
     BrowserIntegrationConfig,
     BandwidthLimitConfig,
+    SchedulerConfig,
     clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
@@ -106,6 +108,7 @@ TAB_EXTERNAL_TOOLS = "external_tools"
 TAB_YOUTUBE = "youtube"
 TAB_QUEUES = "queues"
 TAB_BANDWIDTH = "bandwidth"
+TAB_SCHEDULER = "scheduler"
 
 #: Name -> insertion index. Order here *is* the tab order; ``SettingsDialog._setup_ui``
 #: adds the pages in exactly this sequence and the tests pin the two against each other.
@@ -123,6 +126,7 @@ TAB_ORDER: tuple[str, ...] = (
     TAB_YOUTUBE,
     TAB_QUEUES,
     TAB_BANDWIDTH,
+    TAB_SCHEDULER,
 )
 
 #: Titles as shown in the sidebar, keyed by the same names. Used by the tests and by
@@ -141,6 +145,7 @@ TAB_TITLES: dict[str, str] = {
     TAB_YOUTUBE: "▶️ YouTube (yt-dlp)",
     TAB_QUEUES: "⚙️ Queues",
     TAB_BANDWIDTH: "📊 Bandwidth Limit",
+    TAB_SCHEDULER: "⏱️ Scheduler",
 }
 
 
@@ -357,6 +362,7 @@ class SettingsDialog(QDialog):
         tor_config: Optional[TorConfig] = None,
         external_tools_config: Optional[ExternalToolsConfig] = None,
         browser_config: Optional[BrowserIntegrationConfig] = None,
+        scheduler_config: Optional[SchedulerConfig] = None,
         db: Optional[Database] = None,
         parent=None,
         initial_tab=0,
@@ -422,6 +428,15 @@ class SettingsDialog(QDialog):
             BrowserIntegrationConfig.from_dict(browser_config.to_dict())
             if browser_config
             else BrowserIntegrationConfig.load()
+        )
+        self._scheduler_cfg = (
+            SchedulerConfig.from_dict(scheduler_config.to_dict())
+            if scheduler_config
+            else (
+                self._manager.scheduler_config
+                if self._manager and hasattr(self._manager, "scheduler_config")
+                else SchedulerConfig.load()
+            )
         )
 
         self._interfaces: list[NetworkInterfaceInfo] = []
@@ -720,6 +735,7 @@ class SettingsDialog(QDialog):
             (TAB_YOUTUBE, self._create_youtube_tab),
             (TAB_QUEUES, self._create_queues_tab),
             (TAB_BANDWIDTH, self._create_bandwidth_tab),
+            (TAB_SCHEDULER, self._create_scheduler_tab),
         )
         self._tab_names: list[str] = []
         for name, builder in self._tab_builders:
@@ -2883,6 +2899,113 @@ class SettingsDialog(QDialog):
                 self._manager.check_all_bandwidth_limits()
             self._reload_bandwidth_limits()
 
+    def _create_scheduler_tab(self) -> QWidget:
+        """Download scheduler (off-peak hours) settings tab."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        sched_group = QGroupBox("Off-Peak Download Scheduler")
+        sched_layout = QVBoxLayout(sched_group)
+        sched_layout.setSpacing(12)
+        sched_layout.setContentsMargins(14, 16, 14, 14)
+
+        self._scheduler_enable_cb = QCheckBox("Enable off-peak download scheduler")
+        self._scheduler_enable_cb.setToolTip(
+            "When enabled, queued downloads only start during specified off-peak hours unless force-started."
+        )
+        self._scheduler_enable_cb.toggled.connect(self._on_scheduler_enable_toggled)
+        sched_layout.addWidget(self._scheduler_enable_cb)
+
+        self._scheduler_controls_widget = QWidget()
+        ctrls_layout = QVBoxLayout(self._scheduler_controls_widget)
+        ctrls_layout.setContentsMargins(0, 4, 0, 0)
+        ctrls_layout.setSpacing(12)
+
+        # Time window row
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel("Off-peak start time:"))
+        self._scheduler_start_time = QTimeEdit()
+        self._scheduler_start_time.setDisplayFormat("HH:mm")
+        self._scheduler_start_time.setToolTip("Start time of off-peak window (local time)")
+        time_row.addWidget(self._scheduler_start_time)
+
+        time_row.addSpacing(16)
+        time_row.addWidget(QLabel("Off-peak end time:"))
+        self._scheduler_end_time = QTimeEdit()
+        self._scheduler_end_time.setDisplayFormat("HH:mm")
+        self._scheduler_end_time.setToolTip("End time of off-peak window (local time)")
+        time_row.addWidget(self._scheduler_end_time)
+        time_row.addStretch(1)
+        ctrls_layout.addLayout(time_row)
+
+        time_hint = QLabel(
+            "ℹ️ Times use your local system clock. Overnight windows spanning midnight "
+            "(e.g., 23:00 to 07:00) are fully supported."
+        )
+        time_hint.setWordWrap(True)
+        time_hint.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+        ctrls_layout.addWidget(time_hint)
+
+        # Pause toggle
+        self._scheduler_pause_cb = QCheckBox("Pause active downloads when off-peak window ends")
+        self._scheduler_pause_cb.setToolTip(
+            "Automatically pause downloading items when leaving off-peak hours. "
+            "Force-started downloads will continue running."
+        )
+        ctrls_layout.addWidget(self._scheduler_pause_cb)
+
+        # Active days of week
+        days_group = QGroupBox("Active Days")
+        days_layout = QVBoxLayout(days_group)
+        days_layout.setSpacing(8)
+
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        self._scheduler_day_cbs: list[QCheckBox] = []
+        days_row = QHBoxLayout()
+        for d in day_names:
+            cb = QCheckBox(d[:3])
+            cb.setToolTip(f"Active on {d}")
+            self._scheduler_day_cbs.append(cb)
+            days_row.addWidget(cb)
+        days_row.addStretch(1)
+        days_layout.addLayout(days_row)
+
+        days_btn_row = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: [cb.setChecked(True) for cb in self._scheduler_day_cbs])
+        select_none_btn = QPushButton("Clear All")
+        select_none_btn.clicked.connect(lambda: [cb.setChecked(False) for cb in self._scheduler_day_cbs])
+        days_btn_row.addWidget(select_all_btn)
+        days_btn_row.addWidget(select_none_btn)
+        days_btn_row.addStretch(1)
+        days_layout.addLayout(days_btn_row)
+
+        ctrls_layout.addWidget(days_group)
+        sched_layout.addWidget(self._scheduler_controls_widget)
+        layout.addWidget(sched_group)
+
+        # Force Start override note
+        override_group = QGroupBox("Force Start Override")
+        ov_layout = QVBoxLayout(override_group)
+        ov_lbl = QLabel(
+            "⚡ <b>Force Start:</b> You can override the off-peak schedule at any time for specific downloads.<br>"
+            "Click the <b>Force Start</b> button on the toolbar (or select it from the Edit / Context menu).<br>"
+            "Force-started downloads immediately bypass the off-peak schedule and will not be paused when the window ends."
+        )
+        ov_lbl.setTextFormat(Qt.TextFormat.RichText)
+        ov_lbl.setWordWrap(True)
+        ov_layout.addWidget(ov_lbl)
+        layout.addWidget(override_group)
+
+        layout.addStretch(1)
+        return tab
+
+    def _on_scheduler_enable_toggled(self, checked: bool):
+        if hasattr(self, "_scheduler_controls_widget"):
+            self._scheduler_controls_widget.setEnabled(checked)
+
 
     def _create_youtube_tab(self) -> QWidget:
         """YouTube / yt-dlp settings, split out of the combined External Tools tab.
@@ -3687,6 +3810,18 @@ class SettingsDialog(QDialog):
         else:
             self._browser_status_lbl.setText("⚪ Disabled")
             self._browser_status_lbl.setStyleSheet("color: #8fa0b5; margin-left: 12px;")
+
+        # Scheduler tab
+        self._scheduler_enable_cb.setChecked(self._scheduler_cfg.enabled)
+        sh, sm = (int(x) for x in self._scheduler_cfg.start_time.split(":")[:2]) if ":" in self._scheduler_cfg.start_time else (2, 0)
+        eh, em = (int(x) for x in self._scheduler_cfg.end_time.split(":")[:2]) if ":" in self._scheduler_cfg.end_time else (8, 0)
+        self._scheduler_start_time.setTime(QTime(sh, sm))
+        self._scheduler_end_time.setTime(QTime(eh, em))
+        self._scheduler_pause_cb.setChecked(self._scheduler_cfg.pause_when_ended)
+        active_days = set(self._scheduler_cfg.days_of_week)
+        for day_idx, cb in enumerate(self._scheduler_day_cbs):
+            cb.setChecked(day_idx in active_days)
+        self._on_scheduler_enable_toggled(self._scheduler_cfg.enabled)
 
     def _on_test_tor(self):
         host = self._tor_host_edit.text().strip() or "127.0.0.1"
@@ -4615,6 +4750,18 @@ class SettingsDialog(QDialog):
         if self._manager and hasattr(self._manager, "set_browser_config"):
             self._manager.set_browser_config(self._browser_cfg)
 
+        # 7b. Collect Scheduler settings
+        self._scheduler_cfg.enabled = self._scheduler_enable_cb.isChecked()
+        self._scheduler_cfg.start_time = self._scheduler_start_time.time().toString("HH:mm")
+        self._scheduler_cfg.end_time = self._scheduler_end_time.time().toString("HH:mm")
+        self._scheduler_cfg.pause_when_ended = self._scheduler_pause_cb.isChecked()
+        self._scheduler_cfg.days_of_week = [
+            i for i, cb in enumerate(self._scheduler_day_cbs) if cb.isChecked()
+        ]
+        self._scheduler_cfg.save()
+        if self._manager and hasattr(self._manager, "set_scheduler_config"):
+            self._manager.set_scheduler_config(self._scheduler_cfg)
+
         # 8. Apply Views: segregated grouping and table columns. Last, because it writes
         # straight onto the live table rather than into a config object.
         if hasattr(self, "_apply_views_tab"):
@@ -4649,6 +4796,10 @@ class SettingsDialog(QDialog):
     @property
     def browser_config(self) -> BrowserIntegrationConfig:
         return self._browser_cfg
+
+    @property
+    def scheduler_config(self) -> SchedulerConfig:
+        return self._scheduler_cfg
 
 
 class FirefoxInstallGuideDialog(QDialog):

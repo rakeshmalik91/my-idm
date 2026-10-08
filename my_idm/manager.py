@@ -42,6 +42,8 @@ from my_idm.config import (
     ExternalToolsConfig,
     BrowserIntegrationConfig,
     BandwidthLimitConfig,
+    SchedulerConfig,
+    is_within_schedule_window,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
 )
@@ -439,6 +441,7 @@ class DownloadManager(QObject):
     bandwidth_warning = Signal(str, str, float, bool)    # queue_id, message, percentage, is_global
     bandwidth_limit_exceeded = Signal(str, str, float, bool)  # queue_id, message, percentage, is_global
     bandwidth_warning_cleared = Signal()
+    scheduler_config_changed = Signal(object)  # SchedulerConfig
     #: (paths) — local .torrent files the watched folder yielded, for the UI to report.
     torrent_folder_captured = Signal(list)
 
@@ -452,6 +455,8 @@ class DownloadManager(QObject):
         self._tor_config = TorConfig.load()
         self._external_tools_config = ExternalToolsConfig.load()
         self._browser_config = BrowserIntegrationConfig.load()
+        self._scheduler_config = SchedulerConfig.load()
+        self._was_within_schedule: Optional[bool] = None
         self._browser_server = BrowserServer(self, self._browser_config)
         self._animepahe_process: Optional[subprocess.Popen] = None
         self._animepahe_queue: list[dict[str, Any]] = []
@@ -540,6 +545,11 @@ class DownloadManager(QObject):
         self._bandwidth_timer = QTimer(self)
         self._bandwidth_timer.setInterval(5_000)  # 5 seconds
         self._bandwidth_timer.timeout.connect(self._check_bandwidth_limits)
+
+        # Scheduler check timer — checks off-peak window transitions
+        self._scheduler_timer = QTimer(self)
+        self._scheduler_timer.setInterval(2_000)  # 2 seconds
+        self._scheduler_timer.timeout.connect(self._check_scheduler)
 
         # Connect process_backlogs_requested signal to run process_backlogs on main thread
         self.process_backlogs_requested.connect(self.process_backlogs)
@@ -672,6 +682,9 @@ class DownloadManager(QObject):
         # Start bandwidth limit check timer
         self._bandwidth_timer.start()
 
+        # Start scheduler check timer
+        self._scheduler_timer.start()
+
         # Start browser integration loopback server if enabled
         if self._browser_config.enabled:
             try:
@@ -698,6 +711,7 @@ class DownloadManager(QObject):
         self._animepahe_timer.stop()
         self._verify_completed_timer.stop()
         self._bandwidth_timer.stop()
+        self._scheduler_timer.stop()
         # Before the drain below, like the other timers: the watcher's own scan adds rows through
         # the database, so it must be finished before the caller can close it.
         self._torrent_watcher.stop()
@@ -2127,7 +2141,8 @@ class DownloadManager(QObject):
         return {q.id: q.effective_max_concurrent for q in self._db.get_queues()}
 
     def _may_start(self, entry: DownloadEntry, counts: dict[str, int],
-                   limits: dict[str, int], global_max: int) -> bool:
+                   limits: dict[str, int], global_max: int,
+                   now: Optional[Union[datetime, date]] = None) -> bool:
         """Whether *entry* can start now, under both the global and its own queue's budget.
 
         The single decision every start path shares. It is a method rather than inlined
@@ -2136,8 +2151,13 @@ class DownloadManager(QObject):
         written into only one of them is a check that will be bypassed.
         """
         qid = self._db.resolve_queue_id(entry.queue_id)
+        # Off-peak scheduler check: force start overrides it
+        is_force = bool(entry.metadata.get("force_started", False))
+        if not is_force and not self.is_within_schedule(now):
+            return False
+
         # Bandwidth limit gate: global overrides per-queue, stops entry from starting if limit exceeded
-        allowed, _msg, _pct = self._db.check_bandwidth_limit(qid, 0, False)
+        allowed, _msg, _pct = self._db.check_bandwidth_limit(qid, 0, False, now)
         if not allowed:
             return False
 
@@ -2296,6 +2316,10 @@ class DownloadManager(QObject):
             )
             self._process_queue()
             return
+
+        if entry.metadata.get("force_started"):
+            entry.metadata.pop("force_started", None)
+            self._db.update_download(entry)
 
         self._starting_downloads.discard(download_id)
         if self._is_ytdlp_native_entry(entry):
@@ -2525,6 +2549,7 @@ class DownloadManager(QObject):
         entry.last_tried_at = _now_iso()
         # Clear fetching_metadata_since when force starting (resets the timer)
         entry.fetching_metadata_since = ""
+        entry.metadata["force_started"] = True
         if not entry.file_path and entry.filename and entry.save_path:
             entry.file_path = str(Path(entry.save_path) / entry.filename)
         self._db.update_download(entry)
@@ -3252,6 +3277,58 @@ class DownloadManager(QObject):
         for entry in active:
             if entry.status in ("downloading", "checking", "fetching_metadata", "stalled", "seeding"):
                 self.pause_download(entry.id)
+
+    # -- Scheduler methods ----------------------------------------------------
+
+    @property
+    def scheduler_config(self) -> SchedulerConfig:
+        return self._scheduler_config
+
+    def set_scheduler_config(self, cfg: SchedulerConfig):
+        self._scheduler_config = cfg
+        self.scheduler_config_changed.emit(cfg)
+        self._enforce_scheduler()
+        self._process_queue()
+
+    def is_within_schedule(self, now: Optional[Union[datetime, date]] = None) -> bool:
+        """Check if current time is within configured off-peak schedule window."""
+        return is_within_schedule_window(self._scheduler_config, now)
+
+    def _check_scheduler(self):
+        """Timer callback to check scheduler transitions."""
+        with self._timer_slot():
+            try:
+                self._enforce_scheduler()
+            except Exception as exc:
+                log.error("Error checking scheduler: %s", exc)
+
+    def _enforce_scheduler(self, now: Optional[Union[datetime, date]] = None):
+        """Enforce scheduler off-peak window transitions."""
+        if not self._scheduler_config.enabled:
+            self._was_within_schedule = None
+            return
+
+        is_in = self.is_within_schedule(now)
+        prev = self._was_within_schedule
+        self._was_within_schedule = is_in
+
+        if prev is False and is_in is True:
+            # Entered off-peak window!
+            log.info("Entered scheduled off-peak window; processing queue.")
+            self._process_queue()
+        elif prev is True and is_in is False:
+            # Exited off-peak window!
+            log.info("Exited scheduled off-peak window.")
+            if self._scheduler_config.pause_when_ended:
+                self._pause_downloads_for_scheduler()
+
+    def _pause_downloads_for_scheduler(self):
+        """Pause running downloads when the off-peak window ends, unless force-started."""
+        active = self._db.get_all_downloads()
+        for entry in active:
+            if entry.status in ("downloading", "checking", "fetching_metadata", "stalled", "seeding"):
+                if not entry.metadata.get("force_started"):
+                    self.pause_download(entry.id)
 
     def move_queue_up(self, download_id: str) -> bool:
         """Move a download up in its queue's priority order.
@@ -4077,6 +4154,7 @@ class DownloadManager(QObject):
                     log.debug("Skipping retry queue: VPN/interface is disconnected")
                     return
 
+            self._enforce_scheduler()
             self._process_queue()
 
     # -- helpers -------------------------------------------------------------

@@ -507,6 +507,26 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         self.assertNotIn(self.win._act_open_file, actions)
         self.assertNotIn(self.win._act_open_folder, actions)
 
+    def test_force_start_and_scheduler_actions_on_toolbar_and_menu(self):
+        """Toolbar has Force Start button, icon-only, with separator next to search; Tools menu has Scheduler."""
+        toolbar = self.win.findChild(QToolBar)
+        self.assertIsNotNone(toolbar)
+
+        actions = toolbar.actions()
+        self.assertIn(self.win._act_force_start, actions)
+
+        btn = toolbar.widgetForAction(self.win._act_force_start)
+        self.assertIsInstance(btn, QToolButton)
+        self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+        # Separator right before _act_force_start
+        idx = actions.index(self.win._act_force_start)
+        self.assertGreater(idx, 0)
+        self.assertTrue(actions[idx - 1].isSeparator())
+
+        # Tools menu has Scheduler settings
+        self.assertTrue(hasattr(self.win, "_act_scheduler_settings"))
+
     def test_details_and_console_footer_buttons_and_toolbar_removal(self):
         """Details panel button is removed from toolbar; footer has Details and Console toggle buttons."""
         self.win.show()

@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from datetime import datetime, date, time
+from typing import Any, Optional, Union
 
 from PySide6.QtCore import QSettings
 
@@ -1087,4 +1088,120 @@ class BandwidthLimitConfig:
             global_enabled=bool(global_enabled),
             global_warning_percent=int(global_warning_percent or 80),
         )
+
+
+@dataclass
+class SchedulerConfig:
+    """Stores configuration for off-peak hours download scheduling."""
+    enabled: bool = False
+    start_time: str = "02:00"  # HH:MM
+    end_time: str = "08:00"    # HH:MM
+    pause_when_ended: bool = True
+    days_of_week: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "pause_when_ended": self.pause_when_ended,
+            "days_of_week": list(self.days_of_week),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SchedulerConfig:
+        days = data.get("days_of_week", [0, 1, 2, 3, 4, 5, 6])
+        if not isinstance(days, (list, tuple)):
+            days = [0, 1, 2, 3, 4, 5, 6]
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            start_time=str(data.get("start_time", "02:00")),
+            end_time=str(data.get("end_time", "08:00")),
+            pause_when_ended=bool(data.get("pause_when_ended", True)),
+            days_of_week=[int(d) for d in days],
+        )
+
+    def save(self, settings: Optional[QSettings] = None):
+        """Persists scheduler preferences into QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("Scheduler")
+        settings.setValue("enabled", self.enabled)
+        settings.setValue("start_time", self.start_time)
+        settings.setValue("end_time", self.end_time)
+        settings.setValue("pause_when_ended", self.pause_when_ended)
+        settings.setValue("days_of_week", ",".join(str(d) for d in self.days_of_week))
+        settings.endGroup()
+
+    @classmethod
+    def load(cls, settings: Optional[QSettings] = None) -> SchedulerConfig:
+        """Loads scheduler preferences from QSettings."""
+        if settings is None:
+            settings = QSettings("MyIDM", "My-IDM")
+        settings.beginGroup("Scheduler")
+        enabled = settings.value("enabled", False, type=bool)
+        start_time = settings.value("start_time", "02:00", type=str) or "02:00"
+        end_time = settings.value("end_time", "08:00", type=str) or "08:00"
+        pause_when_ended = settings.value("pause_when_ended", True, type=bool)
+        days_str = settings.value("days_of_week", "0,1,2,3,4,5,6", type=str) or "0,1,2,3,4,5,6"
+        settings.endGroup()
+
+        days = []
+        for d in days_str.split(","):
+            d = d.strip()
+            if d.isdigit():
+                days.append(int(d))
+        if not days:
+            days = [0, 1, 2, 3, 4, 5, 6]
+
+        return cls(
+            enabled=bool(enabled),
+            start_time=str(start_time),
+            end_time=str(end_time),
+            pause_when_ended=bool(pause_when_ended),
+            days_of_week=days,
+        )
+
+
+def is_within_schedule_window(
+    config: SchedulerConfig,
+    now: Optional[Union[datetime, date]] = None,
+) -> bool:
+    """Check if the given time falls within the configured off-peak schedule window.
+
+    If scheduler is disabled, returns True.
+    Handles same-day windows (e.g. 02:00 - 08:00) and overnight windows (e.g. 23:00 - 07:00).
+    """
+    if not config.enabled:
+        return True
+
+    if now is None:
+        now_dt = datetime.now().astimezone()
+    elif isinstance(now, datetime):
+        now_dt = now.astimezone() if now.tzinfo else now
+    else:
+        now_dt = datetime.combine(now, time.min)
+
+    # Day of week check (0=Monday .. 6=Sunday)
+    if config.days_of_week and now_dt.weekday() not in config.days_of_week:
+        return False
+
+    try:
+        sh, sm = map(int, config.start_time.split(":")[:2])
+        eh, em = map(int, config.end_time.split(":")[:2])
+        start_t = time(sh, sm)
+        end_t = time(eh, em)
+    except Exception:
+        return True
+
+    curr_t = now_dt.time()
+
+    if start_t == end_t:
+        return True
+    elif start_t < end_t:
+        return start_t <= curr_t < end_t
+    else:
+        # Overnight window, e.g. 23:00 - 07:00
+        return curr_t >= start_t or curr_t < end_t
+
 

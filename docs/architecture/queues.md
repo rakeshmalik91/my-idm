@@ -479,6 +479,14 @@ In addition to instantaneous speed caps (bytes/sec), My-IDM supports periodic to
 - **Limit Exceeded (100%)**: When 100% of the quota is reached, active downloads and uploads are automatically paused, the menubar badge shifts to a distinct red limit-exceeded indicator, and the start gate (`_may_start`) refuses to launch any queued transfers.
 - **Preferences UI**: Configured under the **Bandwidth Limit** tab (`TAB_BANDWIDTH`), which displays an 8-column management table: `Queue`, `Enabled`, `Limit`, `Limit Type`, `Progress`, `Percetage for Warning`, `Edit`, `Delete`.
 
+### Off-Peak Download Scheduler & Force Start
+
+My-IDM supports an off-peak download scheduler configured in Preferences → **⏱️ Scheduler** (`TAB_SCHEDULER`):
+- **Gating**: When enabled, queued downloads only start within the defined recurring local-time window (`start_time` to `end_time`), on configured active days of the week.
+- **Clock**: Evaluated using local timezone (`datetime.now().astimezone()`) with injectable clock `now` in `is_within_schedule_window()` and `_may_start()`. Overnight windows spanning midnight (e.g. 23:00 to 07:00) are fully supported.
+- **Window Transitions**: Monitored by a periodic timer (`_scheduler_timer`). Entering the off-peak window triggers `_process_queue()`. Exiting the window automatically pauses active downloading transfers when `pause_when_ended` is enabled.
+- **Force Start Override**: Users can force start any download via the **Force Start** button (icon-only green play button containing an 'F' on the toolbar, Edit menu, and download context menu). Force-started items set `metadata["force_started"] = True`, bypassing the scheduler and concurrency limits, and remain active when off-peak hours end. Manually pausing an item clears the `force_started` flag.
+
 ### Seeing which queue a download is in
 
 Two places, because this is the question the feature exists to answer:
@@ -593,12 +601,6 @@ without starting an engine.
 
 Designed in this document's original form, still to be built:
 
-- **An off-peak scheduler.** No time-of-day gate exists. The two things called "schedule" are
-  both absolute instants, not recurring windows: `metadata["next_retry_at"]` and the AnimePahe
-  scraper's 6-hour cadence. The gate belongs in a `_may_start_now()` that all three start paths
-  call — the retry check already lives in that shape — with an **injected clock**, and it must
-  read `datetime.now().astimezone()`, because `Database._now_iso()` writes UTC and the statistics
-  layer already had to be taught about that (`_STATS_LOCAL_DAY`).
 - **Absolute per-download bandwidth caps.** Per-download rates exist as a fraction of whatever
   ceiling applies, so a download cannot be given its own rate independent of its queue and the
   global setting — only its `bandwidth_allocation` share of one of them. A real per-download cap

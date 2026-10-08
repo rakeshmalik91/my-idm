@@ -39,6 +39,7 @@ from my_idm.settings_dialog import (
     TAB_VPN,
     TAB_YOUTUBE,
     TAB_BANDWIDTH,
+    TAB_SCHEDULER,
     SettingsDialog,
     tab_index,
 )
@@ -57,6 +58,7 @@ _CONFIG_GROUPS = (
     "BrowserIntegration",
     "Network",
     "Security",
+    "Scheduler",
 )
 
 
@@ -903,8 +905,16 @@ class TestPreferencesDialogOpensTheNamedPage(ConfigIsolationMixin, unittest.Test
     def test_opening_with_no_page_defaults_to_general(self):
         self.assertEqual(self.dialog().current_tab_name(), TAB_GENERAL)
 
-    def test_the_bandwidth_tab_sits_last(self):
-        self.assertEqual(tab_index(TAB_BANDWIDTH), len(TAB_ORDER) - 1)
+    def test_the_scheduler_tab_sits_last(self):
+        self.assertEqual(tab_index(TAB_SCHEDULER), len(TAB_ORDER) - 1)
+
+    def test_scheduler_tab_controls_exist_and_populate(self):
+        dlg = self.dialog(initial_tab=TAB_SCHEDULER)
+        self.assertIsNotNone(dlg._scheduler_enable_cb)
+        self.assertIsNotNone(dlg._scheduler_start_time)
+        self.assertIsNotNone(dlg._scheduler_end_time)
+        self.assertIsNotNone(dlg._scheduler_pause_cb)
+        self.assertEqual(len(dlg._scheduler_day_cbs), 7)
 
     def test_bandwidth_tab_has_expected_columns(self):
         dlg = self.dialog(initial_tab=TAB_BANDWIDTH)

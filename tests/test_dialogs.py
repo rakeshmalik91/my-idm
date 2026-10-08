@@ -29,6 +29,7 @@ _CONFIG_GROUPS = (
     "BrowserIntegration",
     "Network",
     "Security",
+    "Scheduler",
 )
 
 

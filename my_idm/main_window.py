@@ -93,6 +93,7 @@ from my_idm.settings_dialog import (
     TAB_TORRENT,
     TAB_VPN,
     TAB_BANDWIDTH,
+    TAB_SCHEDULER,
     SettingsDialog,
 )
 from my_idm.external_tools import launch_animepahe_gui
@@ -348,6 +349,34 @@ def _create_emoji_icon(emoji: str, size: int = 32) -> QIcon:
     font.setPixelSize(int(size * 0.65))
     p.setFont(font)
     p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
+    p.end()
+    return QIcon(pix)
+
+
+def _create_force_start_icon(size: int = 32) -> QIcon:
+    """Create a play triangle icon containing an 'F' (Force Start)."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    p.setBrush(QColor("#4ade80"))
+    p.setPen(Qt.PenStyle.NoPen)
+    triangle = QPolygonF([
+        QPointF(size * 0.16, size * 0.16),
+        QPointF(size * 0.88, size * 0.5),
+        QPointF(size * 0.16, size * 0.84),
+    ])
+    p.drawPolygon(triangle)
+
+    # Draw bold 'F' inside the play button
+    font = p.font()
+    font.setBold(True)
+    font.setPixelSize(int(size * 0.42))
+    p.setFont(font)
+    p.setPen(QColor("#0d1117"))
+    text_rect = QRectF(size * 0.20, size * 0.22, size * 0.44, size * 0.56)
+    p.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, "F")
     p.end()
     return QIcon(pix)
 
@@ -777,8 +806,8 @@ class MainWindow(QMainWindow):
         self._act_resume.setToolTip("Resume selected downloads (Ctrl+R)")
         self._act_resume.triggered.connect(self._on_resume)
 
-        self._act_force_start = QAction(_create_emoji_icon("⚡"), "Force Start", self)
-        self._act_force_start.setToolTip("Force start selected download(s) immediately")
+        self._act_force_start = QAction(_create_force_start_icon(), "Force Start", self)
+        self._act_force_start.setToolTip("Force start selected download(s) immediately (overrides off-peak schedule)")
         self._act_force_start.triggered.connect(self._on_force_start)
 
         self._act_pause = QAction(_create_pause_icon(), "Pause", self)
@@ -904,6 +933,14 @@ class MainWindow(QMainWindow):
             self._on_open_bandwidth_settings
         )
 
+        self._act_scheduler_settings = QAction(_create_emoji_icon("⏱️"), "Scheduler Settings…", self)
+        self._act_scheduler_settings.setToolTip(
+            "Configure off-peak download hours and schedule"
+        )
+        self._act_scheduler_settings.triggered.connect(
+            self._on_open_scheduler_settings
+        )
+
         self._act_scan_antivirus = QAction(_create_emoji_icon("🛡"), "Scan with Antivirus", self)
         self._act_scan_antivirus.setToolTip("Scan the downloaded file with antivirus")
         self._act_scan_antivirus.triggered.connect(self._on_scan_selected_file)
@@ -1008,16 +1045,15 @@ class MainWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
-        # Separate the search field from the one button after it, so the strip reads as
-        # search then Preferences rather than as one control. The playback block above is
-        # split the same way. Statistics and the queue switcher are not here: both live in
-        # the Tools and Edit menus, which keeps the toolbar to transport and file actions.
+        # Separate the search field from the force start and preferences buttons
         toolbar.addSeparator()
+        toolbar.addAction(self._act_force_start)
         toolbar.addAction(self._act_preferences)
 
         # Show only icons without text for playback and action buttons
         for act in (
             self._act_resume,
+            self._act_force_start,
             self._act_pause,
             self._act_stop,
             self._act_start_seeding,
@@ -1286,6 +1322,7 @@ class MainWindow(QMainWindow):
         tools_menu.addAction(self._act_network_settings)
         tools_menu.addAction(self._act_security_settings)
         tools_menu.addAction(self._act_bandwidth_settings)
+        tools_menu.addAction(self._act_scheduler_settings)
         tools_menu.addSeparator()
         self._act_launch_animepahe_gui = QAction(_create_emoji_icon("🎬"), "Launch AnimePahe Downloader…", self)
         self._act_launch_animepahe_gui.triggered.connect(self._on_launch_animepahe_gui)
@@ -3207,6 +3244,10 @@ class MainWindow(QMainWindow):
     def _on_open_bandwidth_settings(self):
         """Open Preferences dialog on the Bandwidth Limit tab."""
         self._on_open_preferences(TAB_BANDWIDTH)
+
+    def _on_open_scheduler_settings(self):
+        """Open Preferences dialog on the Scheduler tab."""
+        self._on_open_preferences(TAB_SCHEDULER)
 
     def _show_speed_context_menu(self, pos):
         menu = QMenu(self)

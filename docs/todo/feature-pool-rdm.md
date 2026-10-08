@@ -176,24 +176,22 @@ Residual, none of which is "implement the feature":
 
 ## MEDIUM value
 
-### 5. Download scheduler (off-peak hours) — MISSING
+### 5. Download scheduler (off-peak hours) — DONE
 RDM: "Schedule downloads for off-peak hours" with `schedule_start` / `schedule_end`.
 
-No time-of-day gate exists in `manager._process_queue()` (`manager.py:2115-2175`). The
-only "schedule" in the codebase is retry backoff (`metadata["next_retry_at"]`, an absolute
-epoch instant) and the AnimePahe scraper's 6-hour re-run cadence. Neither is a recurring
-local-time window, so there is no precedent to copy — the design has to introduce one.
+**Implemented 2026-10-08** as `my_idm/config.py:SchedulerConfig` and integrated into
+`manager._may_start()`, `SettingsDialog` (`TAB_SCHEDULER`), and `MainWindow`.
 
-Shape: two config fields plus a guard in `_process_queue`. The manager already has a 1 Hz
-`QTimer` (`_retry_timer`, `manager.py:497`, driving `_process_retry_queue` at `:3785`) driving
-the queue, so there is a natural place to gate it. Note the guard must **also** be applied to the
-two inline gates that bypass `_process_queue()` entirely — `add_download()` (`manager.py:1800`,
-gate at `:1958`) and `resume_download()` (`manager.py:2437`, gate at `:2474`) — or the window
-leaks.
-
-Designed together with the other two members of this cluster; see
-[Named Queues & Concurrency Budgets](../architecture/queues.md) — which specifies the
-`_may_start_now()` gate, the injectable clock, and the UTC-vs-local trap, in full.
+- Feature is disabled by default. Configured in Preferences → ⏱️ Scheduler tab.
+- Supports recurring off-peak time window (`start_time`, `end_time`), same-day or overnight
+  spanning midnight (e.g., 23:00 to 07:00), active days of week, and optional pause when ended.
+- Uses local time (`datetime.now().astimezone()`) with injectable clock `now` in `is_within_schedule_window`.
+- Enforced at all start gates via `_may_start` and periodic timer check (`_scheduler_timer`).
+- **Force Start** overrides the scheduler: accessible via green play button with an "F" on the
+  toolbar (icon-only, separated from search edit), Edit menu, and download context menu.
+- Force-started entries set `entry.metadata["force_started"] = True` and bypass window gating and
+  concurrency limits; manual pause clears the flag.
+- Covered by `tests/test_scheduler.py` and `tests/test_settings.py`.
 
 ### 6. Global hotkey to toggle capture — DONE
 RDM: "Scroll Lock toggles capture on/off system-wide."
