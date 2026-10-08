@@ -63,7 +63,6 @@ from my_idm.dialogs import (
     AddQueueDialog,
     DeleteConfirmDialog,
     MoveDownloadDialog,
-    QueueManagerDialog,
     RefreshAddressDialog,
     RenameDialog,
 )
@@ -2997,7 +2996,21 @@ class MainWindow(QMainWindow):
             self._refresh_queue_ui()
 
     def _on_manage_queues(self):
-        dialog = QueueManagerDialog(self._manager, self)
+        from my_idm.settings_dialog import SettingsDialog, TAB_QUEUES
+
+        dialog = SettingsDialog(
+            general_config=self._manager.general_config,
+            torrent_config=self._manager.torrent_config,
+            network_config=self._manager.network_config,
+            security_config=self._manager.security_config,
+            tor_config=self._manager.tor_config,
+            external_tools_config=self._manager.external_tools_config,
+            browser_config=self._manager.browser_config,
+            db=self._manager._db,
+            parent=self,
+            initial_tab=TAB_QUEUES,
+            manager=self._manager,
+        )
         if dialog.exec():
             self._refresh_queue_ui()
             self._load_history()

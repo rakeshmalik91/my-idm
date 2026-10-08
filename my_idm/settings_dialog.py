@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal
-from PySide6.QtGui import QDesktopServices, QFontMetrics, QIcon, QKeySequence
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QKeySequenceEdit,
     QLabel,
     QLineEdit,
@@ -30,13 +31,18 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
-QScrollArea,
+    QScrollArea,
     QLayout,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QAbstractItemView,
+    QHeaderView,
     QVBoxLayout,
     QWidget,
+    QStyle,
 )
 
 import asyncio
@@ -53,8 +59,9 @@ from my_idm.config import (
     MAX_SEGMENT_START_DELAY_MS,
     normalize_extension_list,
 )
-from my_idm.database import Database, APP_DIR
-from my_idm.download_model import Col
+from my_idm.database import Database, APP_DIR, DEFAULT_QUEUE_COLOR, normalize_queue_color
+from my_idm.download_model import Col, _format_speed
+from my_idm.dialogs import AddQueueDialog
 from my_idm.external_tools import (
     launch_animepahe_cli,
     launch_animepahe_gui,
@@ -96,6 +103,7 @@ TAB_TOR = "tor"
 TAB_SECURITY = "security"
 TAB_EXTERNAL_TOOLS = "external_tools"
 TAB_YOUTUBE = "youtube"
+TAB_QUEUES = "queues"
 
 #: Name -> insertion index. Order here *is* the tab order; ``SettingsDialog._setup_ui``
 #: adds the pages in exactly this sequence and the tests pin the two against each other.
@@ -111,6 +119,7 @@ TAB_ORDER: tuple[str, ...] = (
     TAB_SECURITY,
     TAB_EXTERNAL_TOOLS,
     TAB_YOUTUBE,
+    TAB_QUEUES,
 )
 
 #: Titles as shown in the sidebar, keyed by the same names. Used by the tests and by
@@ -127,6 +136,7 @@ TAB_TITLES: dict[str, str] = {
     TAB_SECURITY: "🛡️ Antivirus & Security",
     TAB_EXTERNAL_TOOLS: "🌐 AnimePahe Scraper",
     TAB_YOUTUBE: "▶️ YouTube (yt-dlp)",
+    TAB_QUEUES: "⚙️ Queues",
 }
 
 
@@ -136,6 +146,7 @@ from my_idm.styles import (
     THEME_NAMES,
     apply_theme,
     normalize_theme,
+    themed_widget,
 )
 
 
@@ -703,6 +714,7 @@ class SettingsDialog(QDialog):
             (TAB_SECURITY, self._create_security_tab),
             (TAB_EXTERNAL_TOOLS, self._create_external_tools_tab),
             (TAB_YOUTUBE, self._create_youtube_tab),
+            (TAB_QUEUES, self._create_queues_tab),
         )
         self._tab_names: list[str] = []
         for name, builder in self._tab_builders:
@@ -2195,6 +2207,444 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         return tab
 
+
+    def _create_queues_tab(self) -> QWidget:
+        """Queue Manager - create, rename, reorder, limit and delete named queues."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(14)
+        layout.setContentsMargins(14, 16, 14, 14)
+
+        # Queue Manager group
+        queues_group = QGroupBox("Queue Manager")
+        queues_layout = QVBoxLayout(queues_group)
+        queues_layout.setSpacing(14)
+        queues_layout.setContentsMargins(14, 16, 14, 14)
+
+        # The Queue Manager table
+        self._queues_table = QTableWidget(0, 5, self)
+        self._queues_table.setHorizontalHeaderLabels([
+            "Queue",
+            "Downloads",
+            "Max at once\n(0 = Global)",
+            "Download limit\n(0 = Global)",
+            "Upload limit\n(0 = Global)",
+        ])
+        # Two lines per header
+        _header = self._queues_table.horizontalHeader()
+        _line_height = _header.fontMetrics().height()
+        _header.setFixedHeight(_line_height * 2 + 12)
+        # Reset padding
+        themed_widget(
+            _header,
+            """
+            QHeaderView::section {
+                background-color: {Colors.BG_MID};
+                color: {Colors.TEXT_SECONDARY};
+                border: none;
+                border-bottom: 2px solid {Colors.BORDER};
+                border-right: 1px solid {Colors.BORDER};
+                padding: 6px 10px;
+                font-weight: 600;
+                font-size: 12px;
+                text-transform: uppercase;
+            }
+            QHeaderView::section:hover {
+                color: {Colors.TEXT};
+                background-color: {Colors.BG_LIGHT};
+            }
+            """,
+        )
+        self._queues_table.verticalHeader().setVisible(False)
+        self._queues_table.verticalHeader().setDefaultSectionSize(34)
+        self._queues_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._queues_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._queues_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        header = self._queues_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, 5):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+        self._queues_table.itemSelectionChanged.connect(self._on_queues_selection_changed)
+        queues_layout.addWidget(self._queues_table)
+
+        # Note explaining how queue limits interact with global limits
+        self._queues_note = QLabel()
+        self._queues_note.setWordWrap(True)
+        self._queues_note.setStyleSheet("color: #8fa0b5;")
+        queues_layout.addWidget(self._queues_note)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        self._queues_up_btn = QPushButton("↑ Move Up")
+        self._queues_down_btn = QPushButton("↓ Move Down")
+        self._queues_add_btn = QPushButton("Add…")
+        self._queues_rename_btn = QPushButton("Rename…")
+        self._queues_color_btn = QPushButton("Color…")
+        self._queues_delete_btn = QPushButton("Delete…")
+        self._queues_up_btn.clicked.connect(lambda: self._move_selected_queue(-1))
+        self._queues_down_btn.clicked.connect(lambda: self._move_selected_queue(+1))
+        self._queues_add_btn.clicked.connect(self._on_add_queue)
+        self._queues_rename_btn.clicked.connect(self._on_rename_queue)
+        self._queues_color_btn.clicked.connect(self._on_change_queue_color)
+        self._queues_delete_btn.clicked.connect(self._on_delete_queue)
+        for btn in (self._queues_up_btn, self._queues_down_btn, self._queues_add_btn, self._queues_rename_btn, self._queues_color_btn, self._queues_delete_btn):
+            btn_row.addWidget(btn)
+        btn_row.addStretch(1)
+        queues_layout.addLayout(btn_row)
+
+        layout.addWidget(queues_group)
+        layout.addStretch()
+        self._reload_queues()
+        self._fit_queues_width_to_headers()
+        return tab
+
+    # -- Queue Manager methods --------------------------------------------------
+
+    def _reload_queues(self):
+        """Reload the queues table from the manager."""
+        if not self._manager or not hasattr(self._manager, 'get_queues'):
+            return
+        try:
+            queues = self._manager.get_queues()
+            counts = self._manager._db.get_queue_download_counts()
+        except (AttributeError, TypeError):
+            return
+        selected_id = self._selected_queue_id()
+
+        self._queues_table.blockSignals(True)
+        self._queues_table.setRowCount(0)
+        for queue in queues:
+            row = self._queues_table.rowCount()
+            self._queues_table.insertRow(row)
+            # Colour swatch + name in same cell
+            name_item = QTableWidgetItem(queue.name)
+            name_item.setData(Qt.ItemDataRole.UserRole, queue.id)
+            if queue.is_default:
+                name_item.setToolTip(
+                    "The default queue. Every download starts here unless another queue "
+                    "claims it. Its limits and colour are editable like any other."
+                )
+            self._queues_table.setItem(row, 0, name_item)
+            self._queues_table.setCellWidget(row, 0, self._name_cell(queue))
+            self._queues_table.setItem(
+                row, 1, QTableWidgetItem(str(counts.get(queue.id, 0)))
+            )
+            # Editors for each limit column
+            self._queues_table.setCellWidget(row, 2, self._limit_editor(queue))
+            self._queues_table.setCellWidget(
+                row, 3, self._bandwidth_editor(queue, upload=False)
+            )
+            self._queues_table.setCellWidget(
+                row, 4, self._bandwidth_editor(queue, upload=True)
+            )
+        self._queues_table.blockSignals(False)
+
+        self._refresh_queues_note()
+        if selected_id:
+            self._select_queue_id(selected_id)
+        self._on_queues_selection_changed()
+
+    def _name_cell(self, queue):
+        """The swatch plus the queue name, as one cell."""
+        holder = QWidget(self._queues_table)
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(4, 0, 4, 0)
+        row.setSpacing(8)
+
+        button = QPushButton(holder)
+        button.setFixedSize(22, 22)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        colour = normalize_queue_color(queue.color) or DEFAULT_QUEUE_COLOR
+        char = (queue.name or "").strip()[:1].upper()
+        button.setText(char)
+        qc = QColor(colour)
+        luminance = (0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()) / 255.0
+        text_color = "#000000" if luminance > 0.65 else "#ffffff"
+        button.setStyleSheet(
+            f"QPushButton {{ background-color: {colour}; color: {text_color}; "
+            f"font-weight: bold; font-size: 11px; border: 1px solid #555; "
+            f"border-radius: 4px; }}"
+            f"QPushButton:hover {{ border: 2px solid #fff; }}"
+        )
+        button.setToolTip(f"Colour for '{queue.name}'. Click to change it.")
+        button.clicked.connect(
+            lambda _checked=False, qid=queue.id: self._on_pick_queue_color(qid)
+        )
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        label = QLabel(queue.name, holder)
+        label.setToolTip(
+            f"'{queue.name}' - click the swatch to change its colour."
+        )
+        row.addWidget(label, 1)
+        return holder
+
+    def _limit_editor(self, queue):
+        spin = QSpinBox(self._queues_table)
+        spin.setRange(0, 99)
+        spin.setValue(max(0, queue.max_concurrent))
+        spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        spin.setToolTip(
+            "How many of this queue's downloads may run at once.\n"
+            "0 = follow the global limit (no limit of its own)."
+        )
+        spin.valueChanged.connect(
+            lambda value, qid=queue.id: self._on_queue_limit_changed(qid, value)
+        )
+        return spin
+
+    def _bandwidth_editor(self, queue, upload: bool):
+        stored = queue.upload_limit if upload else queue.download_limit
+        spin = QSpinBox(self._queues_table)
+        spin.setRange(0, 10_000_000)
+        spin.setSingleStep(64)
+        spin.setValue(max(0, int(stored or 0) // 1024))
+        spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        spin.setSuffix(" KB/s")
+        direction = "upload" if upload else "download"
+        spin.setToolTip(
+            f"Ceiling on this queue's total {direction} rate, in KB/s.\n"
+            "0 = follow the global limit (no limit of its own).\n"
+            "Where both are set, the tighter one wins."
+        )
+        spin.valueChanged.connect(
+            lambda value, qid=queue.id, up=upload: self._on_queue_bandwidth_changed(
+                qid, up, value * 1024
+            )
+        )
+        return spin
+
+    def _on_pick_queue_color(self, queue_id: str):
+        from PySide6.QtWidgets import QColorDialog
+
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        current = QColor(normalize_queue_color(queue.color) or DEFAULT_QUEUE_COLOR)
+        chosen = QColorDialog.getColor(current, self, f"Colour for '{queue.name}'")
+        if not chosen.isValid():
+            return
+        ok, message = self._manager.set_queue_color(queue_id, chosen.name())
+        if not ok and message:
+            self._result_message = message
+        self._reload_queues()
+
+    def _on_change_queue_color(self):
+        queue_id = self._selected_queue_id()
+        if queue_id:
+            self._on_pick_queue_color(queue_id)
+
+    def _selected_queue_id(self) -> str:
+        row = self._queues_table.currentRow()
+        if row < 0:
+            return ""
+        item = self._queues_table.item(row, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else ""
+
+    def _select_queue_id(self, queue_id: str):
+        for row in range(self._queues_table.rowCount()):
+            item = self._queues_table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == queue_id:
+                self._queues_table.selectRow(row)
+                return
+
+    def _on_queues_selection_changed(self):
+        queue_id = self._selected_queue_id()
+        queue = self._manager.get_queue(queue_id) if queue_id else None
+        is_default = bool(queue and queue.is_default)
+        self._queues_rename_btn.setEnabled(bool(queue) and not is_default)
+        self._queues_color_btn.setEnabled(bool(queue))
+        self._queues_delete_btn.setEnabled(bool(queue) and not is_default)
+        rows = self._queues_table.rowCount()
+        idx = self._queues_table.currentRow()
+        movable = rows - 1 if rows else 0
+        position = idx if idx > 0 else 0
+        self._queues_up_btn.setEnabled(bool(queue) and not is_default and position > 0)
+        self._queues_down_btn.setEnabled(bool(queue) and not is_default and position < movable - 1)
+
+    def _on_queue_limit_changed(self, queue_id: str, value: int):
+        self._manager.set_queue_max_concurrent(queue_id, value)
+        self._refresh_queues_note()
+
+    def _on_queue_bandwidth_changed(self, queue_id: str, upload: bool, value: int):
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        download = value if not upload else queue.download_limit
+        upload_limit = value if upload else queue.upload_limit
+        self._manager.set_queue_limits(queue_id, download, upload_limit)
+        self._refresh_queues_note()
+
+    def _move_selected_queue(self, delta: int):
+        queue_id = self._selected_queue_id()
+        if not queue_id:
+            return
+        self._manager.move_queue_in_list(queue_id, delta)
+        self._reload_queues()
+        self._select_queue_id(queue_id)
+
+    def _on_add_queue(self):
+        dlg = AddQueueDialog(self, manager=self._manager)
+        if not dlg.exec():
+            return
+        created, message = self._manager.create_queue(
+            dlg.name.strip(), dlg.max_concurrent, dlg.color,
+            dlg.download_limit_kb * 1024, dlg.upload_limit_kb * 1024,
+        )
+        self._result_message = message
+        if created:
+            self._reload_queues()
+            new_q = next((q for q in self._manager.get_queues() if q.name.lower() == dlg.name.strip().lower()), None)
+            if new_q:
+                self._select_queue_id(new_q.id)
+
+    def _on_rename_queue(self):
+        queue_id = self._selected_queue_id()
+        if not queue_id:
+            return
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        name, ok = QInputDialog.getText(
+            self, "Rename Queue", "Queue name:", QLineEdit.Normal, queue.name
+        )
+        if not ok:
+            return
+        renamed, message = self._manager.rename_queue(queue_id, name.strip())
+        self._result_message = message
+        if renamed:
+            self._reload_queues()
+            self._select_queue_id(queue_id)
+
+    def _on_delete_queue(self):
+        queue_id = self._selected_queue_id()
+        if not queue_id:
+            return
+        queue = self._manager.get_queue(queue_id)
+        if not queue:
+            return
+        moved = len(self._manager._db.get_all_downloads(queue_id))
+        if moved:
+            text = (
+                f"Delete '{queue.name}'?\n\n"
+                f"{moved} download(s) will move to the Default queue. Downloads are never "
+                "deleted with their queue."
+            )
+        else:
+            text = f"Delete the empty queue '{queue.name}'?"
+        if QMessageBox.question(self, "Delete Queue", text) != QMessageBox.StandardButton.Yes:
+            return
+        deleted, message = self._manager.delete_queue(queue_id)
+        self._result_message = message
+        if deleted:
+            self._reload_queues()
+
+    def _refresh_queues_note(self):
+        """Explain how a queue limit interacts with the global limit, with the live values."""
+        from my_idm.download_model import _format_speed
+
+        # Guard against mock managers without full config objects
+        if not self._manager or not hasattr(self._manager, 'general_config') or not hasattr(self._manager, 'network_config'):
+            return
+        try:
+            general = self._manager.general_config
+            net = self._manager.network_config
+            global_max = general.effective_max_concurrent
+            global_dl = net.download_limit or 0
+            global_ul = net.upload_limit or 0
+        except (AttributeError, TypeError):
+            return
+        # Additional guard: mock objects will have MagicMock attributes that fail comparison
+        if not isinstance(global_dl, (int, float)) or not isinstance(global_ul, (int, float)) or not isinstance(global_max, (int, float)):
+            return
+        dl_text = f"{_format_speed(global_dl)} (unlimited)" if global_dl > 0 else "unlimited"
+        ul_text = f"{_format_speed(global_ul)} (unlimited)" if global_ul > 0 else "unlimited"
+        self._queues_note.setText(
+            "A queue's limit caps how many of its own downloads run at once. "
+            "Leave it at 0 for Global: the queue adds no cap of its own and follows the "
+            f"global limit, currently {global_max} at a time "
+            "(Tools → Preferences → General & Downloads).\n"
+            "A download starts only when both its queue's limit and the global limit allow "
+            "it, so a queue limit is a ceiling and never a reservation. Default holds every "
+            "download that no other queue claims.\n"
+            f"The bandwidth limits are in KB/s and follow the same rule: 0 follows the global "
+            f"limit, currently {dl_text} down and {ul_text} up. Where both are set the tighter "
+            "one wins, so a queue can slow its downloads down but never speed them up past the "
+            "global limit. A download's own allocation (Low/Medium/High/Max) then takes its "
+            "share of that."
+        )
+
+    def _header_column_widths(self):
+        """Width each header needs, measured from this widget's own font."""
+        header = self._queues_table.horizontalHeader()
+        font = QFont(header.font())
+        if font.pixelSize() > 0:
+            font.setPixelSize(max(font.pixelSize(), 12))
+        else:
+            font.setPointSize(max(font.pointSize(), 10))
+        font.setWeight(QFont.Weight.DemiBold)
+        metrics = QFontMetrics(font)
+
+        style = self._queues_table.style()
+        padding = 2 * style.pixelMetric(QStyle.PixelMetric.PM_HeaderMargin) + 32
+
+        widths = []
+        headers = [
+            "Queue",
+            "Downloads",
+            "Max at once\n(0 = Global)",
+            "Download limit\n(0 = Global)",
+            "Upload limit\n(0 = Global)",
+        ]
+        for column, text in enumerate(headers):
+            widest = max(
+                max(metrics.horizontalAdvance(line), metrics.horizontalAdvance(line.upper()))
+                for line in text.split("\n")
+            )
+            min_widths = {
+                1: 110,
+                2: 120,
+                3: 160,
+                4: 160,
+            }
+            widths.append(max(widest + padding, min_widths.get(column, 0)))
+        return widths
+
+    def _fit_queues_width_to_headers(self):
+        """Size the columns and the window to what the headers actually need."""
+        widths = self._header_column_widths()
+        for column, width in enumerate(widths):
+            if column != 0:
+                self._queues_table.setColumnWidth(column, width)
+
+        margins = self.layout().contentsMargins()
+        style = self._queues_table.style()
+        chrome = (
+            margins.left()
+            + margins.right()
+            + 2 * self._queues_table.frameWidth()
+            + style.pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+        )
+        needed = sum(widths) + 170 + chrome
+
+        MAX_DIALOG_WIDTH = 1400
+        MIN_NAME_COLUMN_WIDTH = 170
+
+        if needed > MAX_DIALOG_WIDTH:
+            self._queues_table.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.Interactive
+            )
+            self._queues_table.setColumnWidth(0, widths[0])
+        else:
+            self._queues_table.horizontalHeader().setSectionResizeMode(
+                0, QHeaderView.ResizeMode.Stretch
+            )
+
+        self.setMinimumWidth(min(needed, MAX_DIALOG_WIDTH))
+        target = min(max(needed, self.width()), MAX_DIALOG_WIDTH)
+        if target != self.width():
+            self.resize(target, self.height())
 
     def _create_youtube_tab(self) -> QWidget:
         """YouTube / yt-dlp settings, split out of the combined External Tools tab.

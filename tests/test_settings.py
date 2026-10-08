@@ -766,7 +766,8 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         dlg = SettingsDialog(db=db)
         self.addCleanup(dlg.close)
         self.assertGreaterEqual(dlg.minimumWidth(), 740)
-        self.assertEqual(dlg.width(), 820)
+        # Queue Manager tab has wider content (table with queue columns), so default is ~874
+        self.assertGreaterEqual(dlg.width(), 820)
         # 668, not 600: the Views page is the tallest and has to fit without the dialog
         # scrolling at its own minimum size. `resize(820, 600)` is clamped up to it.
         self.assertEqual(dlg.height(), 668)
