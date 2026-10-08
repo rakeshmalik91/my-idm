@@ -3050,10 +3050,15 @@ class MainWindow(QMainWindow):
             1 for e in self._model.all_entries
             if e.status in ("downloading", "checking", "fetching_metadata")
         )
+        selected = len(self._selected_ids())
         if self._model.is_filtered():
-            self._count_label.setText(f"{visible} of {total_all} Downloads, {active} Active (Filtered)")
+            base = f"{visible} of {total_all} Downloads, {active} Active (Filtered)"
         else:
-            self._count_label.setText(f"{total_all} Downloads, {active} Active")
+            base = f"{total_all} Downloads, {active} Active"
+        if selected:
+            self._count_label.setText(f"{base} — {selected} Selected")
+        else:
+            self._count_label.setText(base)
 
     def _update_speed_label(self):
         down, up = self._model.get_aggregate_speeds()
@@ -3796,6 +3801,7 @@ class MainWindow(QMainWindow):
         self._details_panel.set_download_id(entry.id if entry else None)
         self._update_queue_status(entry)
         self._update_action_states()
+        self._update_count_label()
 
     def _update_queue_status(self, entry):
         """Show which queue the selected download belongs to.
