@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, date, timedelta
 from unittest.mock import MagicMock, patch
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
@@ -267,6 +268,7 @@ class TestBandwidthLimitsManager(unittest.TestCase):
         self.assertEqual(dl, 100)  # 50 + 50
 
 
+@pytest.mark.ui
 class TestBandwidthLimitDialog(unittest.TestCase):
     """Test BandwidthLimitDialog creation, validation, and acceptance."""
 
@@ -308,6 +310,25 @@ class TestBandwidthLimitDialog(unittest.TestCase):
         dlg.close()
         dlg.deleteLater()
 
+    def test_settings_dialog_bandwidth_tab_with_existing_limits(self):
+        """SettingsDialog must open and render table rows without error when limits exist in DB."""
+        self.db.create_bandwidth_limit(
+            queue_id="",
+            enabled=True,
+            limit_bytes=5 * 1024 * 1024 * 1024,
+            limit_type="monthly",
+            warning_percent=80,
+        )
+        dlg = SettingsDialog(db=self.db, initial_tab=TAB_BANDWIDTH)
+        self.assertEqual(dlg._bw_table.rowCount(), 1)
+        self.assertIn("5.0 GiB", dlg._bw_table.item(0, 2).text())
+        self.assertIn("0 Bytes / 5.0 GiB", dlg._bw_table.item(0, 4).text())
+        if getattr(dlg, "_probe_worker", None) is not None:
+            dlg._probe_worker.join(timeout=2.0)
+        dlg.close()
+        dlg.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()
+

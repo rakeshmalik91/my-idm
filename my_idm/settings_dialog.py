@@ -7,10 +7,10 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
-from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal, QTime
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QColor
+from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal, QTime, QRect
+from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QColor, QPixmap, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 import asyncio
 import aiohttp
+import humanize
 from my_idm.config import (
     GeneralConfig,
     TorConfig,
@@ -85,7 +86,23 @@ from my_idm.security import (
     scan_file,
 )
 
+from my_idm import fonts
+
 log = logging.getLogger(__name__)
+
+
+def _create_action_icon(emoji: str, size: int = 24) -> QIcon:
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+    font = fonts.emoji_font(12)
+    font.setPixelSize(int(size * 0.75))
+    p.setFont(font)
+    p.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, emoji)
+    p.end()
+    return QIcon(pix)
 
 #: Symbolic indices for the Preferences pages, in the order ``_setup_ui`` adds them.
 #:
@@ -2679,8 +2696,8 @@ class SettingsDialog(QDialog):
         bw_layout.setSpacing(12)
         bw_layout.setContentsMargins(14, 16, 14, 14)
 
-        # 8 columns: Queue, Enabled, Limit, Limit Type, Progress, Percetage for Warning, Edit, Delete
-        self._bw_table = QTableWidget(0, 8, self)
+        # 7 columns: Queue, Enabled, Limit, Limit Type, Progress, Percetage for Warning, Actions
+        self._bw_table = QTableWidget(0, 7, self)
         self._bw_table.setHorizontalHeaderLabels([
             "Queue",
             "Enabled",
@@ -2688,12 +2705,10 @@ class SettingsDialog(QDialog):
             "Limit Type",
             "Progress",
             "Percetage for Warning",
-            "Edit",
-            "Delete",
+            "Actions",
         ])
         _header = self._bw_table.horizontalHeader()
-        _line_height = _header.fontMetrics().height()
-        _header.setFixedHeight(_line_height + 10)
+        _header.setFixedHeight(34)
         themed_widget(
             _header,
             """
@@ -2703,10 +2718,9 @@ class SettingsDialog(QDialog):
                 border: none;
                 border-bottom: 2px solid {Colors.BORDER};
                 border-right: 1px solid {Colors.BORDER};
-                padding: 6px 10px;
+                padding: 4px 6px;
                 font-weight: 600;
-                font-size: 12px;
-                text-transform: uppercase;
+                font-size: 11px;
             }
             QHeaderView::section:hover {
                 color: {Colors.TEXT};
@@ -2721,13 +2735,20 @@ class SettingsDialog(QDialog):
         self._bw_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         _header.setStretchLastSection(False)
         _header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        _header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        _header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        _header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        _header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        _header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         _header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        _header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        _header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        _header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        _header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        _header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+
+        self._bw_table.setColumnWidth(0, 150)
+        self._bw_table.setColumnWidth(1, 80)
+        self._bw_table.setColumnWidth(2, 90)
+        self._bw_table.setColumnWidth(3, 105)
+        self._bw_table.setColumnWidth(4, 210)
+        self._bw_table.setColumnWidth(5, 175)
+        self._bw_table.setColumnWidth(6, 85)
         bw_layout.addWidget(self._bw_table)
 
         btn_row = QHBoxLayout()
@@ -2764,85 +2785,106 @@ class SettingsDialog(QDialog):
             limits = db.get_all_bandwidth_limits()
             queues = self._manager.get_queues() if self._manager and hasattr(self._manager, "get_queues") else db.get_queues()
             queue_names = {q.id: q.name for q in queues}
-        except Exception:
+        except Exception as exc:
+            log.warning("Failed to fetch bandwidth limits from database: %s", exc)
             return
 
         self._bw_table.blockSignals(True)
-        self._bw_table.setRowCount(0)
+        try:
+            self._bw_table.setRowCount(0)
 
-        for limit in limits:
-            row = self._bw_table.rowCount()
-            self._bw_table.insertRow(row)
+            for limit in limits:
+                row = self._bw_table.rowCount()
+                self._bw_table.insertRow(row)
 
-            qid = limit["queue_id"]
-            if not qid or qid == "global":
-                q_name = "Global (All Queues)"
-            else:
-                q_name = queue_names.get(qid, qid)
+                qid = limit["queue_id"]
+                if not qid or qid == "global":
+                    q_name = "Global (All Queues)"
+                else:
+                    q_name = queue_names.get(qid, qid)
 
-            # 0. Queue
-            item_q = QTableWidgetItem(q_name)
-            item_q.setData(Qt.ItemDataRole.UserRole, limit["id"])
-            if not qid or qid == "global":
-                font = item_q.font()
-                font.setBold(True)
-                item_q.setFont(font)
-            self._bw_table.setItem(row, 0, item_q)
+                # 0. Queue
+                item_q = QTableWidgetItem(q_name)
+                item_q.setData(Qt.ItemDataRole.UserRole, limit["id"])
+                if not qid or qid == "global":
+                    font = item_q.font()
+                    font.setBold(True)
+                    item_q.setFont(font)
+                self._bw_table.setItem(row, 0, item_q)
 
-            # 1. Enabled
-            cb_container = QWidget()
-            cb_layout = QHBoxLayout(cb_container)
-            cb_layout.setContentsMargins(0, 0, 0, 0)
-            cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cb = QCheckBox()
-            cb.setChecked(bool(limit["enabled"]))
-            cb.toggled.connect(lambda checked, l_id=limit["id"]: self._on_bw_toggle_enabled(l_id, checked))
-            cb_layout.addWidget(cb)
-            self._bw_table.setCellWidget(row, 1, cb_container)
+                # 1. Enabled
+                cb_container = QWidget()
+                cb_layout = QHBoxLayout(cb_container)
+                cb_layout.setContentsMargins(0, 0, 0, 0)
+                cb_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                cb = QCheckBox()
+                cb.setChecked(bool(limit["enabled"]))
+                cb.toggled.connect(lambda checked, l_id=limit["id"]: self._on_bw_toggle_enabled(l_id, checked))
+                cb_layout.addWidget(cb)
+                self._bw_table.setCellWidget(row, 1, cb_container)
 
-            # 2. Limit
-            lim_bytes = limit["limit_bytes"]
-            lim_text = humanize.naturalsize(lim_bytes, binary=True) if lim_bytes > 0 else "Unlimited"
-            item_lim = QTableWidgetItem(lim_text)
-            item_lim.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._bw_table.setItem(row, 2, item_lim)
+                # 2. Limit
+                lim_bytes = limit["limit_bytes"]
+                lim_text = humanize.naturalsize(lim_bytes, binary=True) if lim_bytes > 0 else "Unlimited"
+                item_lim = QTableWidgetItem(lim_text)
+                item_lim.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._bw_table.setItem(row, 2, item_lim)
 
-            # 3. Limit Type
-            pt = limit["limit_type"].capitalize()
-            item_pt = QTableWidgetItem(pt)
-            item_pt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._bw_table.setItem(row, 3, item_pt)
+                # 3. Limit Type
+                pt = limit["limit_type"].capitalize()
+                item_pt = QTableWidgetItem(pt)
+                item_pt.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._bw_table.setItem(row, 3, item_pt)
 
-            # 4. Progress
-            dl, ul = db.get_current_period_usage(qid, limit["limit_type"])
-            used = dl + ul
-            pct = (used / lim_bytes * 100) if lim_bytes > 0 else 0.0
-            prog_text = f"{humanize.naturalsize(used, binary=True)} / {lim_text} ({pct:.1f}%)"
-            item_prog = QTableWidgetItem(prog_text)
-            item_prog.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if pct >= 100.0:
-                item_prog.setForeground(QColor("#ef4444"))
-            elif pct >= limit["warning_percent"]:
-                item_prog.setForeground(QColor("#f59e0b"))
-            self._bw_table.setItem(row, 4, item_prog)
+                # 4. Progress
+                dl, ul = db.get_current_period_usage(qid, limit["limit_type"])
+                used = dl + ul
+                pct = (used / lim_bytes * 100) if lim_bytes > 0 else 0.0
+                prog_text = f"{humanize.naturalsize(used, binary=True)} / {lim_text} ({pct:.1f}%)"
+                item_prog = QTableWidgetItem(prog_text)
+                item_prog.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if pct >= 100.0:
+                    item_prog.setForeground(QColor("#ef4444"))
+                elif pct >= limit["warning_percent"]:
+                    item_prog.setForeground(QColor("#f59e0b"))
+                self._bw_table.setItem(row, 4, item_prog)
 
-            # 5. Percetage for Warning
-            warn_text = f"{limit['warning_percent']}%"
-            item_warn = QTableWidgetItem(warn_text)
-            item_warn.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._bw_table.setItem(row, 5, item_warn)
+                # 5. Percetage for Warning
+                warn_text = f"{limit['warning_percent']}%"
+                item_warn = QTableWidgetItem(warn_text)
+                item_warn.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._bw_table.setItem(row, 5, item_warn)
 
-            # 6. Edit button
-            btn_edit = QPushButton("✏️ Edit")
-            btn_edit.clicked.connect(lambda checked, l=limit: self._on_bw_edit_limit(l))
-            self._bw_table.setCellWidget(row, 6, btn_edit)
+                # 6. Actions (Edit & Delete buttons with QIcons)
+                actions_widget = QWidget()
+                actions_layout = QHBoxLayout(actions_widget)
+                actions_layout.setContentsMargins(4, 0, 4, 0)
+                actions_layout.setSpacing(6)
+                actions_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # 7. Delete button
-            btn_del = QPushButton("🗑️ Delete")
-            btn_del.clicked.connect(lambda checked, l_id=limit["id"]: self._on_bw_delete_limit(l_id))
-            self._bw_table.setCellWidget(row, 7, btn_del)
+                btn_edit = QPushButton()
+                btn_edit.setIcon(_create_action_icon("✏️", 18))
+                btn_edit.setIconSize(QSize(16, 16))
+                btn_edit.setFixedSize(30, 26)
+                btn_edit.setToolTip("Edit bandwidth limit")
+                btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_edit.clicked.connect(lambda checked, l=limit: self._on_bw_edit_limit(l))
+                actions_layout.addWidget(btn_edit)
 
-        self._bw_table.blockSignals(False)
+                btn_del = QPushButton()
+                btn_del.setIcon(_create_action_icon("🗑️", 18))
+                btn_del.setIconSize(QSize(16, 16))
+                btn_del.setFixedSize(30, 26)
+                btn_del.setToolTip("Delete bandwidth limit")
+                btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_del.clicked.connect(lambda checked, l_id=limit["id"]: self._on_bw_delete_limit(l_id))
+                actions_layout.addWidget(btn_del)
+
+                self._bw_table.setCellWidget(row, 6, actions_widget)
+        except Exception as exc:
+            log.warning("Error rendering bandwidth limits table: %s", exc)
+        finally:
+            self._bw_table.blockSignals(False)
 
     def _on_bw_toggle_enabled(self, limit_id: int, enabled: bool):
         db = self._db or (self._manager._db if self._manager else None)

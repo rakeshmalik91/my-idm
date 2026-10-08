@@ -976,6 +976,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self._act_add)
         toolbar.addSeparator()
         toolbar.addAction(self._act_resume)
+        toolbar.addAction(self._act_force_start)
         toolbar.addAction(self._act_pause)
         toolbar.addAction(self._act_stop)
         toolbar.addAction(self._act_start_seeding)
@@ -1045,9 +1046,8 @@ class MainWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
-        # Separate the search field from the force start and preferences buttons
+        # Separate the search field from the preferences button
         toolbar.addSeparator()
-        toolbar.addAction(self._act_force_start)
         toolbar.addAction(self._act_preferences)
 
         # Show only icons without text for playback and action buttons

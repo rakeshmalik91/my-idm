@@ -519,10 +519,10 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         self.assertIsInstance(btn, QToolButton)
         self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonIconOnly)
 
-        # Separator right before _act_force_start
-        idx = actions.index(self.win._act_force_start)
-        self.assertGreater(idx, 0)
-        self.assertTrue(actions[idx - 1].isSeparator())
+        # Force Start is right beside Resume
+        resume_idx = actions.index(self.win._act_resume)
+        force_start_idx = actions.index(self.win._act_force_start)
+        self.assertEqual(force_start_idx, resume_idx + 1)
 
         # Tools menu has Scheduler settings
         self.assertTrue(hasattr(self.win, "_act_scheduler_settings"))

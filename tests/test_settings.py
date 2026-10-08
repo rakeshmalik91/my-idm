@@ -919,8 +919,8 @@ class TestPreferencesDialogOpensTheNamedPage(ConfigIsolationMixin, unittest.Test
     def test_bandwidth_tab_has_expected_columns(self):
         dlg = self.dialog(initial_tab=TAB_BANDWIDTH)
         table = dlg._bw_table
-        self.assertEqual(table.columnCount(), 8)
-        headers = [table.horizontalHeaderItem(i).text() for i in range(8)]
+        self.assertEqual(table.columnCount(), 7)
+        headers = [table.horizontalHeaderItem(i).text() for i in range(7)]
         expected = [
             "Queue",
             "Enabled",
@@ -928,8 +928,7 @@ class TestPreferencesDialogOpensTheNamedPage(ConfigIsolationMixin, unittest.Test
             "Limit Type",
             "Progress",
             "Percetage for Warning",
-            "Edit",
-            "Delete",
+            "Actions",
         ]
         self.assertEqual(headers, expected)
 
