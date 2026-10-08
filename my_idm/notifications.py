@@ -254,3 +254,12 @@ def notify_torrent_files_added(filenames: list[str], source: str = "") -> bool:
     else:
         message = f"Added {len(filenames)} torrent files{where}"
     return show_notification(title, message, duration=5)
+
+
+def notify_backlog_downloads_picked(count: int) -> bool:
+    """Show notification when downloads are picked up from a backlog file."""
+    if count <= 0:
+        return False
+    title = "Backlog Processed"
+    message = f"Picked up {count} download{'s' if count != 1 else ''} from Backlog"
+    return show_notification(title, message, duration=5)

@@ -2389,6 +2389,9 @@ class MainWindow(QMainWindow):
             self._status_label.setText(
                 f"Loaded {count} download(s) from backlog"
             )
+            if count > 0:
+                from my_idm.notifications import notify_backlog_downloads_picked
+                notify_backlog_downloads_picked(count)
 
     def _on_about(self):
         # Reachable from the tray, where the window may be hidden; the dialog is

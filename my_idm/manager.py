@@ -3604,6 +3604,10 @@ class DownloadManager(QObject):
             except Exception as exc:
                 log.error("Error processing backlog file %s: %s", candidate, exc)
 
+        if total_added > 0:
+            from my_idm.notifications import notify_backlog_downloads_picked
+            notify_backlog_downloads_picked(total_added)
+
         return total_added
 
     # -- query ---------------------------------------------------------------
