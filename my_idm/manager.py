@@ -4297,6 +4297,10 @@ class DownloadManager(QObject):
         if current and current.status in ("paused", "stopped", "suspended") and status in ("queued", "downloading", "fetching_metadata"):
             log.debug("Ignoring status %s for %s torrent %s", status, current.status, download_id)
             return
+        if status in ("completed", "finished", "seeding") and current and current.total_size > 0:
+            prev = self._last_progress_bytes.get(download_id, current.downloaded_size)
+            if current.total_size > prev:
+                self.record_bandwidth_usage(download_id, downloaded_bytes=(current.total_size - prev))
         if (
             status in ("finished", "seeding")
             and self._security_config.scan_after_download

@@ -68,8 +68,10 @@ class StatsChartWidget(QWidget):
         self._update_tooltip()
 
     def _update_tooltip(self) -> None:
-        if self._bucket in ("5min", "minute"):
+        if self._bucket == "5min":
             unit = "5 minutes"
+        elif self._bucket == "minute":
+            unit = "minute"
         elif self._bucket == "hour":
             unit = "hour"
         elif self._bucket == "month":
@@ -77,9 +79,8 @@ class StatsChartWidget(QWidget):
         else:
             unit = "day of month"
         self.setToolTip(
-            f"Grouped by {unit}. Bytes are counted when a download was added, not when they "
-            "arrived: a large file added on the 1st and finished on the 5th appears "
-            "entirely on the 1st."
+            f"Grouped by {unit}. Tracks actual bytes transferred during each interval "
+            "(instead of only when downloads were added)."
         )
 
     def set_days(self, days: Sequence[tuple[str, DownloadStats]], bucket: str = "day") -> None:

@@ -917,6 +917,18 @@ CREATE TABLE IF NOT EXISTS segments (
 
             CREATE INDEX IF NOT EXISTS idx_bandwidth_limits_queue ON bandwidth_limits(queue_id);
             CREATE INDEX IF NOT EXISTS idx_bandwidth_usage_queue_period ON bandwidth_usage(queue_id, period_type, period_start);
+
+            -- Bandwidth history tracking in 5-minute intervals for statistics
+            CREATE TABLE IF NOT EXISTS bandwidth_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                queue_id        TEXT NOT NULL DEFAULT '',
+                period_start    TEXT NOT NULL,  -- 'YYYY-MM-DD HH:MM' in local time (5-min bucket)
+                downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+                uploaded_bytes   INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(queue_id, period_start)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_bandwidth_history_period ON bandwidth_history(period_start);
         """)
 
         # Migration check for columns in existing databases
@@ -975,6 +987,9 @@ CREATE TABLE IF NOT EXISTS segments (
             "UPDATE downloads SET downloaded_size = total_size "
             "WHERE status IN ('completed', 'seeding') AND total_size > 0 AND (downloaded_size <= 0 OR downloaded_size < total_size)"
         )
+
+        # Backfill bandwidth_history from downloads if empty
+        self._backfill_bandwidth_history_if_empty()
 
         self._conn.commit()
 
@@ -1409,6 +1424,92 @@ CREATE TABLE IF NOT EXISTS segments (
             return d.replace(day=1).isoformat()
         return d.isoformat()
 
+    def _get_5min_bucket(self, now: Optional[Union[datetime, date, str]] = None) -> str:
+        """Get the 'YYYY-MM-DD HH:MM' 5-minute bucket string in local time."""
+        if now is None:
+            now_dt = datetime.now().astimezone()
+        elif isinstance(now, datetime):
+            now_dt = now.astimezone() if now.tzinfo is not None else now
+        elif isinstance(now, date):
+            now_dt = datetime.combine(now, time(0, 0))
+        elif isinstance(now, str):
+            try:
+                dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+                now_dt = dt.astimezone() if dt.tzinfo is not None else dt
+            except Exception:
+                now_dt = datetime.now().astimezone()
+        else:
+            now_dt = datetime.now().astimezone()
+
+        minute = (now_dt.minute // 5) * 5
+        return f"{now_dt.strftime('%Y-%m-%d %H')}:{minute:02d}"
+
+    def add_bandwidth_history(self, queue_id: str, period_start: str,
+                              downloaded_bytes: int = 0, uploaded_bytes: int = 0) -> None:
+        """Add or update bandwidth history in a 5-minute bucket."""
+        if downloaded_bytes <= 0 and uploaded_bytes <= 0:
+            return
+        qid = queue_id if queue_id else "default"
+        self._conn.execute(
+            "INSERT INTO bandwidth_history (queue_id, period_start, downloaded_bytes, uploaded_bytes) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(queue_id, period_start) DO UPDATE SET "
+            "downloaded_bytes = downloaded_bytes + excluded.downloaded_bytes, "
+            "uploaded_bytes = uploaded_bytes + excluded.uploaded_bytes",
+            (qid, period_start, downloaded_bytes, uploaded_bytes),
+        )
+        self._conn.commit()
+
+    def get_bandwidth_history(self, period_start: str, queue_id: str = "") -> Optional[dict]:
+        """Get bandwidth history for a specific queue (or aggregate if empty) and period_start."""
+        if queue_id:
+            row = self._conn.execute(
+                "SELECT * FROM bandwidth_history WHERE queue_id = ? AND period_start = ?",
+                (queue_id, period_start),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT SUM(downloaded_bytes) AS downloaded_bytes, SUM(uploaded_bytes) AS uploaded_bytes "
+                "FROM bandwidth_history WHERE period_start = ?",
+                (period_start,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _backfill_bandwidth_history_if_empty(self) -> None:
+        """Seed bandwidth_history from existing downloads if bandwidth_history has no records."""
+        try:
+            count = self._conn.execute("SELECT COUNT(*) FROM bandwidth_history").fetchone()[0]
+            if count > 0:
+                return
+            rows = self._conn.execute(
+                "SELECT queue_id, total_size, downloaded_size, uploaded_size, status, added_at, completed_at "
+                "FROM downloads WHERE (downloaded_size > 0 OR total_size > 0 OR uploaded_size > 0)"
+            ).fetchall()
+            for r in rows:
+                dl = r["downloaded_size"] if r["downloaded_size"] > 0 else (r["total_size"] if r["status"] in COMPLETE_STATUSES else 0)
+                ul = int(r["uploaded_size"] or 0)
+                if dl <= 0 and ul <= 0:
+                    continue
+                ts = r["completed_at"] or r["added_at"]
+                if not ts:
+                    continue
+                try:
+                    bucket = self._get_5min_bucket(ts)
+                except Exception:
+                    continue
+                qid = r["queue_id"] or "default"
+                self._conn.execute(
+                    "INSERT INTO bandwidth_history (queue_id, period_start, downloaded_bytes, uploaded_bytes) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(queue_id, period_start) DO UPDATE SET "
+                    "downloaded_bytes = downloaded_bytes + excluded.downloaded_bytes, "
+                    "uploaded_bytes = uploaded_bytes + excluded.uploaded_bytes",
+                    (qid, bucket, dl, ul),
+                )
+            self._conn.commit()
+        except Exception as exc:
+            log.debug("Failed to seed bandwidth_history: %s", exc)
+
     def check_bandwidth_limit(self, queue_id: str = "", bytes_to_add: int = 0,
                               is_upload: bool = False,
                               now: Optional[Union[datetime, date]] = None) -> tuple[bool, str, float]:
@@ -1489,6 +1590,9 @@ CREATE TABLE IF NOT EXISTS segments (
             for period_type in ("daily", "weekly", "monthly"):
                 period_start = self._get_period_start(period_type, now)
                 self.add_bandwidth_usage(target_qid, period_type, period_start, downloaded_bytes, uploaded_bytes)
+            # Record in bandwidth_history (5-minute bucket in local time)
+            bucket_5m = self._get_5min_bucket(now)
+            self.add_bandwidth_history(target_qid, bucket_5m, downloaded_bytes, uploaded_bytes)
 
         return self.check_bandwidth_limit(target_qid, 0, False, now)
 
@@ -1751,6 +1855,24 @@ CREATE TABLE IF NOT EXISTS segments (
             f"FROM downloads{where}",
             params,
         ).fetchone()
+
+        has_bw = self._conn.execute("SELECT 1 FROM bandwidth_history LIMIT 1").fetchone() is not None
+        if has_bw:
+            bw_where = " WHERE period_start >= ?" if since is not None else ""
+            bw_params = [since] if since is not None else []
+            bw_row = self._conn.execute(
+                f"SELECT COALESCE(SUM(downloaded_bytes), 0) AS downloaded, "
+                f"       COALESCE(SUM(uploaded_bytes), 0) AS uploaded "
+                f"FROM bandwidth_history{bw_where}",
+                bw_params,
+            ).fetchone()
+            return DownloadStats(
+                count=int(row["count"] or 0),
+                downloaded=int(bw_row["downloaded"] or 0),
+                uploaded=int(bw_row["uploaded"] or 0),
+                completed=int(row["completed"] or 0),
+            )
+
         return self._stats_row_to_bucket(row)
 
     def get_download_stats(
@@ -1867,7 +1989,40 @@ CREATE TABLE IF NOT EXISTS segments (
             "GROUP BY bucket ORDER BY bucket",
             params,
         ).fetchall()
-        raw_series = tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
+
+        has_bw = self._conn.execute("SELECT 1 FROM bandwidth_history LIMIT 1").fetchone() is not None
+        if has_bw:
+            bw_where = ""
+            bw_params = []
+            if since is not None:
+                bw_where = f" WHERE substr(period_start, 1, {width}) >= ?"
+                bw_params.append(since_str)
+            bw_rows = self._conn.execute(
+                f"SELECT substr(period_start, 1, {width}) AS bucket, "
+                "       COALESCE(SUM(downloaded_bytes), 0) AS downloaded, "
+                "       COALESCE(SUM(uploaded_bytes), 0) AS uploaded "
+                f"FROM bandwidth_history{bw_where} "
+                "GROUP BY bucket ORDER BY bucket",
+                bw_params,
+            ).fetchall()
+            bw_map = {str(r["bucket"]): (int(r["downloaded"] or 0), int(r["uploaded"] or 0)) for r in bw_rows}
+            dl_map = {str(r["bucket"]): (int(r["count"] or 0), int(r["completed"] or 0)) for r in rows}
+            all_buckets = sorted(set(bw_map.keys()) | set(dl_map.keys()))
+            raw_series = tuple(
+                (
+                    b,
+                    DownloadStats(
+                        count=dl_map.get(b, (0, 0))[0],
+                        downloaded=bw_map.get(b, (0, 0))[0],
+                        uploaded=bw_map.get(b, (0, 0))[1],
+                        completed=dl_map.get(b, (0, 0))[1],
+                    )
+                )
+                for b in all_buckets
+            )
+        else:
+            raw_series = tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
+
         if fill_gaps:
             return fill_series_gaps(raw_series, bucket, start=since, end=today)
         return raw_series

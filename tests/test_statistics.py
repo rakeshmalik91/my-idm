@@ -1607,5 +1607,115 @@ class TestStatsGapFilling(StatsTestCase):
         self.assertTrue(all(s.count == 0 for _, s in snap.series))
 
 
+
+class TestTransferredBytesStatistics(StatsTestCase):
+    def test_download_queued_in_past_tracks_bytes_transferred_today(self):
+        """A download added 5 days ago, but transferred today, counts its bytes under today."""
+        # Added 5 days ago with 0 downloaded size initially
+        self.db.add_download(DownloadEntry(
+            id="old_item",
+            url="https://example.com/big.iso",
+            filename="big.iso",
+            save_path="C:/t",
+            total_size=10 * GB,
+            downloaded_size=0,
+            status="downloading",
+            added_at=iso(5),
+        ))
+
+        # Bytes actually transferred today
+        now_today = datetime.combine(TODAY, time(14, 0))
+        self.db.record_bandwidth("default", downloaded_bytes=500 * MB, uploaded_bytes=50 * MB, now=now_today)
+
+        snap = self.db.get_download_stats(TODAY, since=TODAY - timedelta(days=6), bucket="day")
+
+        # Today's bucket should show the 500 MB downloaded today
+        self.assertEqual(snap.today.downloaded, 500 * MB)
+        self.assertEqual(snap.today.uploaded, 50 * MB)
+        # Count of downloads added today is 0 (it was added 5 days ago)
+        self.assertEqual(snap.today.count, 0)
+        # Lifetime has 1 download and 500 MB downloaded
+        self.assertEqual(snap.lifetime.count, 1)
+        self.assertEqual(snap.lifetime.downloaded, 500 * MB)
+
+        # In daily series, day 5 ago has count 1 but 0 bytes; today has count 0 but 500 MB bytes
+        series_map = {day: s for day, s in snap.series}
+        day_5_ago = (TODAY - timedelta(days=5)).isoformat()
+        day_today = TODAY.isoformat()
+
+        self.assertIn(day_5_ago, series_map)
+        self.assertEqual(series_map[day_5_ago].count, 1)
+        self.assertEqual(series_map[day_5_ago].downloaded, 0)
+
+        self.assertIn(day_today, series_map)
+        self.assertEqual(series_map[day_today].count, 0)
+        self.assertEqual(series_map[day_today].downloaded, 500 * MB)
+        self.assertEqual(series_map[day_today].uploaded, 50 * MB)
+
+    def test_bandwidth_history_5min_and_hourly_bucketing(self):
+        """Transfers at distinct times land in their respective 5min and hour buckets."""
+        dt1 = datetime.combine(TODAY, time(10, 12))  # 5-min bucket 10:10, hour 10
+        dt2 = datetime.combine(TODAY, time(10, 48))  # 5-min bucket 10:45, hour 10
+        dt3 = datetime.combine(TODAY, time(14, 5))   # 5-min bucket 14:05, hour 14
+
+        self.db.record_bandwidth("default", downloaded_bytes=100 * MB, now=dt1)
+        self.db.record_bandwidth("default", downloaded_bytes=200 * MB, now=dt2)
+        self.db.record_bandwidth("default", downloaded_bytes=300 * MB, now=dt3)
+
+        # Check 5min series
+        snap_5m = self.db.get_download_stats(TODAY, since=TODAY, bucket="5min")
+        series_5m = {b: s.downloaded for b, s in snap_5m.series if s.downloaded > 0}
+        b1 = f"{TODAY.isoformat()} 10:10"
+        b2 = f"{TODAY.isoformat()} 10:45"
+        b3 = f"{TODAY.isoformat()} 14:05"
+        self.assertEqual(series_5m.get(b1), 100 * MB)
+        self.assertEqual(series_5m.get(b2), 200 * MB)
+        self.assertEqual(series_5m.get(b3), 300 * MB)
+
+        # Check hour series
+        snap_hr = self.db.get_download_stats(TODAY, since=TODAY, bucket="hour")
+        series_hr = {b: s.downloaded for b, s in snap_hr.series if s.downloaded > 0}
+        h1 = f"{TODAY.isoformat()} 10"
+        h2 = f"{TODAY.isoformat()} 14"
+        self.assertEqual(series_hr.get(h1), 300 * MB)  # 100 + 200 MB in hour 10
+        self.assertEqual(series_hr.get(h2), 300 * MB)  # 300 MB in hour 14
+
+    def test_backfill_bandwidth_history_from_legacy_downloads(self):
+        """When opening a database that has existing downloads, bandwidth_history is populated."""
+        db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        db_file.close()
+        try:
+            # 1. Create a DB and add downloads without bandwidth_history
+            db1 = Database(db_file.name)
+            db1.open()
+            db1.add_download(DownloadEntry(
+                id="leg1",
+                url="https://example.com/leg1.bin",
+                filename="leg1.bin",
+                save_path="C:/t",
+                total_size=1 * GB,
+                downloaded_size=1 * GB,
+                status="completed",
+                added_at=iso(2),
+            ))
+            # Delete any bandwidth_history rows to simulate legacy pre-migration DB
+            db1._conn.execute("DELETE FROM bandwidth_history")
+            db1._conn.commit()
+            db1.close()
+
+            # 2. Re-open DB — _init_db will trigger _backfill_bandwidth_history_if_empty
+            db2 = Database(db_file.name)
+            db2.open()
+            try:
+                count = db2._conn.execute("SELECT COUNT(*) FROM bandwidth_history").fetchone()[0]
+                self.assertGreater(count, 0, "bandwidth_history should be backfilled from existing downloads")
+                snap = db2.get_download_stats(TODAY)
+                self.assertEqual(snap.lifetime.downloaded, 1 * GB)
+            finally:
+                db2.close()
+        finally:
+            os.unlink(db_file.name)
+
+
 if __name__ == "__main__":
     unittest.main()
