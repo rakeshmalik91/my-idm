@@ -684,6 +684,7 @@ class DetailsPanel(QWidget):
         self._manager.download_added.connect(self._on_download_event_for_queues)
         self._manager.download_removed.connect(self._on_download_event_for_queues)
         self._manager.queue_order_changed.connect(self._on_download_event_for_queues)
+        self._manager.checksum_computed.connect(self._on_checksum_computed)
         if self._manager.is_animepahe_running():
             self._browser_monitor_timer.start()
         self._update_queues()
@@ -2205,6 +2206,10 @@ class DetailsPanel(QWidget):
 
             status_str = self._get_file_status(f, self._current_entry)
             item.setText(4, _to_str(status_str).capitalize())
+            checksum = f.get("checksum") or (self._current_entry.content_hash if self._current_entry else "")
+            if checksum:
+                item.setToolTip(0, f"{item.text(0)}\nSHA-256: {checksum}")
+                item.setToolTip(4, f"SHA-256: {checksum}")
 
             if is_torrent:
                 curr_prio = f.get("priority", 4)
@@ -2511,7 +2516,7 @@ class DetailsPanel(QWidget):
         if not item or not self._download_id:
             return
         entry = self._manager.get_entry(self._download_id)
-        if not entry or entry.download_type != "torrent":
+        if not entry:
             return
 
         selected_items = self._tree_files.selectedItems()
@@ -2519,6 +2524,18 @@ class DetailsPanel(QWidget):
             selected_items = [item]
 
         menu = QMenu(self)
+        f_data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        checksum = f_data.get("checksum") or (entry.content_hash if entry else "")
+        if checksum:
+            act_copy_hash = menu.addAction(f"Copy SHA-256 Checksum")
+            act_copy_hash.triggered.connect(lambda: self._copy_to_clipboard(checksum))
+            menu.addSeparator()
+
+        if entry.download_type != "torrent":
+            if not menu.isEmpty():
+                menu.exec(self._tree_files.viewport().mapToGlobal(pos))
+            return
+
         prio_menu = menu.addMenu("Bandwidth Allocation / Priority")
         options = [
             ("Max (100%)", 7),
@@ -3118,6 +3135,16 @@ class DetailsPanel(QWidget):
     def _on_download_event_for_queues(self, *args):
         if self.current_mode() == "queues":
             self._update_queues()
+
+    def _on_checksum_computed(self, download_id: str, checksum: str):
+        if self._download_id == download_id:
+            if hasattr(self, "_ov_hash"):
+                self._ov_hash.setText(checksum)
+                if hasattr(self, "_ov_hash_copy_btn"):
+                    self._ov_hash_copy_btn.setVisible(True)
+            if self._current_entry:
+                self._current_entry.content_hash = checksum
+                self._update_files(self._current_entry)
 
     def refresh_queues(self):
         """Refresh live queues table stats and speeds."""

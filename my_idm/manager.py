@@ -531,6 +531,7 @@ class DownloadManager(QObject):
     scheduler_config_changed = Signal(object)  # SchedulerConfig
     #: (paths) — local .torrent files the watched folder yielded, for the UI to report.
     torrent_folder_captured = Signal(list)
+    checksum_computed = Signal(str, str)  # download_id, checksum
 
     def __init__(self, db: Database, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -1234,6 +1235,8 @@ class DownloadManager(QObject):
         )
         if self._security_config.scan_after_download and self._security_config.scan_timing == "after_complete":
             self._handle_completed_scan(download_id)
+        else:
+            self._compute_and_save_checksum(download_id)
         self._process_queue()
 
     def _on_ytdlp_error(self, download_id: str, message: str):
@@ -3841,7 +3844,33 @@ class DownloadManager(QObject):
                     entry.total_size > 0
                     and actual_downloaded >= entry.total_size
                 ):
-                    # Fully written — confirm completed
+                    # Fully written — verify checksum if previously recorded
+                    from my_idm.utils import compute_file_sha256
+                    if entry.content_hash:
+                        try:
+                            current_hash = compute_file_sha256(fp)
+                            if current_hash != entry.content_hash:
+                                log.warning(
+                                    "Checksum mismatch on recheck for %s: expected %s, got %s",
+                                    download_id, entry.content_hash, current_hash,
+                                )
+                                entry.status = "error"
+                                entry.error_message = "Checksum verification failed: file corrupted or modified on disk"
+                                self._db.update_download(entry)
+                                self.status_changed.emit(download_id, "error", entry.error_message)
+                                self._process_queue()
+                                return
+                        except Exception as exc:
+                            log.warning("Could not compute checksum on recheck for %s: %s", download_id, exc)
+                    else:
+                        try:
+                            entry.content_hash = compute_file_sha256(fp)
+                            self._db.update_download(entry)
+                            self.checksum_computed.emit(download_id, entry.content_hash)
+                        except Exception as exc:
+                            log.debug("Could not backfill checksum on recheck for %s: %s", download_id, exc)
+
+                    # Fully written & verified — confirm completed
                     self._db.update_status(download_id, "completed")
                     self._db.update_progress(download_id, actual_downloaded)
                     self.status_changed.emit(download_id, "completed", "")
@@ -4201,6 +4230,8 @@ class DownloadManager(QObject):
             self._handle_completed_scan(download_id)
         else:
             self.status_changed.emit(download_id, status, error_msg)
+            if status == "completed":
+                self._compute_and_save_checksum(download_id)
         if status in ("completed", "paused", "stopped", "error"):
             self._last_progress_bytes.pop(download_id, None)
             self._process_queue()
@@ -4292,12 +4323,40 @@ class DownloadManager(QObject):
                     if h:
                         self._torrent._apply_seeding_limit_to_handle(h)
                 self.status_changed.emit(download_id, final_status, report)
+                if final_status == "completed" and not is_torrent:
+                    self._compute_and_save_checksum(download_id)
             except Exception as exc:
                 log.debug("Antivirus scan background task error for %s: %s", download_id, exc)
 
         threading.Thread(
             target=_do_scan, daemon=True, name=f"scan-{download_id}"
         ).start()
+
+    def _compute_and_save_checksum(self, download_id: str):
+        """Asynchronously compute SHA-256 for a completed file and persist it."""
+        def _worker():
+            try:
+                entry = self._db.get_download(download_id)
+                if not entry or entry.download_type == "torrent":
+                    return
+                if not entry.file_path and entry.filename and entry.save_path:
+                    entry.file_path = str(Path(entry.save_path) / entry.filename)
+                if not entry.file_path:
+                    return
+                p = Path(entry.file_path)
+                if not p.is_file():
+                    return
+                from my_idm.utils import compute_file_sha256
+                digest = compute_file_sha256(p)
+                entry = self._db.get_download(download_id)
+                if entry:
+                    entry.content_hash = digest
+                    self._db.update_download(entry)
+                    self.checksum_computed.emit(download_id, digest)
+            except Exception as exc:
+                log.debug("Error computing checksum for %s: %s", download_id, exc)
+
+        threading.Thread(target=_worker, name=f"hash-{download_id}", daemon=True).start()
 
     def scan_download_file(self, download_id: str):
         """Perform on-demand antivirus scan of a downloaded file."""
@@ -4386,6 +4445,7 @@ class DownloadManager(QObject):
             "priority": 4,
             "priority_label": "Normal",
             "status": entry.status,
+            "checksum": entry.content_hash or "",
         }]
 
     def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:

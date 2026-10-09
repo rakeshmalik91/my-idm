@@ -1889,6 +1889,7 @@ class MainWindow(QMainWindow):
         self._manager.torrent_folder_captured.connect(self._on_watched_folder_torrents)
         self._manager.download_removed.connect(self._on_download_removed)
         self._manager.download_moved.connect(self._on_download_moved)
+        self._manager.checksum_computed.connect(self._on_checksum_computed)
         self._manager.download_renamed.connect(self._on_download_renamed)
         self._manager.download_url_updated.connect(self._on_download_url_updated)
         self._manager.network_config_changed.connect(
@@ -2926,6 +2927,13 @@ class MainWindow(QMainWindow):
 
     def _on_filename_resolved(self, download_id: str, filename: str):
         self._model.update_filename(download_id, filename)
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
+            self._details_panel.refresh()
+
+    def _on_checksum_computed(self, download_id: str, checksum: str):
+        fresh = self._manager.get_entry(download_id)
+        if fresh is not None:
+            self._model.refresh_entry(download_id, fresh)
         if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
             self._details_panel.refresh()
 

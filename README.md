@@ -68,36 +68,6 @@ python -m my_idm.main # Or direct python execution
 
 ---
 
-## 📺 Downloading YouTube & Video-Site Videos
-
-My-IDM never speaks YouTube's protocols directly — all extraction is delegated to [`yt-dlp`](https://github.com/yt-dlp/yt-dlp), which is bundled as a Python library.
-
-**Three ways in:**
-
-1. **Paste** — open **Add Download** (<kbd>Ctrl</kbd>+<kbd>N</kbd>), paste a YouTube link, then click **Open YouTube Downloader** in the banner that appears.
-2. **Menu** — **Tools → Download YouTube Video…** (<kbd>Ctrl</kbd>+<kbd>Y</kbd>).
-3. **System tray** — right-click the tray icon → **➕ Add Download…**.
-
-**How it downloads:** two engines are used, chosen automatically.
-
-| Mode | Engine | When it is used |
-|---|---|---|
-| **A** | My-IDM's own HTTP engine | Audio-only streams. The CDN URL is handed to `HTTPEngine`, so you keep segmented, resumable, throttled and VPN/Tor-aware downloading. |
-| **B** | `yt-dlp` + `ffmpeg` | Video. YouTube serves video and audio as *separate* streams that must be merged by ffmpeg. |
-
-> [!NOTE]
-> YouTube no longer offers combined video+audio files, so **video always uses Mode B**. Audio-only downloads use Mode A and get My-IDM's full download manager treatment.
-
-**Playlists & channels** are listed with checkboxes. Listing one costs at most **two** network requests regardless of playlist size — one flat request for the list, plus one to resolve the first video's formats — and a quality preset applies to every selected video.
-
-**Requirements:** `yt-dlp` is a declared dependency (`pip install -r requirements.txt`). `ffmpeg` is needed to merge video and audio; it is auto-detected on `PATH`, and its location plus the `yt-dlp` binary can be set in **Tools → Preferences → External Tools → YouTube**, which also offers an **Update yt-dlp** button and a live ✓/✗ validity check for both tools.
-
-Private, members-only, age-restricted, and geo-restricted videos need a browser cookie source — also configurable in that settings tab. **Cookie access exposes your account credentials to yt-dlp, so use a throwaway account.**
-
-See the **[YouTube Scraper Architecture](docs/architecture/youtube-scraper.md)** for the full design, including the Mode A/B decision logic and its measured API cost.
-
----
-
 ## ⌨️ Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -136,11 +106,11 @@ run_all_tests.bat
 There are two tiers, because the UI tests interfere with the desktop if you are using the
 machine while they run.
 
-| Command | What it runs | Time |
-| :--- | :--- | :---: |
-| `run_all_tests.bat basic` | Everything **except** the UI, system-tray and clipboard tests. Opens no window, steals no focus, and never touches your real clipboard — so you can leave it running in the background. | ~52 s |
-| `run_all_tests.bat` or `run_all_tests.bat full` | The whole suite. **Run this before committing.** | ~3.5 min |
-| `run_all_tests.bat ui` | Only the UI, tray and clipboard tests. | ~2 min 20 s |
+| Command                                         | What it runs                                                                                                                                                                            | Time        |
+| :------------------------------------------------| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| :-----------:|
+| `run_all_tests.bat basic`                       | Everything **except** the UI, system-tray and clipboard tests. Opens no window, steals no focus, and never touches your real clipboard — so you can leave it running in the background. | ~52 s       |
+| `run_all_tests.bat` or `run_all_tests.bat full` | The whole suite. **Run this before committing.**                                                                                                                                        | ~3.5 min    |
+| `run_all_tests.bat ui`                          | Only the UI, tray and clipboard tests.                                                                                                                                                  | ~2 min 20 s |
 
 ---
 
