@@ -290,7 +290,7 @@ My-IDM includes a rich, collapsible bottom details panel separated from the main
 
 ### Tab Breakdown
 
-When any download is selected in the main table, the panel updates dynamically across five dedicated tabs:
+When any download is selected in the main table, the panel updates dynamically across six dedicated tabs:
 
 1. **📋 Overview**:
    - **Status & Progress**: Color-coded download state with error details and completion percentage.
@@ -322,6 +322,13 @@ When any download is selected in the main table, the panel updates dynamically a
 5. **🧩 Segments**:
    - HTTP parallel segment breakdown.
    - Columns: `Segment #`, `Byte Range` (start byte to end byte), `Downloaded Bytes`, `Progress Bar`, and `Status` (downloading, completed, pending).
+
+6. **🗂️ Queues**:
+   - Live overview of all configured named queues with color indicators.
+   - Columns: `Queue`, `Status`, `Downloads` (active / total breakdown), `Speed` (combined download & upload rates), `Max at Once`, `Download Limit` (KB/s), `Upload Limit` (KB/s), and `Actions`.
+   - **Editable Limits**: Concurrency ("Max at Once") and bandwidth limits are directly editable via embedded spinboxes in each row, updating SQLite and active limiters immediately.
+   - **Separate Pause & Resume**: Individual `⏸ Pause` and `▶ Resume` buttons allow pausing and resuming each queue independently without affecting others.
+   - **Scope Filter**: Double-clicking any queue row filters the main downloads list to that queue.
 
 ---
 

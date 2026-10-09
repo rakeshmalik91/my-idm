@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStyle,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -45,7 +46,7 @@ from PySide6.QtWidgets import (
 
 logger = logging.getLogger("my_idm.details_panel")
 
-from my_idm.database import DownloadEntry
+from my_idm.database import DEFAULT_QUEUE_ID, DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
 from my_idm.external_tools import embedded_browser_supported, find_chrome_hwnd
 from my_idm.manager import DownloadManager
@@ -618,15 +619,19 @@ class DetailsPanel(QWidget):
         self._log_timer.setInterval(250)
         self._log_timer.timeout.connect(self._poll_console_log)
 
+        self._queue_row_widgets: dict[str, dict[str, Any]] = {}
+
         self._is_browser_floating: bool = False
         self._browser_monitor_timer = QTimer(self)
         self._browser_monitor_timer.setInterval(300)
         self._browser_monitor_timer.timeout.connect(self._on_browser_monitor_tick)
 
         self._setup_ui()
+        self._manager.queues_changed.connect(self._update_queues)
         self._manager.animepahe_status_changed.connect(self.on_animepahe_status_changed)
         if self._manager.is_animepahe_running():
             self._browser_monitor_timer.start()
+        self._update_queues()
 
     def paintEvent(self, event):
         opt = QStyleOption()
@@ -738,6 +743,10 @@ class DetailsPanel(QWidget):
         # 5. Segments Tab
         self._tab_segments = self._create_segments_tab()
         self._tabs.addTab(self._tab_segments, "🧩 Segments")
+
+        # 6. Queues Tab
+        self._tab_queues = self._create_queues_tab()
+        self._tabs.addTab(self._tab_queues, "🗂️ Queues")
 
         self._tabs.currentChanged.connect(self._on_details_tab_changed)
         self._mode_stack.addWidget(self._tabs)
@@ -973,6 +982,375 @@ class DetailsPanel(QWidget):
         layout.addWidget(self._table_segments)
         return container
 
+    def _create_queues_tab(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        self._lbl_queues_status = QLabel(
+            "Named download queues, concurrency budgets, and limits. Pause or resume each queue individually below.",
+            container,
+        )
+        self._lbl_queues_status.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
+        layout.addWidget(self._lbl_queues_status)
+
+        self._table_queues = QTableWidget(0, 8, container)
+        self._table_queues.setHorizontalHeaderLabels([
+            "Queue", "Status", "Downloads", "Speed", "Max at Once", "Download Limit", "Upload Limit", "Actions"
+        ])
+        header = self._table_queues.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self._table_queues.setColumnWidth(4, 100)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self._table_queues.setColumnWidth(5, 125)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
+        self._table_queues.setColumnWidth(6, 125)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+
+        self._table_queues.verticalHeader().setVisible(False)
+        self._table_queues.verticalHeader().setDefaultSectionSize(32)
+        self._table_queues.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table_queues.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table_queues.setShowGrid(True)
+        self._table_queues.itemDoubleClicked.connect(self._on_queue_row_double_clicked)
+
+        layout.addWidget(self._table_queues)
+        return container
+
+    def _show_status_message(self, message: str):
+        if hasattr(self, "_status_label"):
+            self._status_label.setText(message)
+            self._status_label.setVisible(True)
+            QTimer.singleShot(2500, lambda: self._status_label.setVisible(False))
+
+    def _update_queues_header(self):
+        if self.current_mode() == "console":
+            return
+        self._lbl_icon.setText("🗂️")
+        self._lbl_title.setText("Download Queues & Concurrency")
+        queues = self._manager.get_queues()
+        self._lbl_badge.setText(f"{len(queues)} Queues")
+        self._lbl_badge.setStyleSheet(
+            f"background-color: {Colors.BG_LIGHT}; color: {Colors.ACCENT}; "
+            f"padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px;"
+        )
+        self._lbl_badge.setVisible(True)
+        self._btn_open_folder.setVisible(False)
+
+    def _get_all_download_entries(self) -> list[DownloadEntry]:
+        win = self.window()
+        if win is not None and hasattr(win, "_model") and hasattr(win._model, "_all_entries"):
+            return list(win._model._all_entries)
+        if hasattr(self._manager, "_db") and self._manager._db:
+            return self._manager._db.get_all_downloads()
+        return []
+
+    def _update_queues(self):
+        if not hasattr(self, "_table_queues"):
+            return
+        queues = self._manager.get_queues()
+        entries = self._get_all_download_entries()
+
+        # Aggregate per-queue statistics
+        stats: dict[str, dict[str, Any]] = {}
+        for q in queues:
+            stats[q.id] = {
+                "active": 0,
+                "queued": 0,
+                "paused": 0,
+                "stopped": 0,
+                "completed": 0,
+                "error": 0,
+                "total": 0,
+                "down_speed": 0.0,
+                "up_speed": 0.0,
+            }
+
+        default_qid = queues[0].id if queues else DEFAULT_QUEUE_ID
+        for e in entries:
+            qid = e.queue_id or default_qid
+            if hasattr(self._manager, "_db") and self._manager._db:
+                qid = self._manager._db.resolve_queue_id(qid)
+            if qid not in stats:
+                qid = default_qid
+            st = stats.get(qid)
+            if not st:
+                continue
+            st["total"] += 1
+            if e.status in ("downloading", "checking", "fetching_metadata", "stalled", "seeding"):
+                st["active"] += 1
+                st["down_speed"] += float(getattr(e, "speed", 0.0) or 0.0)
+                st["up_speed"] += float(getattr(e, "upload_speed", 0.0) or 0.0)
+            elif e.status == "queued":
+                st["queued"] += 1
+            elif e.status == "paused":
+                st["paused"] += 1
+            elif e.status == "stopped":
+                st["stopped"] += 1
+            elif e.status in ("completed", "seeding"):
+                st["completed"] += 1
+            elif e.status == "error":
+                st["error"] += 1
+
+        needs_rebuild = (
+            self._table_queues.rowCount() != len(queues)
+            or set(self._queue_row_widgets.keys()) != set(q.id for q in queues)
+        )
+
+        if needs_rebuild:
+            self._table_queues.setRowCount(0)
+            self._queue_row_widgets.clear()
+            self._table_queues.setRowCount(len(queues))
+
+            for row_idx, q in enumerate(queues):
+                # Col 0: Swatch + Name
+                holder = QWidget()
+                h_lay = QHBoxLayout(holder)
+                h_lay.setContentsMargins(6, 2, 6, 2)
+                h_lay.setSpacing(8)
+                swatch = QLabel()
+                swatch.setFixedSize(14, 14)
+                color = q.color or Colors.ACCENT
+                swatch.setStyleSheet(f"background-color: {color}; border-radius: 3px; border: 1px solid #555;")
+                suffix = " (Default)" if q.is_default else ""
+                name_lbl = QLabel(f"{q.name}{suffix}")
+                name_lbl.setStyleSheet(f"color: {Colors.TEXT}; font-weight: bold;")
+                h_lay.addWidget(swatch)
+                h_lay.addWidget(name_lbl)
+                h_lay.addStretch()
+                self._table_queues.setCellWidget(row_idx, 0, holder)
+
+                # Col 1: Status
+                item_status = QTableWidgetItem("Idle")
+                item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table_queues.setItem(row_idx, 1, item_status)
+
+                # Col 2: Downloads
+                item_counts = QTableWidgetItem("0 downloads")
+                self._table_queues.setItem(row_idx, 2, item_counts)
+
+                # Col 3: Speed
+                item_speed = QTableWidgetItem("—")
+                item_speed.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._table_queues.setItem(row_idx, 3, item_speed)
+
+                # Col 4: Max at Once
+                spin_max = QSpinBox()
+                spin_max.setRange(0, 99)
+                spin_max.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spin_max.setValue(max(0, q.max_concurrent))
+                spin_max.setToolTip(
+                    f"Concurrency ceiling for '{q.name}'.\n"
+                    "0 = follow global limit (no ceiling of its own)."
+                )
+                spin_max.valueChanged.connect(
+                    lambda val, qid=q.id: self._on_queue_max_concurrent_changed(qid, val)
+                )
+                self._table_queues.setCellWidget(row_idx, 4, spin_max)
+
+                # Col 5: Download Limit
+                spin_dl = QSpinBox()
+                spin_dl.setRange(0, 10_000_000)
+                spin_dl.setSingleStep(64)
+                spin_dl.setSuffix(" KB/s")
+                spin_dl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spin_dl.setValue(max(0, int(q.download_limit or 0) // 1024))
+                spin_dl.setToolTip(
+                    f"Download rate ceiling for '{q.name}' in KB/s.\n"
+                    "0 = follow global limit (no ceiling of its own)."
+                )
+                spin_dl.valueChanged.connect(
+                    lambda val, qid=q.id: self._on_queue_dl_limit_changed(qid, val)
+                )
+                self._table_queues.setCellWidget(row_idx, 5, spin_dl)
+
+                # Col 6: Upload Limit
+                spin_up = QSpinBox()
+                spin_up.setRange(0, 10_000_000)
+                spin_up.setSingleStep(64)
+                spin_up.setSuffix(" KB/s")
+                spin_up.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spin_up.setValue(max(0, int(q.upload_limit or 0) // 1024))
+                spin_up.setToolTip(
+                    f"Upload rate ceiling for '{q.name}' in KB/s.\n"
+                    "0 = follow global limit (no ceiling of its own)."
+                )
+                spin_up.valueChanged.connect(
+                    lambda val, qid=q.id: self._on_queue_up_limit_changed(qid, val)
+                )
+                self._table_queues.setCellWidget(row_idx, 6, spin_up)
+
+                # Col 7: Actions
+                act_holder = QWidget()
+                act_lay = QHBoxLayout(act_holder)
+                act_lay.setContentsMargins(4, 2, 4, 2)
+                act_lay.setSpacing(6)
+                btn_pause = QPushButton("⏸ Pause")
+                btn_pause.setToolTip(f"Pause all active and queued downloads in '{q.name}'")
+                btn_pause.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_pause.clicked.connect(lambda _=False, qid=q.id: self._on_pause_queue_clicked(qid))
+
+                btn_resume = QPushButton("▶ Resume")
+                btn_resume.setToolTip(f"Resume all paused and stopped downloads in '{q.name}'")
+                btn_resume.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_resume.clicked.connect(lambda _=False, qid=q.id: self._on_resume_queue_clicked(qid))
+
+                act_lay.addWidget(btn_pause)
+                act_lay.addWidget(btn_resume)
+                self._table_queues.setCellWidget(row_idx, 7, act_holder)
+
+                self._queue_row_widgets[q.id] = {
+                    "row": row_idx,
+                    "item_status": item_status,
+                    "item_counts": item_counts,
+                    "item_speed": item_speed,
+                    "spin_max": spin_max,
+                    "spin_dl": spin_dl,
+                    "spin_up": spin_up,
+                    "btn_pause": btn_pause,
+                    "btn_resume": btn_resume,
+                }
+
+        # Update values for each row without recreating widgets
+        for q in queues:
+            widgets = self._queue_row_widgets.get(q.id)
+            if not widgets:
+                continue
+            st = stats.get(q.id, {})
+
+            active = st.get("active", 0)
+            queued = st.get("queued", 0)
+            paused = st.get("paused", 0)
+            stopped = st.get("stopped", 0)
+            completed = st.get("completed", 0)
+            error = st.get("error", 0)
+            total = st.get("total", 0)
+            down_spd = st.get("down_speed", 0.0)
+            up_spd = st.get("up_speed", 0.0)
+
+            # Status column
+            if active > 0:
+                status_text = f"Running ({active})"
+                widgets["item_status"].setForeground(QColor(Colors.ACCENT))
+            elif queued > 0:
+                status_text = f"Queued ({queued})"
+                widgets["item_status"].setForeground(QColor(Colors.TEXT))
+            elif paused > 0:
+                status_text = f"Paused ({paused})"
+                widgets["item_status"].setForeground(QColor(Colors.ORANGE))
+            elif total > 0 and completed == total:
+                status_text = "Completed"
+                widgets["item_status"].setForeground(QColor(Colors.GREEN))
+            elif error > 0:
+                status_text = f"Error ({error})"
+                widgets["item_status"].setForeground(QColor(Colors.RED))
+            else:
+                status_text = "Idle"
+                widgets["item_status"].setForeground(QColor(Colors.TEXT_MUTED))
+            widgets["item_status"].setText(status_text)
+
+            # Downloads count breakdown
+            parts = []
+            if active > 0:
+                parts.append(f"{active} active")
+            if queued > 0:
+                parts.append(f"{queued} queued")
+            if paused > 0:
+                parts.append(f"{paused} paused")
+            if error > 0:
+                parts.append(f"{error} error")
+            if not parts:
+                counts_str = f"{total} total" if total > 0 else "Empty"
+            else:
+                counts_str = ", ".join(parts) + f" ({total} total)"
+            widgets["item_counts"].setText(counts_str)
+
+            # Speed
+            if down_spd > 0 or up_spd > 0:
+                speed_parts = []
+                if down_spd > 0:
+                    speed_parts.append(f"↓ {_format_speed(down_spd)}")
+                if up_spd > 0:
+                    speed_parts.append(f"↑ {_format_speed(up_spd)}")
+                widgets["item_speed"].setText("  ".join(speed_parts))
+            else:
+                widgets["item_speed"].setText("—")
+
+            # Update spinboxes only when not focused
+            spin_max = widgets["spin_max"]
+            if not spin_max.hasFocus():
+                spin_max.blockSignals(True)
+                spin_max.setValue(max(0, q.max_concurrent))
+                spin_max.blockSignals(False)
+
+            spin_dl = widgets["spin_dl"]
+            if not spin_dl.hasFocus():
+                spin_dl.blockSignals(True)
+                spin_dl.setValue(max(0, int(q.download_limit or 0) // 1024))
+                spin_dl.blockSignals(False)
+
+            spin_up = widgets["spin_up"]
+            if not spin_up.hasFocus():
+                spin_up.blockSignals(True)
+                spin_up.setValue(max(0, int(q.upload_limit or 0) // 1024))
+                spin_up.blockSignals(False)
+
+            # Action button states
+            widgets["btn_pause"].setEnabled(active > 0 or queued > 0)
+            widgets["btn_resume"].setEnabled(paused > 0 or stopped > 0)
+
+    def _on_queue_max_concurrent_changed(self, queue_id: str, value: int):
+        self._manager.set_queue_max_concurrent(queue_id, value)
+        q = self._manager.get_queue(queue_id)
+        name = q.name if q else queue_id
+        limit_txt = f"{value} concurrent" if value > 0 else "Unlimited (Global)"
+        self._show_status_message(f"Updated '{name}' max at once to {limit_txt}")
+
+    def _on_queue_dl_limit_changed(self, queue_id: str, value_kb: int):
+        q = self._manager.get_queue(queue_id)
+        up_lim = q.upload_limit if q else 0
+        self._manager.set_queue_limits(queue_id, value_kb * 1024, up_lim)
+        name = q.name if q else queue_id
+        limit_txt = f"{value_kb} KB/s" if value_kb > 0 else "Unlimited"
+        self._show_status_message(f"Updated '{name}' download limit to {limit_txt}")
+
+    def _on_queue_up_limit_changed(self, queue_id: str, value_kb: int):
+        q = self._manager.get_queue(queue_id)
+        dl_lim = q.download_limit if q else 0
+        self._manager.set_queue_limits(queue_id, dl_lim, value_kb * 1024)
+        name = q.name if q else queue_id
+        limit_txt = f"{value_kb} KB/s" if value_kb > 0 else "Unlimited"
+        self._show_status_message(f"Updated '{name}' upload limit to {limit_txt}")
+
+    def _on_pause_queue_clicked(self, queue_id: str):
+        count = self._manager.pause_queue(queue_id)
+        q = self._manager.get_queue(queue_id)
+        name = q.name if q else queue_id
+        self._show_status_message(f"Paused {count} download(s) in queue '{name}'")
+        self._update_queues()
+
+    def _on_resume_queue_clicked(self, queue_id: str):
+        count = self._manager.resume_queue(queue_id)
+        q = self._manager.get_queue(queue_id)
+        name = q.name if q else queue_id
+        self._show_status_message(f"Resumed {count} download(s) in queue '{name}'")
+        self._update_queues()
+
+    def _on_queue_row_double_clicked(self, item: QTableWidgetItem):
+        row = item.row()
+        for qid, w in self._queue_row_widgets.items():
+            if w.get("row") == row:
+                self._manager.set_active_queue(qid)
+                q = self._manager.get_queue(qid)
+                name = q.name if q else qid
+                self._show_status_message(f"Filtered view to queue '{name}'")
+                break
+
     # -- Public control -------------------------------------------------------
 
     def set_download_id(self, download_id: Optional[str]):
@@ -989,7 +1367,8 @@ class DetailsPanel(QWidget):
         return self._manager.get_entry(download_id)
 
     def refresh(self):
-        """Update all tabs for the active download."""
+        """Update all tabs for the active download and global queues."""
+        self._update_queues()
         if not self._download_id:
             self._clear_view()
             return
@@ -1015,7 +1394,10 @@ class DetailsPanel(QWidget):
                 self._tabs.setCurrentIndex(0)
 
         if self.current_mode() == "details":
-            self._update_header(entry)
+            if hasattr(self, "_tab_queues") and self._tabs.currentWidget() == self._tab_queues:
+                self._update_queues_header()
+            else:
+                self._update_header(entry)
         self._update_overview(entry)
         self._update_files(entry)
         self._update_peers(entry)
@@ -1027,6 +1409,9 @@ class DetailsPanel(QWidget):
     def _clear_header(self):
         if self.current_mode() == "console":
             self._update_console_header()
+            return
+        if hasattr(self, "_tab_queues") and self._tabs.currentWidget() == self._tab_queues:
+            self._update_queues_header()
             return
         self._lbl_icon.setText("📊")
         self._lbl_title.setText("Select a download to view details")
@@ -1069,6 +1454,9 @@ class DetailsPanel(QWidget):
 
     def _update_header(self, entry: DownloadEntry):
         if self.current_mode() == "console":
+            return
+        if hasattr(self, "_tab_queues") and self._tabs.currentWidget() == self._tab_queues:
+            self._update_queues_header()
             return
 
         icon = "📦" if entry.download_type == "torrent" else "🌐"
@@ -2376,6 +2764,10 @@ class DetailsPanel(QWidget):
             self._btn_float_browser.setToolTip("Dock the browser window back inside the panel")
 
     def _on_details_tab_changed(self, index: int):
+        if hasattr(self, "_tab_queues") and self._tabs.widget(index) == self._tab_queues:
+            self._update_queues_header()
+            self._update_queues()
+            return
         if self._current_entry:
             self._update_header(self._current_entry)
             self.refresh()

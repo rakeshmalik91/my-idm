@@ -1257,8 +1257,8 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertIn("Details", panel._side_tabs.tabText(0))
         self.assertIn("Console", panel._side_tabs.tabText(1))
 
-        # Details tabs are strictly download tabs (Overview, Files, Peers, Trackers, Segments)
-        self.assertEqual(panel._tabs.count(), 5)
+        # Details tabs (Overview, Files, Peers, Trackers, Segments, Queues)
+        self.assertEqual(panel._tabs.count(), 6)
         self.assertEqual(panel._tabs.indexOf(panel._tab_console), -1)
 
         # Initially in details mode
@@ -1882,6 +1882,105 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(pb.format(), "100.0%")
         self.assertEqual(item.text(4), "Completed")
         self.assertIn("100.0%", pb.toolTip())
+
+    def test_details_panel_queues_tab_creation_and_listing(self):
+        """Queues tab displays all queues with spinboxes for max at once and limits."""
+        panel = self.win._details_panel
+        queues_tab_idx = panel._tabs.indexOf(panel._tab_queues)
+        self.assertNotEqual(queues_tab_idx, -1)
+
+        # Switch to queues tab
+        panel._tabs.setCurrentIndex(queues_tab_idx)
+        self.assertEqual(panel._lbl_title.text(), "Download Queues & Concurrency")
+
+        # Must list at least Default, AnimePahe, YouTube
+        queues = self.manager.get_queues()
+        self.assertGreaterEqual(len(queues), 3)
+        self.assertEqual(panel._table_queues.rowCount(), len(queues))
+
+        for q in queues:
+            widgets = panel._queue_row_widgets.get(q.id)
+            self.assertIsNotNone(widgets, f"Missing row widgets for queue {q.id}")
+            self.assertEqual(widgets["spin_max"].value(), max(0, q.max_concurrent))
+            self.assertEqual(widgets["spin_dl"].value(), max(0, int(q.download_limit or 0) // 1024))
+            self.assertEqual(widgets["spin_up"].value(), max(0, int(q.upload_limit or 0) // 1024))
+
+    def test_details_panel_queues_tab_edit_limits(self):
+        """Editing spinbox values in the Queues tab updates the queue's limits in the manager and DB."""
+        panel = self.win._details_panel
+        queues = self.manager.get_queues()
+        target_q = queues[0]
+        qid = target_q.id
+
+        widgets = panel._queue_row_widgets.get(qid)
+        self.assertIsNotNone(widgets)
+
+        # 1. Edit max_concurrent
+        widgets["spin_max"].setValue(7)
+        self.assertEqual(self.manager.get_queue(qid).max_concurrent, 7)
+
+        # 2. Edit download_limit
+        widgets["spin_dl"].setValue(1024)  # 1024 KB/s
+        self.assertEqual(self.manager.get_queue(qid).download_limit, 1024 * 1024)
+
+        # 3. Edit upload_limit
+        widgets["spin_up"].setValue(512)   # 512 KB/s
+        self.assertEqual(self.manager.get_queue(qid).upload_limit, 512 * 1024)
+
+    def test_details_panel_queues_tab_pause_and_resume(self):
+        """Pause and resume buttons in Queues tab trigger queue pause/resume."""
+        panel = self.win._details_panel
+        queues = self.manager.get_queues()
+        target_q = queues[0]
+        qid = target_q.id
+
+        entry = DownloadEntry(
+            id="test-queue-pause-1",
+            url="https://example.com/test.zip",
+            filename="test.zip",
+            save_path="C:/Downloads",
+            status="downloading",
+            queue_id=qid,
+        )
+        self._build(entry)
+
+        # Refresh panel
+        panel.refresh()
+        widgets = panel._queue_row_widgets.get(qid)
+        self.assertIsNotNone(widgets)
+
+        # Pause queue via button click
+        widgets["btn_pause"].click()
+
+        # Wait for status job pool to execute
+        self.manager._status_job_pool.wait_idle()
+        QApplication.processEvents()
+
+        # Entry should now be paused
+        updated_entry = self.db.get_download("test-queue-pause-1")
+        self.assertEqual(updated_entry.status, "paused")
+
+        # Resume queue via button click
+        panel.refresh()
+        widgets["btn_resume"].click()
+        self.manager._status_job_pool.wait_idle()
+        QApplication.processEvents()
+
+        updated_entry2 = self.db.get_download("test-queue-pause-1")
+        self.assertIn(updated_entry2.status, ("queued", "downloading"))
+
+    def test_details_panel_queues_tab_double_click_filters_scope(self):
+        """Double-clicking a queue row in Queues tab scopes active queue in manager."""
+        panel = self.win._details_panel
+        queues = self.manager.get_queues()
+        self.assertGreater(len(queues), 1)
+        target_q = queues[1]
+
+        row = panel._queue_row_widgets[target_q.id]["row"]
+        item = panel._table_queues.item(row, 1) or panel._table_queues.item(row, 2)
+        panel._on_queue_row_double_clicked(item)
+
+        self.assertEqual(self.manager.get_active_queue(), target_q.id)
 
 
 if __name__ == "__main__":

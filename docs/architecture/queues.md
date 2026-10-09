@@ -640,6 +640,29 @@ Signals: `queues_changed` (the list, its limits or its membership changed) and
 | `set_queue_limits(id, dl, ul)` | bytes/sec; `0` = no ceiling of its own. Reaches a running HTTP download on its next chunk and a torrent on its next handle refresh |
 | `move_queue_in_list(id, delta)` | reorder in the switcher |
 | `move_downloads_to_queue(ids, id)` | preserves the user's selection order and **continues** the target queue's numbering rather than restarting at 1, which would collide |
+| `pause_queue(id)` | pauses all active or queued downloads belonging to the specified queue via `StatusJobPool.pause_downloads` |
+| `resume_queue(id)` | resumes paused and stopped downloads in the queue via `StatusJobPool.resume_downloads`, preserving FIFO queue order |
+
+---
+
+## Details Panel: Queues Tab
+
+The collapsible bottom Details Panel features a dedicated **🗂️ Queues** tab. Unlike single-download tabs (Overview, Files, Peers, Trackers, Segments), the Queues tab presents an aggregate table of all named queues configured in My-IDM:
+
+- **Columns**:
+  - **Queue**: Color swatch indicator and queue name.
+  - **Status**: Live state indicator (`Active (N)`, `Queued (N)`, `Paused`, or `Idle`).
+  - **Downloads**: Breakdown showing running transfers vs total items in the queue (e.g. `2 / 5 (3 queued, 0 paused, 0 done)`).
+  - **Speed**: Combined instantaneous download and upload speeds for all active transfers in that queue.
+  - **Max at Once**: Embedded `QSpinBox` (0 to 100, `0` = unlimited). Directly editable in-place; changes persist to SQLite immediately and update queue concurrency dispatch budgets.
+  - **Download Limit**: Embedded `QSpinBox` (KB/s, `0` = unlimited). Directly editable in-place; changes immediately update the queue's bandwidth limit in SQLite and notify active engine limiters.
+  - **Upload Limit**: Embedded `QSpinBox` (KB/s, `0` = unlimited). Directly editable in-place; updates engine and DB limits.
+  - **Actions**: Independent `⏸ Pause` and `▶ Resume` buttons per queue.
+- **Independent Queue Control**:
+  - Clicking `⏸ Pause` calls `DownloadManager.pause_queue(queue_id)`, identifying all active or queued downloads in that queue and routing them through `StatusJobPool.pause_downloads()`.
+  - Clicking `▶ Resume` calls `DownloadManager.resume_queue(queue_id)`, identifying all paused or stopped downloads in that queue, preserving FIFO queue order, and submitting them through `StatusJobPool.resume_downloads()`.
+- **Quick Scope Switching**:
+  - Double-clicking any queue row in the table immediately switches the main window's queue scope to filter the downloads table to that queue.
 
 One subtlety worth knowing: `get_active_queue()` validates the stored id and falls back to `""`
 when it no longer resolves. `delete_queue` therefore compares against the **stored** value, not

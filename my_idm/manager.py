@@ -3694,6 +3694,42 @@ class DownloadManager(QObject):
         self.queues_changed.emit()
         self._process_queue()
 
+    def pause_queue(self, queue_id: str) -> int:
+        """Pause all ongoing and queued downloads in a specific queue.
+
+        Routes through status_job_pool to pace transitions without GUI lockups.
+        Returns the number of downloads queued for pause.
+        """
+        resolved = self._db.resolve_queue_id(queue_id)
+        entries = self._db.get_all_downloads(resolved)
+        pausable = [
+            e.id for e in entries
+            if e.status in ("downloading", "queued", "checking", "fetching_metadata", "stalled", "seeding")
+        ]
+        if pausable:
+            self.pause_downloads(pausable)
+        return len(pausable)
+
+    def resume_queue(self, queue_id: str) -> int:
+        """Resume all paused or stopped downloads in a specific queue in FIFO queue order.
+
+        Routes through status_job_pool to pace transitions without GUI lockups.
+        Returns the number of downloads queued for resume.
+        """
+        resolved = self._db.resolve_queue_id(queue_id)
+        entries = self._db.get_all_downloads(resolved)
+        resumable = [
+            e for e in entries
+            if e.status in ("paused", "stopped")
+        ]
+        resumable.sort(
+            key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "", e.id)
+        )
+        to_resume = [e.id for e in resumable]
+        if to_resume:
+            self.resume_downloads(to_resume)
+        return len(to_resume)
+
     def set_queue_color(self, queue_id: str, color: str) -> tuple[bool, str]:
         """Change a queue's swatch colour, which every row of that queue redraws."""
         ok, message = self._db.set_queue_color(queue_id, color)
