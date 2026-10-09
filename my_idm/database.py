@@ -1427,12 +1427,12 @@ CREATE TABLE IF NOT EXISTS segments (
         """
         if queue_id:
             rows = self._conn.execute(
-                "SELECT * FROM downloads WHERE queue_id = ? ORDER BY added_at DESC",
+                "SELECT * FROM downloads WHERE queue_id = ? ORDER BY added_at DESC, rowid DESC",
                 (queue_id,),
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT * FROM downloads ORDER BY added_at DESC"
+                "SELECT * FROM downloads ORDER BY added_at DESC, rowid DESC"
             ).fetchall()
         return [self._row_to_entry(r) for r in rows]
 

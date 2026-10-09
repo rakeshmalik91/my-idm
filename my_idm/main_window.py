@@ -2194,8 +2194,9 @@ class MainWindow(QMainWindow):
         notify_torrent_files_added(names, "watched folder")
 
     def _on_pause(self):
-        for did in self._selected_ids():
-            self._manager.pause_download(did)
+        ids = self._selected_ids()
+        if ids:
+            self._manager.pause_downloads(ids)
 
     def _on_pause_all_downloads(self):
         count = self._manager.pause_all_downloads()
@@ -2212,8 +2213,9 @@ class MainWindow(QMainWindow):
             self._status_label.setText("No paused downloads to resume")
 
     def _on_stop(self):
-        for did in self._selected_ids():
-            self._manager.stop_download(did)
+        ids = self._selected_ids()
+        if ids:
+            self._manager.stop_downloads(ids)
 
     def _on_start_seeding(self):
         for did in self._selected_ids():
@@ -2227,12 +2229,14 @@ class MainWindow(QMainWindow):
             self._status_label.setText("No torrents are currently seeding")
 
     def _on_resume(self):
-        for did in self._selected_ids():
-            self._manager.resume_download(did)
+        ids = self._selected_ids()
+        if ids:
+            self._manager.resume_downloads(ids)
 
     def _on_force_start(self):
-        for did in self._selected_ids():
-            self._manager.force_start_download(did)
+        ids = self._selected_ids()
+        if ids:
+            self._manager.force_start_downloads(ids)
 
     def _on_delete(self):
         ids = self._selected_ids()
@@ -2270,8 +2274,9 @@ class MainWindow(QMainWindow):
                 self._manager.move_download(did, dlg.new_path)
 
     def _on_recheck(self):
-        for did in self._selected_ids():
-            self._manager.recheck_download(did)
+        ids = self._selected_ids()
+        if ids:
+            self._manager.recheck_downloads(ids)
 
     def _on_move_queue_up(self):
         for did in self._selected_ids():

@@ -7,6 +7,7 @@ at nothing, and to a queue limit that is lower than the global one.
 
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -2745,6 +2746,75 @@ class TestColorSwatchIconAndDelegate(unittest.TestCase):
         from my_idm.delegates import QueueColumnDelegate
         delegate = QueueColumnDelegate()
         self.assertGreaterEqual(delegate.SWATCH, 16)
+
+
+class TestStatusJobPoolAndFIFOOrder(unittest.TestCase):
+    """Tests for StatusJobPool, FIFO active queue ordering, and non-reverting status."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = Database(Path(self.temp_dir.name) / "test.db")
+        self.db.open()
+        self.manager = DownloadManager(self.db)
+
+    def tearDown(self):
+        self.manager.stop()
+        self.db.close()
+        self.temp_dir.cleanup()
+
+    def test_status_job_pool_batch_resume(self):
+        """Batch resume queues operations into the job pool and processes them."""
+        # Create 5 paused entries
+        for i in range(1, 6):
+            entry = DownloadEntry(id=f"dl{i}", url=f"http://example.com/file{i}.zip", status="paused")
+            self.db.add_download(entry)
+
+        resumed = []
+        with patch.object(self.manager, "resume_download", side_effect=lambda did: resumed.append(did)):
+            self.manager.resume_downloads([f"dl{i}" for i in range(1, 6)])
+            done = self.manager.wait_status_jobs(timeout=5.0)
+            self.assertTrue(done)
+            self.assertEqual(resumed, ["dl1", "dl2", "dl3", "dl4", "dl5"])
+
+    def test_status_job_pool_batch_recheck(self):
+        """Batch recheck queues operations into the job pool and processes them."""
+        for i in range(1, 4):
+            entry = DownloadEntry(id=f"chk{i}", url=f"http://example.com/file{i}.zip", status="queued")
+            self.db.add_download(entry)
+
+        rechecked = []
+        with patch.object(self.manager, "recheck_download", side_effect=lambda did: rechecked.append(did)):
+            self.manager.recheck_downloads([f"chk{i}" for i in range(1, 4)])
+            done = self.manager.wait_status_jobs(timeout=5.0)
+            self.assertTrue(done)
+            self.assertEqual(rechecked, ["chk1", "chk2", "chk3"])
+
+    def test_active_section_fifo_ordering(self):
+        """Active section entries are presented in FIFO insertion order regardless of identical timestamps."""
+        from my_idm.download_model import DownloadTableModel, SECTION_ACTIVE
+        model = DownloadTableModel()
+        model.set_segregated_view(True, mode="status")
+        entries = []
+        # Simulate 10 downloads added sequentially in the same second
+        now = "2026-10-09T00:00:00.000000+00:00"
+        for i in range(1, 11):
+            e = DownloadEntry(
+                id=f"ep{i}",
+                filename=f"Episode_{i:02d}.mp4",
+                status="queued" if i > 4 else "downloading",
+                added_at=now,
+                queue_order=i,
+            )
+            entries.append(e)
+
+        # Load in reverse or scrambled order to verify model orders them strictly FIFO
+        model.load_entries(list(reversed(entries)))
+        active_ids = [
+            e.id for e in model._entries
+            if not getattr(e, "is_section_header", False) and e.status in ("downloading", "queued")
+        ]
+        expected_ids = [f"ep{i}" for i in range(1, 11)]
+        self.assertEqual(active_ids, expected_ids)
 
 
 if __name__ == "__main__":

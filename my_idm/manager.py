@@ -6,6 +6,7 @@ import asyncio
 import glob
 import logging
 import os
+import queue
 import re
 import shutil
 import threading
@@ -403,6 +404,88 @@ def parse_backlog_entry(
         queue=queue or active_queue,
     )
 
+class StatusJobPool:
+    """Worker pool for serializing and pacing status operations (resume, recheck, pause, etc.).
+
+    Prevents UI lockups during bulk operations (such as resuming or rechecking 25 downloads)
+    and ensures state changes settle sequentially without thrashing concurrency limits.
+    """
+
+    def __init__(self, manager: "DownloadManager", pace_seconds: float = 0.01):
+        self._manager = manager
+        self._pace_seconds = pace_seconds
+        self._queue: queue.Queue = queue.Queue()
+        self._stopped = False
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="status-job-pool",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def submit(self, action: str, download_id: str, *args, **kwargs):
+        """Submit a single status operation to the pool."""
+        if not self._stopped:
+            self._queue.put((action, download_id, args, kwargs))
+
+    def submit_batch(self, action: str, download_ids: list[str]):
+        """Submit multiple downloads for the given action in FIFO order."""
+        for did in download_ids:
+            self.submit(action, did)
+
+    def wait_idle(self, timeout: float = 5.0) -> bool:
+        """Wait until all pending jobs have been executed."""
+        start = time.time()
+        while not self._queue.empty():
+            if time.time() - start > timeout:
+                return False
+            time.sleep(0.01)
+        self._queue.join()
+        return True
+
+    def stop(self, timeout: float = 2.0):
+        """Stop the worker thread."""
+        self._stopped = True
+        if self._worker.is_alive():
+            self._worker.join(timeout=timeout)
+
+    def _worker_loop(self):
+        while not self._stopped:
+            try:
+                action, download_id, args, kwargs = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                self._dispatch(action, download_id, *args, **kwargs)
+            except Exception as exc:
+                log.error("StatusJobPool error performing %s on %s: %s", action, download_id, exc)
+            finally:
+                self._queue.task_done()
+
+            if self._pace_seconds > 0:
+                time.sleep(self._pace_seconds)
+
+            # When queue drains, run queue processor once to start any newly eligible downloads
+            if self._queue.empty() and not self._stopped:
+                try:
+                    self._manager._process_queue()
+                except Exception as exc:
+                    log.error("StatusJobPool _process_queue error: %s", exc)
+
+    def _dispatch(self, action: str, download_id: str, *args, **kwargs):
+        if action == "resume":
+            self._manager.resume_download(download_id, *args, **kwargs)
+        elif action == "recheck":
+            self._manager.recheck_download(download_id, *args, **kwargs)
+        elif action == "pause":
+            self._manager.pause_download(download_id, *args, **kwargs)
+        elif action == "stop":
+            self._manager.stop_download(download_id, *args, **kwargs)
+        elif action == "force_start":
+            self._manager.force_start_download(download_id, *args, **kwargs)
+        else:
+            log.warning("Unknown status job action: %s", action)
 
 
 class DownloadManager(QObject):
@@ -566,6 +649,9 @@ class DownloadManager(QObject):
             self._on_filename_resolved,
         )
 
+        # Status operations worker pool
+        self._status_job_pool = StatusJobPool(self)
+
     # -- lifecycle -----------------------------------------------------------
 
     @contextmanager
@@ -715,6 +801,7 @@ class DownloadManager(QObject):
         # Before the drain below, like the other timers: the watcher's own scan adds rows through
         # the database, so it must be finished before the caller can close it.
         self._torrent_watcher.stop()
+        self._status_job_pool.stop()
 
         # A timer callback that was already executing survives .stop(), so a
         # poll can still be mid-write when this method returns. Join it before
@@ -2129,11 +2216,19 @@ class DownloadManager(QObject):
         per-queue accounting *cheaper* than the single global count it replaces.
         """
         counts = self._db.get_active_counts_by_queue()
+        active_db_statuses = ('downloading', 'checking', 'fetching_metadata', 'stalled')
         for did in self._starting_downloads:
             entry = self._db.get_download(did)
-            if entry:
+            if entry and entry.status not in active_db_statuses:
                 key = self._db.resolve_queue_id(entry.queue_id)
                 counts[key] = counts.get(key, 0) + 1
+        if hasattr(self, "_http") and hasattr(self._http, "get_active_download_ids"):
+            for did in self._http.get_active_download_ids():
+                if did not in self._starting_downloads:
+                    entry = self._db.get_download(did)
+                    if entry and entry.status not in active_db_statuses:
+                        key = self._db.resolve_queue_id(entry.queue_id)
+                        counts[key] = counts.get(key, 0) + 1
         return counts
 
     def _queue_limits(self) -> dict[str, int]:
@@ -2461,39 +2556,58 @@ class DownloadManager(QObject):
             count += 1
         return count
 
+    def resume_downloads(self, download_ids: list[str]):
+        """Queue multiple downloads for resume via the status job pool."""
+        self._status_job_pool.submit_batch("resume", download_ids)
+
+    def recheck_downloads(self, download_ids: list[str]):
+        """Queue multiple downloads for recheck via the status job pool."""
+        self._status_job_pool.submit_batch("recheck", download_ids)
+
+    def pause_downloads(self, download_ids: list[str]):
+        """Queue multiple downloads for pause via the status job pool."""
+        self._status_job_pool.submit_batch("pause", download_ids)
+
+    def stop_downloads(self, download_ids: list[str]):
+        """Queue multiple downloads for stop via the status job pool."""
+        self._status_job_pool.submit_batch("stop", download_ids)
+
+    def force_start_downloads(self, download_ids: list[str]):
+        """Queue multiple downloads for force start via the status job pool."""
+        self._status_job_pool.submit_batch("force_start", download_ids)
+
+    def wait_status_jobs(self, timeout: float = 5.0) -> bool:
+        """Wait for all pending status pool jobs to finish."""
+        return self._status_job_pool.wait_idle(timeout=timeout)
+
     def pause_all_downloads(self) -> int:
         """Pause all ongoing and queued downloads.
 
         Targets transfers in 'downloading', 'queued', 'checking', 'fetching_metadata',
-        and 'stalled' states, transitioning each to 'paused'.
+        and 'stalled' states.
         Returns the number of paused downloads.
         """
         pausable = [
             e for e in self._db.get_all_downloads()
             if e.status in ("downloading", "queued", "checking", "fetching_metadata", "stalled")
         ]
-        count = 0
         for entry in pausable:
             self.pause_download(entry.id)
-            count += 1
-        return count
+        return len(pausable)
 
     def resume_all_downloads(self) -> int:
         """Resume all paused or stopped downloads.
 
-        Targets transfers in 'paused' or 'stopped' states, transitioning each to 'queued'
-        and processing queue.
+        Targets transfers in 'paused' or 'stopped' states.
         Returns the number of resumed downloads.
         """
         resumable = [
             e for e in self._db.get_all_downloads()
             if e.status in ("paused", "stopped")
         ]
-        count = 0
         for entry in resumable:
             self.resume_download(entry.id)
-            count += 1
-        return count
+        return len(resumable)
 
     def resume_download(self, download_id: str):
         entry = self._db.get_download(download_id)
@@ -3395,11 +3509,13 @@ class DownloadManager(QObject):
         added_by = str(meta.get("added_by", "")).lower()
         if "youtube" in source_type or "youtube" in added_by:
             return _SOURCE_QUEUE_BY_KEY.get("youtube", "")
-        if "animepahe" in source_type or "animepahe" in added_by:
+        if "animepahe" in source_type or "animepahe" in added_by or "anime_url" in meta or "anime_title" in meta:
             return _SOURCE_QUEUE_BY_KEY.get("animepahe", "")
         lowered = url.lower()
         if any(host in lowered for host in self._YOUTUBE_HOSTS):
             return _SOURCE_QUEUE_BY_KEY.get("youtube", "")
+        if any(cdn in lowered for cdn in ("owocdn.top", "kwik.cx", "kwik.")):
+            return _SOURCE_QUEUE_BY_KEY.get("animepahe", "")
         return ""
 
     def queue_id_for_name(self, name: str) -> str:
@@ -3705,6 +3821,8 @@ class DownloadManager(QObject):
                     entry_source["anime_url"] = parsed.headers["anime_url"]
                 if "anime_title" in parsed.headers:
                     entry_source["anime_title"] = parsed.headers["anime_title"]
+            if "anime_url" in entry_source or "anime_title" in entry_source:
+                entry_source["added_by"] = "animepahe"
             
             # Clear last_comment after being consumed by a download line
             last_comment = ""
@@ -3885,9 +4003,10 @@ class DownloadManager(QObject):
         if current and current.status in ("paused", "stopped", "suspended") and status in ("queued", "downloading"):
             log.debug("Ignoring status %s for %s download %s", status, current.status, download_id)
             return
-        if current and current.status != status and status in ("completed", "paused", "stopped", "error"):
+        if current and current.status != status and status in ("downloading", "completed", "paused", "stopped", "error"):
             self._db.update_status(download_id, status)
-            self._last_progress_bytes.pop(download_id, None)
+            if status != "downloading":
+                self._last_progress_bytes.pop(download_id, None)
         if (
             status == "completed"
             and self._security_config.scan_after_download

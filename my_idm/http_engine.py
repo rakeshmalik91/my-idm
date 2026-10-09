@@ -493,6 +493,9 @@ class HTTPEngine:
         t = self._tasks.get(download_id)
         return t is not None and not t.done()
 
+    def get_active_download_ids(self) -> set[str]:
+        return {did for did, t in self._tasks.items() if not t.done()}
+
     # -- download logic ------------------------------------------------------
 
     def _enforce_browser_min_size(self, entry: DownloadEntry, probed_total: int) -> bool:
@@ -657,6 +660,7 @@ class HTTPEngine:
                 return
 
         try:
+            entry.status = "downloading"
             self._db.update_status(download_id, "downloading")
             self._emit_status(download_id, "downloading")
 
