@@ -428,10 +428,10 @@ class StatusJobPool:
         if not self._stopped:
             self._queue.put((action, download_id, args, kwargs))
 
-    def submit_batch(self, action: str, download_ids: list[str]):
+    def submit_batch(self, action: str, download_ids: list[str], *args, **kwargs):
         """Submit multiple downloads for the given action in FIFO order."""
         for did in download_ids:
-            self.submit(action, did)
+            self.submit(action, did, *args, **kwargs)
 
     def wait_idle(self, timeout: float = 5.0) -> bool:
         """Wait until all pending jobs have been executed."""
@@ -475,15 +475,19 @@ class StatusJobPool:
 
     def _dispatch(self, action: str, download_id: str, *args, **kwargs):
         if action == "resume":
-            self._manager.resume_download(download_id, *args, **kwargs)
+            self._manager.resume_download(download_id, trigger_process_queue=False, *args, **kwargs)
         elif action == "recheck":
             self._manager.recheck_download(download_id, *args, **kwargs)
         elif action == "pause":
-            self._manager.pause_download(download_id, *args, **kwargs)
+            self._manager.pause_download(download_id, trigger_process_queue=False, *args, **kwargs)
         elif action == "stop":
-            self._manager.stop_download(download_id, *args, **kwargs)
+            self._manager.stop_download(download_id, trigger_process_queue=False, *args, **kwargs)
         elif action == "force_start":
             self._manager.force_start_download(download_id, *args, **kwargs)
+        elif action == "delete":
+            self._manager.delete_download(download_id, trigger_process_queue=False, *args, **kwargs)
+        elif action == "delete_file":
+            self._manager.delete_download_file(download_id, *args, **kwargs)
         else:
             log.warning("Unknown status job action: %s", action)
 
@@ -2403,7 +2407,7 @@ class DownloadManager(QObject):
 
     # -- pause / resume / delete ---------------------------------------------
 
-    def pause_download(self, download_id: str):
+    def pause_download(self, download_id: str, trigger_process_queue: bool = True):
         entry = self._db.get_download(download_id)
         if not entry:
             return
@@ -2420,7 +2424,8 @@ class DownloadManager(QObject):
             self.progress_updated.emit(
                 download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
             )
-            self._process_queue()
+            if trigger_process_queue:
+                self._process_queue()
             return
 
         if entry.metadata.get("force_started"):
@@ -2453,7 +2458,6 @@ class DownloadManager(QObject):
                 self._db.update_progress(download_id, entry.downloaded_size)
 
         self._db.update_status(download_id, "paused")
-        self._db.update_queue_order(download_id, 0)
         self.status_changed.emit(download_id, "paused", "")
 
         if entry.download_type == "http":
@@ -2469,9 +2473,10 @@ class DownloadManager(QObject):
         self.progress_updated.emit(
             download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
-        self._process_queue()
+        if trigger_process_queue:
+            self._process_queue()
 
-    def stop_download(self, download_id: str):
+    def stop_download(self, download_id: str, trigger_process_queue: bool = True):
         """Permanently stop a download. It will never be auto-retried or auto-resumed.
 
         Only an explicit resume_download() or force_start_download() will restart it.
@@ -2495,7 +2500,8 @@ class DownloadManager(QObject):
             self.progress_updated.emit(
                 download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
             )
-            self._process_queue()
+            if trigger_process_queue:
+                self._process_queue()
             return
 
         self._starting_downloads.discard(download_id)
@@ -2541,7 +2547,8 @@ class DownloadManager(QObject):
         self.progress_updated.emit(
             download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
         )
-        self._process_queue()
+        if trigger_process_queue:
+            self._process_queue()
 
     def start_seeding(self, download_id: str):
         """Start or resume seeding for a completed or stopped torrent."""
@@ -2561,11 +2568,11 @@ class DownloadManager(QObject):
             e for e in self._db.get_all_downloads()
             if e.download_type == "torrent" and e.status == "seeding"
         ]
-        count = 0
         for entry in seeding_entries:
-            self.stop_download(entry.id)
-            count += 1
-        return count
+            self.stop_download(entry.id, trigger_process_queue=False)
+        if seeding_entries:
+            self._process_queue()
+        return len(seeding_entries)
 
     def resume_downloads(self, download_ids: list[str]):
         """Queue multiple downloads for resume via the status job pool."""
@@ -2591,6 +2598,14 @@ class DownloadManager(QObject):
         """Wait for all pending status pool jobs to finish."""
         return self._status_job_pool.wait_idle(timeout=timeout)
 
+    def delete_downloads(self, download_ids: list[str], delete_files: bool = False):
+        """Queue multiple downloads for deletion via the status job pool."""
+        self._status_job_pool.submit_batch("delete", download_ids, delete_files=delete_files)
+
+    def delete_download_files(self, download_ids: list[str]):
+        """Queue multiple downloads for disk file deletion via the status job pool."""
+        self._status_job_pool.submit_batch("delete_file", download_ids)
+
     def pause_all_downloads(self) -> int:
         """Pause all ongoing and queued downloads.
 
@@ -2603,11 +2618,13 @@ class DownloadManager(QObject):
             if e.status in ("downloading", "queued", "checking", "fetching_metadata", "stalled")
         ]
         for entry in pausable:
-            self.pause_download(entry.id)
+            self.pause_download(entry.id, trigger_process_queue=False)
+        if pausable:
+            self._process_queue()
         return len(pausable)
 
     def resume_all_downloads(self) -> int:
-        """Resume all paused or stopped downloads.
+        """Resume all paused or stopped downloads in queue order.
 
         Targets transfers in 'paused' or 'stopped' states.
         Returns the number of resumed downloads.
@@ -2616,11 +2633,16 @@ class DownloadManager(QObject):
             e for e in self._db.get_all_downloads()
             if e.status in ("paused", "stopped")
         ]
+        resumable.sort(
+            key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "", e.id)
+        )
         for entry in resumable:
-            self.resume_download(entry.id)
+            self.resume_download(entry.id, trigger_process_queue=False)
+        if resumable:
+            self._process_queue()
         return len(resumable)
 
-    def resume_download(self, download_id: str):
+    def resume_download(self, download_id: str, trigger_process_queue: bool = True):
         entry = self._db.get_download(download_id)
         if not entry:
             return
@@ -2654,6 +2676,9 @@ class DownloadManager(QObject):
 
         self._db.update_download(entry)
         self.status_changed.emit(download_id, "queued", "")
+
+        if not trigger_process_queue:
+            return
 
         counts = self._active_counts_by_queue()
         limits = self._queue_limits()
@@ -2784,7 +2809,7 @@ class DownloadManager(QObject):
                      len(removed), entry.id, ", ".join(removed))
         return removed
 
-    def delete_download(self, download_id: str, delete_files: bool = False):
+    def delete_download(self, download_id: str, delete_files: bool = False, trigger_process_queue: bool = True):
         entry = self._db.get_download(download_id)
         if not entry:
             return
@@ -2825,7 +2850,8 @@ class DownloadManager(QObject):
         self._db.delete_segments(download_id)
         self._db.delete_download(download_id)
         self.download_removed.emit(download_id)
-        self._process_queue()
+        if trigger_process_queue:
+            self._process_queue()
 
     def delete_download_file(self, download_id: str):
         """Delete downloaded files from disk while keeping the entry in DB paused at 0%."""

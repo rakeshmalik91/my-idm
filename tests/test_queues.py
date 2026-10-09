@@ -2766,11 +2766,11 @@ class TestStatusJobPoolAndFIFOOrder(unittest.TestCase):
         """Batch resume queues operations into the job pool and processes them."""
         # Create 5 paused entries
         for i in range(1, 6):
-            entry = DownloadEntry(id=f"dl{i}", url=f"http://example.com/file{i}.zip", status="paused")
+            entry = DownloadEntry(id=f"dl{i}", url=f"http://example.com/file{i}.zip", status="paused", queue_order=i)
             self.db.add_download(entry)
 
         resumed = []
-        with patch.object(self.manager, "resume_download", side_effect=lambda did: resumed.append(did)):
+        with patch.object(self.manager, "resume_download", side_effect=lambda did, *args, **kwargs: resumed.append(did)):
             self.manager.resume_downloads([f"dl{i}" for i in range(1, 6)])
             done = self.manager.wait_status_jobs(timeout=5.0)
             self.assertTrue(done)
@@ -2783,11 +2783,45 @@ class TestStatusJobPoolAndFIFOOrder(unittest.TestCase):
             self.db.add_download(entry)
 
         rechecked = []
-        with patch.object(self.manager, "recheck_download", side_effect=lambda did: rechecked.append(did)):
+        with patch.object(self.manager, "recheck_download", side_effect=lambda did, *args, **kwargs: rechecked.append(did)):
             self.manager.recheck_downloads([f"chk{i}" for i in range(1, 4)])
             done = self.manager.wait_status_jobs(timeout=5.0)
             self.assertTrue(done)
             self.assertEqual(rechecked, ["chk1", "chk2", "chk3"])
+
+    def test_status_job_pool_batch_delete(self):
+        """Batch delete queues delete operations into the job pool."""
+        for i in range(1, 4):
+            entry = DownloadEntry(id=f"del{i}", url=f"http://example.com/file{i}.zip", status="paused")
+            self.db.add_download(entry)
+
+        deleted = []
+        with patch.object(self.manager, "delete_download", side_effect=lambda did, *args, **kwargs: deleted.append(did)):
+            self.manager.delete_downloads([f"del{i}" for i in range(1, 4)], delete_files=False)
+            done = self.manager.wait_status_jobs(timeout=5.0)
+            self.assertTrue(done)
+            self.assertEqual(deleted, ["del1", "del2", "del3"])
+
+    def test_paused_downloads_retain_queue_order(self):
+        """Pausing a download retains its queue_order instead of resetting to 0, preventing order jumbling."""
+        e1 = DownloadEntry(id="q1", url="http://example.com/1.zip", status="downloading", queue_order=1)
+        e2 = DownloadEntry(id="q2", url="http://example.com/2.zip", status="queued", queue_order=2)
+        e3 = DownloadEntry(id="q3", url="http://example.com/3.zip", status="queued", queue_order=3)
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.db.add_download(e3)
+
+        # Pause download 1
+        self.manager.pause_download("q1")
+        updated_e1 = self.db.get_download("q1")
+        self.assertEqual(updated_e1.status, "paused")
+        self.assertEqual(updated_e1.queue_order, 1, "Paused download must retain queue_order")
+
+        # Resume download 1: must keep queue_order=1 rather than appending to end
+        self.manager.resume_download("q1", trigger_process_queue=False)
+        resumed_e1 = self.db.get_download("q1")
+        self.assertEqual(resumed_e1.status, "queued")
+        self.assertEqual(resumed_e1.queue_order, 1, "Resumed download must retain original queue_order")
 
     def test_active_section_fifo_ordering(self):
         """Active section entries are presented in FIFO insertion order regardless of identical timestamps."""

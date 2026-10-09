@@ -1620,7 +1620,7 @@ CREATE TABLE IF NOT EXISTS segments (
         """
         row = self._conn.execute(
             "SELECT MAX(queue_order) AS max_order FROM downloads "
-            "WHERE status IN ('queued', 'downloading', 'checking', 'fetching_metadata', 'stalled') "
+            "WHERE status IN ('queued', 'downloading', 'checking', 'fetching_metadata', 'stalled', 'paused') "
             "AND queue_order > 0 AND queue_id = ?",
             (queue_id or DEFAULT_QUEUE_ID,),
         ).fetchone()

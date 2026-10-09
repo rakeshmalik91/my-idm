@@ -96,6 +96,7 @@ _STATUS_COLORS = {
 ACTIVE_QUEUE_STATUSES = {
     "downloading",
     "queued",
+    "paused",
 }
 
 
@@ -1389,11 +1390,30 @@ class DownloadTableModel(QAbstractTableModel):
             [Qt.ItemDataRole.DisplayRole],
         )
 
+    def _entry_section_id(self, entry: Optional[DownloadEntry]) -> Optional[str]:
+        if not entry:
+            return None
+        if self._segregated_mode == "date":
+            return get_entry_date_category(entry)
+        elif self._segregated_mode == "type":
+            return get_entry_type_category(entry)
+        else:
+            if entry.status in ACTIVE_SECTION_STATUSES:
+                return SECTION_ACTIVE
+            elif entry.status in SEEDING_SECTION_STATUSES:
+                return SECTION_SEEDING
+            elif entry.status in INACTIVE_SECTION_STATUSES:
+                return SECTION_INACTIVE
+            return SECTION_INACTIVE
+
     def update_status(self, download_id: str, status: str,
                       error_msg: str = ""):
         entry_all: Optional[DownloadEntry] = None
+        old_sec: Optional[str] = None
         for e in self._all_entries:
             if e.id == download_id:
+                if self._segregated_view:
+                    old_sec = self._entry_section_id(e)
                 e.status = status
                 e.error_message = error_msg
                 if status in ("paused", "completed", "error", "stopped"):
@@ -1403,7 +1423,28 @@ class DownloadTableModel(QAbstractTableModel):
                 break
 
         if self._segregated_view:
-            self._reapply_filter()
+            new_sec = self._entry_section_id(entry_all) if entry_all else None
+            if old_sec != new_sec:
+                self._reapply_filter()
+                return
+            row = self._id_to_row.get(download_id)
+            if row is not None:
+                left = self.index(row, 0)
+                right = self.index(row, Col.COUNT - 1)
+                self.dataChanged.emit(
+                    left, right,
+                    [
+                        Qt.ItemDataRole.DisplayRole,
+                        Qt.ItemDataRole.ForegroundRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                    ],
+                )
+                if len(self._entries) > 1:
+                    self.dataChanged.emit(
+                        self.index(0, Col.QUEUE),
+                        self.index(len(self._entries) - 1, Col.QUEUE),
+                        [Qt.ItemDataRole.DisplayRole],
+                    )
             return
 
         row = self._id_to_row.get(download_id)
@@ -1553,8 +1594,11 @@ class DownloadTableModel(QAbstractTableModel):
         entry.total_seeds = to_int(getattr(entry, "total_seeds", 0))
         entry.total_peers = to_int(getattr(entry, "total_peers", 0))
 
+        old_sec: Optional[str] = None
         for i, e in enumerate(self._all_entries):
             if e.id == download_id:
+                if self._segregated_view:
+                    old_sec = self._entry_section_id(e)
                 if entry.downloaded_size == 0 and e.downloaded_size > 0 and entry.status in ("paused", "stopped", "suspended"):
                     entry.downloaded_size = e.downloaded_size
                 self._all_entries[i] = entry
@@ -1563,7 +1607,29 @@ class DownloadTableModel(QAbstractTableModel):
             self._all_entries.append(entry)
 
         if self._segregated_view:
-            self._reapply_filter()
+            new_sec = self._entry_section_id(entry)
+            if old_sec is None or old_sec != new_sec:
+                self._reapply_filter()
+                return
+            row = self._id_to_row.get(download_id)
+            if row is not None:
+                self._entries[row] = entry
+                left = self.index(row, 0)
+                right = self.index(row, Col.COUNT - 1)
+                self.dataChanged.emit(
+                    left, right,
+                    [
+                        Qt.ItemDataRole.DisplayRole,
+                        Qt.ItemDataRole.ForegroundRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                    ],
+                )
+                if len(self._entries) > 1:
+                    self.dataChanged.emit(
+                        self.index(0, Col.QUEUE),
+                        self.index(len(self._entries) - 1, Col.QUEUE),
+                        [Qt.ItemDataRole.DisplayRole],
+                    )
             return
 
         row = self._id_to_row.get(download_id)

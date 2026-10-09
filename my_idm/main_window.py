@@ -2250,8 +2250,7 @@ class MainWindow(QMainWindow):
             return
         dlg = DeleteConfirmDialog(len(ids), self)
         if dlg.exec() == DeleteConfirmDialog.DialogCode.Accepted:
-            for did in ids:
-                self._manager.delete_download(did, dlg.delete_files)
+            self._manager.delete_downloads(ids, dlg.delete_files)
 
     def _on_delete_file(self):
         ids = self._selected_ids()
@@ -2267,8 +2266,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         )
         if ans == QMessageBox.StandardButton.Yes:
-            for did in ids:
-                self._manager.delete_download_file(did)
+            self._manager.delete_download_files(ids)
 
     def _on_move(self):
         entry = self._first_selected_entry()
@@ -2817,13 +2815,11 @@ class MainWindow(QMainWindow):
         # copy is the only place the *previous* status still exists.
         previous_entry = self._model.get_entry_by_id(download_id)
         previous_status = previous_entry.status if previous_entry is not None else None
-        self._model.update_status(download_id, status, error_msg)
-        # The engine writes more than the status: seeding timestamps, resolved
-        # filenames and sizes all change alongside it, and the model holds its
-        # own snapshot of the row.
         fresh = self._manager.get_entry(download_id)
         if fresh is not None:
             self._model.refresh_entry(download_id, fresh)
+        else:
+            self._model.update_status(download_id, status, error_msg)
         self._restore_selection(selected)
         self._update_count_label()
         self._update_speed_label()
