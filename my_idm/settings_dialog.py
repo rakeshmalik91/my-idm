@@ -9,9 +9,21 @@ import threading
 from pathlib import Path
 from typing import Optional, Any
 
-from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal, QTime, QRect
-from PySide6.QtGui import QDesktopServices, QFont, QFontMetrics, QIcon, QKeySequence, QColor, QPixmap, QPainter
+from PySide6.QtCore import Qt, QSize, QUrl, QSettings, QObject, Signal, QTime, QRect, QEvent
+from PySide6.QtGui import (
+    QDesktopServices,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QKeySequence,
+    QColor,
+    QPixmap,
+    QPainter,
+    QShortcut,
+    QKeyEvent,
+)
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -597,9 +609,22 @@ class SettingsDialog(QDialog):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
+        sidebar_width = self._sidebar_width()
+        sidebar_container = QWidget()
+        sidebar_container.setFixedWidth(sidebar_width)
+        sidebar_layout = QVBoxLayout(sidebar_container)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(6)
+
+        self._search_input = QLineEdit()
+        self._search_input.setObjectName("preferencesSearchInput")
+        self._search_input.setPlaceholderText("Search settings... (Ctrl+F)")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.installEventFilter(self)
+        sidebar_layout.addWidget(self._search_input)
+
         self._tab_sidebar = QListWidget()
         self._tab_sidebar.setObjectName("preferencesSidebar")
-        self._tab_sidebar.setFixedWidth(self._sidebar_width())
         self._tab_sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._tab_sidebar.setSpacing(1)
         for i in range(self._tabs.count()):
@@ -616,10 +641,20 @@ class SettingsDialog(QDialog):
                 item.setData(Qt.ItemDataRole.UserRole, text)
             self._tab_sidebar.addItem(item)
         self._tab_sidebar.setCurrentRow(0)
+        sidebar_layout.addWidget(self._tab_sidebar, 1)
 
-        row.addWidget(self._tab_sidebar)
+        self._no_results_label = QLabel("No matching settings found")
+        self._no_results_label.setObjectName("preferencesNoResults")
+        self._no_results_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._no_results_label.setStyleSheet("color: #8b949e; padding: 24px 8px; font-style: italic;")
+        self._no_results_label.setWordWrap(True)
+        self._no_results_label.hide()
+        sidebar_layout.addWidget(self._no_results_label, 1)
+
+        row.addWidget(sidebar_container)
         row.addWidget(self._tabs, 1)
 
+        self._search_input.textChanged.connect(self._on_search_text_changed)
         self._tab_sidebar.currentRowChanged.connect(self._on_sidebar_row_changed)
         self._tabs.currentChanged.connect(self._on_tab_current_changed)
         return body
@@ -642,11 +677,176 @@ class SettingsDialog(QDialog):
             text = self._tabs.tabText(i)
             labels.append(text.partition(" ")[2] or text)
         widest = max((metrics.horizontalAdvance(t) for t in labels), default=120)
-        return max(170, min(widest + 62, 300))
+        return max(200, min(widest + 62, 300))
+
+    def _focus_search(self) -> None:
+        if hasattr(self, "_search_input"):
+            self._search_input.setFocus()
+            self._search_input.selectAll()
+
+    def eventFilter(self, watched: QObject, event: Any) -> bool:
+        if (
+            hasattr(self, "_search_input")
+            and watched is self._search_input
+            and event.type() == QEvent.Type.KeyPress
+        ):
+            if isinstance(event, QKeyEvent) and event.key() == Qt.Key.Key_Escape:
+                if self._search_input.text():
+                    self._search_input.clear()
+                    return True
+        return super().eventFilter(watched, event)
+
+    @staticmethod
+    def _clean_search_text(text: str) -> str:
+        if not text:
+            return ""
+        s = re.sub(r"<[^>]+>", " ", text)
+        s = s.replace("&", "")
+        return " ".join(s.split()).lower()
+
+    def _build_search_index(self) -> None:
+        """Index settings text, controls, and tooltips across all tabs."""
+        self._search_index: dict[int, dict[str, Any]] = {}
+        for i in range(self._tabs.count()):
+            name = self._tab_names[i] if i < len(self._tab_names) else ""
+            title = self._tabs.tabText(i)
+            tab_texts = [self._clean_search_text(title), self._clean_search_text(name)]
+            widget_entries: list[tuple[QWidget, str]] = []
+
+            scroll_area = self._tabs.widget(i)
+            page = scroll_area.widget() if isinstance(scroll_area, QScrollArea) else scroll_area
+            if page:
+                for w in page.findChildren(QWidget):
+                    pieces: list[str] = []
+                    if isinstance(w, QGroupBox):
+                        pieces.append(w.title())
+                    elif isinstance(w, QLabel):
+                        pieces.append(w.text())
+                    elif isinstance(w, QAbstractButton):
+                        pieces.append(w.text())
+                    elif isinstance(w, QComboBox):
+                        pieces.extend(w.itemText(j) for j in range(w.count()))
+                    elif isinstance(w, QLineEdit):
+                        pieces.append(w.placeholderText())
+                    elif isinstance(w, (QSpinBox, QDoubleSpinBox)):
+                        prefix = w.prefix()
+                        suffix = w.suffix()
+                        if prefix:
+                            pieces.append(prefix)
+                        if suffix:
+                            pieces.append(suffix)
+                    elif isinstance(w, QTableWidget):
+                        pieces.extend(
+                            w.horizontalHeaderItem(j).text()
+                            for j in range(w.columnCount())
+                            if w.horizontalHeaderItem(j)
+                        )
+                    elif isinstance(w, QListWidget):
+                        pieces.extend(
+                            w.item(j).text()
+                            for j in range(w.count())
+                            if w.item(j)
+                        )
+                    tip = w.toolTip()
+                    if tip:
+                        pieces.append(tip)
+
+                    w_text = self._clean_search_text(" ".join(p for p in pieces if p))
+                    if w_text:
+                        widget_entries.append((w, w_text))
+                        tab_texts.append(w_text)
+
+            self._search_index[i] = {
+                "name": name,
+                "title": title,
+                "all_text": " ".join(tab_texts),
+                "widgets": widget_entries,
+            }
+
+    def _scroll_to_matching_widget(self, tab_index: int) -> None:
+        best_w = getattr(self, "_current_search_best_widgets", {}).get(tab_index)
+        scroll_area = self._tabs.widget(tab_index)
+        if isinstance(scroll_area, QScrollArea):
+            if best_w is not None:
+                scroll_area.ensureWidgetVisible(best_w, 0, 50)
+            else:
+                scroll_area.verticalScrollBar().setValue(0)
+
+    def _on_search_text_changed(self, text: str) -> None:
+        query = self._clean_search_text(text)
+        if not query:
+            self._current_search_best_widgets = {}
+            self._tab_sidebar.blockSignals(True)
+            try:
+                for i in range(self._tab_sidebar.count()):
+                    self._tab_sidebar.item(i).setHidden(False)
+            finally:
+                self._tab_sidebar.blockSignals(False)
+            self._no_results_label.hide()
+            self._tab_sidebar.show()
+            cur = self._tabs.currentIndex()
+            if 0 <= cur < self._tab_sidebar.count():
+                self._tab_sidebar.setCurrentRow(cur)
+            return
+
+        terms = query.split()
+        matched_indices: list[int] = []
+        best_widgets: dict[int, Optional[QWidget]] = {}
+
+        if not hasattr(self, "_search_index") or not self._search_index:
+            self._build_search_index()
+
+        for i, tab_data in self._search_index.items():
+            if all(term in tab_data["all_text"] for term in terms):
+                matched_indices.append(i)
+                best_w: Optional[QWidget] = None
+                best_score = 0
+                for w, wt in tab_data["widgets"]:
+                    score = 0
+                    if query in wt:
+                        score += 100
+                    for term in terms:
+                        if term in wt:
+                            score += 10
+                    if score > best_score:
+                        best_score = score
+                        best_w = w
+                best_widgets[i] = best_w
+
+        self._current_search_best_widgets = best_widgets
+
+        self._tab_sidebar.blockSignals(True)
+        try:
+            for i in range(self._tab_sidebar.count()):
+                self._tab_sidebar.item(i).setHidden(i not in matched_indices)
+        finally:
+            self._tab_sidebar.blockSignals(False)
+
+        if not matched_indices:
+            self._tab_sidebar.hide()
+            self._no_results_label.setText(f'No matching settings found for\n"{text.strip()}"')
+            self._no_results_label.show()
+            return
+
+        self._no_results_label.hide()
+        self._tab_sidebar.show()
+
+        cur_tab = self._tabs.currentIndex()
+        target_tab = cur_tab if cur_tab in matched_indices else matched_indices[0]
+
+        if self._tab_sidebar.currentRow() != target_tab:
+            self._tab_sidebar.setCurrentRow(target_tab)
+        elif self._tabs.currentIndex() != target_tab:
+            self._tabs.setCurrentIndex(target_tab)
+
+        self._scroll_to_matching_widget(target_tab)
 
     def _on_sidebar_row_changed(self, row: int) -> None:
-        if row >= 0 and row != self._tabs.currentIndex():
-            self._tabs.setCurrentIndex(row)
+        if row >= 0:
+            if row != self._tabs.currentIndex():
+                self._tabs.setCurrentIndex(row)
+            if hasattr(self, "_search_input") and self._search_input.text().strip():
+                self._scroll_to_matching_widget(row)
 
     def _on_tab_current_changed(self, index: int) -> None:
         if index < 0:
@@ -657,6 +857,8 @@ class SettingsDialog(QDialog):
                 self._tab_sidebar.setCurrentRow(index)
             finally:
                 self._tab_sidebar.blockSignals(False)
+        if hasattr(self, "_search_input") and self._search_input.text().strip():
+            self._scroll_to_matching_widget(index)
 
     def _restore_size_from_db(self):
         """Restore preferences window dimensions from database or QSettings."""
@@ -780,6 +982,11 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(self._save_btn)
 
         root_layout.addLayout(btn_layout)
+
+        # Search shortcut (Ctrl+F / Cmd+F)
+        self._search_shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self)
+        self._search_shortcut.activated.connect(self._focus_search)
+        self._build_search_index()
 
     def _create_views_tab(self) -> QWidget:
         """Segregated-view grouping plus which columns the downloads table shows, and in what order.

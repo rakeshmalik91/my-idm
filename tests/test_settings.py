@@ -825,6 +825,62 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.assertEqual(dlg2.width(), 960)
         self.assertEqual(dlg2.height(), 700)
 
+    def test_settings_dialog_search_input_and_escape(self):
+        from PySide6.QtCore import Qt, QEvent
+        from PySide6.QtGui import QKeyEvent
+
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+        self.assertTrue(hasattr(dlg, "_search_input"))
+        self.assertTrue(dlg._search_input.isClearButtonEnabled())
+        self.assertIn("Ctrl+F", dlg._search_input.placeholderText())
+
+        # Test Esc key clears non-empty input
+        dlg._search_input.setText("bittorrent")
+        self.assertEqual(dlg._search_input.text(), "bittorrent")
+        esc_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        consumed = dlg.eventFilter(dlg._search_input, esc_event)
+        self.assertTrue(consumed)
+        self.assertEqual(dlg._search_input.text(), "")
+
+    def test_settings_dialog_search_filtering_and_restore(self):
+        from my_idm.settings_dialog import TAB_VIEWS, TAB_VPN, tab_index
+
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        total_tabs = dlg._tab_sidebar.count()
+        self.assertEqual(total_tabs, 14)
+
+        # Search for a setting on the Views tab (e.g. "dark")
+        dlg._search_input.setText("dark")
+        visible_rows = [i for i in range(total_tabs) if not dlg._tab_sidebar.item(i).isHidden()]
+        views_idx = tab_index(TAB_VIEWS)
+        self.assertIn(views_idx, visible_rows)
+        self.assertEqual(dlg._tabs.currentIndex(), views_idx)
+        self.assertFalse(dlg._tab_sidebar.isHidden())
+        self.assertTrue(dlg._no_results_label.isHidden())
+
+        # Search for a multi-word setting on the VPN tab ("kill switch")
+        dlg._search_input.setText("kill switch")
+        visible_rows = [i for i in range(total_tabs) if not dlg._tab_sidebar.item(i).isHidden()]
+        vpn_idx = tab_index(TAB_VPN)
+        self.assertIn(vpn_idx, visible_rows)
+        self.assertEqual(dlg._tabs.currentIndex(), vpn_idx)
+
+        # Search for something non-existent
+        dlg._search_input.setText("xyz_nonexistent_setting_12345")
+        self.assertTrue(dlg._tab_sidebar.isHidden())
+        self.assertFalse(dlg._no_results_label.isHidden())
+        self.assertIn("No matching settings found", dlg._no_results_label.text())
+
+        # Clearing restores all tabs
+        dlg._search_input.clear()
+        visible_rows = [i for i in range(total_tabs) if not dlg._tab_sidebar.item(i).isHidden()]
+        self.assertEqual(len(visible_rows), total_tabs)
+        self.assertFalse(dlg._tab_sidebar.isHidden())
+        self.assertTrue(dlg._no_results_label.isHidden())
+
 
 class TestPreferencesPageRegistry(unittest.TestCase):
     """``TAB_ORDER`` / ``TAB_TITLES`` are the single source of truth for page identity.
