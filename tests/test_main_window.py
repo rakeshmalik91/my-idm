@@ -2190,7 +2190,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         )
         self.assertEqual(
             [_DEFAULT_COLUMN_WIDTHS[c] for c in _DEFAULT_COLUMN_ORDER],
-            [30, 30, 412, 82, 214, 135, 166, 80, 140, 123, 262, 130, 130, 187,
+            [50, 30, 412, 82, 214, 135, 166, 80, 140, 123, 262, 130, 130, 187,
              546, 131, 110, 173],
         )
 
@@ -2303,7 +2303,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             app.setStyleSheet(without)
             QApplication.processEvents()
             self.assertLess(
-                ink_at(_DEFAULT_COLUMN_WIDTHS[Col.QUEUE]), full * 0.6,
+                ink_at(30), full * 0.6,
                 "the control no longer reproduces the defect, so this test proves nothing",
             )
         finally:

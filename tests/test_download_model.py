@@ -1201,6 +1201,58 @@ class TestModelFiltering(unittest.TestCase):
                 )
                 self.assertFalse(self.model.refresh_date_grouping(now_dt=far_future))
 
+    def test_newly_added_active_downloads_placed_behind_older_active_downloads(self):
+        """When new downloads get added (e.g. from backlog), they are placed behind older active downloads."""
+        from datetime import datetime, timedelta
+        now = datetime.now().astimezone()
+        t1 = (now - timedelta(minutes=10)).isoformat()
+        t2 = (now - timedelta(minutes=8)).isoformat()
+        t3 = (now - timedelta(minutes=6)).isoformat()
+        t_completed = (now - timedelta(minutes=15)).isoformat()
+
+        # Existing active downloads (e.g. Gosick 10, 09, 08) and completed ones
+        older_active1 = DownloadEntry(id="ep10", filename="ep10.mp4", status="downloading", added_at=t1, queue_order=1)
+        older_active2 = DownloadEntry(id="ep09", filename="ep09.mp4", status="downloading", added_at=t2, queue_order=2)
+        older_queued = DownloadEntry(id="ep08", filename="ep08.mp4", status="queued", added_at=t3, queue_order=3)
+        completed_item = DownloadEntry(id="ep01", filename="ep01.mp4", status="completed", added_at=t_completed, queue_order=0)
+
+        self.model.set_segregated_view(True, mode="date")
+        self.model.load_entries([older_active1, older_active2, older_queued, completed_item])
+
+        # Active downloads start at row 1 (row 0 is TODAY header)
+        self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
+        self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "3")
+        self.assertEqual(self.model.get_entry(1).id, "ep10")
+        self.assertEqual(self.model.get_entry(2).id, "ep09")
+        self.assertEqual(self.model.get_entry(3).id, "ep08")
+
+        # Now more episodes get added from backlog with a newer timestamp (now) and higher queue_order
+        t_new = now.isoformat()
+        new_ep11 = DownloadEntry(id="ep11", filename="ep11.mp4", status="queued", added_at=t_new, queue_order=4)
+        new_ep12 = DownloadEntry(id="ep12", filename="ep12.mp4", status="queued", added_at=t_new, queue_order=5)
+
+        self.model.add_entry(new_ep11)
+        self.model.add_entry(new_ep12)
+
+        # The new episodes must be BEHIND the older active downloads (rows 4 and 5), NOT at row 1!
+        self.assertEqual(self.model.get_entry(1).id, "ep10", "ep10 must remain order 1")
+        self.assertEqual(self.model.get_entry(2).id, "ep09", "ep09 must remain order 2")
+        self.assertEqual(self.model.get_entry(3).id, "ep08", "ep08 must remain order 3")
+        self.assertEqual(self.model.get_entry(4).id, "ep11", "ep11 must be behind older active downloads")
+        self.assertEqual(self.model.get_entry(5).id, "ep12", "ep12 must be behind older active downloads")
+
+        # Check queue order numbers
+        self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
+        self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "3")
+        self.assertEqual(self.model.data(self.model.index(4, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "4")
+        self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "5")
+
+        # Completed item must be after all active downloads
+        self.assertEqual(self.model.get_entry(6).id, "ep01")
+        self.assertEqual(self.model.data(self.model.index(6, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
+
 
 if __name__ == "__main__":
     unittest.main()

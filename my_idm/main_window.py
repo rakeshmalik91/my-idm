@@ -155,7 +155,7 @@ _DEFAULT_TAIL_COLUMNS = (
 #: truncated every long filename, and a file/folder name column at 220px truncated the other
 #: half of them. Deliberately *not* fitted to a nominal window width.
 _DEFAULT_COLUMN_WIDTHS = {
-    Col.QUEUE: 30,
+    Col.QUEUE: 50,
     Col.QUEUE_NAME: 30,
     Col.NAME: 412,
     Col.SIZE: 82,
@@ -2821,12 +2821,13 @@ class MainWindow(QMainWindow):
             return
 
         selected = self._selected_ids()
+        model_reset = bool(self._model.update_status(download_id, status, error_msg))
         fresh = self._manager.get_entry(download_id)
-        model_reset = False
         if fresh is not None:
-            model_reset = bool(self._model.refresh_entry(download_id, fresh))
-        else:
-            model_reset = bool(self._model.update_status(download_id, status, error_msg))
+            fresh.status = status
+            if error_msg:
+                fresh.error_message = error_msg
+            model_reset = bool(self._model.refresh_entry(download_id, fresh)) or model_reset
 
         if model_reset:
             self._restore_selection(selected)
@@ -4244,6 +4245,8 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     pass
+                if self._table.columnWidth(Col.QUEUE) < _DEFAULT_COLUMN_WIDTHS[Col.QUEUE]:
+                    self._table.setColumnWidth(Col.QUEUE, _DEFAULT_COLUMN_WIDTHS[Col.QUEUE])
             else:
                 # No saved header state: a fresh profile. Apply the default hidden set here
                 # too, for the case where the DB holds window geometry from an older build

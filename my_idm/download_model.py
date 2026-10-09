@@ -1117,24 +1117,32 @@ class DownloadTableModel(QAbstractTableModel):
                     (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
                 ]
 
-        if self._sort_column is not None:
+        if self._sort_column in (Col.ADDED, Col.QUEUE) or self._sort_column is None:
             for sec_id, _, group_entries, _ in groups:
-                if sec_id == SECTION_ACTIVE and self._sort_column in (Col.ADDED, Col.QUEUE):
+                if self._sort_column == Col.ADDED and ascending:
                     group_entries.sort(
+                        key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                        reverse=False,
+                    )
+                else:
+                    active_group = [e for e in group_entries if e.status in ACTIVE_QUEUE_STATUSES]
+                    inactive_group = [e for e in group_entries if e.status not in ACTIVE_QUEUE_STATUSES]
+                    active_group.sort(
                         key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "", e.id),
                         reverse=(self._sort_column == Col.QUEUE and not ascending),
                     )
-                else:
-                    group_entries.sort(
-                        key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
-                        reverse=reverse,
-                    )
-        else:
+                    if self._sort_column is not None:
+                        inactive_group.sort(
+                            key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                            reverse=reverse,
+                        )
+                    group_entries[:] = active_group + inactive_group
+        elif self._sort_column is not None:
             for sec_id, _, group_entries, _ in groups:
-                if sec_id == SECTION_ACTIVE:
-                    group_entries.sort(
-                        key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "", e.id),
-                    )
+                group_entries.sort(
+                    key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
+                    reverse=reverse,
+                )
 
         entries: list[DownloadEntry] = []
         for sec_id, title, group_entries, hdr_id in groups:
@@ -1411,8 +1419,10 @@ class DownloadTableModel(QAbstractTableModel):
                       error_msg: str = ""):
         entry_all: Optional[DownloadEntry] = None
         old_sec: Optional[str] = None
+        old_status: Optional[str] = None
         for e in self._all_entries:
             if e.id == download_id:
+                old_status = e.status
                 if self._segregated_view:
                     old_sec = self._entry_section_id(e)
                 e.status = status
@@ -1425,7 +1435,9 @@ class DownloadTableModel(QAbstractTableModel):
 
         if self._segregated_view:
             new_sec = self._entry_section_id(entry_all) if entry_all else None
-            if old_sec != new_sec:
+            was_active = old_status in ACTIVE_QUEUE_STATUSES
+            now_active = status in ACTIVE_QUEUE_STATUSES
+            if old_sec != new_sec or was_active != now_active:
                 self._reapply_filter()
                 return True
             row = self._id_to_row.get(download_id)
