@@ -1,8 +1,8 @@
 # Named Queues & Concurrency Budgets
 
-**Implemented 2026-10-01.** This document now describes shipped behaviour. Two related
-features from [`docs/todo/feature-pool-rdm.md`](file:///d:/Projects/my-idm/docs/todo/feature-pool-rdm.md)
-were designed alongside it and are **still not implemented** — see [Not implemented](#not-implemented).
+**Implemented 2026-10-01, expanded 2026-10-07 through 2026-10-09.** This document describes
+shipped behaviour including named queues, concurrency budgets, bandwidth limits, off-peak
+scheduling, and the StatusJobPool pacing worker.
 
 ---
 
@@ -13,13 +13,18 @@ once. The motivating case is a user with one 40-segment torrent and four small f
 put the torrent in its own queue with `max_concurrent = 1` and let the small files run together
 in Default.
 
-Three knobs answer that, in increasing order of power:
+Four knobs answer that, in increasing order of power:
 
 1. **Per-queue concurrency** — implemented. "At most 1 torrent at a time, but all the small
    files together."
-2. **Per-queue bandwidth ceilings** — implemented. "Downloads in this queue may not exceed
-   500 KB/s, so the torrent cannot eat the line."
-3. **An off-peak schedule** — *not implemented*.
+2. **Per-queue bandwidth ceilings & periodic quotas** — implemented. Instantaneous transfer
+   rate ceilings (KB/s), plus daily, weekly, and monthly total volume limits per queue and globally.
+3. **An off-peak schedule** — implemented. Restricts downloads to a configured local time
+   window (e.g. 02:00 to 06:00, including spans crossing midnight), with an explicit Force Start
+   override.
+4. **Status Job Pool pacing** — implemented. Serializes and paces status transitions (resume,
+   recheck, pause, stop, delete) via a background worker thread (`status-job-pool`) to eliminate
+   UI freeze during bulk multi-selection operations.
 
 The global `GeneralConfig.max_concurrent_downloads` remains a **ceiling over everything**. A
 download starts only when both its own queue's budget and the global budget allow it, so a user
@@ -178,40 +183,92 @@ Three call sites reach `_start_entry` without passing through each other: `_proc
 be bypassed, so the decision lives in one method:
 
 ```python
-# manager.py:1830
-def _may_start(self, entry, counts, limits, global_max) -> bool:
+# manager.py
+def _may_start(self, entry: DownloadEntry, counts: dict[str, int],
+               limits: dict[str, int], global_max: int,
+               now: Optional[Union[datetime, date]] = None) -> bool:
+    qid = self._db.resolve_queue_id(entry.queue_id)
+    # Off-peak scheduler check: force start overrides it
+    is_force = bool(entry.metadata.get("force_started", False))
+    if not is_force and not self.is_within_schedule(now):
+        return False
+
+    # Bandwidth quota gate: global overrides per-queue, stops entry from starting if limit exceeded
+    allowed, _msg, _pct = self._db.check_bandwidth_limit(qid, 0, False, now)
+    if not allowed:
+        return False
+
     if sum(counts.values()) >= global_max:
         return False
-    limit = limits.get(self._db.resolve_queue_id(entry.queue_id), 0)
-    if limit > 0 and counts.get(self._db.resolve_queue_id(entry.queue_id), 0) >= limit:
+    limit = limits.get(qid, 0)
+    # limit 0 == unlimited within the queue; only the global ceiling can stop it.
+    if limit > 0 and counts.get(qid, 0) >= limit:
         return False
     return True
 ```
 
 `force_start_download` deliberately bypasses it — that is the user's "I know, just start it".
 
-### Counts are one grouped query
+### Thread Synchronization & Concurrency Safety
+
+`_process_queue()` and `add_download()` are guarded by a re-entrant lock:
+```python
+with self._queue_process_lock:
+```
+This prevents multiple concurrent threads (the 1 Hz main-thread retry timer, the background
+`status-job-pool` thread, and asynchronous HTTP completion callbacks on `idm-async`) from
+racing to compute available slots simultaneously and overshooting a queue's `max_concurrent`
+ceiling.
+
+Furthermore, `resume_download()` explicitly guards against resuming already-active downloads:
+if an entry is already in `("downloading", "checking", "fetching_metadata")` or active in any
+underlying engine (`HTTPEngine`, `TorrentEngine`, or `yt-dlp`), calling resume is safely
+treated as a no-op instead of corrupting its state to `"queued"`. When eligible to resume,
+it delegates starting to `self._process_queue()` under `self._queue_process_lock`.
+
+### Deduplicated Active Transfer Accounting
+
+`_active_counts_by_queue()` combines database active states with memory-tracked in-flight transfers
+across all engines, deduplicating IDs so no transfer is counted twice or omitted due to transition
+latency:
 
 ```python
-# manager.py:1807
 def _active_counts_by_queue(self) -> dict[str, int]:
-    counts = self._db.get_active_counts_by_queue()   # one GROUP BY, indexed on queue_id
-    for did in self._starting_downloads:
-        entry = self._db.get_download(did)
-        if entry:
-            key = self._db.resolve_queue_id(entry.queue_id)
-            counts[key] = counts.get(key, 0) + 1
+    active_map: dict[str, str] = {}
+    if hasattr(self._db, "get_active_download_ids"):
+        active_map.update(self._db.get_active_download_ids())
+
+    in_flight = set(self._starting_downloads)
+    in_flight.update(self._http.get_active_download_ids())
+    in_flight.update(self._torrent.get_active_download_ids())
+    in_flight.update(self._ytdlp_jobs.keys())
+
+    for did in in_flight:
+        if did not in active_map:
+            entry = self._db.get_download(did)
+            if entry:
+                active_map[did] = self._db.resolve_queue_id(entry.queue_id)
+
+    counts: dict[str, int] = {}
+    for qid in active_map.values():
+        counts[qid] = counts.get(qid, 0) + 1
     return counts
 ```
 
-This replaces the previous `_get_active_download_count()`, which did a **full table scan per
-candidate** — `_process_queue` read it once up front and again per row, so one dispatch pass was
-O(n²) `SELECT *` round-trips. Per-queue accounting made the grouped form *cheaper* than the
-single global count it replaced.
+### Status Job Pool (`StatusJobPool`)
 
-`_starting_downloads` is added in because it covers the window between deciding to start a
-download and the engine reporting it as `downloading`. Without it a queue's first start always
-overshoots its own budget by exactly that set's size.
+When users perform bulk operations on multiple selections (e.g. resuming, rechecking, or pausing
+25+ downloads at once), invoking status operations and database updates synchronously on the Qt
+main thread causes severe UI lockups and thrashing.
+
+`StatusJobPool` solves this:
+- **Dedicated Worker Thread**: Runs on a background daemon thread named `"status-job-pool"`.
+- **FIFO Queued Serialization**: Queues status actions (`resume`, `recheck`, `pause`, `stop`,
+  `delete`) and dispatches them sequentially.
+- **Pacing**: Configurable interval (`pace_seconds = 0.01`, 10 ms) allows the Qt event loop
+  to process events and render intermediate state fluidly.
+- **Batched Queue Drain**: When the status queue completely drains, it calls `_process_queue()`
+  once to start any newly eligible queued downloads, avoiding redundant start passes per row.
 
 ### Dispatch order
 
@@ -487,6 +544,14 @@ My-IDM supports an off-peak download scheduler configured in Preferences → **�
 - **Window Transitions**: Monitored by a periodic timer (`_scheduler_timer`). Entering the off-peak window triggers `_process_queue()`. Exiting the window automatically pauses active downloading transfers when `pause_when_ended` is enabled.
 - **Force Start Override**: Users can force start any download via the **Force Start** button (icon-only green play button containing an 'F' on the toolbar, Edit menu, and download context menu). Force-started items set `metadata["force_started"] = True`, bypassing the scheduler and concurrency limits, and remain active when off-peak hours end. Manually pausing an item clears the `force_started` flag.
 
+### Queue Manager Tab in Preferences
+
+In addition to the standalone **Edit → Queues** dialog, full queue management is directly integrated into Preferences under the **🗃️ Queues** tab (`TAB_QUEUES`):
+- Provides full CRUD over named queues without leaving Preferences.
+- Allows inline editing of queue names, color swatches, concurrency limits (`max_concurrent`), and download/upload speed ceilings.
+- Reordering buttons (Move Up / Move Down) to adjust priority order.
+- Deletion safety: Seeded queues (`Default`, `AnimePahe`, `YouTube`) are protected against deletion; deleting custom queues migrates their downloads cleanly to Default.
+
 ### Seeing which queue a download is in
 
 Two places, because this is the question the feature exists to answer:
@@ -585,11 +650,12 @@ stale id survives in `ui_state`, and the view stays filtered to a queue that doe
 
 ## Tests
 
-`tests/test_queues.py` — 232 tests: schema and migration from a pre-queue database (including one
+`tests/test_queues.py` — 243 tests: schema and migration from a pre-queue database (including one
 with no `color` column and no bandwidth columns), CRUD refusals, queue-scoped reads, budget
 enforcement, dispatch ordering (asserted stable across repeated runs), reorder density, model
 scoping, the bandwidth ceilings end to end (resolution rule, both engines, the manager's snapshot,
-the migration), the manager dialog's editors and header-fitting, and the window wiring.
+the migration), the manager dialog's editors and header-fitting, StatusJobPool pacing, concurrent
+dispatch race resilience, and the window wiring.
 
 Useful seams when extending: `Database.resolve_queue_id`, `manager._may_start` and
 `manager._active_counts_by_queue` are all directly callable, so budget behaviour can be asserted

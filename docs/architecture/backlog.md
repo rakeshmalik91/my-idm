@@ -204,6 +204,11 @@ To prevent backlog items from being repeatedly downloaded on every application r
   If certain lines fail (e.g. malformed URL or security violation), My-IDM removes only the successfully queued lines. Failed lines, along with their associated header directives and comments, are preserved in the file so the user or script can correct them.
 - **Configurable Preference**:
   Auto-clearing can be toggled via the **"Clear entries from backlog file after processing successfully"** checkbox under **Preferences → General**. When disabled, backlog files remain untouched.
+- **User Notifications**:
+  Whenever non-zero downloads are ingested from a backlog file, My-IDM triggers an application toast/tray notification:
+  `"Picked up N downloads from Backlog"` (or `"Picked up 1 download from Backlog"`), providing immediate visual feedback during background polling or CLI handoff.
+- **Batch Processing & Backup Deduplication**:
+  Ingestion writes are batched to avoid locking issues, and processed items are deduplicated before updating persistent backup logs.
 
 ---
 

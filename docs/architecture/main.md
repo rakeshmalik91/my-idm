@@ -120,7 +120,7 @@ main.py
 
 ## Threading Model
 
-My-IDM uses three execution contexts:
+My-IDM uses five execution contexts coordinated by Qt signals, queues, and locks:
 
 ### 1. Qt Main Thread
 
@@ -128,7 +128,8 @@ My-IDM uses three execution contexts:
 - The `QApplication` event loop runs here
 - `DownloadManager` lives here as a `QObject`
 - Torrent polling timer (`_torrent_timer`, 1-second interval) runs here
-- Retry timer (`_retry_timer`, 10-second interval) runs here
+- Retry timer (`_retry_timer`, 1-second interval) runs here
+- Scheduler evaluation timer (`_scheduler_timer`) runs here
 
 ### 2. asyncio Background Thread
 
@@ -139,27 +140,44 @@ My-IDM uses three execution contexts:
   - **Main → Async**: `asyncio.run_coroutine_threadsafe(coro, loop)` to schedule downloads
   - **Async → Main**: Engine callbacks are invoked from the async thread; they call `DownloadManager` methods that emit Qt signals (which are cross-thread safe)
 
-### 3. SQLite Thread Safety
+### 3. Status Job Pool Background Thread (`StatusJobPool`)
+
+- A dedicated daemon thread named `"status-job-pool"` (`manager.py:407`)
+- Serializes and paces status transitions (`resume`, `recheck`, `pause`, `stop`, `delete`) to keep the Qt GUI responsive during bulk multi-selection operations
+- Runs operations with a slight delay (`pace_seconds = 0.01`, 10 ms), and triggers `_process_queue()` once upon queue drain
+
+### 4. Daemon Worker Threads (yt-dlp & Antivirus)
+
+- yt-dlp video extractions and downloads run on plain daemon threads (`"ytdlp-download"`, `"yt-extract"`). Plain Python threads are used instead of `QThread` because destroying a running `QThread` aborts the interpreter on exit.
+- Background malware scans run on short-lived daemon threads (`"scan-<id>"`).
+
+### 5. SQLite Thread Safety & Concurrency Synchronization
 
 - SQLite is opened with `check_same_thread=False` and `journal_mode=WAL`
-- WAL mode allows concurrent reads with a single writer
-- The `Database` class is accessed from both the main thread and the async thread
-- Individual operations are atomic and committed immediately
+- WAL mode allows concurrent reads with atomic commits
+- Queue dispatch operations (`_process_queue` and `add_download`) are synchronized across threads via a re-entrant lock (`DownloadManager._queue_process_lock`), preventing race conditions when checking budget and starting transfers.
 
 ```
 ┌──────────────────┐   signals    ┌──────────────────┐
 │   Qt Main Thread │ ◄─────────── │  asyncio Thread  │
-│                  │              │                  │
-│  MainWindow      │  run_coro   │  HTTPEngine      │
-│  DownloadManager │ ──────────► │  aiohttp tasks   │
+│                  │              │  ("idm-async")   │
+│  MainWindow      │  run_coro    │  HTTPEngine      │
+│  DownloadManager │ ───────────► │  aiohttp tasks   │
 │  TorrentEngine   │              │                  │
-│  (polling timer) │              │                  │
-└──────────────────┘              └──────────────────┘
-         │                                │
-         │        ┌──────────┐            │
-         └───────►│  SQLite  │◄───────────┘
-                  │   (WAL)  │
-                  └──────────┘
+│  (polling timer) │              └──────────────────┘
+└──────────────────┘                        │
+         ▲                                  │
+         │ Qt signals / queue               │
+┌──────────────────┐                        │
+│ StatusJobPool    │                        │
+│ ("status-job-    │                        │
+│  pool" thread)   │                        │
+└──────────────────┘                        │
+         │                                  │
+         │         ┌──────────┐             │
+         └────────►│  SQLite  │◄────────────┘
+                   │   (WAL)  │
+                   └──────────┘
 ```
 
 ---
@@ -324,30 +342,36 @@ named queues, each with its own budget** — see
    - `GeneralConfig.max_concurrent_downloads` remains a **global ceiling over everything**, so a per-queue budget is a local ceiling and not a reservation.
    - Selecting a queue in **Edit → Queues** scopes the downloads list to it. **"All Queues" is the startup default** — history is the product, so a user must never find existing downloads missing because a queue is selected. (This was a toolbar combo until 2026-10-02; the strip is now transport and file commands only.)
    - Deleting a queue re-homes its downloads to Default; downloads are never deleted with their queue.
-2. **Active Concurrency Counting**:
+2. **Active Concurrency Counting & Deduplication**:
    - Downloads in `downloading`, `checking`, `fetching_metadata`, and `stalled` states consume concurrency slots.
-   - Any currently dispatching entries (`_starting_downloads`) are counted to prevent race conditions during rapid batch additions — per queue, so a queue's first start cannot overshoot its own budget.
-   - Counted by a single `GROUP BY` on `queue_id` (`Database.get_active_counts_by_queue`), which replaced a full table scan per candidate.
-3. **Queue Slot Allocation**:
-   - A download starts only when **both** the global ceiling and its queue's own budget allow it (`DownloadManager._may_start`). The check is one method because three call sites reach the engines without passing through each other — `_process_queue`, `add_download` and `resume_download`.
-   - If either limit is reached, newly added or resumed downloads remain in `queued`.
-   - When an active download finishes (`completed`, `seeding`), pauses, stops, errors, or is deleted—or when the user increases a limit—`_process_queue()` automatically starts the next queued item on the next 1 Hz tick.
-   - `force_start_download` deliberately bypasses both limits: it is the user's "I know, just start it".
-4. **Priority Ordering Rules**:
+   - Any currently dispatching entries (`_starting_downloads`) and active transfers in underlying engines (`_http`, `_torrent`, `_ytdlp_jobs`) are collected and deduplicated by download ID.
+   - Active accounting is guarded against state transition latency: calling `resume_download()` on an already-active transfer is a safe no-op that never resets state to `"queued"`.
+3. **Queue Slot Allocation & Start Gates**:
+   - A download starts only when **all** gating conditions are satisfied (`DownloadManager._may_start`):
+     - **Off-Peak Scheduler Window**: Current local time falls within the configured scheduler window (`is_within_schedule`), unless the download was explicitly force-started.
+     - **Bandwidth Quota**: The queue (and global combined usage) has not reached its periodic quota (`check_bandwidth_limit`).
+     - **Global Concurrency Ceiling**: Active transfers across all queues is below `GeneralConfig.effective_max_concurrent`.
+     - **Queue Concurrency Budget**: Active transfers in the download's queue is below `queue.effective_max_concurrent`.
+   - `_process_queue()` and `add_download()` execute under a re-entrant lock (`_queue_process_lock`), eliminating race conditions across multiple polling or worker threads.
+   - If limits are reached, downloads remain in `queued`.
+   - When an active download finishes, pauses, stops, errors, or is deleted—or when the user increases a limit—`_process_queue()` automatically starts the next eligible item.
+   - `force_start_download` deliberately bypasses both limits and schedules: it is the user's "I know, just start it".
+4. **Status Job Pool Pacing**:
+   - Batch status changes (e.g. resuming or pausing 25+ selected downloads) are queued into `StatusJobPool`, which serializes state updates on a dedicated daemon thread with a 10 ms pace. This prevents UI thread freezes and triggers `_process_queue()` once upon queue drain.
+5. **Priority Ordering Rules**:
    - `queue_order` is priority **within** a queue (`0` is a meaningful "not queued" sentinel, pushed last by every sort key). `move_queue_up`/`move_queue_down` are queue-scoped and renumber the queue densely, so two downloads can never share a priority.
    - Queued downloads are sorted by `(queue_order if queue_order > 0 else 999999, added_at or "")`.
    - Lower order numbers represent higher priority (`order 1` starts first).
    - Among items with equal or unassigned queue order, earlier additions are prioritized; the latest added download is processed last.
    - Across queues, a queue that still has budget is served before one that is saturated; ties break on the user's switcher order, **never** on the queue id (ids are UUIDs, which would make dispatch order differ between identical runs).
    - On application startup, downloads are auto-resumed in strict ascending queue order.
-5. **Strict Pause State Protection**:
+6. **Strict Pause State Protection**:
    - Paused, stopped, and suspended downloads are fully halted at the engine level (`lt.torrent_flags.auto_managed` unset and handle paused).
    - In-flight or lingering progress callbacks for paused/stopped/suspended tasks are immediately discarded and never emitted to the GUI or database.
+   - Stopping or pausing a force-started download automatically clears `metadata["force_started"]`.
 
 > [!NOTE]
-> Named queues with per-queue concurrency budgets are **implemented**. Two designs that live in
-> the same document are **not**: an off-peak scheduler and absolute per-download bandwidth caps
-> — see [Not implemented](queues.md#not-implemented).
+> Named queues, per-queue concurrency budgets, off-peak scheduling, and periodic bandwidth quotas are **implemented and shipped**. Absolute per-download bandwidth caps (independent of queue/global rates) remain planned in [Not implemented](queues.md#not-implemented).
 
 ---
 
@@ -523,11 +547,29 @@ When a download is added without an explicit save path:
 
 ### Unified Settings Dialog
 
-- **`my_idm/settings_dialog.py:SettingsDialog`** provides a comprehensive 3-tab interface:
-  - **📁 General & Downloads**: Default folder picker, "Open Folder" shortcut, segments, concurrency, and startup behavior.
-  - **🌐 Network & VPN**: Interface picker, kill switch, and proxy configuration with connection test.
-  - **🛡️ Antivirus & Security**: Pre-download rules, VirusTotal API, scanner selection, and scanner diagnostic test.
-- Navigation shortcuts: `Tools → Preferences…` (<kbd>Ctrl</kbd>+<kbd>,</kbd>) opens tab 0; `Tools → VPN & Network Settings…` opens tab 1; `Tools → Antivirus & Security Settings…` opens tab 2.
+- **`my_idm/settings_dialog.py:SettingsDialog`** provides a comprehensive 14-tab interface:
+  - **📁 Downloads & Retries**: Default folder picker, "Open Folder" shortcut, segment bounds, max retries, retry backoff configuration, and reset-to-defaults button.
+  - **🖥️ Application & Tray**: Auto-start at login, minimize/close to tray, completion notification behavior.
+  - **📋 Clipboard Capture**: Automatic clipboard monitoring, URL regex patterns, min/max capture sizing.
+  - **👁️ Views & Columns**: Visible column pickers, status segregation toggles, segregated group order settings.
+  - **🧲 BitTorrent**: DHT/PEX switches, seeding ratios, listen ports, fastresume directory.
+  - **🌐 Browser Integration**: Extension native messaging host, local loopback REST port (127.0.0.1:19582), intercept thresholds.
+  - **🛡️ VPN & Proxy**: Network adapter binding, kill switch, SOCKS5/HTTP proxies.
+  - **🧅 Tor**: Tor SOCKS5 routing toggle, executable discovery, proxy port.
+  - **🛡️ Antivirus & Security**: Pre-download safety inspection, Defender/custom CLI engine scanning, quarantine directory.
+  - **🌐 AnimePahe Scraper**: Scraper binary discovery, automatic queue assignment, download automation options.
+  - **▶️ YouTube (yt-dlp)**: yt-dlp / ffmpeg binary validation, format preferences, cookie sources.
+  - **⚙️ Queues**: Dedicated Queue Manager for named queue creation, coloring, priority reordering, and concurrency caps.
+  - **📊 Bandwidth Limit**: Periodic daily/weekly/monthly quotas per queue and globally, warning percentage badges.
+  - **⏱️ Scheduler**: Off-peak download window scheduling, active days of week, automatic pause on window end.
+- Navigation shortcuts: `Tools → Preferences…` (<kbd>Ctrl</kbd>+<kbd>,</kbd>) or dedicated status bar badges open Settings directly to the corresponding tab.
+
+### Logging Architecture & Rotation
+
+- **Per-Run Timestamped Log Files**: Each application launch generates its own dedicated log file:
+  `~/.my-idm/logs/my-idm-YYYYMMDD-HHMMSS.log`.
+- **Local Time Formatting**: Log entries are stamped with the local machine's timezone (`YYYY-MM-DD HH:MM:SS`) for human-readable correlation with user actions.
+- **Log Rotation**: On startup, `_rotate_logs()` retains only the 10 most recent run logs, automatically purging older files to prevent unbounded disk growth.
 
 ---
 

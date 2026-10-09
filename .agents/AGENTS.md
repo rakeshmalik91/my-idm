@@ -18,7 +18,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **State Machines & Lifecycle** | [`state-machines.md`](file:///d:/Projects/my-idm/docs/architecture/state-machines.md) | Mermaid state diagrams for HTTP and BitTorrent, transition triggers, backoff/seeding. |
 | **Backlog Processing** | [`backlog.md`](file:///d:/Projects/my-idm/docs/architecture/backlog.md) | Multi-location discovery, location delimiters & directives, queue lifecycle, IPC ingestion. |
 | **Database & Persistence** | [`database.md`](file:///d:/Projects/my-idm/docs/architecture/database.md) | Schema, constraints, indexing, `metadata_json` contract, migrations, self-healing. |
-| **Queues & Concurrency** | [`queues.md`](file:///d:/Projects/my-idm/docs/architecture/queues.md) | Named queues, per-queue concurrency budgets, the start gate, priority ordering, the seeded AnimePahe/YouTube source queues, and `queue=` in backlog files. |
+| **Queues & Concurrency** | [`queues.md`](file:///d:/Projects/my-idm/docs/architecture/queues.md) | Named queues, per-queue concurrency budgets, the start gate, priority ordering, seeded source queues, off-peak scheduler, periodic bandwidth quotas, and StatusJobPool pacing. |
 | **Browser Integration** | [`browser-integration.md`](file:///d:/Projects/my-idm/docs/architecture/browser-integration.md) | MV3 extension, loopback REST server (127.0.0.1:19582), interception, cookies. |
 | **Blob URL Handling** | [`blob-urls.md`](file:///d:/Projects/my-idm/docs/architecture/blob-urls.md) | Evaluation of browser `blob:` URLs, process-isolation limits, extension-assisted transfer, and native browser fallbacks. |
 | **Capture (Hotkey & Clipboard)** | [`capture.md`](file:///d:/Projects/my-idm/docs/architecture/capture.md) | System-wide `RegisterHotKey` via a native event filter, clipboard capture and its resolve-before-capture probe, the `intercept_all` toggle. |
@@ -28,9 +28,9 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Bandwidth Statistics** | [`statistics.md`](file:///d:/Projects/my-idm/docs/architecture/statistics.md) | `get_download_stats()` local-day bucketing, totals grid, volume chart, sparkline. |
 | **Cross-Platform Architecture** | [`cross-platform.md`](file:///d:/Projects/my-idm/docs/architecture/cross-platform.md) | Linux (X11/Wayland) & macOS (Intel/ARM) porting specs. Records what shipped: `autostart.py` (launch at login), `proc.py` (detached spawns), the antivirus fail-closed fix, and the 3-OS CI matrix. |
 
-> `queues.md` also designs two things that are **not** implemented: an off-peak scheduler and
-> absolute per-download bandwidth caps. Its "current state" sections are accurate; the rest is a
-> plan. Do not cite those as existing behaviour.
+> `queues.md` specifies named queues, concurrency caps, off-peak scheduling, and bandwidth quotas
+> (daily/weekly/monthly). Only absolute per-download bandwidth caps (independent of queue/global rates)
+> remain a future plan.
 
 > When adding a subsystem doc, add a row here **and** to the index in
 > [`README.md`](file:///d:/Projects/my-idm/README.md) so the two do not drift.
@@ -67,6 +67,8 @@ The canonical architecture documentation is organized under [`docs/architecture/
    - Qt GUI runs on the main thread.
    - `HTTPEngine` uses an asyncio event loop running on a dedicated background thread (`idm-async`).
    - `TorrentEngine` uses `libtorrent` session managed via periodic Qt timer polls (`_poll_torrents`).
+   - `StatusJobPool` runs on a background daemon thread (`status-job-pool`), pacing and serializing bulk operations (`resume`, `recheck`, `pause`, `stop`, `delete`) to keep the GUI responsive.
+   - Queue start dispatch (`_process_queue` and `add_download`) is synchronized across threads with `_queue_process_lock`.
    - Background scans (antivirus) run on short-lived daemon threads (`scan-<id>`).
    - yt-dlp work runs on plain daemon threads (`ytdlp-download`, `yt-extract`). Never use `QThread` for
      it: destroying a `QThread` whose `run()` is still executing aborts the process, and detaching does
@@ -124,3 +126,14 @@ The canonical architecture documentation is organized under [`docs/architecture/
     of `docs/todo/feature-pool-rdm.md`, several by 30+ lines. A wrong line number is worse than
     none: it reads as verified. Re-check against the tree, and mark any table of corrections as
     point-in-time.
+18. **Per-Run Log Files & Rotation**: Application logs are written to
+    `~/.my-idm/logs/my-idm-YYYYMMDD-HHMMSS.log` with local time timestamps (`YYYY-MM-DD HH:MM:SS`).
+    `_rotate_logs()` retains the last 10 runs on startup to keep disk usage bounded.
+19. **Preserve FIFO Queue Order on State Transitions**: Pausing, stopping, or resuming a download
+    retains its original `queue_order` rather than resetting to 0 or re-appending. In segregated
+    active view, queue order is a clean 1-indexed FIFO sequence. Resuming an already-active download
+    must be a no-op that never resets state to `"queued"`.
+20. **Status Operations Must Route Through StatusJobPool**: Multi-row batch status changes
+    (resume, recheck, pause, stop, delete) must be submitted through `DownloadManager.resume_downloads`
+    etc. to `StatusJobPool`. It paces operations on a background daemon thread (`status-job-pool`) to
+    prevent Qt main-thread UI lockups and calls `_process_queue` once when the queue is drained.

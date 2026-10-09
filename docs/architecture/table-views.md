@@ -44,7 +44,7 @@ The main download table exposes 18 columns indexed by the `Col` class:
 
 | Column | Index | Header | Width | Alignment | Description |
 | :--- | :---: | :--- | :---: | :--- | :--- |
-| `QUEUE` | 0 | `#` | 30 px | Center | Active queue order (1, 2, 3...) or expand/collapse indicator (`▼` / `▶`) in section headers. |
+| `QUEUE` | 0 | `#` | 50 px | Center | Active queue order (1, 2, 3...) for both downloading and queued transfers, starting at 1, or expand/collapse indicator (`▼` / `▶`) in section headers. Width expanded to 50 px to comfortably accommodate multi-digit numbers. |
 | `NAME` | 1 | `Name` | 412 px | Left | Filename or resource title with type icon (`📦`, `🎬`, `🧲`) and Tor routing badge (`🧅`). YouTube downloads additionally show an engine tooltip on hover. |
 | `SOURCE_DOMAIN` | 2 | `Source Domain` | 187 px | Left | Normalized domain/hostname extracted from the source URL or magnet tracker. |
 | `SIZE` | 3 | `Size` | 82 px | Right | Total size formatted via `humanize.naturalsize()` (e.g., `450.2 MiB`). |
@@ -465,6 +465,27 @@ When any download row is selected, `DetailsPanel` (`my_idm/details_panel.py`) po
 - Columns: `Tier`, `URL`, `Status`, `Peers`, `Seeds`, `Scrapes`.
 - Shows live tracker response statuses, fail counts, and next announce timers.
 
-### 4. Segments Table (`SegmentsTableWidget`)- Multi-segment HTTP transfer diagnostics.
+### 4. Segments Table (`SegmentsTableWidget`)
+- Multi-segment HTTP transfer diagnostics.
 - Columns: `Segment #`, `Byte Range`, `Downloaded`, `Progress`, `Speed`, `Status`.
 - Displays individual segment worker threads, range offsets, and chunk progress bars.
+
+### 5. Details Panel Overview Copy Buttons
+In the **Overview** inspector tab, long metadata fields (URL, Target Save Path, Referrer, Anime Series Page URL) feature dedicated inline `📋 Copy` buttons that instantly copy the corresponding value to the system clipboard without requiring text highlighting.
+
+---
+
+## 🧭 Status Bar Metrics & Selection Count
+
+The main window status bar provides live telemetry:
+- **Selection Count**: Displays real-time multi-selection counts (`"1 of 12 downloads selected"` or `"5 of 12 downloads selected"`). When nothing is selected, shows total download counts.
+- **Queue Badge**: Shows active queue assignment for single or uniform selections (`🗃️ AnimePahe`), or count of distinct queues (`🗃️ 3 queues`) for mixed selections.
+- **Bandwidth Quota Warnings**: Top-right corner badge lights up yellow when approaching warning thresholds (e.g. 80%) or red when monthly/daily caps are exceeded. Clicking opens Preferences directly to the Bandwidth Limit tab.
+
+---
+
+## ✏️ URL Editing & Expired Address Refresh
+
+Downloads can have their source URLs modified via the context menu:
+- **Edit URL**: Allows replacing an expired or updated download link while retaining existing partial progress on disk.
+- **Automated YouTube Refresh**: YouTube CDN streaming URLs expire after several hours. When resuming paused or stopped YouTube downloads, My-IDM automatically invokes yt-dlp to re-resolve fresh CDN streaming addresses before connecting.

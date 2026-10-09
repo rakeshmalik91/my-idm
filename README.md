@@ -25,8 +25,9 @@
 - 🌐 **Browser Integration** — Local unpacked Chrome extension for 1-click downloads, automatic intercept, and cookie forwarding.
 - 🧅 **Tor & VPN Privacy** — 1-click Tor routing, network adapter binding, and instant kill switch protection.
 - 🛡️ **Antivirus & Safety** — Pre-download deceptive extension blocks and background Windows Defender scans.
-- 📋 **5-Tab Details Panel** — Collapsible inspector (<kbd>F4</kbd>) for live segments, torrent files, peers, and trackers.
-- 🎛️ **Queue & UI** — Priority queue order (`#`), multi-column sorting, resizable columns, and dark theme.
+- 📋 **5-Tab Details Panel** — Collapsible inspector (<kbd>F4</kbd>) for live segments, torrent files, peers, trackers, with 1-click copy buttons.
+- 🎛️ **Queue & Concurrency Management** — Named queues with local concurrency caps, dedicated Queue Manager in Preferences, and `StatusJobPool` pacing for fluid bulk operations.
+- ⏱️ **Off-Peak Scheduler & Bandwidth Quotas** — Configurable download time windows with Force Start override, plus daily, weekly, and monthly data transfer caps with menubar warning badges.
 - 🎬 **External Tools Integration** — Background AnimePahe scraper execution with real-time embedded console logs & browser sessions.
 
 ---
@@ -120,7 +121,7 @@ See the **[YouTube Scraper Architecture](docs/architecture/youtube-scraper.md)**
 All settings and runtime data are persisted in the user profile:
 - **Database**: `~/.my-idm/downloads.db`
 - **Resume Cache**: `~/.my-idm/fastresume/`
-- **Application Logs**: `~/.my-idm/logs/my-idm.log`
+- **Application Logs**: `~/.my-idm/logs/my-idm-YYYYMMDD-HHMMSS.log` (timestamped per run with 10-session automatic rotation)
 - **Preferences**: Configurable via **Tools → Preferences** (<kbd>Ctrl</kbd>+<kbd>,</kbd>) or status bar badges.
 
 ---
@@ -146,7 +147,7 @@ machine while they run.
 ## 📚 Documentation
 
 - [**User Guide**](docs/user-guide.md) — Complete user manual: GUI navigation, download management, and troubleshooting.
-- [**Architecture Guide**](docs/architecture/main.md) — System design, threading model (`asyncio` + `libtorrent` + Qt), and SQLite schema.
+- [**Architecture Guide**](docs/architecture/main.md) — System design, threading model (`asyncio` + `libtorrent` + Qt + `StatusJobPool`), and SQLite schema.
 - [**Database & Persistence**](docs/architecture/database.md) — SQLite schema specification, constraints, indexing, `metadata_json` contract, migrations, and self-healing.
 - [**Tor Privacy**](docs/architecture/tor.md) — SOCKS5 routing, daemon auto-discovery, startup gating, and exit termination.
 - [**VPN & Kill Switch**](docs/architecture/vpn.md) — Network interface binding, adapter watcher loop, and proxy configuration.
@@ -161,7 +162,7 @@ machine while they run.
 - [**Window Lifecycle & System Tray**](docs/architecture/window-system-tray.md) — Window geometry persistence, close-to-tray behaviour, and the tray context menu.
 - [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
 - [**Bandwidth Statistics**](docs/architecture/statistics.md) — Today / week / month / year / all-time totals from the existing `downloads` table, a `📊 Statistics` entry in **Tools** beside Preferences, a per-day volume chart and a live speed sparkline. Buckets are the user's **local** calendar days; rows are stamped in UTC and converted per row.
-- [**Named Queues & Concurrency Budgets**](docs/architecture/queues.md) — Every download belongs to a named queue with its own concurrency ceiling, on top of the global limit. Scope the list with **Edit → Queues**; AnimePahe and YouTube get their own queues automatically; backlog files can assign queues with `queue=`.
+- [**Queues, Scheduler & Bandwidth Quotas**](docs/architecture/queues.md) — Named queues with concurrency budgets, dedicated Queue Manager tab in Preferences, off-peak download scheduling with Force Start override, daily/weekly/monthly bandwidth quotas, and `StatusJobPool` serialized bulk execution.
 - [**Cross-Platform Architecture**](docs/architecture/cross-platform.md) — Specifications for Linux (X11 & Wayland) and macOS (Intel & Apple Silicon) compatibility, including hotkeys, file managers, notifications, and XDG paths. Also the reference for launch-at-login registration on all three platforms.
 - [**User Guide**](docs/user-guide.md) — End-user walkthrough of every feature, settings tab, and keyboard shortcut.
 - [**API Reference**](docs/api-reference.md) — Comprehensive API reference for engines, models, and signals.
