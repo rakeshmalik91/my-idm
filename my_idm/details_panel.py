@@ -666,6 +666,9 @@ class DetailsPanel(QWidget):
         self._log_timer.timeout.connect(self._poll_console_log)
 
         self._queue_row_widgets: dict[str, dict[str, Any]] = {}
+        self._queues_timer = QTimer(self)
+        self._queues_timer.setInterval(1000)
+        self._queues_timer.timeout.connect(self._on_queues_timer_tick)
 
         self._is_browser_floating: bool = False
         self._browser_monitor_timer = QTimer(self)
@@ -676,6 +679,10 @@ class DetailsPanel(QWidget):
         self._manager.queues_changed.connect(self._update_queues)
         self._manager.queue_scope_changed.connect(lambda _: self._update_queues())
         self._manager.animepahe_status_changed.connect(self.on_animepahe_status_changed)
+        self._manager.status_changed.connect(self._on_download_event_for_queues)
+        self._manager.download_added.connect(self._on_download_event_for_queues)
+        self._manager.download_removed.connect(self._on_download_event_for_queues)
+        self._manager.queue_order_changed.connect(self._on_download_event_for_queues)
         if self._manager.is_animepahe_running():
             self._browser_monitor_timer.start()
         self._update_queues()
@@ -1216,7 +1223,8 @@ class DetailsPanel(QWidget):
                 self._table_queues.setItem(row_idx, 1, item_status)
 
                 # Col 2: Downloads
-                item_counts = QTableWidgetItem("0 downloads")
+                item_counts = QTableWidgetItem("0 active / 0 total")
+                item_counts.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._table_queues.setItem(row_idx, 2, item_counts)
 
                 # Col 3: Speed
@@ -1425,21 +1433,25 @@ class DetailsPanel(QWidget):
                 widgets["item_status"].setForeground(QColor(Colors.TEXT_MUTED))
             widgets["item_status"].setText(status_text)
 
-            # Downloads count breakdown
-            parts = []
-            if active > 0:
-                parts.append(f"{active} active")
-            if queued > 0:
-                parts.append(f"{queued} queued")
-            if paused > 0:
-                parts.append(f"{paused} paused")
-            if error > 0:
-                parts.append(f"{error} error")
-            if not parts:
-                counts_str = f"{total} total" if total > 0 else "Empty"
-            else:
-                counts_str = ", ".join(parts) + f" ({total} total)"
+            # Downloads count: "X active / Y total"
+            counts_str = f"{active} active / {total} total"
             widgets["item_counts"].setText(counts_str)
+            if active > 0:
+                widgets["item_counts"].setForeground(QColor(Colors.ACCENT))
+            else:
+                widgets["item_counts"].setForeground(QColor(Colors.TEXT_MUTED if total == 0 else Colors.TEXT))
+
+            tip_parts = [f"Active: {active}"]
+            if queued > 0:
+                tip_parts.append(f"Queued: {queued}")
+            if paused > 0:
+                tip_parts.append(f"Paused: {paused}")
+            if completed > 0:
+                tip_parts.append(f"Completed: {completed}")
+            if error > 0:
+                tip_parts.append(f"Errors: {error}")
+            tip_parts.append(f"Total: {total}")
+            widgets["item_counts"].setToolTip("  ·  ".join(tip_parts))
 
             # Speed
             if down_spd > 0 or up_spd > 0:
@@ -1449,8 +1461,10 @@ class DetailsPanel(QWidget):
                 if up_spd > 0:
                     speed_parts.append(f"↑ {_format_speed(up_spd)}")
                 widgets["item_speed"].setText("  ".join(speed_parts))
+                widgets["item_speed"].setForeground(QColor(Colors.ACCENT))
             else:
                 widgets["item_speed"].setText("—")
+                widgets["item_speed"].setForeground(QColor(Colors.TEXT_MUTED))
 
             # Update spinboxes only when not focused
             spin_max = widgets["spin_max"]
@@ -2985,6 +2999,7 @@ class DetailsPanel(QWidget):
             mode = "details"
 
         if mode == "console":
+            self._stop_queues_timer()
             self._update_console_header()
             if self.isVisible():
                 self._start_log_timer()
@@ -2992,8 +3007,10 @@ class DetailsPanel(QWidget):
             self._stop_log_timer()
             self._update_queues_header()
             self._update_queues()
+            self._start_queues_timer()
         else:
             self._stop_log_timer()
+            self._stop_queues_timer()
             if self._current_entry:
                 self._update_header(self._current_entry)
             else:
@@ -3018,6 +3035,30 @@ class DetailsPanel(QWidget):
         else:
             idx = 0
         self._side_tabs.setCurrentIndex(idx)
+
+    def _start_queues_timer(self):
+        if not self._queues_timer.isActive():
+            self._queues_timer.start(1000)
+        self._update_queues()
+
+    def _stop_queues_timer(self):
+        if self._queues_timer.isActive():
+            self._queues_timer.stop()
+
+    def _on_queues_timer_tick(self):
+        if self.current_mode() == "queues":
+            self._update_queues()
+        else:
+            self._stop_queues_timer()
+
+    def _on_download_event_for_queues(self, *args):
+        if self.current_mode() == "queues":
+            self._update_queues()
+
+    def refresh_queues(self):
+        """Refresh live queues table stats and speeds."""
+        if hasattr(self, "_table_queues") and not self._table_queues.isHidden():
+            self._update_queues()
 
     def _start_log_timer(self):
         if not self._log_timer.isActive():
@@ -3587,6 +3628,7 @@ class DetailsPanel(QWidget):
     def hideEvent(self, event):
         super().hideEvent(event)
         self._stop_log_timer()
+        self._stop_queues_timer()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3595,6 +3637,7 @@ class DetailsPanel(QWidget):
         elif self.current_mode() == "queues":
             self._update_queues_header()
             self._update_queues()
+            self._start_queues_timer()
 
     # -- State Persistence ----------------------------------------------------
 

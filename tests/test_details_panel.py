@@ -2041,6 +2041,53 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertFalse(widgets["btn_filter"].isChecked())
         self.assertIn("Filter", widgets["btn_filter"].toolTip())
 
+    def test_details_panel_queues_tab_realtime_counts_and_speed_updates(self):
+        """Downloads column shows 'X active / Y total' and speed/status updates in realtime."""
+        panel = self.win._details_panel
+        queues = self.manager.get_queues()
+        target_q = queues[0]
+
+        # Add an active downloading entry with speed
+        entry = DownloadEntry(
+            id="test-live-speed-1",
+            url="https://example.com/live.iso",
+            filename="live.iso",
+            status="downloading",
+            total_size=100 * 1024 * 1024,
+            downloaded_size=20 * 1024 * 1024,
+            speed=1024 * 1024 * 2.5,  # 2.5 MB/s
+            upload_speed=1024 * 50,    # 50 KB/s
+            queue_id=target_q.id,
+        )
+        self.db.add_download(entry)
+        self.win._load_history()
+        self.win._model.update_progress(
+            "test-live-speed-1",
+            downloaded=20 * 1024 * 1024,
+            total=100 * 1024 * 1024,
+            speed=1024 * 1024 * 2.5,
+            eta=30.0,
+            upload_speed=1024 * 50,
+        )
+
+        # Switch to queues mode: timer should be active and values updated
+        panel.set_mode("queues")
+        self.assertTrue(panel._queues_timer.isActive())
+
+        widgets = panel._queue_row_widgets[target_q.id]
+        # Download column format: "X active / Y total"
+        self.assertEqual(widgets["item_counts"].text(), "1 active / 1 total")
+        # Status shows Running (1)
+        self.assertEqual(widgets["item_status"].text(), "Running (1)")
+        # Speed shows live download and upload speeds
+        speed_txt = widgets["item_speed"].text()
+        self.assertIn("↓", speed_txt)
+        self.assertIn("MiB/s", speed_txt)
+
+        # Switch away from queues mode: timer stops
+        panel.set_mode("details")
+        self.assertFalse(panel._queues_timer.isActive())
+
 
 if __name__ == "__main__":
     unittest.main()

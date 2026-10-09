@@ -4091,8 +4091,11 @@ class MainWindow(QMainWindow):
         # when a midnight rollover happens unnoticed.
         if self._model.date_grouping_is_stale():
             self._regroup_for_new_day()
-        if self._details_panel.isVisible() and self._details_panel.current_download_id:
-            self._details_panel.refresh()
+        if self._details_panel.isVisible():
+            if self._details_panel.current_mode() == "queues":
+                self._details_panel.refresh_queues()
+            elif self._details_panel.current_download_id:
+                self._details_panel.refresh()
         self._update_speed_label()
 
     def _regroup_for_new_day(self):
