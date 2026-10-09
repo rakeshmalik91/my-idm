@@ -1819,6 +1819,70 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_download_id("test-ref-2")
         self.assertEqual(panel._ov_referrer.text(), "https://example.com/source")
 
+    def test_details_panel_files_tab_updates_during_active_download(self):
+        """Active download progress updates files tab progress bar, tooltip, and status."""
+        panel = self.win._details_panel
+        entry = DownloadEntry(
+            id="test-files-prog-1",
+            url="https://example.com/video.mp4",
+            filename="video.mp4",
+            save_path="C:/Downloads",
+            total_size=1000000,
+            downloaded_size=0,
+            status="downloading",
+            download_type="http",
+        )
+        self._build(entry)
+
+        # Show panel and select the download
+        self.win._act_toggle_details.setChecked(True)
+        panel.setVisible(True)
+        panel.set_download_id("test-files-prog-1")
+
+        # Files tab should have the file item
+        item = panel._file_item_map.get(0)
+        self.assertIsNotNone(item)
+        pb = panel._tree_files.itemWidget(item, 2)
+        self.assertIsNotNone(pb)
+        self.assertEqual(pb.value(), 0)
+        self.assertEqual(pb.format(), "0.0%")
+        self.assertEqual(item.text(4), "Downloading")
+
+        # Simulate live progress tick from engine (50% progress)
+        self.win._on_progress_updated(
+            "test-files-prog-1",
+            downloaded=500000,
+            total=1000000,
+            speed=50000.0,
+            eta=10.0,
+            seeds=0,
+            peers=0,
+            upload_speed=0.0,
+        )
+
+        # Verify Files tab updated dynamically
+        self.assertEqual(pb.value(), 50)
+        self.assertEqual(pb.format(), "50.0%")
+        self.assertEqual(item.text(4), "Downloading")
+        self.assertIn("50.0%", pb.toolTip())
+
+        # Simulate progress reaching 100%
+        self.win._on_progress_updated(
+            "test-files-prog-1",
+            downloaded=1000000,
+            total=1000000,
+            speed=0.0,
+            eta=0.0,
+            seeds=0,
+            peers=0,
+            upload_speed=0.0,
+        )
+
+        self.assertEqual(pb.value(), 100)
+        self.assertEqual(pb.format(), "100.0%")
+        self.assertEqual(item.text(4), "Completed")
+        self.assertIn("100.0%", pb.toolTip())
+
 
 if __name__ == "__main__":
     unittest.main()

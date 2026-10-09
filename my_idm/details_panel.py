@@ -1252,7 +1252,7 @@ class DetailsPanel(QWidget):
         self._ov_referrer_copy_btn.setVisible(self._ov_referrer.text() != "—")
 
     def _update_files(self, entry: DownloadEntry):
-        files = self._manager.get_download_files(entry.id)
+        files = self._manager.get_download_files(entry.id, entry=entry)
         if not isinstance(files, list) or not files:
             self._files_hash = None
             self._file_item_map.clear()
@@ -1413,10 +1413,16 @@ class DetailsPanel(QWidget):
             priorities.add(f.get("priority", 4))
 
         folder_item.setText(1, humanize.naturalsize(total_size, binary=True) if total_size > 0 else "—")
+        if total_downloaded > 0 and total_size > 0 and total_downloaded < total_size:
+            folder_item.setToolTip(1, f"Downloaded: {humanize.naturalsize(total_downloaded, binary=True)} of {folder_item.text(1)}")
+        else:
+            folder_item.setToolTip(1, f"Size: {folder_item.text(1)}")
 
         folder_pct = (total_downloaded / total_size * 100.0) if total_size > 0 else 0.0
         pb = self._tree_files.itemWidget(folder_item, 2)
         if isinstance(pb, QProgressBar):
+            pb.setTextVisible(True)
+            pb.setFormat(f"{folder_pct:.1f}%")
             pb.setValue(int(min(max(folder_pct, 0.0), 100.0)))
 
         # Update check state
@@ -1457,17 +1463,19 @@ class DetailsPanel(QWidget):
             folder_item.setText(4, "Pending")
 
     def _get_file_status(self, f: dict, entry: DownloadEntry) -> str:
-        """Derive display status for a torrent file from entry status and file progress."""
+        """Derive display status for a torrent or HTTP file from entry status and file progress."""
         if f.get("priority", 4) == 0:
             return "skipped"
         entry_status = entry.status if entry else "pending"
         if entry_status in ("completed", "seeding"):
             return "completed"
+        if entry_status == "error":
+            return "error"
         pct_raw = f.get("progress", 0.0)
         pct = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
         if pct >= 100.0:
             return "completed"
-        if pct > 0.0 or f.get("downloaded", 0) > 0:
+        if pct > 0.0 or f.get("downloaded", 0) > 0 or entry_status == "downloading":
             if entry_status == "paused":
                 return "paused"
             if entry_status == "stopped":
@@ -1517,11 +1525,17 @@ class DetailsPanel(QWidget):
             else:
                 item.setToolTip(1, f"Size: {size_str}")
 
-            pct_raw = f.get("progress", 0.0)
-            pct_val = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
+            if size_val > 0 and dl_val >= 0:
+                pct_val = min(max((dl_val / size_val) * 100.0, 0.0), 100.0)
+            else:
+                pct_raw = f.get("progress", 0.0)
+                pct_val = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
+                pct_val = min(max(pct_val, 0.0), 100.0)
             pb = self._tree_files.itemWidget(item, 2)
             if isinstance(pb, QProgressBar):
-                pb.setValue(int(min(max(pct_val, 0.0), 100.0)))
+                pb.setTextVisible(True)
+                pb.setFormat(f"{pct_val:.1f}%")
+                pb.setValue(int(pct_val))
                 dl_str = humanize.naturalsize(dl_val, binary=True) if dl_val > 0 else "0 B"
                 pb.setToolTip(f"{pct_val:.1f}% ({dl_str} / {size_str})")
 
@@ -2364,6 +2378,7 @@ class DetailsPanel(QWidget):
     def _on_details_tab_changed(self, index: int):
         if self._current_entry:
             self._update_header(self._current_entry)
+            self.refresh()
         else:
             self._clear_header()
 

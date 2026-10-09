@@ -4304,9 +4304,10 @@ class DownloadManager(QObject):
 
     # -- inspection & details queries ---------------------------------------
 
-    def get_download_files(self, download_id: str) -> list[dict]:
+    def get_download_files(self, download_id: str, entry: Optional[DownloadEntry] = None) -> list[dict]:
         """Return files for a download. For torrents, queries TorrentEngine (falling back to cached metadata in DB). For HTTP, returns single target."""
-        entry = self._db.get_download(download_id)
+        if entry is None:
+            entry = self.get_entry(download_id) or self._db.get_download(download_id)
         if not entry:
             return []
         if entry.download_type == "torrent":
@@ -4319,14 +4320,28 @@ class DownloadManager(QObject):
             cached = entry.metadata.get("files", [])
             return cached if isinstance(cached, list) else []
         # HTTP single file representation
-        name = entry.filename or os.path.basename(entry.file_path) if entry.file_path else "file"
-        pct = (entry.downloaded_size / entry.total_size) if entry.total_size > 0 else 0.0
+        name = entry.filename or (os.path.basename(entry.file_path) if entry.file_path else "file")
+        dl_bytes = entry.downloaded_size
+        if (dl_bytes == 0 or dl_bytes < self._last_progress_bytes.get(download_id, 0)) and download_id in self._last_progress_bytes and entry.status == "downloading":
+            dl_bytes = self._last_progress_bytes[download_id]
+        total_sz = entry.total_size
+        if entry.status in ("completed", "seeding"):
+            if total_sz > 0:
+                dl_bytes = max(dl_bytes, total_sz)
+                pct = 100.0
+            elif dl_bytes > 0:
+                total_sz = dl_bytes
+                pct = 100.0
+            else:
+                pct = 100.0
+        else:
+            pct = (dl_bytes / total_sz * 100.0) if total_sz > 0 else 0.0
         return [{
             "index": 0,
             "path": name,
-            "size": entry.total_size,
-            "downloaded": entry.downloaded_size,
-            "progress": pct,
+            "size": total_sz,
+            "downloaded": dl_bytes,
+            "progress": min(pct, 100.0),
             "priority": 4,
             "priority_label": "Normal",
             "status": entry.status,
