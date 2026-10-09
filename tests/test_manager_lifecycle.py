@@ -1110,6 +1110,37 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         self.assertEqual(entry.metadata.get("headers", {}).get("Referer"), "https://kwik.cx/")
         self.assertTrue(entry.metadata.get("explicit_filename"))
 
+    def test_append_to_backlog_backup_deduplication(self):
+        """Verify _append_to_backlog_backup skips duplicates and respects the test guard."""
+        from unittest.mock import patch
+        from pathlib import Path
+
+        backup_file = Path(self.tmp_dir.name) / "backlog.backup.txt"
+        with patch("my_idm.paths.data_dir", return_value=Path(self.tmp_dir.name)):
+            # 1. When PYTEST_CURRENT_TEST is present, it returns without writing
+            self.manager._append_to_backlog_backup(["https://example.com/file1.mp4 | D:/Anime\n"])
+            self.assertFalse(backup_file.exists())
+
+            # 2. When PYTEST_CURRENT_TEST is temporarily masked, writing occurs
+            with patch.dict("os.environ"):
+                import os
+                os.environ.pop("PYTEST_CURRENT_TEST", None)
+                self.manager._append_to_backlog_backup(["https://example.com/file1.mp4 | D:/Anime\n"])
+                self.assertTrue(backup_file.exists())
+                content1 = backup_file.read_text(encoding="utf-8")
+                self.assertIn("https://example.com/file1.mp4", content1)
+
+                # 3. Adding the exact same URL again should deduplicate and not append
+                self.manager._append_to_backlog_backup(["https://example.com/file1.mp4 | D:/Anime\n"])
+                content2 = backup_file.read_text(encoding="utf-8")
+                self.assertEqual(content1, content2)
+
+                # 4. Adding a new URL prepends the new block
+                self.manager._append_to_backlog_backup(["https://example.com/file2.mp4 | D:/Anime\n"])
+                content3 = backup_file.read_text(encoding="utf-8")
+                self.assertIn("https://example.com/file2.mp4", content3)
+                self.assertGreater(len(content3), len(content1))
+
     def test_explicit_filename_preserved_over_website_headers(self):
         """A torrent rename must not overwrite a user-set explicit filename.
 

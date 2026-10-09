@@ -3919,15 +3919,43 @@ class DownloadManager(QObject):
             backup_path.parent.mkdir(parents=True, exist_ok=True)
             # Read existing backup content
             existing_content = ""
+            existing_urls = set()
             if backup_path.exists():
                 with open(backup_path, "r", encoding="utf-8") as f:
                     existing_content = f.read()
+                for line in existing_content.splitlines():
+                    clean = line.strip()
+                    if clean and not clean.startswith("#") and not clean.startswith("//"):
+                        u = clean.split("|")[0].split("->")[0].strip()
+                        if u:
+                            existing_urls.add(u)
+
+            # Deduplicate incoming lines against existing backup URLs
+            unique_lines = []
+            for line in lines:
+                clean = line.strip()
+                if clean and not clean.startswith("#") and not clean.startswith("//"):
+                    u = clean.split("|")[0].split("->")[0].strip()
+                    if u in existing_urls:
+                        continue
+                    existing_urls.add(u)
+                unique_lines.append(line)
+
+            if not unique_lines:
+                return
+
             # Prepend new lines (with timestamp marker)
             from datetime import datetime
             timestamp = datetime.now().isoformat()
-            new_content = f"# Backed up {timestamp}\n" + "".join(lines)
+            new_block = f"# Backed up {timestamp}\n" + "".join(unique_lines)
+            if not new_block.endswith("\n"):
+                new_block += "\n"
             if existing_content:
-                new_content += "\n" + existing_content
+                if not new_block.endswith("\n\n"):
+                    new_block += "\n"
+                new_content = new_block + existing_content
+            else:
+                new_content = new_block
             with open(backup_path, "w", encoding="utf-8") as f:
                 f.write(new_content)
         except Exception as exc:
