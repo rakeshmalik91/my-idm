@@ -1456,13 +1456,6 @@ class MainWindow(QMainWindow):
         self._details_status_btn.setToolTip("Toggle bottom download details panel (F4)")
         self._details_status_btn.clicked.connect(self._on_toggle_details_btn_clicked)
 
-        self._console_status_btn = QPushButton("📄 Console: OFF")
-        self._console_status_btn.setFlat(True)
-        self._console_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._console_status_btn.setToolTip("Toggle bottom AnimePahe CLI Console panel")
-        self._console_status_btn.clicked.connect(self._on_toggle_console_btn_clicked)
-        self._animepahe_console_btn = self._console_status_btn
-
         # AnimePahe background scraper status badge
         self._animepahe_status_btn = QPushButton("🎬 AnimePahe: Active")
         self._animepahe_status_btn.setFlat(True)
@@ -1494,7 +1487,6 @@ class MainWindow(QMainWindow):
         status_bar.addPermanentWidget(self._tor_footer_container)
         status_bar.addPermanentWidget(self._vpn_status_btn)
         status_bar.addPermanentWidget(self._details_status_btn)
-        status_bar.addPermanentWidget(self._console_status_btn)
         status_bar.addPermanentWidget(self._speed_label)
         status_bar.addPermanentWidget(self._queue_status_label)
         status_bar.addPermanentWidget(self._count_label)
@@ -3629,17 +3621,9 @@ class MainWindow(QMainWindow):
 
     def _sync_panel_buttons(self):
         is_vis = getattr(self, "_act_toggle_details", None) is not None and self._act_toggle_details.isChecked() and not self._details_panel.isHidden()
-        is_console = (self._details_panel.current_mode() == "console")
-        details_on = is_vis and not is_console
-        console_on = is_vis and is_console
-
         if hasattr(self, "_details_status_btn"):
-            self._details_status_btn.setText("📋 Details: ON" if details_on else "📋 Details: OFF")
-            self._details_status_btn.setStyleSheet(self._footer_toggle_style(details_on))
-
-        if hasattr(self, "_console_status_btn"):
-            self._console_status_btn.setText("📄 Console: ON" if console_on else "📄 Console: OFF")
-            self._console_status_btn.setStyleSheet(self._footer_toggle_style(console_on))
+            self._details_status_btn.setText("📋 Details: ON" if is_vis else "📋 Details: OFF")
+            self._details_status_btn.setStyleSheet(self._footer_toggle_style(is_vis))
 
     def _on_open_animepahe_console_log_file(self):
         from my_idm.external_tools import open_file_in_default_app

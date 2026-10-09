@@ -11,8 +11,8 @@ from typing import Any, Optional
 
 import humanize
 from datetime import datetime, timedelta, timezone
-from PySide6.QtCore import Qt, Signal, QTimer, QSize
-from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor, QIcon
+from PySide6.QtCore import Qt, Signal, QTimer, QSize, QPointF
+from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor, QIcon, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -97,6 +97,50 @@ def _to_str(val: Any) -> str:
     if isinstance(val, bytes):
         return val.decode("utf-8", errors="replace")
     return str(val)
+
+
+def _create_eye_icon(visible: bool, active: bool = False, size: int = 18) -> QIcon:
+    """Create a crisp vector eye icon denoting visible (open eye) or hidden (slashed eye)."""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    w = float(size)
+    h = float(size)
+    cx = w / 2.0
+    cy = h / 2.0
+
+    eye_path = QPainterPath()
+    eye_path.moveTo(w * 0.1, cy)
+    eye_path.quadTo(cx, h * 0.15, w * 0.9, cy)
+    eye_path.quadTo(cx, h * 0.85, w * 0.1, cy)
+
+    outline_color = QColor(Colors.ACCENT if active else (Colors.TEXT if visible else Colors.TEXT_MUTED))
+    pen = QPen(outline_color, 1.6)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPath(eye_path)
+
+    if visible:
+        iris_color = QColor(Colors.ACCENT if active else Colors.TEXT_SECONDARY)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(iris_color)
+        p.drawEllipse(QPointF(cx, cy), w * 0.22, h * 0.22)
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QPointF(cx + w * 0.07, cy - h * 0.07), w * 0.06, h * 0.06)
+    else:
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(Colors.TEXT_MUTED))
+        p.drawEllipse(QPointF(cx, cy), w * 0.16, h * 0.16)
+        slash_pen = QPen(QColor(Colors.RED), 1.8)
+        slash_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(slash_pen)
+        p.drawLine(QPointF(w * 0.18, h * 0.18), QPointF(w * 0.82, h * 0.82))
+
+    p.end()
+    return QIcon(pix)
 
 
 class FilesTreeWidget(QTreeWidget):
@@ -1298,23 +1342,22 @@ class DetailsPanel(QWidget):
                 """)
                 btn_resume.clicked.connect(lambda _=False, qid=q.id: self._on_resume_queue_clicked(qid))
 
-                btn_filter = QPushButton("👁")
+                btn_filter = QPushButton()
                 btn_filter.setFixedSize(28, 26)
+                btn_filter.setIconSize(QSize(18, 18))
                 btn_filter.setCheckable(True)
                 btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_filter.setIcon(_create_eye_icon(visible=False, active=False))
                 themed_widget(btn_filter, """
                     QPushButton {
                         background-color: Colors.BG_LIGHT;
                         border: 1px solid Colors.BORDER;
                         border-radius: 4px;
                         padding: 0px;
-                        color: Colors.TEXT_SECONDARY;
-                        font-size: 12px;
                     }
                     QPushButton:hover {
                         background-color: Colors.BG_HOVER;
                         border-color: Colors.BORDER_LIGHT;
-                        color: Colors.TEXT;
                     }
                     QPushButton:pressed {
                         background-color: Colors.BG_DARK;
@@ -1322,7 +1365,6 @@ class DetailsPanel(QWidget):
                     QPushButton:checked {
                         background-color: rgba(88, 166, 255, 0.2);
                         border-color: Colors.ACCENT;
-                        color: Colors.ACCENT;
                     }
                 """)
                 btn_filter.clicked.connect(lambda _=False, qid=q.id: self._on_filter_queue_clicked(qid))
@@ -1444,11 +1486,12 @@ class DetailsPanel(QWidget):
             if btn_filter:
                 btn_filter.blockSignals(True)
                 btn_filter.setChecked(is_filtered)
+                btn_filter.setIcon(_create_eye_icon(visible=is_filtered, active=is_filtered))
                 btn_filter.blockSignals(False)
                 if is_filtered:
-                    btn_filter.setToolTip(f"Active filter: showing '{q.name}'. Click to show all queues.")
+                    btn_filter.setToolTip(f"Queue '{q.name}' is visible (click to show all queues)")
                 else:
-                    btn_filter.setToolTip(f"Filter downloads list to '{q.name}'")
+                    btn_filter.setToolTip(f"Filter view to show only '{q.name}'")
 
     def _on_queue_max_concurrent_changed(self, queue_id: str, value: int):
         self._manager.set_queue_max_concurrent(queue_id, value)

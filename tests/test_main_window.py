@@ -537,39 +537,27 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         btn = getattr(self.win, "_details_toolbar_btn", None)
         self.assertIsNone(btn, "_details_toolbar_btn should no longer exist on MainWindow")
 
-        # Footer buttons exist and are visible
+        # Footer details button exists and is visible; console button is removed from footer
         details_btn = getattr(self.win, "_details_status_btn", None)
-        console_btn = getattr(self.win, "_console_status_btn", None)
         self.assertIsNotNone(details_btn)
-        self.assertIsNotNone(console_btn)
         self.assertTrue(details_btn.isVisible())
-        self.assertTrue(console_btn.isVisible())
+        self.assertIsNone(getattr(self.win, "_console_status_btn", None))
 
         # Initially details panel is visible in Details mode
         self.assertTrue(self.win._details_panel.isVisible())
         self.assertEqual(self.win._details_panel.current_mode(), "details")
         self.assertIn("ON", details_btn.text())
-        self.assertIn("OFF", console_btn.text())
 
-        # Click Console button on footer -> switches to Console mode
-        console_btn.click()
-        self.assertTrue(self.win._details_panel.isVisible())
-        self.assertEqual(self.win._details_panel.current_mode(), "console")
-        self.assertIn("OFF", details_btn.text())
-        self.assertIn("ON", console_btn.text())
-
-        # Click Console button again while active -> hides bottom panel
-        console_btn.click()
+        # Click Details button on footer -> hides bottom panel
+        details_btn.click()
         self.assertFalse(self.win._details_panel.isVisible())
         self.assertIn("OFF", details_btn.text())
-        self.assertIn("OFF", console_btn.text())
 
         # Click Details button on footer -> opens panel in Details mode
         details_btn.click()
         self.assertTrue(self.win._details_panel.isVisible())
         self.assertEqual(self.win._details_panel.current_mode(), "details")
         self.assertIn("ON", details_btn.text())
-        self.assertIn("OFF", console_btn.text())
 
     def test_icon_only_buttons_on_toolbar(self):
         """Resume, Pause, Stop, Delete, Move, and Recheck must be icon-only on toolbar, while Preferences shows text."""
@@ -640,45 +628,34 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         self.assertTrue(self.win._animepahe_status_btn.isHidden())
 
     def test_animepahe_footer_console_log_button_and_panel_toggle(self):
-        """Clicking on console log button or menu from footer opens bottom panel and selects console tab."""
+        """Console button is removed from footer; opening console log via action switches to console mode."""
         self.win.show()
-        # Console button is always visible on the footer
-        self.assertFalse(self.win._animepahe_console_btn.isHidden())
-        self.assertTrue(self.win._animepahe_console_btn.isVisible())
+        # Console button is removed from the footer
+        self.assertIsNone(getattr(self.win, "_console_status_btn", None))
+        self.assertIsNone(getattr(self.win, "_animepahe_console_btn", None))
 
-        # Start scraper -> status badge becomes active, console button remains visible
+        # Start scraper -> status badge becomes active
         self.manager.animepahe_status_changed.emit(True)
         self.assertTrue(self.win._animepahe_status_btn.isVisible())
-        self.assertTrue(self.win._animepahe_console_btn.isVisible())
 
-        # Hide details panel first to test that clicking console log button opens it
+        # Hide details panel first to test that opening console log opens it
         self.win._act_toggle_details.setChecked(False)
         self.assertFalse(self.win._details_panel.isVisible())
-        self.assertIn("OFF", self.win._animepahe_console_btn.text())
 
-        # Click footer console log button -> opens panel in Console mode
-        self.win._animepahe_console_btn.click()
+        # Opening via menu action opens details panel in Console mode
+        self.win._on_view_animepahe_console_log()
         self.assertTrue(self.win._details_panel.isVisible())
         self.assertTrue(self.win._act_toggle_details.isChecked())
         self.assertTrue(self.win._details_panel.is_animepahe_console_active())
-        self.assertIn("ON", self.win._animepahe_console_btn.text())
 
-        # Clicking again while console tab is active toggles panel closed
-        self.win._animepahe_console_btn.click()
+        # Calling again toggles panel closed
+        self.win._on_view_animepahe_console_log()
         self.assertFalse(self.win._details_panel.isVisible())
         self.assertFalse(self.win._act_toggle_details.isChecked())
-        self.assertIn("OFF", self.win._animepahe_console_btn.text())
 
-        # Opening via menu action
-        self.win._on_view_animepahe_console_log()
-        self.assertTrue(self.win._details_panel.isVisible())
-        self.assertTrue(self.win._details_panel.is_animepahe_console_active())
-        self.assertIn("ON", self.win._animepahe_console_btn.text())
-
-        # Scraper stops -> status badge hides, but console button remains visible always
+        # Scraper stops -> status badge hides
         self.manager.animepahe_status_changed.emit(False)
         self.assertTrue(self.win._animepahe_status_btn.isHidden())
-        self.assertTrue(self.win._animepahe_console_btn.isVisible())
 
 
 class TestMainWindowTableAndInteractions(_MainWindowTestCase):

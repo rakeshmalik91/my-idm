@@ -2016,25 +2016,30 @@ class TestDetailsPanel(unittest.TestCase):
         target_q = queues[1]
         widgets = panel._queue_row_widgets[target_q.id]
 
-        # Verify button texts are icon-only
+        # Verify button texts are icon-only and filter button has vector icon
         self.assertEqual(widgets["btn_pause"].text(), "⏸")
         self.assertEqual(widgets["btn_resume"].text(), "▶")
-        self.assertEqual(widgets["btn_filter"].text(), "👁")
+        self.assertEqual(widgets["btn_filter"].text(), "")
+        self.assertFalse(widgets["btn_filter"].icon().isNull())
         self.assertTrue(widgets["btn_filter"].isCheckable())
 
-        # Initially no queue filter is active
+        # Initially no queue filter is active (hidden/unfiltered state)
         self.assertEqual(self.manager.active_queue_id, "")
         self.assertFalse(widgets["btn_filter"].isChecked())
+        self.assertIn("Filter", widgets["btn_filter"].toolTip())
 
-        # Click eye button to filter to target_q
+        # Click eye button to filter to target_q (visible state)
         widgets["btn_filter"].click()
         self.assertEqual(self.manager.active_queue_id, target_q.id)
         self.assertTrue(widgets["btn_filter"].isChecked())
+        self.assertFalse(widgets["btn_filter"].icon().isNull())
+        self.assertIn("visible", widgets["btn_filter"].toolTip().lower())
 
         # Click eye button again to toggle filter off
         widgets["btn_filter"].click()
         self.assertEqual(self.manager.active_queue_id, "")
         self.assertFalse(widgets["btn_filter"].isChecked())
+        self.assertIn("Filter", widgets["btn_filter"].toolTip())
 
 
 if __name__ == "__main__":
