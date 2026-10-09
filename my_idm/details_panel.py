@@ -184,9 +184,11 @@ class SideTabBar(QWidget):
         self._btn_group.setExclusive(True)
 
         self._btn_details = self._create_tab_button("📋 Details", 0)
-        self._btn_console = self._create_tab_button("📄 Console", 1)
+        self._btn_queues = self._create_tab_button("🗂️ Queues", 1)
+        self._btn_console = self._create_tab_button("📄 Console", 2)
 
         layout.addWidget(self._btn_details)
+        layout.addWidget(self._btn_queues)
         layout.addWidget(self._btn_console)
         layout.addStretch(1)
 
@@ -746,12 +748,14 @@ class DetailsPanel(QWidget):
 
         # 6. Queues Tab
         self._tab_queues = self._create_queues_tab()
-        self._tabs.addTab(self._tab_queues, "🗂️ Queues")
 
         self._tabs.currentChanged.connect(self._on_details_tab_changed)
         self._mode_stack.addWidget(self._tabs)
 
-        # Page 1: Console View
+        # Page 1: Queues View
+        self._mode_stack.addWidget(self._tab_queues)
+
+        # Page 2: Console View
         self._console_widget = self._create_console_view()
         self._tab_console = self._console_widget
         self._mode_stack.addWidget(self._console_widget)
@@ -985,8 +989,8 @@ class DetailsPanel(QWidget):
     def _create_queues_tab(self) -> QWidget:
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(8, 6, 8, 8)
+        layout.setSpacing(6)
 
         self._lbl_queues_status = QLabel(
             "Named download queues, concurrency budgets, and limits. Pause or resume each queue individually below.",
@@ -1000,20 +1004,56 @@ class DetailsPanel(QWidget):
             "Queue", "Status", "Downloads", "Speed", "Max at Once", "Download Limit", "Upload Limit", "Actions"
         ])
         header = self._table_queues.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self._table_queues.setColumnWidth(4, 100)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        self._table_queues.setColumnWidth(5, 125)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        self._table_queues.setColumnWidth(6, 125)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setFixedHeight(32)
+        themed_widget(
+            header,
+            """
+            QHeaderView::section {
+                background-color: Colors.BG_MID;
+                color: Colors.TEXT_SECONDARY;
+                border: none;
+                border-bottom: 2px solid Colors.BORDER;
+                border-right: 1px solid Colors.BORDER;
+                padding: 4px 8px;
+                font-weight: 600;
+                font-size: 11px;
+                text-transform: uppercase;
+            }
+            QHeaderView::section:hover {
+                color: Colors.TEXT;
+                background-color: Colors.BG_LIGHT;
+            }
+            """,
+        )
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(60)
+
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._table_queues.setColumnWidth(0, 180)
+
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(1, 85)
+
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(2, 180)
+
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(3, 95)
+
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(4, 110)
+
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(5, 135)
+
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(6, 135)
+
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+        self._table_queues.setColumnWidth(7, 180)
 
         self._table_queues.verticalHeader().setVisible(False)
-        self._table_queues.verticalHeader().setDefaultSectionSize(32)
+        self._table_queues.verticalHeader().setDefaultSectionSize(40)
         self._table_queues.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table_queues.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table_queues.setShowGrid(True)
@@ -1029,7 +1069,7 @@ class DetailsPanel(QWidget):
             QTimer.singleShot(2500, lambda: self._status_label.setVisible(False))
 
     def _update_queues_header(self):
-        if self.current_mode() == "console":
+        if self.current_mode() != "queues":
             return
         self._lbl_icon.setText("🗂️")
         self._lbl_title.setText("Download Queues & Concurrency")
@@ -1144,6 +1184,7 @@ class DetailsPanel(QWidget):
                 spin_max.setRange(0, 99)
                 spin_max.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 spin_max.setValue(max(0, q.max_concurrent))
+                spin_max.setFixedHeight(26)
                 spin_max.setToolTip(
                     f"Concurrency ceiling for '{q.name}'.\n"
                     "0 = follow global limit (no ceiling of its own)."
@@ -1151,7 +1192,12 @@ class DetailsPanel(QWidget):
                 spin_max.valueChanged.connect(
                     lambda val, qid=q.id: self._on_queue_max_concurrent_changed(qid, val)
                 )
-                self._table_queues.setCellWidget(row_idx, 4, spin_max)
+                spin_container = QWidget()
+                spin_lay = QHBoxLayout(spin_container)
+                spin_lay.setContentsMargins(6, 4, 6, 4)
+                spin_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spin_lay.addWidget(spin_max)
+                self._table_queues.setCellWidget(row_idx, 4, spin_container)
 
                 # Col 5: Download Limit
                 spin_dl = QSpinBox()
@@ -1160,6 +1206,7 @@ class DetailsPanel(QWidget):
                 spin_dl.setSuffix(" KB/s")
                 spin_dl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 spin_dl.setValue(max(0, int(q.download_limit or 0) // 1024))
+                spin_dl.setFixedHeight(26)
                 spin_dl.setToolTip(
                     f"Download rate ceiling for '{q.name}' in KB/s.\n"
                     "0 = follow global limit (no ceiling of its own)."
@@ -1167,7 +1214,12 @@ class DetailsPanel(QWidget):
                 spin_dl.valueChanged.connect(
                     lambda val, qid=q.id: self._on_queue_dl_limit_changed(qid, val)
                 )
-                self._table_queues.setCellWidget(row_idx, 5, spin_dl)
+                spin_dl_container = QWidget()
+                spin_dl_lay = QHBoxLayout(spin_dl_container)
+                spin_dl_lay.setContentsMargins(6, 4, 6, 4)
+                spin_dl_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spin_dl_lay.addWidget(spin_dl)
+                self._table_queues.setCellWidget(row_idx, 5, spin_dl_container)
 
                 # Col 6: Upload Limit
                 spin_up = QSpinBox()
@@ -1176,6 +1228,7 @@ class DetailsPanel(QWidget):
                 spin_up.setSuffix(" KB/s")
                 spin_up.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 spin_up.setValue(max(0, int(q.upload_limit or 0) // 1024))
+                spin_up.setFixedHeight(26)
                 spin_up.setToolTip(
                     f"Upload rate ceiling for '{q.name}' in KB/s.\n"
                     "0 = follow global limit (no ceiling of its own)."
@@ -1183,21 +1236,65 @@ class DetailsPanel(QWidget):
                 spin_up.valueChanged.connect(
                     lambda val, qid=q.id: self._on_queue_up_limit_changed(qid, val)
                 )
-                self._table_queues.setCellWidget(row_idx, 6, spin_up)
+                spin_up_container = QWidget()
+                spin_up_lay = QHBoxLayout(spin_up_container)
+                spin_up_lay.setContentsMargins(6, 4, 6, 4)
+                spin_up_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                spin_up_lay.addWidget(spin_up)
+                self._table_queues.setCellWidget(row_idx, 6, spin_up_container)
 
                 # Col 7: Actions
                 act_holder = QWidget()
                 act_lay = QHBoxLayout(act_holder)
-                act_lay.setContentsMargins(4, 2, 4, 2)
+                act_lay.setContentsMargins(6, 4, 6, 4)
                 act_lay.setSpacing(6)
+                act_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 btn_pause = QPushButton("⏸ Pause")
+                btn_pause.setFixedHeight(26)
                 btn_pause.setToolTip(f"Pause all active and queued downloads in '{q.name}'")
                 btn_pause.setCursor(Qt.CursorShape.PointingHandCursor)
+                themed_widget(btn_pause, """
+                    QPushButton {
+                        background-color: Colors.BG_LIGHT;
+                        border: 1px solid Colors.BORDER;
+                        border-radius: 4px;
+                        padding: 2px 10px;
+                        color: Colors.TEXT;
+                        font-size: 11px;
+                        font-weight: 500;
+                    }
+                    QPushButton:hover {
+                        background-color: Colors.BG_HOVER;
+                        border-color: Colors.BORDER_LIGHT;
+                    }
+                    QPushButton:pressed {
+                        background-color: Colors.BG_DARK;
+                    }
+                """)
                 btn_pause.clicked.connect(lambda _=False, qid=q.id: self._on_pause_queue_clicked(qid))
 
                 btn_resume = QPushButton("▶ Resume")
+                btn_resume.setFixedHeight(26)
                 btn_resume.setToolTip(f"Resume all paused and stopped downloads in '{q.name}'")
                 btn_resume.setCursor(Qt.CursorShape.PointingHandCursor)
+                themed_widget(btn_resume, """
+                    QPushButton {
+                        background-color: Colors.BG_LIGHT;
+                        border: 1px solid Colors.BORDER;
+                        border-radius: 4px;
+                        padding: 2px 10px;
+                        color: Colors.TEXT;
+                        font-size: 11px;
+                        font-weight: 500;
+                    }
+                    QPushButton:hover {
+                        background-color: Colors.BG_HOVER;
+                        border-color: Colors.BORDER_LIGHT;
+                    }
+                    QPushButton:pressed {
+                        background-color: Colors.BG_DARK;
+                    }
+                """)
                 btn_resume.clicked.connect(lambda _=False, qid=q.id: self._on_resume_queue_clicked(qid))
 
                 act_lay.addWidget(btn_pause)
@@ -1394,10 +1491,9 @@ class DetailsPanel(QWidget):
                 self._tabs.setCurrentIndex(0)
 
         if self.current_mode() == "details":
-            if hasattr(self, "_tab_queues") and self._tabs.currentWidget() == self._tab_queues:
-                self._update_queues_header()
-            else:
-                self._update_header(entry)
+            self._update_header(entry)
+        elif self.current_mode() == "queues":
+            self._update_queues_header()
         self._update_overview(entry)
         self._update_files(entry)
         self._update_peers(entry)
@@ -1410,7 +1506,7 @@ class DetailsPanel(QWidget):
         if self.current_mode() == "console":
             self._update_console_header()
             return
-        if hasattr(self, "_tab_queues") and self._tabs.currentWidget() == self._tab_queues:
+        if self.current_mode() == "queues":
             self._update_queues_header()
             return
         self._lbl_icon.setText("📊")
@@ -1453,10 +1549,7 @@ class DetailsPanel(QWidget):
         self._lbl_segments_status.setText("")
 
     def _update_header(self, entry: DownloadEntry):
-        if self.current_mode() == "console":
-            return
-        if hasattr(self, "_tab_queues") and self._tabs.currentWidget() == self._tab_queues:
-            self._update_queues_header()
+        if self.current_mode() in ("console", "queues"):
             return
 
         icon = "📦" if entry.download_type == "torrent" else "🌐"
@@ -2771,10 +2864,6 @@ class DetailsPanel(QWidget):
             self._btn_float_browser.setToolTip("Dock the browser window back inside the panel")
 
     def _on_details_tab_changed(self, index: int):
-        if hasattr(self, "_tab_queues") and self._tabs.widget(index) == self._tab_queues:
-            self._update_queues_header()
-            self._update_queues()
-            return
         if self._current_entry:
             self._update_header(self._current_entry)
             self.refresh()
@@ -2783,11 +2872,21 @@ class DetailsPanel(QWidget):
 
     def _on_mode_tab_changed(self, index: int):
         self._mode_stack.setCurrentIndex(index)
-        mode = "console" if index == 1 else "details"
+        if index == 1:
+            mode = "queues"
+        elif index == 2:
+            mode = "console"
+        else:
+            mode = "details"
+
         if mode == "console":
             self._update_console_header()
             if self.isVisible():
                 self._start_log_timer()
+        elif mode == "queues":
+            self._stop_log_timer()
+            self._update_queues_header()
+            self._update_queues()
         else:
             self._stop_log_timer()
             if self._current_entry:
@@ -2797,12 +2896,22 @@ class DetailsPanel(QWidget):
         self.mode_changed.emit(mode)
 
     def current_mode(self) -> str:
-        """Returns 'details' or 'console' based on active left-side tab."""
-        return "console" if self._side_tabs.currentIndex() == 1 else "details"
+        """Returns 'details', 'queues', or 'console' based on active left-side tab."""
+        idx = self._side_tabs.currentIndex()
+        if idx == 1:
+            return "queues"
+        elif idx == 2:
+            return "console"
+        return "details"
 
     def set_mode(self, mode: str):
-        """Switch left-side tab mode ('details' or 'console')."""
-        idx = 1 if mode == "console" else 0
+        """Switch left-side tab mode ('details', 'queues', or 'console')."""
+        if mode == "queues":
+            idx = 1
+        elif mode == "console":
+            idx = 2
+        else:
+            idx = 0
         self._side_tabs.setCurrentIndex(idx)
 
     def _start_log_timer(self):
@@ -3213,6 +3322,16 @@ class DetailsPanel(QWidget):
         """Switch to Details mode, update header, and stop log timer."""
         self.set_mode("details")
 
+    def show_queues(self):
+        """Switch to Queues mode, update header, and refresh queues."""
+        self.set_mode("queues")
+        self._update_queues_header()
+        self._update_queues()
+
+    def is_queues_active(self) -> bool:
+        """Returns True if the panel is currently in Queues mode."""
+        return self.current_mode() == "queues"
+
     def is_animepahe_console_active(self) -> bool:
         """Returns True if the panel is currently in Console mode."""
         return self.current_mode() == "console"
@@ -3368,6 +3487,9 @@ class DetailsPanel(QWidget):
         super().showEvent(event)
         if self.current_mode() == "console":
             self._start_log_timer()
+        elif self.current_mode() == "queues":
+            self._update_queues_header()
+            self._update_queues()
 
     # -- State Persistence ----------------------------------------------------
 
@@ -3383,7 +3505,7 @@ class DetailsPanel(QWidget):
         if not isinstance(state, dict):
             return
         mode = state.get("current_mode")
-        if mode in ("details", "console"):
+        if mode in ("details", "console", "queues"):
             self.set_mode(mode)
         tab_idx = state.get("current_tab")
         if tab_idx is not None:

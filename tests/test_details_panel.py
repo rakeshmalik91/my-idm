@@ -1252,14 +1252,16 @@ class TestDetailsPanel(unittest.TestCase):
         self.addCleanup(panel._browser_monitor_timer.stop)
         self.addCleanup(panel.deleteLater)
 
-        # Side tabs on left side for Details & Console
-        self.assertEqual(panel._side_tabs.count(), 2)
+        # Side tabs on left side for Details, Queues & Console
+        self.assertEqual(panel._side_tabs.count(), 3)
         self.assertIn("Details", panel._side_tabs.tabText(0))
-        self.assertIn("Console", panel._side_tabs.tabText(1))
+        self.assertIn("Queues", panel._side_tabs.tabText(1))
+        self.assertIn("Console", panel._side_tabs.tabText(2))
 
-        # Details tabs (Overview, Files, Peers, Trackers, Segments, Queues)
-        self.assertEqual(panel._tabs.count(), 6)
+        # Details tabs (Overview, Files, Peers, Trackers, Segments)
+        self.assertEqual(panel._tabs.count(), 5)
         self.assertEqual(panel._tabs.indexOf(panel._tab_console), -1)
+        self.assertEqual(panel._tabs.indexOf(panel._tab_queues), -1)
 
         # Initially in details mode
         self.assertEqual(panel.current_mode(), "details")
@@ -1269,7 +1271,7 @@ class TestDetailsPanel(unittest.TestCase):
         panel.show_animepahe_console()
         self.assertEqual(panel.current_mode(), "console")
         self.assertTrue(panel.is_animepahe_console_active())
-        self.assertEqual(panel._side_tabs.currentIndex(), 1)
+        self.assertEqual(panel._side_tabs.currentIndex(), 2)
         self.assertTrue(
             panel._log_timer.isActive(),
             "opening the console must start the live-tail timer",
@@ -1908,11 +1910,12 @@ class TestDetailsPanel(unittest.TestCase):
     def test_details_panel_queues_tab_creation_and_listing(self):
         """Queues tab displays all queues with spinboxes for max at once and limits."""
         panel = self.win._details_panel
-        queues_tab_idx = panel._tabs.indexOf(panel._tab_queues)
-        self.assertNotEqual(queues_tab_idx, -1)
+        self.assertEqual(panel._tabs.indexOf(panel._tab_queues), -1)
 
-        # Switch to queues tab
-        panel._tabs.setCurrentIndex(queues_tab_idx)
+        # Switch to queues tab via side tabs
+        panel.set_mode("queues")
+        self.assertEqual(panel.current_mode(), "queues")
+        self.assertEqual(panel._side_tabs.currentIndex(), 1)
         self.assertEqual(panel._lbl_title.text(), "Download Queues & Concurrency")
 
         # Must list at least Default, AnimePahe, YouTube
