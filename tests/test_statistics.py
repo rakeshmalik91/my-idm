@@ -54,21 +54,13 @@ def local_day(days_back: int) -> date:
 
 
 def iso(days_back: int) -> str:
-    """A timestamp ``days_back`` days back, in the format production actually writes.
-
-    ``added_at`` is written by ``Database._now_iso()`` in **UTC**, and the statistics
-    queries re-base each row to local time with ``datetime(added_at, 'localtime')``
-    before bucketing. These fixtures therefore have to be UTC instants too, otherwise the
-    suite asserts against the wrong day on every host that is not itself on UTC.
-
-    Local *noon* on the target day is converted to UTC here, so the round trip lands back
-    on exactly that local calendar day on any host, whatever the offset and whatever DST
-    is doing that week. A plain naive ``datetime(...).isoformat()`` reads as UTC in SQLite
-    and is then shifted a second time, which drifts past midnight on any machine far
-    enough east or west of Greenwich.
-    """
     local_noon = datetime.combine(local_day(days_back), time(12, 0))
     return local_noon.astimezone(timezone.utc).isoformat()
+
+
+def iso_at(days_back: int, hour: int = 12, minute: int = 0) -> str:
+    local_dt = datetime.combine(local_day(days_back), time(hour, minute))
+    return local_dt.astimezone(timezone.utc).isoformat()
 
 
 # ===========================================================================
@@ -82,7 +74,7 @@ class StatsTestCase(unittest.TestCase):
         self.addCleanup(self.db.close)
 
     def add(self, eid, added_days_back=0, total=0, uploaded=0, status="completed",
-            filename=None):
+            filename=None, hour=12, minute=0):
         self.db.add_download(DownloadEntry(
             id=eid,
             url=f"https://example.com/{eid}",
@@ -92,7 +84,7 @@ class StatsTestCase(unittest.TestCase):
             downloaded_size=total,
             uploaded_size=uploaded,
             status=status,
-            added_at=iso(added_days_back),
+            added_at=iso_at(added_days_back, hour=hour, minute=minute),
         ))
 
     def stats(self, since=None, bucket="day"):
@@ -301,6 +293,29 @@ class TestStatsBuckets(StatsTestCase):
         self.assertEqual(per_month.series[0][1].count, 3)
         self.assertEqual(per_month.series[0][1].downloaded, 3 * GB)
 
+    def test_an_hour_bucket_groups_by_hour(self):
+        self.add("h1", 0, total=1 * GB, hour=10, minute=15)
+        self.add("h2", 0, total=2 * GB, hour=10, minute=45)
+        self.add("h3", 0, total=3 * GB, hour=14, minute=0)
+        per_hour = self.stats(since=TODAY, bucket="hour")
+        self.assertEqual(per_hour.bucket, "hour")
+        self.assertEqual([h for h, _s in per_hour.series], ["2026-09-30 10", "2026-09-30 14"])
+        self.assertEqual(per_hour.series[0][1].count, 2)
+        self.assertEqual(per_hour.series[0][1].downloaded, 3 * GB)
+        self.assertEqual(per_hour.series[1][1].count, 1)
+        self.assertEqual(per_hour.series[1][1].downloaded, 3 * GB)
+
+    def test_a_minute_bucket_groups_by_minute(self):
+        self.add("m1", 0, total=1 * GB, hour=10, minute=15)
+        self.add("m2", 0, total=2 * GB, hour=10, minute=15)
+        self.add("m3", 0, total=3 * GB, hour=10, minute=30)
+        per_minute = self.stats(since=TODAY, bucket="minute")
+        self.assertEqual(per_minute.bucket, "minute")
+        self.assertEqual([m for m, _s in per_minute.series], ["2026-09-30 10:15", "2026-09-30 10:30"])
+        self.assertEqual(per_minute.series[0][1].count, 2)
+        self.assertEqual(per_minute.series[0][1].downloaded, 3 * GB)
+        self.assertEqual(per_minute.series[1][1].count, 1)
+
     def test_the_summary_buckets_do_not_follow_the_chart_selection(self):
         """Picking a chart range must not silently redefine 'this week'."""
         self.add("today", 0, total=1 * GB)
@@ -384,6 +399,12 @@ class TestStatsBucketByLocalDay(StatsTestCase):
 
     def test_the_month_expression_converts_too(self):
         self.assertIn("localtime", Database._STATS_LOCAL_MONTH)
+
+    def test_the_hour_expression_converts_too(self):
+        self.assertIn("localtime", Database._STATS_LOCAL_HOUR)
+
+    def test_the_minute_expression_converts_too(self):
+        self.assertIn("localtime", Database._STATS_LOCAL_MINUTE)
 
     def test_sqlite_and_python_agree_on_the_converted_day(self):
         """Pins the conversion contract whatever the host offset is."""
@@ -571,7 +592,7 @@ class TestStatsRejectsUnbucketableTimestamps(StatsTestCase):
         for index, stamp in enumerate(self.BAD):
             with self.subTest(stamp=stamp):
                 db = self.fresh_db_with(f"bads{index}", stamp)
-                for bucket in ("day", "month"):
+                for bucket in ("day", "month", "hour", "minute"):
                     snap = db.get_download_stats(TODAY, since=None, bucket=bucket)
                     labels = [label for label, _ in snap.series]
                     self.assertNotIn(
@@ -585,7 +606,7 @@ class TestStatsRejectsUnbucketableTimestamps(StatsTestCase):
         for index, stamp in enumerate(self.BAD):
             with self.subTest(stamp=stamp):
                 db = self.fresh_db_with(f"badsb{index}", stamp)
-                for bucket in ("day", "month"):
+                for bucket in ("day", "month", "hour", "minute"):
                     snap = db.get_download_stats(
                         TODAY, since=date(2020, 1, 1), bucket=bucket
                     )
@@ -862,11 +883,12 @@ class PopupTestCase(unittest.TestCase):
             popup.deleteLater()
         QApplication.processEvents()
 
-    def add(self, eid, days_back=0, total=1 * GB, uploaded=0, status="completed"):
+    def add(self, eid, days_back=0, total=1 * GB, uploaded=0, status="completed",
+            hour=12, minute=0):
         self.db.add_download(DownloadEntry(
             id=eid, url=f"https://e.com/{eid}", filename=f"{eid}.bin", save_path="C:/t",
             total_size=total, downloaded_size=total, uploaded_size=uploaded,
-            status=status, added_at=iso(days_back),
+            status=status, added_at=iso_at(days_back, hour=hour, minute=minute),
         ))
 
     def popup(self, speed_provider=None, **kw):
@@ -1322,26 +1344,37 @@ class TestChartSelectors(PopupTestCase):
     def test_the_offered_ranges(self):
         self.assertEqual(
             [label for label, _days in StatisticsPopup.RANGES],
-            ["Last 7 days", "Last 30 days", "Last 12 months", "All time"],
+            ["Today", "Last 7 days", "Last 30 days", "Last 12 months", "All time"],
         )
 
     def test_the_offered_granularities(self):
         self.assertEqual(
-            [key for _label, key in StatisticsPopup.BUCKETS], ["day", "month"]
+            [key for _label, key in StatisticsPopup.BUCKETS],
+            ["minute", "hour", "day", "month"],
         )
 
     def test_the_default_is_thirty_days_by_day(self):
         popup = self.popup()
-        self.assertEqual(popup._range_combo.currentIndex(), 1)
+        self.assertEqual(popup._range_combo.currentIndex(), 2)
+        self.assertEqual(popup._range_combo.currentText(), "Last 30 days")
         self.assertEqual(popup.bucket_selection(), "day")
         self.assertEqual(popup.snapshot().since, (TODAY - timedelta(days=29)).isoformat())
+
+    def test_picking_today_narrows_the_series(self):
+        self.add("old", 1, total=1 * GB)
+        self.add("new", 0, total=1 * GB)
+        popup = self.popup()
+        self.assertEqual(len(popup.snapshot().series), 2)
+        popup._range_combo.setCurrentIndex(0)
+        self.assertEqual(popup.snapshot().since, TODAY.isoformat())
+        self.assertEqual(len(popup.snapshot().series), 1)
 
     def test_picking_last_seven_days_narrows_the_series(self):
         self.add("old", 20, total=1 * GB)
         self.add("new", 2, total=1 * GB)
         popup = self.popup()
         self.assertEqual(len(popup.snapshot().series), 2)
-        popup._range_combo.setCurrentIndex(0)
+        popup._range_combo.setCurrentIndex(1)
         self.assertEqual(popup.snapshot().since, (TODAY - timedelta(days=6)).isoformat())
         self.assertEqual(
             len(popup.snapshot().series), 1,
@@ -1351,21 +1384,21 @@ class TestChartSelectors(PopupTestCase):
     def test_all_time_has_no_lower_bound(self):
         self.add("ancient", 900, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(3)
+        popup._range_combo.setCurrentIndex(4)
         self.assertEqual(popup.snapshot().since, "", "all time means no cut-off at all")
         self.assertEqual(len(popup.snapshot().series), 1)
 
     def test_changing_the_range_refreshes_the_chart(self):
         self.add("a", 0, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(0)
+        popup._range_combo.setCurrentIndex(1)
         self.assertEqual(len(popup._chart.days()), len(popup.snapshot().series))
 
     def test_switching_to_per_month_merges_the_bars(self):
         for days in (0, 1, 2, 40):
             self.add(f"d{days}", days, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(3)
+        popup._range_combo.setCurrentIndex(4)
         popup._bucket_combo.setCurrentIndex(
             popup._bucket_combo.findData("month")
         )
@@ -1374,25 +1407,47 @@ class TestChartSelectors(PopupTestCase):
         self.assertEqual([m for m, _s in snap.series], ["2026-08", "2026-09"])
         self.assertEqual(popup._chart.bucket(), "month", "the chart is told the granularity")
 
+    def test_switching_to_per_hour_groups_by_hour(self):
+        self.add("h1", 0, total=1 * GB, hour=9)
+        self.add("h2", 0, total=1 * GB, hour=14)
+        popup = self.popup()
+        popup._range_combo.setCurrentIndex(0)
+        popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("hour"))
+        snap = popup.snapshot()
+        self.assertEqual(snap.bucket, "hour")
+        self.assertEqual(len(snap.series), 2)
+        self.assertEqual(popup._chart.bucket(), "hour")
+
+    def test_switching_to_per_minute_groups_by_minute(self):
+        self.add("m1", 0, total=1 * GB, hour=9, minute=10)
+        self.add("m2", 0, total=1 * GB, hour=9, minute=20)
+        popup = self.popup()
+        popup._range_combo.setCurrentIndex(0)
+        popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("minute"))
+        snap = popup.snapshot()
+        self.assertEqual(snap.bucket, "minute")
+        self.assertEqual(len(snap.series), 2)
+        self.assertEqual(popup._chart.bucket(), "minute")
+
     def test_switching_the_granularity_alone_is_enough(self):
         for days in (0, 1, 40):
             self.add(f"d{days}", days, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(3)
+        popup._range_combo.setCurrentIndex(4)
         popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("month"))
         self.assertEqual(len(popup.snapshot().series), 2)
 
     def test_the_pickers_survive_a_refresh(self):
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(0)
+        popup._range_combo.setCurrentIndex(1)
         popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("month"))
         popup.refresh()
-        self.assertEqual(popup._range_combo.currentIndex(), 0)
+        self.assertEqual(popup._range_combo.currentIndex(), 1)
         self.assertEqual(popup.bucket_selection(), "month")
 
     def test_an_out_of_range_initial_index_falls_back(self):
         popup = self.popup(range_index=99)
-        self.assertEqual(popup._range_combo.currentIndex(), 1)
+        self.assertEqual(popup._range_combo.currentIndex(), 2)
         self.assertIsNotNone(popup.snapshot())
 
     def test_an_unknown_initial_bucket_falls_back(self):
@@ -1425,10 +1480,30 @@ class TestChartMonthLabels(unittest.TestCase):
     def test_a_month_bucket_paints(self):
         self._chart("month")
 
+    def test_an_hour_bucket_paints(self):
+        chart = StatsChartWidget()
+        chart.resize(520, 220)
+        chart.set_days([("2026-09-30 14", DownloadStats(1, 100, 0, 1))], bucket="hour")
+        self.addCleanup(chart.deleteLater)
+
+    def test_a_minute_bucket_paints(self):
+        chart = StatsChartWidget()
+        chart.resize(520, 220)
+        chart.set_days([("2026-09-30 14:35", DownloadStats(1, 100, 0, 1))], bucket="minute")
+        self.addCleanup(chart.deleteLater)
+
     def test_the_tooltip_names_the_right_unit(self):
         self.assertIn("day of month", self._chart("day").toolTip())
         self.assertIn("month", self._chart("month").toolTip())
         self.assertNotIn("day of month", self._chart("month").toolTip())
+        chart_hr = StatsChartWidget()
+        chart_hr.set_days([], bucket="hour")
+        self.assertIn("hour", chart_hr.toolTip())
+        chart_hr.deleteLater()
+        chart_min = StatsChartWidget()
+        chart_min.set_days([], bucket="minute")
+        self.assertIn("minute", chart_min.toolTip())
+        chart_min.deleteLater()
 
 
 if __name__ == "__main__":

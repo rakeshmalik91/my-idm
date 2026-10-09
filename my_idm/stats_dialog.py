@@ -68,7 +68,14 @@ class StatsChartWidget(QWidget):
         self._update_tooltip()
 
     def _update_tooltip(self) -> None:
-        unit = "day of month" if self._bucket == "day" else "month"
+        if self._bucket == "minute":
+            unit = "minute"
+        elif self._bucket == "hour":
+            unit = "hour"
+        elif self._bucket == "month":
+            unit = "month"
+        else:
+            unit = "day of month"
         self.setToolTip(
             f"Grouped by {unit}. Bytes are counted when a download was added, not when they "
             "arrived: a large file added on the 1st and finished on the 5th appears "
@@ -77,7 +84,7 @@ class StatsChartWidget(QWidget):
 
     def set_days(self, days: Sequence[tuple[str, DownloadStats]], bucket: str = "day") -> None:
         self._days = tuple(days)
-        self._bucket = bucket if bucket in ("day", "month") else "day"
+        self._bucket = bucket if bucket in ("minute", "hour", "day", "month") else "day"
         self._update_tooltip()
         self.update()
 
@@ -174,8 +181,24 @@ class StatsChartWidget(QWidget):
                     )
             if index % label_every == 0:
                 painter.setPen(QColor(Colors.TEXT_MUTED))
-                # A month bucket is already YYYY-MM; a day bucket needs the MM-DD tail.
-                label = day if self._bucket == "month" else day[5:]
+                if self._bucket == "month":
+                    label = day
+                elif self._bucket == "hour":
+                    same_day = len(self._days) > 0 and all(
+                        d[:10] == self._days[0][0][:10] for d, _ in self._days
+                    )
+                    hour_part = day[11:13] if len(day) >= 13 else day
+                    date_part = day[5:10] if len(day) >= 10 else day
+                    label = f"{hour_part}:00" if same_day else f"{date_part} {hour_part}h"
+                elif self._bucket == "minute":
+                    same_day = len(self._days) > 0 and all(
+                        d[:10] == self._days[0][0][:10] for d, _ in self._days
+                    )
+                    min_part = day[11:16] if len(day) >= 16 else day
+                    date_part = day[5:10] if len(day) >= 10 else day
+                    label = min_part if same_day else f"{date_part} {min_part}"
+                else:
+                    label = day[5:] if len(day) >= 5 else day
                 painter.drawText(
                     QRectF(plot.left() + index * slot, plot.bottom() + 2, slot * 1.6, 16),
                     Qt.AlignmentFlag.AlignCenter, label,
@@ -280,15 +303,21 @@ class StatisticsPopup(QDialog):
 
     #: (label, days back, or None for all time)
     RANGES = (
+        ("Today", 0),
         ("Last 7 days", 6),
         ("Last 30 days", 29),
         ("Last 12 months", 364),
         ("All time", None),
     )
-    BUCKETS = (("Per day", "day"), ("Per month", "month"))
+    BUCKETS = (
+        ("Per minute", "minute"),
+        ("Per hour", "hour"),
+        ("Per day", "day"),
+        ("Per month", "month"),
+    )
 
     def __init__(self, db: Database, parent=None, today: Optional[date] = None,
-                 speed_provider=None, range_index: int = 1, bucket: str = "day"):
+                 speed_provider=None, range_index: int = 2, bucket: str = "day"):
         super().__init__(parent)
         self._db = db
         self._today = today
@@ -330,7 +359,7 @@ class StatisticsPopup(QDialog):
         for label, _days in self.RANGES:
             self._range_combo.addItem(label)
         self._range_combo.setCurrentIndex(
-            self._range_index if 0 <= self._range_index < len(self.RANGES) else 1
+            self._range_index if 0 <= self._range_index < len(self.RANGES) else 2
         )
         self._range_combo.currentIndexChanged.connect(self._on_range_changed)
         controls.addWidget(self._range_combo)

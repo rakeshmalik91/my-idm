@@ -1486,6 +1486,12 @@ CREATE TABLE IF NOT EXISTS segments (
     #: written identically in the SELECT list and the WHERE clause.
     _STATS_LOCAL_MONTH = "substr(datetime(added_at, 'localtime'), 1, 7)"
 
+    #: Hour expression, width 13 ('YYYY-MM-DD HH').
+    _STATS_LOCAL_HOUR = "substr(datetime(added_at, 'localtime'), 1, 13)"
+
+    #: Minute expression, width 16 ('YYYY-MM-DD HH:MM').
+    _STATS_LOCAL_MINUTE = "substr(datetime(added_at, 'localtime'), 1, 16)"
+
     #: Excludes rows that cannot be bucketed by date: blank, hand-edited garbage, and
     #: well-shaped but impossible dates like ``2026-13-45`` (which passes the GLOB shape
     #: check but makes ``datetime()`` return NULL). Without the second clause such a row
@@ -1562,15 +1568,15 @@ CREATE TABLE IF NOT EXISTS segments (
         while still failing if the conversion is removed.
 
         *since* and *bucket* drive the chart series: the range to plot (None = all time)
-        and whether to group by day or month. The summary buckets above are fixed and
-        unaffected - they are the headline numbers, and a chart range should not silently
-        redefine them.
+        and whether to group by minute, hour, day, or month. The summary buckets above are
+        fixed and unaffected - they are the headline numbers, and a chart range should not
+        silently redefine them.
         """
         if today is None:
             today = datetime.now().astimezone().date()
         elif isinstance(today, datetime):
             today = today.date()
-        if isinstance(since, datetime):
+        if isinstance(since, datetime) and bucket not in ("hour", "minute"):
             since = since.date()
 
         values = {}
@@ -1579,30 +1585,37 @@ CREATE TABLE IF NOT EXISTS segments (
             values[name] = self._stats_sum_for(cutoff)
         values["lifetime"] = self._stats_sum_for(None)
 
+        valid_buckets = ("minute", "hour", "day", "month")
+        bucket_val = bucket if bucket in valid_buckets else "day"
+
         return StatsSnapshot(
             today=values["today"],
             week=values["week"],
             month=values["month"],
             year=values["year"],
             lifetime=values["lifetime"],
-            series=self._stats_series(since, bucket),
-            bucket=bucket if bucket in ("day", "month") else "day",
-            since=since.isoformat() if since else "",
+            series=self._stats_series(since, bucket_val),
+            bucket=bucket_val,
+            since=since.isoformat() if hasattr(since, "isoformat") else str(since or ""),
         )
 
     def _stats_series(
-        self, since: Optional[date], bucket: str
+        self, since: Optional[date | datetime | str], bucket: str
     ) -> tuple[tuple[str, DownloadStats], ...]:
-        """The chart series, grouped by local day or local month and clipped to *since*.
+        """The chart series, grouped by local minute, hour, day, or month and clipped to *since*.
 
         Same ``_STATS_PARSABLE`` guard and same local conversion as the cut-off buckets.
         The group expression is repeated verbatim in the WHERE clause - SQLite will not let
         a WHERE reference a SELECT alias, so the two must be written out identically.
         """
-        if bucket == "day":
-            width, day_expr = 10, self._STATS_LOCAL_DAY
-        else:
+        if bucket == "minute":
+            width, day_expr = 16, self._STATS_LOCAL_MINUTE
+        elif bucket == "hour":
+            width, day_expr = 13, self._STATS_LOCAL_HOUR
+        elif bucket == "month":
             width, day_expr = 7, self._STATS_LOCAL_MONTH
+        else:
+            width, day_expr = 10, self._STATS_LOCAL_DAY
         completed_sql = (
             f"SUM(CASE WHEN status IN ({','.join('?' * len(COMPLETE_STATUSES))}) "
             f"THEN 1 ELSE 0 END)"
@@ -1611,7 +1624,23 @@ CREATE TABLE IF NOT EXISTS segments (
         where = f" WHERE {self._STATS_PARSABLE}"
         if since is not None:
             where += f" AND {day_expr} >= ?"
-            params.append(since.isoformat()[:width])
+            if isinstance(since, datetime):
+                dt = since.astimezone() if since.tzinfo is not None else since
+                since_str = dt.strftime("%Y-%m-%d %H:%M:%S")[:width]
+            elif isinstance(since, date):
+                if width == 7:
+                    since_str = since.strftime("%Y-%m")
+                elif width == 13:
+                    since_str = since.strftime("%Y-%m-%d 00")
+                elif width == 16:
+                    since_str = since.strftime("%Y-%m-%d 00:00")
+                else:
+                    since_str = since.strftime("%Y-%m-%d")
+            elif isinstance(since, str):
+                since_str = since.replace("T", " ")[:width]
+            else:
+                since_str = str(since)[:width]
+            params.append(since_str)
         rows = self._conn.execute(
             f"SELECT {day_expr} AS bucket, "
             "       COUNT(*) AS count, "
