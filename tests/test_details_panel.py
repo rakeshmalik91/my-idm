@@ -56,7 +56,7 @@ def stop_panel_timers(panel):
     """Silence a DetailsPanel's periodic timers and drop it from the event loop."""
     if panel is None:
         return
-    for name in ("_log_timer", "_browser_monitor_timer"):
+    for name in ("_log_timer", "_browser_monitor_timer", "_queues_timer"):
         timer = getattr(panel, name, None)
         if timer is not None:
             timer.stop()
@@ -2087,6 +2087,27 @@ class TestDetailsPanel(unittest.TestCase):
         # Switch away from queues mode: timer stops
         panel.set_mode("details")
         self.assertFalse(panel._queues_timer.isActive())
+
+    def test_details_panel_queues_tab_manage_queues_button(self):
+        """Queues tab includes a button to jump to queue management in preferences."""
+        panel = self.win._details_panel
+        self.assertTrue(hasattr(panel, "_btn_manage_queues"))
+        self.assertIn("Manage Queues", panel._btn_manage_queues.text())
+        self.assertIn("Preferences", panel._btn_manage_queues.text())
+
+        # Clicking the button emits manage_queues_requested and calls MainWindow._on_manage_queues
+        signal_emitted = []
+        panel.manage_queues_requested.connect(lambda: signal_emitted.append(True))
+
+        called = []
+        original_on_manage = self.win._on_manage_queues
+        self.win._on_manage_queues = lambda: called.append(True)
+        try:
+            panel._btn_manage_queues.click()
+            self.assertTrue(signal_emitted)
+            self.assertTrue(called)
+        finally:
+            self.win._on_manage_queues = original_on_manage
 
 
 if __name__ == "__main__":

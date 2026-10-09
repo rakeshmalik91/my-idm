@@ -646,6 +646,7 @@ class DetailsPanel(QWidget):
     close_requested = Signal()
     mode_changed = Signal(str)
     browser_tab_requested = Signal()
+    manage_queues_requested = Signal()
 
     def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1044,12 +1045,50 @@ class DetailsPanel(QWidget):
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(6)
 
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.setSpacing(8)
+
         self._lbl_queues_status = QLabel(
             "Named download queues, concurrency budgets, and limits. Pause or resume each queue individually below.",
             container,
         )
+        self._lbl_queues_status.setWordWrap(True)
         self._lbl_queues_status.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 11px;")
-        layout.addWidget(self._lbl_queues_status)
+        top_bar.addWidget(self._lbl_queues_status, stretch=1)
+
+        self._btn_manage_queues = QPushButton("⚙️ Manage Queues in Preferences", container)
+        self._btn_manage_queues.setObjectName("btn_manage_queues")
+        self._btn_manage_queues.setToolTip(
+            "Open Preferences to configure queues, schedules, bandwidth limits, and priorities"
+        )
+        self._btn_manage_queues.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_manage_queues.clicked.connect(self._on_jump_to_manage_queues)
+        themed_widget(
+            self._btn_manage_queues,
+            """
+            QPushButton {
+                background-color: Colors.BG_MID;
+                color: Colors.TEXT;
+                border: 1px solid Colors.BORDER;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: Colors.BG_LIGHT;
+                border-color: Colors.ACCENT;
+                color: Colors.TEXT;
+            }
+            QPushButton:pressed {
+                background-color: Colors.BG_DARK;
+            }
+            """,
+        )
+        top_bar.addWidget(self._btn_manage_queues, stretch=0)
+
+        layout.addLayout(top_bar)
 
         self._table_queues = QTableWidget(0, 8, container)
         self._table_queues.setHorizontalHeaderLabels([
@@ -1566,6 +1605,31 @@ class DetailsPanel(QWidget):
             if w.get("row") == row:
                 self._on_filter_queue_clicked(qid)
                 break
+
+    def _on_jump_to_manage_queues(self):
+        """Open Preferences dialog jumped directly to the Queues tab."""
+        self.manage_queues_requested.emit()
+        if self.receivers(self.manage_queues_requested) == 0:
+            win = self.window()
+            if win is not None and hasattr(win, "_on_manage_queues"):
+                win._on_manage_queues()
+            else:
+                from my_idm.settings_dialog import SettingsDialog, TAB_QUEUES
+                dialog = SettingsDialog(
+                    general_config=getattr(self._manager, "general_config", None),
+                    torrent_config=getattr(self._manager, "torrent_config", None),
+                    network_config=getattr(self._manager, "network_config", None),
+                    security_config=getattr(self._manager, "security_config", None),
+                    tor_config=getattr(self._manager, "tor_config", None),
+                    external_tools_config=getattr(self._manager, "external_tools_config", None),
+                    browser_config=getattr(self._manager, "browser_config", None),
+                    db=getattr(self._manager, "_db", None),
+                    parent=self,
+                    initial_tab=TAB_QUEUES,
+                    manager=self._manager,
+                )
+                dialog.exec()
+        self._update_queues()
 
     # -- Public control -------------------------------------------------------
 

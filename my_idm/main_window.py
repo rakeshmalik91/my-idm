@@ -755,6 +755,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._details_panel.browser_tab_requested.connect(self._on_browser_tab_requested)
+        self._details_panel.manage_queues_requested.connect(self._on_manage_queues)
         self._splitter.addWidget(self._details_panel)
         self._splitter.setChildrenCollapsible(False)
         self._details_height: int = 250
@@ -3170,6 +3171,8 @@ class MainWindow(QMainWindow):
             self._refresh_queue_ui()
             self._load_history()
             self._update_count_label()
+            if hasattr(self, "_details_panel"):
+                self._details_panel.refresh_queues()
         self._status_label.setText(dialog.result_message or "")
 
     def _on_move_selected_to_queue(self, queue_id: str):
