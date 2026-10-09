@@ -2850,6 +2850,64 @@ class TestStatusJobPoolAndFIFOOrder(unittest.TestCase):
         expected_ids = [f"ep{i}" for i in range(1, 11)]
         self.assertEqual(active_ids, expected_ids)
 
+    def test_resume_download_already_active_is_noop(self):
+        """Resuming a download that is already active/downloading must be a no-op."""
+        e1 = DownloadEntry(id="act1", url="http://example.com/1.zip", status="downloading", queue_order=1)
+        self.db.add_download(e1)
+        self.manager.resume_download("act1")
+        updated = self.db.get_download("act1")
+        self.assertEqual(updated.status, "downloading")
+
+        # Also when in _starting_downloads
+        e2 = DownloadEntry(id="act2", url="http://example.com/2.zip", status="queued", queue_order=2)
+        self.db.add_download(e2)
+        self.manager._starting_downloads.add("act2")
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            self.manager.resume_download("act2")
+            mock_start.assert_not_called()
+        self.manager._starting_downloads.discard("act2")
+
+    def test_queue_limit_strictly_enforced_with_concurrency_race(self):
+        """Concurrent _process_queue calls must never overshoot the queue's max_concurrent limit."""
+        from my_idm.config import GeneralConfig
+        self.manager._general_config = GeneralConfig()
+        self.manager._general_config.max_concurrent_downloads = 6
+
+        # Configure AnimePahe queue with max_concurrent = 4 (matching user's config)
+        qid = "queue-animepahe"
+        self.db.set_queue_max_concurrent(qid, 4)
+
+        # Add 6 downloads belonging to this queue
+        for i in range(1, 7):
+            entry = DownloadEntry(
+                id=f"anime_{i}",
+                url=f"http://example.com/ep_{i}.mp4",
+                status="queued",
+                queue_id=qid,
+                queue_order=i,
+            )
+            self.db.add_download(entry)
+
+        # Mock _start_entry to simulate starting and updating DB
+        def mock_start(e):
+            self.manager._starting_downloads.add(e.id)
+            self.db.update_status(e.id, "downloading")
+
+        import threading
+        threads = []
+        with patch.object(self.manager, "_start_entry", side_effect=mock_start):
+            for _ in range(8):
+                t = threading.Thread(target=self.manager._process_queue)
+                threads.append(t)
+                t.start()
+            for t in threads:
+                t.join()
+
+        active_count = self.manager._get_active_download_count(qid)
+        self.assertEqual(active_count, 4)
+        queued_count = sum(1 for e in self.db.get_all_downloads() if e.status == "queued" and e.queue_id == qid)
+        self.assertEqual(queued_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

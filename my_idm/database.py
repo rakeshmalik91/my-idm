@@ -1043,6 +1043,18 @@ CREATE TABLE IF NOT EXISTS segments (
                 )
         return len(download_ids)
 
+    def get_active_download_ids(self) -> dict[str, str]:
+        """Map of download_id -> queue_id for all downloads in an active DB state.
+
+        Active states: 'downloading', 'checking', 'fetching_metadata', 'stalled'.
+        Returns a dict mapping download_id to the row's queue_id (defaulting to DEFAULT_QUEUE_ID).
+        """
+        rows = self._conn.execute(
+            "SELECT id, queue_id FROM downloads "
+            "WHERE status IN ('downloading','checking','fetching_metadata','stalled')"
+        ).fetchall()
+        return {r["id"]: (r["queue_id"] or DEFAULT_QUEUE_ID) for r in rows}
+
     def get_active_counts_by_queue(self) -> dict[str, int]:
         """Active transfers per queue, keyed by queue id.
 

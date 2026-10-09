@@ -534,6 +534,26 @@ class TorrentEngine:
         except Exception as exc:
             log.warning("Failed to apply session rate limits: %s", exc)
 
+    def is_active(self, download_id: str) -> bool:
+        """Check if a torrent handle is valid and active (not paused)."""
+        handle = self._handles.get(download_id)
+        if not handle:
+            return False
+        try:
+            if hasattr(handle, "is_valid") and not handle.is_valid():
+                return False
+            if hasattr(handle, "status"):
+                s = handle.status()
+                if getattr(s, "paused", False):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def get_active_download_ids(self) -> set[str]:
+        """Return download IDs of currently active torrents."""
+        return {did for did in list(self._handles) if self.is_active(did)}
+
     def set_torrent_tor_route(self, download_id: str, enabled: bool) -> None:
         """Flag a torrent to use the Tor SOCKS5 proxy.
 

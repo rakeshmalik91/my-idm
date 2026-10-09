@@ -565,6 +565,7 @@ class DownloadManager(QObject):
         self._last_progress_bytes: dict[str, int] = {}
         self._ytdlp_jobs: dict[str, dict[str, Any]] = {}
         self._ytdlp_lock = threading.RLock()
+        self._queue_process_lock = threading.RLock()
         self._http = HTTPEngine(db)
         self._torrent = TorrentEngine(db)
         self._http.set_general_config_sync(self._general_config)
@@ -2100,14 +2101,15 @@ class DownloadManager(QObject):
                 log.debug("Could not cache .torrent file for %s: %s", entry.id, exc)
 
         # Start if within the global and per-queue limits; otherwise stays queued.
-        counts = self._active_counts_by_queue()
-        limits = self._queue_limits()
-        if self._may_start(entry, counts, limits, self._general_config.effective_max_concurrent):
-            self._start_entry(entry)
-        else:
-            entry.status = "queued"
-            self._db.update_download(entry)
-            self.status_changed.emit(entry.id, "queued", "")
+        with self._queue_process_lock:
+            counts = self._active_counts_by_queue()
+            limits = self._queue_limits()
+            if self._may_start(entry, counts, limits, self._general_config.effective_max_concurrent):
+                self._start_entry(entry)
+            else:
+                entry.status = "queued"
+                self._db.update_download(entry)
+                self.status_changed.emit(entry.id, "queued", "")
 
         return entry.id
 
@@ -2220,30 +2222,50 @@ class DownloadManager(QObject):
         return sum(counts.values())
 
     def _active_counts_by_queue(self) -> dict[str, int]:
-        """Active transfers per queue, including ones not yet reported as downloading.
+        """Active transfers per queue, including ones in-flight across all engines.
 
-        ``_starting_downloads`` is added in because it covers the window between deciding to
-        start a download and the engine reporting it as ``downloading``. Without it a queue's
-        first start always overshoots its own budget by exactly this set's size, and the
-        overshoot is invisible until it settles.
-
-        One grouped query rather than a full scan per candidate: the grouped form is what makes
-        per-queue accounting *cheaper* than the single global count it replaces.
+        Combines database active states with memory-tracked in-flight transfers across
+        HTTP, BitTorrent, and native yt-dlp engines, deduplicating so no transfer is
+        counted twice or omitted due to transition latency.
         """
-        counts = self._db.get_active_counts_by_queue()
-        active_db_statuses = ('downloading', 'checking', 'fetching_metadata', 'stalled')
-        for did in self._starting_downloads:
-            entry = self._db.get_download(did)
-            if entry and entry.status not in active_db_statuses:
-                key = self._db.resolve_queue_id(entry.queue_id)
-                counts[key] = counts.get(key, 0) + 1
+        active_map: dict[str, str] = {}
+        if hasattr(self._db, "get_active_download_ids"):
+            try:
+                active_map.update(self._db.get_active_download_ids())
+            except Exception:
+                pass
+
+        # In-flight candidates across engines and starting gate
+        in_flight: set[str] = set()
+        if hasattr(self, "_starting_downloads"):
+            in_flight.update(self._starting_downloads)
         if hasattr(self, "_http") and hasattr(self._http, "get_active_download_ids"):
-            for did in self._http.get_active_download_ids():
-                if did not in self._starting_downloads:
-                    entry = self._db.get_download(did)
-                    if entry and entry.status not in active_db_statuses:
-                        key = self._db.resolve_queue_id(entry.queue_id)
-                        counts[key] = counts.get(key, 0) + 1
+            try:
+                in_flight.update(self._http.get_active_download_ids())
+            except Exception:
+                pass
+        if hasattr(self, "_torrent") and hasattr(self._torrent, "get_active_download_ids"):
+            try:
+                in_flight.update(self._torrent.get_active_download_ids())
+            except Exception:
+                pass
+        if hasattr(self, "_ytdlp_jobs") and self._ytdlp_jobs:
+            in_flight.update(self._ytdlp_jobs.keys())
+
+        for did in in_flight:
+            if did not in active_map:
+                entry = self._db.get_download(did)
+                if entry:
+                    key = self._db.resolve_queue_id(entry.queue_id)
+                    active_map[did] = key
+
+        # If active_map is empty but mock DB had get_active_counts_by_queue
+        if not active_map and not in_flight:
+            return self._db.get_active_counts_by_queue()
+
+        counts: dict[str, int] = {}
+        for qid in active_map.values():
+            counts[qid] = counts.get(qid, 0) + 1
         return counts
 
     def _queue_limits(self) -> dict[str, int]:
@@ -2288,67 +2310,79 @@ class DownloadManager(QObject):
         a queue of 500 small files. A saturated queue sinks to the back of the walk rather than
         being dropped, so it is picked up the moment a slot frees.
         """
-        global_max = self._general_config.effective_max_concurrent
-        counts = self._active_counts_by_queue()
-        limits = self._queue_limits()
-        if sum(counts.values()) >= global_max:
-            return
+        with self._queue_process_lock:
+            global_max = self._general_config.effective_max_concurrent
+            counts = self._active_counts_by_queue()
+            limits = self._queue_limits()
+            if sum(counts.values()) >= global_max:
+                return
 
-        now = time.time()
-        queued = [
-            e for e in self._db.get_all_downloads()
-            if e.status == "queued"
-        ]
-        eligible = []
-        for e in queued:
-            if e.retry_count > 0:
-                next_retry_at = e.metadata.get("next_retry_at", 0) if e.metadata else 0
-                if now < next_retry_at or e.retry_count >= e.max_retries:
+            now = time.time()
+            queued = [
+                e for e in self._db.get_all_downloads()
+                if e.status == "queued"
+            ]
+            eligible = []
+            for e in queued:
+                if e.id in self._starting_downloads:
                     continue
-            eligible.append(e)
-
-        priority = lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "")
-        by_queue: dict[str, list[DownloadEntry]] = {}
-        for entry in eligible:
-            by_queue.setdefault(self._db.resolve_queue_id(entry.queue_id), []).append(entry)
-        for group in by_queue.values():
-            group.sort(key=priority)
-
-        # Queues that can still start something come first; the rest follow so that a slot
-        # opening up in a saturated queue is filled immediately rather than on the next tick.
-        # Ties break on the queue switcher's own order (default first, then the user's
-        # `position`), never on the raw id - ids are uuids, so an id tiebreaker would make the
-        # dispatch order differ between two runs with identical state.
-        order_index = {
-            queue.id: index for index, queue in enumerate(self._db.get_queues())
-        }
-
-        def has_budget(queue_id: str) -> bool:
-            limit = limits.get(queue_id, 0)
-            used = counts.get(queue_id, 0)
-            return limit <= 0 or used < limit
-
-        queue_ids = sorted(
-            by_queue, key=lambda q: (not has_budget(q), order_index.get(q, 999))
-        )
-
-        for queue_id in queue_ids:
-            for entry in by_queue[queue_id]:
-                if not self._may_start(entry, counts, limits, global_max):
+                if hasattr(self, "_http") and hasattr(self._http, "is_active") and self._http.is_active(e.id):
                     continue
-                if entry.retry_count > 0:
-                    log.info(
-                        "Auto-retrying queued download %s (attempt %d/%d, order=%s, queue=%s)",
-                        entry.id, entry.retry_count + 1, entry.max_retries,
-                        entry.queue_order, queue_id,
-                    )
-                else:
-                    log.info(
-                        "Starting queued download %s (order=%s, queue=%s)",
-                        entry.id, entry.queue_order, queue_id,
-                    )
-                self._start_entry(entry)
-                counts[queue_id] = counts.get(queue_id, 0) + 1
+                if hasattr(self, "_torrent") and hasattr(self._torrent, "is_active") and self._torrent.is_active(e.id):
+                    continue
+                if self.is_ytdlp_native_job(e.id):
+                    continue
+
+                if e.retry_count > 0:
+                    next_retry_at = e.metadata.get("next_retry_at", 0) if e.metadata else 0
+                    if now < next_retry_at or e.retry_count >= e.max_retries:
+                        continue
+                eligible.append(e)
+
+            priority = lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or "")
+            by_queue: dict[str, list[DownloadEntry]] = {}
+            for entry in eligible:
+                by_queue.setdefault(self._db.resolve_queue_id(entry.queue_id), []).append(entry)
+            for group in by_queue.values():
+                group.sort(key=priority)
+
+            # Queues that can still start something come first; the rest follow so that a slot
+            # opening up in a saturated queue is filled immediately rather than on the next tick.
+            # Ties break on the queue switcher's own order (default first, then the user's
+            # `position`), never on the raw id - ids are uuids, so an id tiebreaker would make the
+            # dispatch order differ between two runs with identical state.
+            order_index = {
+                queue.id: index for index, queue in enumerate(self._db.get_queues())
+            }
+
+            def has_budget(queue_id: str) -> bool:
+                limit = limits.get(queue_id, 0)
+                used = counts.get(queue_id, 0)
+                return limit <= 0 or used < limit
+
+            queue_ids = sorted(
+                by_queue, key=lambda q: (not has_budget(q), order_index.get(q, 999))
+            )
+
+            for queue_id in queue_ids:
+                for entry in by_queue[queue_id]:
+                    if sum(counts.values()) >= global_max:
+                        break
+                    if not self._may_start(entry, counts, limits, global_max):
+                        continue
+                    if entry.retry_count > 0:
+                        log.info(
+                            "Auto-retrying queued download %s (attempt %d/%d, order=%s, queue=%s)",
+                            entry.id, entry.retry_count + 1, entry.max_retries,
+                            entry.queue_order, queue_id,
+                        )
+                    else:
+                        log.info(
+                            "Starting queued download %s (order=%s, queue=%s)",
+                            entry.id, entry.queue_order, queue_id,
+                        )
+                    self._start_entry(entry)
+                    counts[queue_id] = counts.get(queue_id, 0) + 1
 
     def _start_entry(self, entry: DownloadEntry):
         """Dispatch download to the right engine."""
@@ -2504,6 +2538,10 @@ class DownloadManager(QObject):
                 self._process_queue()
             return
 
+        if entry.metadata.get("force_started"):
+            entry.metadata.pop("force_started", None)
+            self._db.update_download(entry)
+
         self._starting_downloads.discard(download_id)
 
         # Halt the transfer in the engine
@@ -2654,6 +2692,16 @@ class DownloadManager(QObject):
             log.warning("Download %s is already starting, skipping duplicate resume", download_id)
             return
 
+        is_already_active = (
+            entry.status in ("downloading", "checking", "fetching_metadata")
+            or (hasattr(self, "_http") and hasattr(self._http, "is_active") and self._http.is_active(download_id))
+            or (hasattr(self, "_torrent") and hasattr(self._torrent, "is_active") and self._torrent.is_active(download_id))
+            or self.is_ytdlp_native_job(download_id)
+        )
+        if is_already_active:
+            log.debug("Download %s is already active (%s), skipping duplicate resume", download_id, entry.status)
+            return
+
         # Reset retries and error state so manual or auto-resume always gets fresh attempts
         # If download was already fetching_metadata, keep its timer; if suspended/stopped/paused, reset it
         if entry.status != "fetching_metadata":
@@ -2680,12 +2728,7 @@ class DownloadManager(QObject):
         if not trigger_process_queue:
             return
 
-        counts = self._active_counts_by_queue()
-        limits = self._queue_limits()
-        if not self._may_start(entry, counts, limits, self._general_config.effective_max_concurrent):
-            return
-
-        self._start_entry(entry)
+        self._process_queue()
 
     def force_start_download(self, download_id: str):
         """Immediately force start a download, resetting retries/errors and bypassing paused/queued limits."""
@@ -2693,6 +2736,7 @@ class DownloadManager(QObject):
         if not entry or entry.status == "completed":
             return
 
+        self._starting_downloads.add(download_id)
         entry.status = "downloading"
         entry.retry_count = 0
         entry.error_message = ""
