@@ -60,6 +60,11 @@ from my_idm.config import (
     clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_DELAY,
+    DEFAULT_RETRY_BACKOFF_FACTOR,
+    DEFAULT_RETRY_MAX_DELAY,
+    DEFAULT_RETRY_EXPONENTIAL_BACKOFF,
     MAX_SEGMENT_START_DELAY_MS,
     normalize_extension_list,
 )
@@ -1203,13 +1208,22 @@ class SettingsDialog(QDialog):
         retry_row.addWidget(self._retries_spin)
         retry_layout.addLayout(retry_row)
 
+        exp_row = QHBoxLayout()
         self._retry_exp_cb = QCheckBox("📈 Use exponential backoff for connection retries")
         self._retry_exp_cb.setToolTip(
             "When checked, wait time progressively increases between consecutive retry attempts "
             "to reduce server pressure and prevent spamming failed connections."
         )
         self._retry_exp_cb.toggled.connect(self._on_retry_exp_toggled)
-        retry_layout.addWidget(self._retry_exp_cb)
+        exp_row.addWidget(self._retry_exp_cb, 1)
+
+        self._retry_reset_btn = QPushButton("↺  Reset to Default")
+        self._retry_reset_btn.setToolTip(
+            "Reset retry configuration to default values (5 retries, 30s initial delay, 2.0x multiplier, 600s max cap)"
+        )
+        self._retry_reset_btn.clicked.connect(self._on_reset_retry_defaults)
+        exp_row.addWidget(self._retry_reset_btn)
+        retry_layout.addLayout(exp_row)
 
         retry_details_layout = QHBoxLayout()
         retry_details_layout.addWidget(QLabel("Initial retry delay:"))
@@ -1217,7 +1231,7 @@ class SettingsDialog(QDialog):
         self._retry_delay_spin.setRange(0.1, 120.0)
         self._retry_delay_spin.setSingleStep(0.5)
         self._retry_delay_spin.setSuffix(" sec")
-        self._retry_delay_spin.setToolTip("Initial wait time before the first retry attempt (e.g. 2.0s)")
+        self._retry_delay_spin.setToolTip("Initial wait time before the first retry attempt (e.g. 30.0s)")
         retry_details_layout.addWidget(self._retry_delay_spin)
 
         self._retry_factor_lbl = QLabel("Multiplier:")
@@ -1226,7 +1240,7 @@ class SettingsDialog(QDialog):
         self._retry_factor_spin.setRange(1.0, 10.0)
         self._retry_factor_spin.setSingleStep(0.5)
         self._retry_factor_spin.setSuffix("x")
-        self._retry_factor_spin.setToolTip("Factor by which delay multiplies on each retry attempt (e.g. 2.0x -> 2s, 4s, 8s, 16s...)")
+        self._retry_factor_spin.setToolTip("Factor by which delay multiplies on each retry attempt (e.g. 2.0x -> 30s, 60s, 120s...)")
         retry_details_layout.addWidget(self._retry_factor_spin)
 
         self._retry_max_delay_lbl = QLabel("Max cap:")
@@ -4440,6 +4454,15 @@ class SettingsDialog(QDialog):
         self._retry_factor_spin.setEnabled(checked)
         self._retry_max_delay_lbl.setEnabled(checked)
         self._retry_max_delay_spin.setEnabled(checked)
+
+    def _on_reset_retry_defaults(self):
+        """Restore retry configuration controls to their default values."""
+        self._retries_spin.setValue(DEFAULT_MAX_RETRIES)
+        self._retry_exp_cb.setChecked(DEFAULT_RETRY_EXPONENTIAL_BACKOFF)
+        self._retry_delay_spin.setValue(DEFAULT_RETRY_DELAY)
+        self._retry_factor_spin.setValue(DEFAULT_RETRY_BACKOFF_FACTOR)
+        self._retry_max_delay_spin.setValue(int(DEFAULT_RETRY_MAX_DELAY))
+        self._on_retry_exp_toggled(DEFAULT_RETRY_EXPONENTIAL_BACKOFF)
 
     def _on_iface_changed(self, index: int):
         if index <= 0:

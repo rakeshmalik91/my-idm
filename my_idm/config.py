@@ -88,6 +88,13 @@ def clamp_segment_start_delay(value: Any) -> int:
     return max(0, min(delay, MAX_SEGMENT_START_DELAY_MS))
 
 
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_RETRY_DELAY = 30.0
+DEFAULT_RETRY_BACKOFF_FACTOR = 2.0
+DEFAULT_RETRY_MAX_DELAY = 600.0
+DEFAULT_RETRY_EXPONENTIAL_BACKOFF = True
+
+
 @dataclass
 class GeneralConfig:
     """Stores user preferences for downloads and application behavior."""
@@ -102,11 +109,11 @@ class GeneralConfig:
     # benefit. Raise it when a host rate-limits them - a 429 the moment a download starts.
     segment_start_delay_ms: int = DEFAULT_SEGMENT_START_DELAY_MS
     max_concurrent_downloads: int = 3
-    max_retries: int = 5
-    retry_delay: float = 2.0
-    retry_backoff_factor: float = 2.0
-    retry_max_delay: float = 60.0
-    retry_exponential_backoff: bool = True
+    max_retries: int = DEFAULT_MAX_RETRIES
+    retry_delay: float = DEFAULT_RETRY_DELAY
+    retry_backoff_factor: float = DEFAULT_RETRY_BACKOFF_FACTOR
+    retry_max_delay: float = DEFAULT_RETRY_MAX_DELAY
+    retry_exponential_backoff: bool = DEFAULT_RETRY_EXPONENTIAL_BACKOFF
     auto_resume_startup: bool = True
     notify_on_completion: bool = True
     backlog_locations: list[str] = field(default_factory=list)
@@ -260,11 +267,11 @@ class GeneralConfig:
                 data.get("segment_start_delay_ms", DEFAULT_SEGMENT_START_DELAY_MS)
             ),
             max_concurrent_downloads=int(data.get("max_concurrent_downloads", 3)),
-            max_retries=int(data.get("max_retries", 5)),
-            retry_delay=float(data.get("retry_delay", 2.0)),
-            retry_backoff_factor=float(data.get("retry_backoff_factor", 2.0)),
-            retry_max_delay=float(data.get("retry_max_delay", 60.0)),
-            retry_exponential_backoff=bool(data.get("retry_exponential_backoff", True)),
+            max_retries=int(data.get("max_retries", DEFAULT_MAX_RETRIES)),
+            retry_delay=float(data.get("retry_delay", DEFAULT_RETRY_DELAY)),
+            retry_backoff_factor=float(data.get("retry_backoff_factor", DEFAULT_RETRY_BACKOFF_FACTOR)),
+            retry_max_delay=float(data.get("retry_max_delay", DEFAULT_RETRY_MAX_DELAY)),
+            retry_exponential_backoff=bool(data.get("retry_exponential_backoff", DEFAULT_RETRY_EXPONENTIAL_BACKOFF)),
             auto_resume_startup=bool(data.get("auto_resume_startup", True)),
             notify_on_completion=bool(data.get("notify_on_completion", True)),
             backlog_locations=locs,
@@ -348,11 +355,11 @@ class GeneralConfig:
                            DEFAULT_SEGMENT_START_DELAY_MS, type=int)
         )
         max_concurrent_downloads = settings.value("max_concurrent_downloads", 3, type=int)
-        max_retries = settings.value("max_retries", 5, type=int)
-        retry_delay = settings.value("retry_delay", 2.0, type=float)
-        retry_backoff_factor = settings.value("retry_backoff_factor", 2.0, type=float)
-        retry_max_delay = settings.value("retry_max_delay", 60.0, type=float)
-        retry_exponential_backoff = settings.value("retry_exponential_backoff", True, type=bool)
+        max_retries = settings.value("max_retries", DEFAULT_MAX_RETRIES, type=int)
+        retry_delay = settings.value("retry_delay", DEFAULT_RETRY_DELAY, type=float)
+        retry_backoff_factor = settings.value("retry_backoff_factor", DEFAULT_RETRY_BACKOFF_FACTOR, type=float)
+        retry_max_delay = settings.value("retry_max_delay", DEFAULT_RETRY_MAX_DELAY, type=float)
+        retry_exponential_backoff = settings.value("retry_exponential_backoff", DEFAULT_RETRY_EXPONENTIAL_BACKOFF, type=bool)
         auto_resume_startup = settings.value("auto_resume_startup", True, type=bool)
         notify_on_completion = settings.value("notify_on_completion", True, type=bool)
         raw_locs = settings.value("backlog_locations", [])

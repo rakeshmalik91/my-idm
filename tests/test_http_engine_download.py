@@ -1673,7 +1673,7 @@ class TestRunDownload(EngineTestCase):
         )
         self.assertEqual(
             row.error_message,
-            "Retrying in 2s (1/3): Single-stream download failed after 3 retries: "
+            "Retrying in 30s (1/3): Single-stream download failed after 3 retries: "
             "no route to host",
             "the notice is persisted and names the cause, so it survives the app closing "
             "mid-backoff and is diagnosable without the log",
@@ -1798,7 +1798,7 @@ class TestHandleRetry(EngineTestCase):
         row = self.entry()
         self.assertEqual(row.status, "queued")
         self.assertGreater(row.metadata.get("next_retry_at", 0), 0, "the backoff must be recorded")
-        self.assertEqual(row.metadata.get("retry_delay"), 2.0, "the default backoff base is 2s")
+        self.assertEqual(row.metadata.get("retry_delay"), 30.0, "the default backoff base is 30s")
         self.assertEqual([s[1] for s in self.status_trail()], ["queued"])
 
     def test_the_retry_notice_is_persisted_and_forwarded(self):
@@ -1807,9 +1807,9 @@ class TestHandleRetry(EngineTestCase):
         self.engine._handle_retry(entry, "boom")
         row = self.entry()
         self.assertGreater(row.metadata.get("next_retry_at", 0), 0, "the backoff must be recorded")
-        self.assertEqual(row.metadata.get("retry_delay"), 2.0, "the default backoff base is 2s")
+        self.assertEqual(row.metadata.get("retry_delay"), 30.0, "the default backoff base is 30s")
         self.assertEqual([s[1] for s in self.status_trail()], ["queued"])
-        self.assertEqual(row.error_message, "Retrying in 2s (1/3): boom")
+        self.assertEqual(row.error_message, "Retrying in 30s (1/3): boom")
         _, status, message = self.status_trail()[-1]
         self.assertEqual(status, "queued")
         self.assertIn("Retrying in", message)
@@ -1892,7 +1892,7 @@ class TestHandleRetry(EngineTestCase):
         entry = self.add_entry(max_retries=3)
         self.engine._handle_retry(entry, "boom")
         self.assertEqual(
-            self.entry().error_message, "Retrying in 2s (1/3): boom",
+            self.entry().error_message, "Retrying in 30s (1/3): boom",
             "the retry reason must be persisted, not only emitted to the GUI",
         )
 

@@ -139,9 +139,9 @@ class TestGeneralConfig(ConfigIsolationMixin, unittest.TestCase):
         self.assertEqual(cfg.segment_start_delay_ms, DEFAULT_SEGMENT_START_DELAY_MS)
         self.assertEqual(cfg.max_concurrent_downloads, 3)
         self.assertEqual(cfg.max_retries, 5)
-        self.assertEqual(cfg.retry_delay, 2.0)
+        self.assertEqual(cfg.retry_delay, 30.0)
         self.assertEqual(cfg.retry_backoff_factor, 2.0)
-        self.assertEqual(cfg.retry_max_delay, 60.0)
+        self.assertEqual(cfg.retry_max_delay, 600.0)
         self.assertTrue(cfg.retry_exponential_backoff)
         self.assertTrue(cfg.auto_resume_startup)
         self.assertTrue(cfg.notify_on_completion)
@@ -750,6 +750,41 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.assertEqual(saved.max_retries, 4)
         self.assertFalse(saved.retry_exponential_backoff)
         self.assertEqual(saved.retry_delay, 5.0)
+        dlg.close()
+
+    def test_settings_dialog_retry_reset_to_defaults(self):
+        gen_cfg = GeneralConfig(
+            max_retries=15,
+            retry_delay=5.0,
+            retry_backoff_factor=3.0,
+            retry_max_delay=120.0,
+            retry_exponential_backoff=False,
+        )
+        dlg = SettingsDialog(general_config=gen_cfg)
+        self.assertEqual(dlg._retries_spin.value(), 15)
+        self.assertFalse(dlg._retry_exp_cb.isChecked())
+        self.assertEqual(dlg._retry_delay_spin.value(), 5.0)
+
+        # Click Reset to Default button
+        dlg._retry_reset_btn.click()
+
+        # Check all values are back to defaults
+        self.assertEqual(dlg._retries_spin.value(), 5)
+        self.assertTrue(dlg._retry_exp_cb.isChecked())
+        self.assertEqual(dlg._retry_delay_spin.value(), 30.0)
+        self.assertEqual(dlg._retry_factor_spin.value(), 2.0)
+        self.assertEqual(dlg._retry_max_delay_spin.value(), 600)
+        self.assertTrue(dlg._retry_factor_spin.isEnabled())
+        self.assertTrue(dlg._retry_max_delay_spin.isEnabled())
+
+        # Save and verify GeneralConfig received default retry settings
+        dlg._on_save()
+        saved = dlg.general_config
+        self.assertEqual(saved.max_retries, 5)
+        self.assertTrue(saved.retry_exponential_backoff)
+        self.assertEqual(saved.retry_delay, 30.0)
+        self.assertEqual(saved.retry_backoff_factor, 2.0)
+        self.assertEqual(saved.retry_max_delay, 600.0)
         dlg.close()
 
     def test_preferences_window_width_and_db_persistence(self):
