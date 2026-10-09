@@ -257,6 +257,56 @@ class TestManagerLifecycle(unittest.TestCase):
         updated = self.db.get_download("dl-paused-1")
         self.assertIn(updated.status, ("queued", "downloading"))
 
+    def test_resume_download_skips_when_truly_active_in_engine(self):
+        """Resuming an actively downloading transfer skips redundant dispatch."""
+        entry = DownloadEntry(
+            id="dl-active-live",
+            url="https://example.com/live.zip",
+            filename="live.zip",
+            save_path="C:/Downloads",
+            status="downloading",
+        )
+        self.db.add_download(entry)
+        with patch.object(self.manager, "is_download_active", return_value=True):
+            with patch.object(self.manager, "_process_queue") as mock_pq:
+                self.manager.resume_download("dl-active-live")
+                mock_pq.assert_not_called()
+
+    def test_recover_downloads_on_startup_auto_resumes_interrupted(self):
+        """Startup recovery transitions interrupted items to queued and calls resume_download in priority order."""
+        e1 = DownloadEntry(id="d-active", url="https://example.com/1.zip", filename="1.zip", save_path="C:/Downloads", status="downloading", queue_order=1)
+        e2 = DownloadEntry(id="d-stalled", url="https://example.com/2.zip", filename="2.zip", save_path="C:/Downloads", status="stalled", queue_order=2)
+        e3 = DownloadEntry(id="d-queued", url="https://example.com/3.zip", filename="3.zip", save_path="C:/Downloads", status="queued", queue_order=3)
+        e4 = DownloadEntry(id="d-paused", url="https://example.com/4.zip", filename="4.zip", save_path="C:/Downloads", status="paused", queue_order=4)
+        for e in (e1, e2, e3, e4):
+            self.db.add_download(e)
+
+        resumed = []
+        with patch.object(self.manager, "resume_download", side_effect=lambda did: resumed.append(did)):
+            self.manager._recover_downloads_on_startup()
+
+        # d-active and d-stalled were reset to queued in DB so no phantom active counts block limits
+        self.assertEqual(self.db.get_download("d-active").status, "queued")
+        self.assertEqual(self.db.get_download("d-stalled").status, "queued")
+        # And all three (interrupted + previously queued) were auto-resumed in priority order
+        self.assertEqual(resumed, ["d-active", "d-stalled", "d-queued"])
+        self.assertNotIn("d-paused", resumed)
+
+    def test_recover_downloads_on_startup_pauses_interrupted_when_auto_resume_disabled(self):
+        """Startup recovery sets interrupted downloads to paused when auto_resume_startup=False."""
+        self.manager._general_config.auto_resume_startup = False
+        e1 = DownloadEntry(id="d-active", url="https://example.com/1.zip", filename="1.zip", save_path="C:/Downloads", status="downloading")
+        e2 = DownloadEntry(id="d-queued", url="https://example.com/2.zip", filename="2.zip", save_path="C:/Downloads", status="queued")
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+
+        resumed = []
+        with patch.object(self.manager, "resume_download", side_effect=lambda did: resumed.append(did)):
+            self.manager._recover_downloads_on_startup()
+
+        self.assertEqual(self.db.get_download("d-active").status, "paused")
+        self.assertEqual(resumed, ["d-queued"])
+
     def test_force_start_download_lifecycle(self):
         """Force start immediately resets error/retries and sets status to downloading."""
         entry = DownloadEntry(

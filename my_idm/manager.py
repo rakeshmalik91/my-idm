@@ -741,24 +741,7 @@ class DownloadManager(QObject):
                 self._torrent.apply_tor_config(self._tor_config)
 
         # Auto-resume queued and interrupted downloads on startup in priority order
-        all_entries = self._db.get_all_downloads()
-        all_entries.sort(key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or ""))
-        # resume_download enforces the per-queue budget, so walking the list in priority order
-        # means each queue fills to its own limit and the overflow stays queued for the 1 Hz
-        # tick rather than being started here and then blocked.
-        for entry in all_entries:
-            if entry.status == "queued":
-                log.info("Auto-starting queued download on startup: %s (order=%s, queue=%s)",
-                         entry.id, entry.queue_order, entry.queue_id)
-                self.resume_download(entry.id)
-            elif self._general_config.auto_resume_startup and entry.status in ("downloading", "checking", "fetching_metadata"):
-                log.info("Auto-resuming interrupted download on startup: %s (order=%s, queue=%s)",
-                         entry.id, entry.queue_order, entry.queue_id)
-                self.resume_download(entry.id)
-            elif entry.status == "seeding" and getattr(self._torrent_config, "resume_seeding_on_startup", True):
-                log.info("Auto-resuming seeding torrent on startup: %s (order=%s, queue=%s)",
-                         entry.id, entry.queue_order, entry.queue_id)
-                self._torrent.add_torrent(entry)
+        self._recover_downloads_on_startup()
 
         # Launch external tools (e.g. AnimePahe scraper) if configured
         if self._external_tools_config.animepahe_launch_on_startup:
@@ -788,6 +771,49 @@ class DownloadManager(QObject):
                 log.warning("Failed to start browser integration server: %s", exc)
 
         log.info("DownloadManager started")
+
+    def _recover_downloads_on_startup(self):
+        """Auto-resume queued and interrupted downloads on startup in priority order.
+
+        Downloads left in active states ('downloading', 'checking', 'fetching_metadata',
+        'stalled') from a previous session or unexpected shutdown are reconciled:
+        - If auto_resume_startup is True, they are transitioned to 'queued' in SQLite first
+          so phantom active records do not saturate per-queue concurrency limits, and then
+          resumed in priority order.
+        - If auto_resume_startup is False, they are transitioned to 'paused'.
+        """
+        all_entries = self._db.get_all_downloads()
+        all_entries.sort(key=lambda e: (e.queue_order if e.queue_order > 0 else 999999, e.added_at or ""))
+
+        interrupted = [
+            e for e in all_entries
+            if e.status in ("downloading", "checking", "fetching_metadata", "stalled")
+        ]
+        if not self._general_config.auto_resume_startup:
+            for entry in interrupted:
+                log.info("Pausing interrupted download on startup (auto_resume_startup=False): %s", entry.id)
+                self.pause_download(entry.id, trigger_process_queue=False)
+                entry.status = "paused"
+        else:
+            # Transition all interrupted downloads to queued in DB first so phantom active
+            # counts in SQLite do not block concurrency limits when processing the queues.
+            for entry in interrupted:
+                entry.status = "queued"
+                entry.retry_count = 0
+                entry.error_message = ""
+                entry.last_tried_at = _now_iso()
+                self._db.update_download(entry)
+                self.status_changed.emit(entry.id, "queued", "")
+
+        for entry in all_entries:
+            if entry.status == "queued":
+                log.info("Auto-starting queued download on startup: %s (order=%s, queue=%s)",
+                         entry.id, entry.queue_order, entry.queue_id)
+                self.resume_download(entry.id)
+            elif entry.status == "seeding" and getattr(self._torrent_config, "resume_seeding_on_startup", True):
+                log.info("Auto-resuming seeding torrent on startup: %s (order=%s, queue=%s)",
+                         entry.id, entry.queue_order, entry.queue_id)
+                self._torrent.add_torrent(entry)
 
     def stop(self, status_cb=None):
         """Shut down everything cleanly."""
@@ -915,6 +941,18 @@ class DownloadManager(QObject):
         """True when a live yt-dlp (Mode B) worker thread owns this download."""
         with self._ytdlp_lock:
             return download_id in self._ytdlp_jobs
+
+    def is_download_active(self, download_id: str) -> bool:
+        """True if the download is currently active in memory across HTTP, Torrent, or yt-dlp."""
+        if download_id in self._starting_downloads:
+            return True
+        if hasattr(self, "_http") and hasattr(self._http, "is_active") and self._http.is_active(download_id):
+            return True
+        if hasattr(self, "_torrent") and hasattr(self._torrent, "is_active") and self._torrent.is_active(download_id):
+            return True
+        if self.is_ytdlp_native_job(download_id):
+            return True
+        return False
 
     def _is_ytdlp_native_entry(self, entry: DownloadEntry) -> bool:
         """True when *entry* was created for a yt-dlp native (Mode B) download."""
@@ -2697,9 +2735,7 @@ class DownloadManager(QObject):
 
         is_already_active = (
             entry.status in ("downloading", "checking", "fetching_metadata")
-            or (hasattr(self, "_http") and hasattr(self._http, "is_active") and self._http.is_active(download_id))
-            or (hasattr(self, "_torrent") and hasattr(self._torrent, "is_active") and self._torrent.is_active(download_id))
-            or self.is_ytdlp_native_job(download_id)
+            or self.is_download_active(download_id)
         )
         if is_already_active:
             log.debug("Download %s is already active (%s), skipping duplicate resume", download_id, entry.status)
