@@ -3931,6 +3931,100 @@ class TestActionStatesDynamicGating(_MainWindowTestCase):
             self.assertFalse(can_alloc, f"Bandwidth allocation should be disabled for {st}")
 
 
+class TestSegregatedSelectAll(_MainWindowTestCase):
+    """Tests for the 'Select All' button on segregated view groups."""
+
+    def test_select_all_button_geometry(self):
+        from PySide6.QtCore import QRect
+        from my_idm.delegates import get_section_select_all_btn_rect
+
+        cell = QRect(0, 50, 1400, 28)
+        rect = get_section_select_all_btn_rect(cell, 1200)
+        self.assertEqual(rect.height(), 20)
+        self.assertEqual(rect.width(), 72)
+        # Should be within the visible right limit (1200 - 72 - 12 = 1116)
+        self.assertEqual(rect.right(), 1200 - 12 - 1)
+        self.assertEqual(rect.top(), 50 + (28 - 20) // 2)
+
+    def test_select_all_in_section_selects_group_items(self):
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        e2 = DownloadEntry(id="a2", url="http://e.com/2", filename="2.zip", status="queued")
+        e3 = DownloadEntry(id="c1", url="http://e.com/3", filename="3.zip", status="completed")
+        for e in (e1, e2, e3):
+            self.db.add_download(e)
+        self.win._load_history()
+
+        self.win._act_segregated_view.setChecked(True)
+        self.assertTrue(self.win._model.is_segregated_view())
+
+        # Header 0 is Active
+        self.assertTrue(self.win._model.is_section_header_row(0))
+        hdr_0 = self.win._model.get_section_header(0)
+        self.assertEqual(hdr_0.section_id, "active")
+
+        # Select all in Active
+        selected = self.win._on_select_all_in_section(0)
+        self.assertEqual(sorted(selected), ["a1", "a2"])
+        self.assertEqual(sorted(self.win._selected_ids()), ["a1", "a2"])
+
+        # Find Inactive header row
+        inactive_row = None
+        for r in range(self.win._model.rowCount()):
+            h = self.win._model.get_section_header(r)
+            if h and h.section_id == "inactive":
+                inactive_row = r
+                break
+        self.assertIsNotNone(inactive_row)
+
+        # Select all in Inactive (should replace previous selection)
+        selected_inact = self.win._on_select_all_in_section(inactive_row)
+        self.assertEqual(selected_inact, ["c1"])
+        self.assertEqual(self.win._selected_ids(), ["c1"])
+
+    def test_select_all_in_collapsed_section_expands_and_selects(self):
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        self.db.add_download(e1)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+
+        # Collapse Active section
+        self.win._model.set_section_collapsed("active", True)
+        self.assertTrue(self.win._model.is_section_collapsed("active"))
+
+        # Select all on row 0 (Active header)
+        selected = self.win._on_select_all_in_section(0)
+        self.assertEqual(selected, ["a1"])
+        # Section should now be expanded
+        self.assertFalse(self.win._model.is_section_collapsed("active"))
+        self.assertEqual(self.win._selected_ids(), ["a1"])
+
+    def test_table_click_on_select_all_button_does_not_toggle_collapse(self):
+        from my_idm.delegates import get_section_select_all_btn_rect
+
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        self.db.add_download(e1)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+
+        idx = self.win._model.index(0, 0)
+        cell_rect = self.win._table.visualRect(idx)
+        btn_rect = get_section_select_all_btn_rect(cell_rect, self.win._table.viewport().width())
+
+        # Click inside the button
+        btn_center = btn_rect.center()
+        self.win._on_table_clicked(idx, click_pos=btn_center)
+        # Should NOT collapse
+        self.assertFalse(self.win._model.is_section_collapsed("active"))
+        # Should select the item
+        self.assertEqual(self.win._selected_ids(), ["a1"])
+
+        # Click outside the button (e.g. left side title area)
+        outside_pos = cell_rect.topLeft()
+        self.win._on_table_clicked(idx, click_pos=outside_pos)
+        # Should toggle collapse to True
+        self.assertTrue(self.win._model.is_section_collapsed("active"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

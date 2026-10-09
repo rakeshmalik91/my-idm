@@ -13,6 +13,7 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QColor,
+    QCursor,
     QFont,
     QGuiApplication,
     QIcon,
@@ -56,6 +57,8 @@ from my_idm.delegates import (
     ProgressBarDelegate,
     QueueColumnDelegate,
     SavePathDelegate,
+    SectionHeaderDelegate,
+    get_section_select_all_btn_rect,
 )
 from my_idm.details_panel import DetailsPanel
 from my_idm.dialogs import (
@@ -631,6 +634,13 @@ class MainWindow(QMainWindow):
         self._table.setWordWrap(False)
         self._table.setHorizontalScrollMode(
             QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self._table.setMouseTracking(True)
+        self._table.viewport().setMouseTracking(True)
+
+        self._section_delegate = SectionHeaderDelegate(self._table)
+        self._table.setItemDelegateForColumn(
+            Col.QUEUE, self._section_delegate
         )
 
         self._name_delegate = DownloadNameDelegate(self._table)
@@ -2329,17 +2339,63 @@ class MainWindow(QMainWindow):
         for row in self._model.get_section_header_row_indices():
             self._table.setSpan(row, 0, 1, Col.COUNT)
 
-    def _on_table_clicked(self, index):
+    def _on_select_all_in_section(self, row: int) -> list[str]:
+        """Select all downloads in the section header at *row*."""
+        hdr = self._model.get_section_header(row)
+        if hdr is None or getattr(hdr, "section_count", 0) <= 0:
+            return []
+        sec_id = hdr.section_id
+
+        # If collapsed, expand so its rows become visible in the table and selectable
+        if hdr.section_collapsed:
+            self._model.set_section_collapsed(sec_id, False)
+            self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", False)
+            self._apply_table_spans()
+
+        download_rows = self._model.get_section_download_rows(sec_id)
+        if not download_rows:
+            return []
+
+        sm = self._table.selectionModel()
+        ctrl_held = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier)
+        if not ctrl_held:
+            sm.clearSelection()
+
+        from PySide6.QtCore import QItemSelection
+        selection = QItemSelection()
+        for r in download_rows:
+            selection.select(self._model.index(r, 0), self._model.index(r, Col.COUNT - 1))
+        sm.select(
+            selection,
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self._on_table_selection_changed()
+        return [self._model.entries[r].id for r in download_rows if 0 <= r < len(self._model.entries)]
+
+    def _on_table_clicked(self, index, click_pos=None):
         row = index.row()
         if self._model.is_section_header_row(row):
+            pos = click_pos if click_pos is not None else self._table.viewport().mapFromGlobal(QCursor.pos())
+            cell_rect = self._table.visualRect(index)
+            btn_rect = get_section_select_all_btn_rect(cell_rect, self._table.viewport().width())
+            hdr = self._model.get_section_header(row)
+            if hdr and getattr(hdr, "section_count", 0) > 0 and btn_rect.contains(pos):
+                self._on_select_all_in_section(row)
+                return
             res = self._model.toggle_section_collapsed(row)
             if res:
                 sec_id, is_col = res
                 self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
             self._apply_table_spans()
 
-    def _on_table_double_clicked(self, index):
+    def _on_table_double_clicked(self, index, click_pos=None):
         if self._model.is_section_header_row(index.row()):
+            pos = click_pos if click_pos is not None else self._table.viewport().mapFromGlobal(QCursor.pos())
+            cell_rect = self._table.visualRect(index)
+            btn_rect = get_section_select_all_btn_rect(cell_rect, self._table.viewport().width())
+            hdr = self._model.get_section_header(index.row())
+            if hdr and getattr(hdr, "section_count", 0) > 0 and btn_rect.contains(pos):
+                return
             res = self._model.toggle_section_collapsed(index.row())
             if res:
                 sec_id, is_col = res
@@ -2621,6 +2677,10 @@ class MainWindow(QMainWindow):
                     self._apply_table_spans()
                 act_this.triggered.connect(_toggle_this)
                 sec_menu.addAction(act_this)
+                if getattr(entry, "section_count", 0) > 0:
+                    act_select_section = QAction(f"Select All in '{entry.section_title}'", self)
+                    act_select_section.triggered.connect(lambda _, r=idx.row(): self._on_select_all_in_section(r))
+                    sec_menu.addAction(act_select_section)
                 sec_menu.addSeparator()
                 current_mode = self._model.segregated_mode()
                 if current_mode == "status":

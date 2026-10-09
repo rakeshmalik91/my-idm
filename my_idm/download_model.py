@@ -1298,6 +1298,27 @@ class DownloadTableModel(QAbstractTableModel):
             return e if getattr(e, "is_section_header", False) else None
         return None
 
+    def get_section_download_rows(self, section_id: str) -> list[int]:
+        """Visible row indices of downloads belonging to *section_id*."""
+        hdr_idx = None
+        for i, e in enumerate(self._entries):
+            if getattr(e, "is_section_header", False) and getattr(e, "section_id", None) == section_id:
+                hdr_idx = i
+                break
+        if hdr_idx is None:
+            return []
+        rows: list[int] = []
+        for r in range(hdr_idx + 1, len(self._entries)):
+            if getattr(self._entries[r], "is_section_header", False):
+                break
+            rows.append(r)
+        return rows
+
+    def get_section_download_ids(self, section_id: str) -> list[str]:
+        """Download IDs belonging to *section_id* in the current visible list."""
+        rows = self.get_section_download_rows(section_id)
+        return [self._entries[r].id for r in rows if 0 <= r < len(self._entries)]
+
     def get_entry_by_id(self, download_id: str) -> Optional[DownloadEntry]:
         row = self._id_to_row.get(download_id)
         if row is not None and 0 <= row < len(self._entries):

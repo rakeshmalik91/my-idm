@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QRect, Qt
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import (
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QLinearGradient,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
+from my_idm import fonts
 from my_idm.styles import Colors
 from my_idm.utils import normalize_path
 
@@ -354,4 +356,120 @@ class QueueColumnDelegate(QStyledItemDelegate):
             )
             size.setWidth(min(size.width(), needed))
         return size
+
+
+def get_section_select_all_btn_rect(cell_rect: QRect, viewport_width: int = 0) -> QRect:
+    """Calculate the bounding rectangle for the 'Select All' button at the right edge of a section header row."""
+    btn_w = 72
+    btn_h = 20
+    right_limit = min(cell_rect.right(), viewport_width) if viewport_width > 0 else cell_rect.right()
+    btn_x = right_limit - btn_w - 12
+    # Ensure it doesn't overlap the left title area
+    btn_x = max(cell_rect.left() + 180, btn_x)
+    btn_y = cell_rect.top() + max(0, (cell_rect.height() - btn_h) // 2)
+    return QRect(btn_x, btn_y, btn_w, btn_h)
+
+
+class SectionHeaderDelegate(QStyledItemDelegate):
+    """Renders section header rows in segregated view with a 'Select All' button at the right edge.
+
+    For ordinary download rows in column 0 (Col.QUEUE), it delegates to default painting
+    to show the queue order/row number.
+    """
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
+        model = index.model()
+        row = index.row()
+        if not getattr(model, "is_section_header_row", lambda r: False)(row):
+            super().paint(painter, option, index)
+            return
+
+        entry = getattr(model, "get_section_header", lambda r: None)(row)
+        if entry is None:
+            super().paint(painter, option, index)
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # 1. Background spanning across the header row
+        painter.fillRect(option.rect, QColor("#1e2330"))
+
+        # Subtle bottom border line
+        painter.setPen(QPen(QColor("#282f40"), 1))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+
+        # 2. Text (arrow + section title + count)
+        arrow = "▶" if entry.section_collapsed else "▼"
+        title_text = f"  {arrow}   {entry.section_title.upper()} ({entry.section_count})"
+
+        fg_color = index.data(Qt.ItemDataRole.ForegroundRole)
+        painter.setPen(QColor(fg_color) if fg_color else QColor(Colors.ACCENT))
+        hdr_font = index.data(Qt.ItemDataRole.FontRole) or fonts.ui_font(10, bold=True)
+        painter.setFont(hdr_font)
+
+        text_rect = option.rect.adjusted(12, 0, -96, 0)
+        painter.drawText(
+            text_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            title_text,
+        )
+
+        # 3. 'Select All' button at the right edge
+        if getattr(entry, "section_count", 0) > 0:
+            vw = option.widget.width() if option.widget else 0
+            btn_rect = get_section_select_all_btn_rect(option.rect, vw)
+
+            pos = option.widget.mapFromGlobal(QCursor.pos()) if option.widget else None
+            is_hover = (pos is not None and btn_rect.contains(pos))
+
+            if is_hover:
+                painter.setBrush(QColor(88, 166, 255, 35))
+                painter.setPen(QPen(QColor(Colors.ACCENT), 1))
+            else:
+                painter.setBrush(QColor(255, 255, 255, 12))
+                painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
+
+            painter.drawRoundedRect(btn_rect, 4, 4)
+
+            painter.setFont(fonts.ui_font(9, bold=True))
+            btn_text_color = QColor(Colors.TEXT) if is_hover else QColor(Colors.TEXT_SECONDARY)
+            painter.setPen(btn_text_color)
+            painter.drawText(btn_rect, int(Qt.AlignmentFlag.AlignCenter), "Select All")
+
+        painter.restore()
+
+    def editorEvent(self, event, model, option, index) -> bool:
+        row = index.row()
+        if not getattr(model, "is_section_header_row", lambda r: False)(row):
+            return super().editorEvent(event, model, option, index)
+
+        entry = getattr(model, "get_section_header", lambda r: None)(row)
+        if entry is None or getattr(entry, "section_count", 0) <= 0:
+            return super().editorEvent(event, model, option, index)
+
+        vw = option.widget.width() if option.widget else 0
+        btn_rect = get_section_select_all_btn_rect(option.rect, vw)
+
+        if event.type() == QEvent.Type.MouseMove:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if btn_rect.contains(pos):
+                if option.widget:
+                    option.widget.setCursor(Qt.CursorShape.PointingHandCursor)
+                    option.widget.update(btn_rect)
+            else:
+                if option.widget and option.widget.cursor().shape() == Qt.CursorShape.PointingHandCursor:
+                    option.widget.setCursor(Qt.CursorShape.ArrowCursor)
+                    option.widget.update(btn_rect)
+            return False
+
+        return super().editorEvent(event, model, option, index)
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        model = index.model()
+        if getattr(model, "is_section_header_row", lambda r: False)(index.row()):
+            return QSize(super().sizeHint(option, index).width(), 28)
+        return super().sizeHint(option, index)
+
 
