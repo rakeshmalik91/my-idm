@@ -1141,6 +1141,7 @@ class DownloadTableModel(QAbstractTableModel):
             hdr = DownloadEntry(
                 id=hdr_id,
                 is_section_header=True,
+                status="section_header",
                 section_id=sec_id,
                 section_title=title,
                 section_count=len(group_entries),
@@ -1426,7 +1427,7 @@ class DownloadTableModel(QAbstractTableModel):
             new_sec = self._entry_section_id(entry_all) if entry_all else None
             if old_sec != new_sec:
                 self._reapply_filter()
-                return
+                return True
             row = self._id_to_row.get(download_id)
             if row is not None:
                 left = self.index(row, 0)
@@ -1439,13 +1440,7 @@ class DownloadTableModel(QAbstractTableModel):
                         Qt.ItemDataRole.ToolTipRole,
                     ],
                 )
-                if len(self._entries) > 1:
-                    self.dataChanged.emit(
-                        self.index(0, Col.QUEUE),
-                        self.index(len(self._entries) - 1, Col.QUEUE),
-                        [Qt.ItemDataRole.DisplayRole],
-                    )
-            return
+            return False
 
         row = self._id_to_row.get(download_id)
         matches = entry_all is not None and self._matches_filter(entry_all)
@@ -1610,7 +1605,7 @@ class DownloadTableModel(QAbstractTableModel):
             new_sec = self._entry_section_id(entry)
             if old_sec is None or old_sec != new_sec:
                 self._reapply_filter()
-                return
+                return True
             row = self._id_to_row.get(download_id)
             if row is not None:
                 self._entries[row] = entry
@@ -1624,13 +1619,7 @@ class DownloadTableModel(QAbstractTableModel):
                         Qt.ItemDataRole.ToolTipRole,
                     ],
                 )
-                if len(self._entries) > 1:
-                    self.dataChanged.emit(
-                        self.index(0, Col.QUEUE),
-                        self.index(len(self._entries) - 1, Col.QUEUE),
-                        [Qt.ItemDataRole.DisplayRole],
-                    )
-            return
+            return False
 
         row = self._id_to_row.get(download_id)
         matches = self._matches_filter(entry)
@@ -1836,14 +1825,15 @@ class DownloadTableModel(QAbstractTableModel):
 
     def _display_data(self, entry: DownloadEntry, col: int) -> Any:
         if col == Col.QUEUE:
-            if entry.status not in ACTIVE_QUEUE_STATUSES:
+            if getattr(entry, "is_section_header", False) or entry.status not in ACTIVE_QUEUE_STATUSES:
                 return ""
             row = self._id_to_row.get(entry.id)
             if row is None:
                 return ""
             count = 0
             for i in range(row + 1):
-                if self._entries[i].status in ACTIVE_QUEUE_STATUSES:
+                e = self._entries[i]
+                if not getattr(e, "is_section_header", False) and e.status in ACTIVE_QUEUE_STATUSES:
                     count += 1
             return str(count)
 

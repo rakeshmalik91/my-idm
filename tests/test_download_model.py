@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from datetime import datetime
 import unittest
 from unittest.mock import patch
 import pytest
@@ -222,14 +223,128 @@ class TestDownloadModel(unittest.TestCase):
         self.assertEqual(self.model.data(self.model.index(0, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
         # Row 1: completed -> ""
         self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
-        # Row 2: paused -> "" (inactive)
-        self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
-        # Row 3: queued -> "2" (shows position in queue)
-        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+        # Row 2: paused -> "2" (paused retains queue order position)
+        self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+        # Row 3: queued -> "3" (shows position in queue)
+        self.assertEqual(self.model.data(self.model.index(3, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "3")
         # Row 4: error -> ""
         self.assertEqual(self.model.data(self.model.index(4, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
-        # Row 5: downloading -> "3" (continuous for downloading+queued items)
-        self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "3")
+        # Row 5: downloading -> "4" (continuous for downloading+queued+paused items)
+        self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "4")
+
+    def test_segregated_view_order_starts_at_one(self):
+        """In segregated views, section headers are not counted so order starts at 1."""
+        now_str = datetime.now().astimezone().isoformat()
+        items = [
+            DownloadEntry(id="d1", filename="file1.mp4", status="paused", added_at=now_str),
+            DownloadEntry(id="d2", filename="file2.mp4", status="paused", added_at=now_str),
+            DownloadEntry(id="d3", filename="file3.mp4", status="completed", added_at=now_str),
+        ]
+        self.model.set_segregated_view(True, mode="date")
+        self.model.load_entries(items)
+
+        # Row 0 is the "TODAY (3)" section header
+        idx_hdr = self.model.index(0, Col.QUEUE)
+        self.assertTrue(self.model.is_section_header_row(0))
+        hdr_text = self.model.data(idx_hdr, Qt.ItemDataRole.DisplayRole)
+        self.assertIn("TODAY", hdr_text)
+
+        # Row 1 is the first download under the header: order must start at 1, NOT 2!
+        idx_first_dl = self.model.index(1, Col.QUEUE)
+        self.assertEqual(self.model.data(idx_first_dl, Qt.ItemDataRole.DisplayRole), "1")
+
+        # Row 2 is the second download: order must be 2
+        idx_sec_dl = self.model.index(2, Col.QUEUE)
+        self.assertEqual(self.model.data(idx_sec_dl, Qt.ItemDataRole.DisplayRole), "2")
+
+    def test_segregated_view_order_across_all_modes(self):
+        """Order column always starts at 1 across all segregated modes (status, date, type)."""
+        now_str = datetime.now().astimezone().isoformat()
+        items = [
+            DownloadEntry(id="m1", filename="video.mp4", status="downloading", added_at=now_str),
+            DownloadEntry(id="m2", filename="music.mp3", status="paused", added_at=now_str),
+            DownloadEntry(id="m3", filename="archive.zip", status="queued", added_at=now_str),
+            DownloadEntry(id="m4", filename="doc.pdf", status="completed", added_at=now_str),
+        ]
+        for mode in ("status", "date", "type"):
+            with self.subTest(mode=mode):
+                self.model.set_segregated_view(True, mode=mode)
+                self.model.load_entries(items)
+
+                # Ensure section header rows never have status in ACTIVE_QUEUE_STATUSES
+                # and always display their section title in Col.QUEUE rather than an order number
+                found_first_active = False
+                for r in range(len(self.model.entries)):
+                    idx = self.model.index(r, Col.QUEUE)
+                    if self.model.is_section_header_row(r):
+                        hdr_entry = self.model.get_section_header(r)
+                        self.assertIsNotNone(hdr_entry)
+                        self.assertEqual(hdr_entry.status, "section_header")
+                        self.assertNotIn(hdr_entry.status, {"downloading", "queued", "paused"})
+                        # Header text should contain section name, not pure number
+                        hdr_val = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
+                        self.assertTrue(any(c.isalpha() for c in hdr_val), f"Header display must be text: {hdr_val}")
+                    else:
+                        entry = self.model.get_entry(r)
+                        self.assertIsNotNone(entry)
+                        if entry.status in ("downloading", "paused", "queued") and not found_first_active:
+                            val = self.model.data(idx, Qt.ItemDataRole.DisplayRole)
+                            self.assertEqual(val, "1", f"First active download in {mode} view must start at 1, got {val}")
+                            found_first_active = True
+
+    def test_segregated_view_multi_section_queue_numbering(self):
+        """Active entries across multiple sections are numbered 1, 2, 3... and never skip or shift due to headers."""
+        from datetime import timedelta
+        now = datetime.now().astimezone()
+        now_str = now.isoformat()
+        yesterday_str = (now - timedelta(days=1)).isoformat()
+        older_str = (now - timedelta(days=60)).isoformat()
+
+        items = [
+            DownloadEntry(id="t1", filename="today1.mp4", status="downloading", added_at=now_str),
+            DownloadEntry(id="t2", filename="today2.mp4", status="paused", added_at=now_str),
+            DownloadEntry(id="y1", filename="yest1.mp4", status="queued", added_at=yesterday_str),
+            DownloadEntry(id="y2", filename="yest2.mp4", status="completed", added_at=yesterday_str),
+            DownloadEntry(id="o1", filename="old1.mp4", status="paused", added_at=older_str),
+        ]
+        self.model.set_segregated_view(True, mode="date")
+        self.model.load_entries(items)
+
+        # Expected visible order of active items: 1, 2, 3, (skip completed), 4
+        active_numbers = []
+        for r in range(len(self.model.entries)):
+            if not self.model.is_section_header_row(r):
+                e = self.model.get_entry(r)
+                val = self.model.data(self.model.index(r, Col.QUEUE), Qt.ItemDataRole.DisplayRole)
+                if e.status in ("downloading", "paused", "queued"):
+                    active_numbers.append(val)
+                else:
+                    self.assertEqual(val, "", f"Completed entry should have empty order: {e.id}")
+
+        self.assertEqual(active_numbers, ["1", "2", "3", "4"], "Multi-section active downloads must be numbered sequentially 1..4 without gaps or offset")
+
+    def test_in_place_status_updates_do_not_reset_model_or_corrupt_order(self):
+        """In-place status updates (e.g. pause/resume) within the same section do not reset model or corrupt order."""
+        now_str = datetime.now().astimezone().isoformat()
+        items = [
+            DownloadEntry(id="ip1", filename="file1.mp4", status="downloading", added_at=now_str),
+            DownloadEntry(id="ip2", filename="file2.mp4", status="queued", added_at=now_str),
+        ]
+        self.model.set_segregated_view(True, mode="date")
+        self.model.load_entries(items)
+
+        # Pause ip1: stays in TODAY section
+        was_reset = self.model.update_status("ip1", "paused")
+        self.assertFalse(was_reset, "Pausing within same section must NOT reset the model")
+
+        # First row still order 1, second still order 2
+        self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
+        self.assertEqual(self.model.data(self.model.index(2, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "2")
+
+        # Resume ip1 to queued: stays in TODAY section
+        was_reset = self.model.update_status("ip1", "queued")
+        self.assertFalse(was_reset, "Resuming within same section must NOT reset the model")
+        self.assertEqual(self.model.data(self.model.index(1, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "1")
 
     def test_save_path_normalized_forward_slashes(self):
         """Save path column and data entries are unified with forward slashes."""

@@ -1949,38 +1949,43 @@ class MainWindow(QMainWindow):
             return
         wanted = list(dict.fromkeys(download_ids))
         sm = self._table.selectionModel()
-        sm.clearSelection()
-        first_index = None
-        for did in wanted:
-            row = self._model.row_for_id(did)
-            if row is None or row < 0:
-                continue
-            index = self._model.index(row, 0)
-            # Select|Rows in ONE call. A command carrying only `Rows` has no action flag
-            # (Clear/Select/Deselect/Toggle) and Qt treats it as a no-op, so calling
-            # select(index, Select) and then select(index, Rows) selected column 0 alone
-            # and the row highlight was drawn only over the first ~45px of the row. The id
-            # was still selected, so status actions hit the right downloads - only the
-            # paint was wrong, which is what made it look like a cosmetic glitch.
-            sm.select(
-                index,
-                QItemSelectionModel.SelectionFlag.Select
-                | QItemSelectionModel.SelectionFlag.Rows,
-            )
-            if first_index is None:
-                first_index = index
-        if first_index is not None:
-            # Move the current index through the selection model with NoUpdate.
-            # QAbstractItemView.setCurrentIndex() defaults to ClearAndSelect|Current, so
-            # the plain call wiped the selection it had just rebuilt and left one row
-            # selected - invisible with a single row selected, and the reason that pausing /
-            # resuming / seeding N selected downloads left exactly one of them selected, so
-            # the next action applied to the wrong row. (PySide6 does not expose
-            # setCurrentIndex's two-argument overload, hence going via the model.)
-            sm.setCurrentIndex(
-                first_index, QItemSelectionModel.SelectionFlag.NoUpdate
-            )
-            self._table.scrollTo(first_index, QAbstractItemView.ScrollHint.EnsureVisible)
+        sm.blockSignals(True)
+        try:
+            sm.clearSelection()
+            first_index = None
+            for did in wanted:
+                row = self._model.row_for_id(did)
+                if row is None or row < 0:
+                    continue
+                index = self._model.index(row, 0)
+                # Select|Rows in ONE call. A command carrying only `Rows` has no action flag
+                # (Clear/Select/Deselect/Toggle) and Qt treats it as a no-op, so calling
+                # select(index, Select) and then select(index, Rows) selected column 0 alone
+                # and the row highlight was drawn only over the first ~45px of the row. The id
+                # was still selected, so status actions hit the right downloads - only the
+                # paint was wrong, which is what made it look like a cosmetic glitch.
+                sm.select(
+                    index,
+                    QItemSelectionModel.SelectionFlag.Select
+                    | QItemSelectionModel.SelectionFlag.Rows,
+                )
+                if first_index is None:
+                    first_index = index
+            if first_index is not None:
+                # Move the current index through the selection model with NoUpdate.
+                # QAbstractItemView.setCurrentIndex() defaults to ClearAndSelect|Current, so
+                # the plain call wiped the selection it had just rebuilt and left one row
+                # selected - invisible with a single row selected, and the reason that pausing /
+                # resuming / seeding N selected downloads left exactly one of them selected, so
+                # the next action applied to the wrong row. (PySide6 does not expose
+                # setCurrentIndex's two-argument overload, hence going via the model.)
+                sm.setCurrentIndex(
+                    first_index, QItemSelectionModel.SelectionFlag.NoUpdate
+                )
+                self._table.scrollTo(first_index, QAbstractItemView.ScrollHint.EnsureVisible)
+        finally:
+            sm.blockSignals(False)
+        self._on_table_selection_changed()
 
     def _first_selected_entry(self) -> Optional[DownloadEntry]:
         ids = self._selected_ids()
@@ -2808,19 +2813,23 @@ class MainWindow(QMainWindow):
 
     def _on_status_changed(self, download_id: str, status: str,
                               error_msg: str):
-        # Segregated view rebuilds the model on every status change, and a model
-        # reset drops the view's selection. Capture it first and put it back.
-        selected = self._selected_ids()
         # The manager's row is already updated by the time this slot runs, so the model's
         # copy is the only place the *previous* status still exists.
         previous_entry = self._model.get_entry_by_id(download_id)
         previous_status = previous_entry.status if previous_entry is not None else None
+        if previous_status == status and not error_msg:
+            return
+
+        selected = self._selected_ids()
         fresh = self._manager.get_entry(download_id)
+        model_reset = False
         if fresh is not None:
-            self._model.refresh_entry(download_id, fresh)
+            model_reset = bool(self._model.refresh_entry(download_id, fresh))
         else:
-            self._model.update_status(download_id, status, error_msg)
-        self._restore_selection(selected)
+            model_reset = bool(self._model.update_status(download_id, status, error_msg))
+
+        if model_reset:
+            self._restore_selection(selected)
         self._update_count_label()
         self._update_speed_label()
         self._update_action_states()
@@ -2955,9 +2964,11 @@ class MainWindow(QMainWindow):
             return
 
         selected_ids = self._selected_ids()
-        all_entries = self._manager.get_all_entries() if hasattr(self, "_manager") else []
-        id_map = {e.id: e for e in all_entries}
-        selected_entries = [id_map[did] for did in selected_ids if did in id_map]
+        selected_entries = [
+            e for did in selected_ids
+            if (e := self._model.get_entry_by_id(did)) is not None
+        ]
+        all_entries = self._model.all_entries
 
         has_selection = len(selected_entries) > 0
         single_selection = len(selected_entries) == 1
