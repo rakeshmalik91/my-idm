@@ -2007,6 +2007,35 @@ class TestDetailsPanel(unittest.TestCase):
 
         self.assertEqual(self.manager.get_active_queue(), target_q.id)
 
+    def test_details_panel_queues_tab_filter_toggle_and_icon_buttons(self):
+        """Action buttons have icon-only labels and eye button toggles queue filter."""
+        panel = self.win._details_panel
+        panel.set_mode("queues")
+        queues = self.manager.get_queues()
+        self.assertGreater(len(queues), 1)
+        target_q = queues[1]
+        widgets = panel._queue_row_widgets[target_q.id]
+
+        # Verify button texts are icon-only
+        self.assertEqual(widgets["btn_pause"].text(), "⏸")
+        self.assertEqual(widgets["btn_resume"].text(), "▶")
+        self.assertEqual(widgets["btn_filter"].text(), "👁")
+        self.assertTrue(widgets["btn_filter"].isCheckable())
+
+        # Initially no queue filter is active
+        self.assertEqual(self.manager.active_queue_id, "")
+        self.assertFalse(widgets["btn_filter"].isChecked())
+
+        # Click eye button to filter to target_q
+        widgets["btn_filter"].click()
+        self.assertEqual(self.manager.active_queue_id, target_q.id)
+        self.assertTrue(widgets["btn_filter"].isChecked())
+
+        # Click eye button again to toggle filter off
+        widgets["btn_filter"].click()
+        self.assertEqual(self.manager.active_queue_id, "")
+        self.assertFalse(widgets["btn_filter"].isChecked())
+
 
 if __name__ == "__main__":
     unittest.main()

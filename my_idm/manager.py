@@ -3631,6 +3631,11 @@ class DownloadManager(QObject):
         stored = self._db.get_ui_state("active_queue_id", "") or ""
         return stored if stored and self._db.get_queue(stored) else ""
 
+    @property
+    def active_queue_id(self) -> str:
+        """The queue the downloads list is scoped to (alias for get_active_queue)."""
+        return self.get_active_queue()
+
     def set_active_queue(self, queue_id: str):
         """Scope the downloads list to one queue, or to all of them when *queue_id* is blank.
 

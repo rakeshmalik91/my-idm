@@ -630,6 +630,7 @@ class DetailsPanel(QWidget):
 
         self._setup_ui()
         self._manager.queues_changed.connect(self._update_queues)
+        self._manager.queue_scope_changed.connect(lambda _: self._update_queues())
         self._manager.animepahe_status_changed.connect(self.on_animepahe_status_changed)
         if self._manager.is_animepahe_running():
             self._browser_monitor_timer.start()
@@ -1050,7 +1051,7 @@ class DetailsPanel(QWidget):
         self._table_queues.setColumnWidth(6, 135)
 
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
-        self._table_queues.setColumnWidth(7, 180)
+        self._table_queues.setColumnWidth(7, 120)
 
         self._table_queues.verticalHeader().setVisible(False)
         self._table_queues.verticalHeader().setDefaultSectionSize(40)
@@ -1243,14 +1244,14 @@ class DetailsPanel(QWidget):
                 spin_up_lay.addWidget(spin_up)
                 self._table_queues.setCellWidget(row_idx, 6, spin_up_container)
 
-                # Col 7: Actions
+                # Col 7: Actions (Pause, Resume, Filter toggle)
                 act_holder = QWidget()
                 act_lay = QHBoxLayout(act_holder)
-                act_lay.setContentsMargins(6, 4, 6, 4)
-                act_lay.setSpacing(6)
+                act_lay.setContentsMargins(4, 4, 4, 4)
+                act_lay.setSpacing(4)
                 act_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                btn_pause = QPushButton("⏸ Pause")
-                btn_pause.setFixedHeight(26)
+                btn_pause = QPushButton("⏸")
+                btn_pause.setFixedSize(28, 26)
                 btn_pause.setToolTip(f"Pause all active and queued downloads in '{q.name}'")
                 btn_pause.setCursor(Qt.CursorShape.PointingHandCursor)
                 themed_widget(btn_pause, """
@@ -1258,7 +1259,7 @@ class DetailsPanel(QWidget):
                         background-color: Colors.BG_LIGHT;
                         border: 1px solid Colors.BORDER;
                         border-radius: 4px;
-                        padding: 2px 10px;
+                        padding: 0px;
                         color: Colors.TEXT;
                         font-size: 11px;
                         font-weight: 500;
@@ -1273,8 +1274,8 @@ class DetailsPanel(QWidget):
                 """)
                 btn_pause.clicked.connect(lambda _=False, qid=q.id: self._on_pause_queue_clicked(qid))
 
-                btn_resume = QPushButton("▶ Resume")
-                btn_resume.setFixedHeight(26)
+                btn_resume = QPushButton("▶")
+                btn_resume.setFixedSize(28, 26)
                 btn_resume.setToolTip(f"Resume all paused and stopped downloads in '{q.name}'")
                 btn_resume.setCursor(Qt.CursorShape.PointingHandCursor)
                 themed_widget(btn_resume, """
@@ -1282,7 +1283,7 @@ class DetailsPanel(QWidget):
                         background-color: Colors.BG_LIGHT;
                         border: 1px solid Colors.BORDER;
                         border-radius: 4px;
-                        padding: 2px 10px;
+                        padding: 0px;
                         color: Colors.TEXT;
                         font-size: 11px;
                         font-weight: 500;
@@ -1297,8 +1298,38 @@ class DetailsPanel(QWidget):
                 """)
                 btn_resume.clicked.connect(lambda _=False, qid=q.id: self._on_resume_queue_clicked(qid))
 
+                btn_filter = QPushButton("👁")
+                btn_filter.setFixedSize(28, 26)
+                btn_filter.setCheckable(True)
+                btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
+                themed_widget(btn_filter, """
+                    QPushButton {
+                        background-color: Colors.BG_LIGHT;
+                        border: 1px solid Colors.BORDER;
+                        border-radius: 4px;
+                        padding: 0px;
+                        color: Colors.TEXT_SECONDARY;
+                        font-size: 12px;
+                    }
+                    QPushButton:hover {
+                        background-color: Colors.BG_HOVER;
+                        border-color: Colors.BORDER_LIGHT;
+                        color: Colors.TEXT;
+                    }
+                    QPushButton:pressed {
+                        background-color: Colors.BG_DARK;
+                    }
+                    QPushButton:checked {
+                        background-color: rgba(88, 166, 255, 0.2);
+                        border-color: Colors.ACCENT;
+                        color: Colors.ACCENT;
+                    }
+                """)
+                btn_filter.clicked.connect(lambda _=False, qid=q.id: self._on_filter_queue_clicked(qid))
+
                 act_lay.addWidget(btn_pause)
                 act_lay.addWidget(btn_resume)
+                act_lay.addWidget(btn_filter)
                 self._table_queues.setCellWidget(row_idx, 7, act_holder)
 
                 self._queue_row_widgets[q.id] = {
@@ -1311,6 +1342,7 @@ class DetailsPanel(QWidget):
                     "spin_up": spin_up,
                     "btn_pause": btn_pause,
                     "btn_resume": btn_resume,
+                    "btn_filter": btn_filter,
                 }
 
         # Update values for each row without recreating widgets
@@ -1401,6 +1433,23 @@ class DetailsPanel(QWidget):
             widgets["btn_pause"].setEnabled(active > 0 or queued > 0)
             widgets["btn_resume"].setEnabled(paused > 0 or stopped > 0)
 
+            # Filter toggle state
+            active_qid = (
+                self._manager.get_active_queue()
+                if hasattr(self._manager, "get_active_queue")
+                else getattr(self._manager, "active_queue_id", "")
+            )
+            is_filtered = bool(active_qid and active_qid == q.id)
+            btn_filter = widgets.get("btn_filter")
+            if btn_filter:
+                btn_filter.blockSignals(True)
+                btn_filter.setChecked(is_filtered)
+                btn_filter.blockSignals(False)
+                if is_filtered:
+                    btn_filter.setToolTip(f"Active filter: showing '{q.name}'. Click to show all queues.")
+                else:
+                    btn_filter.setToolTip(f"Filter downloads list to '{q.name}'")
+
     def _on_queue_max_concurrent_changed(self, queue_id: str, value: int):
         self._manager.set_queue_max_concurrent(queue_id, value)
         q = self._manager.get_queue(queue_id)
@@ -1438,14 +1487,27 @@ class DetailsPanel(QWidget):
         self._show_status_message(f"Resumed {count} download(s) in queue '{name}'")
         self._update_queues()
 
+    def _on_filter_queue_clicked(self, queue_id: str):
+        current_active = (
+            self._manager.get_active_queue()
+            if hasattr(self._manager, "get_active_queue")
+            else getattr(self._manager, "active_queue_id", "")
+        )
+        if current_active == queue_id:
+            self._manager.set_active_queue("")
+            self._show_status_message("Showing all queues")
+        else:
+            self._manager.set_active_queue(queue_id)
+            q = self._manager.get_queue(queue_id)
+            name = q.name if q else queue_id
+            self._show_status_message(f"Filtered view to queue '{name}'")
+        self._update_queues()
+
     def _on_queue_row_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
         for qid, w in self._queue_row_widgets.items():
             if w.get("row") == row:
-                self._manager.set_active_queue(qid)
-                q = self._manager.get_queue(qid)
-                name = q.name if q else qid
-                self._show_status_message(f"Filtered view to queue '{name}'")
+                self._on_filter_queue_clicked(qid)
                 break
 
     # -- Public control -------------------------------------------------------
