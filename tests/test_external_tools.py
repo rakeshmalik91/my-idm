@@ -234,6 +234,29 @@ class TestExternalTools(unittest.TestCase):
             self.assertIn("jap", cmd)
             self.assertIn("-y", cmd)
 
+    def test_launch_animepahe_cli_with_title_and_url(self):
+        cfg = ExternalToolsConfig(animepahe_repo_path=str(self.repo_dir))
+        mock_proc = MagicMock()
+        mock_proc.pid = 8889
+
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            ok, msg, proc = launch_animepahe_cli(
+                cfg,
+                my_idm_dir="/path/to/my-idm",
+                title="Sousou no Frieren",
+                url="https://animepahe.ru/anime/4380",
+                episodes="1-12",
+                quality="1080p",
+                lang="jap",
+            )
+            self.assertTrue(ok)
+            self.assertIn("PID: 8889", msg)
+            mock_popen.assert_called_once()
+            cmd = mock_popen.call_args[0][0]
+            self.assertIn("Sousou no Frieren", cmd)
+            self.assertIn("--url", cmd)
+            self.assertIn("https://animepahe.ru/anime/4380", cmd)
+
     def test_settings_dialog_animepahe_url_download(self):
         from my_idm.settings_dialog import SettingsDialog
         from PySide6.QtWidgets import QMessageBox
@@ -241,6 +264,7 @@ class TestExternalTools(unittest.TestCase):
         cfg = ExternalToolsConfig(
             animepahe_repo_path=str(self.repo_dir),
             animepahe_last_url="https://animepahe.ru/anime/test",
+            animepahe_last_title="Test Anime",
             animepahe_last_episodes="1-3",
         )
         dialog = SettingsDialog(external_tools_config=cfg, initial_tab=5)
@@ -249,6 +273,7 @@ class TestExternalTools(unittest.TestCase):
 
         # Verify fields populated
         self.assertEqual(dialog._animepahe_url_edit.text(), "https://animepahe.ru/anime/test")
+        self.assertEqual(dialog._animepahe_title_edit.text(), "Test Anime")
         self.assertEqual(dialog._animepahe_episodes_edit.text(), "1-3")
 
         with patch("my_idm.settings_dialog.launch_animepahe_cli", return_value=(True, "Started", MagicMock())) as mock_launch:
@@ -256,6 +281,7 @@ class TestExternalTools(unittest.TestCase):
             mock_launch.assert_called_once()
             kwargs = mock_launch.call_args.kwargs
             self.assertEqual(kwargs.get("url"), "https://animepahe.ru/anime/test")
+            self.assertEqual(kwargs.get("title"), "Test Anime")
             self.assertEqual(kwargs.get("episodes"), "1-3")
             self.assertTrue(dialog.animepahe_download_started)
 
@@ -733,8 +759,55 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
             episodes="1-10",
             quality=None,
             lang=None,
+            title=None,
         )
         self.assertTrue(dialog.animepahe_download_started)
+
+    def test_settings_dialog_animepahe_title_and_url_download(self):
+        mock_mgr = MagicMock()
+        mock_mgr.is_animepahe_running.return_value = False
+        mock_mgr.start_animepahe_scraper.return_value = (True, "Started")
+
+        cfg = ExternalToolsConfig(animepahe_repo_path=str(self.repo_dir))
+        dialog = self._make_dialog(cfg, manager=mock_mgr, initial_tab=5)
+
+        dialog._animepahe_url_edit.setText("https://animepahe.ru/anime/4380")
+        dialog._animepahe_title_edit.setText("Custom Anime Folder")
+        dialog._animepahe_episodes_edit.setText("1-5")
+
+        dialog._on_download_animepahe_url()
+        mock_mgr.start_animepahe_scraper.assert_called_once_with(
+            url="https://animepahe.ru/anime/4380",
+            episodes="1-5",
+            quality=None,
+            lang=None,
+            title="Custom Anime Folder",
+        )
+        self.assertTrue(dialog.animepahe_download_started)
+        self.assertEqual(dialog._external_tools_cfg.animepahe_last_title, "Custom Anime Folder")
+
+    def test_settings_dialog_animepahe_title_only_download(self):
+        mock_mgr = MagicMock()
+        mock_mgr.is_animepahe_running.return_value = False
+        mock_mgr.start_animepahe_scraper.return_value = (True, "Started")
+
+        cfg = ExternalToolsConfig(animepahe_repo_path=str(self.repo_dir))
+        dialog = self._make_dialog(cfg, manager=mock_mgr, initial_tab=5)
+
+        dialog._animepahe_url_edit.setText("")
+        dialog._animepahe_title_edit.setText("Sousou no Frieren")
+        dialog._animepahe_episodes_edit.setText("")
+
+        dialog._on_download_animepahe_url()
+        mock_mgr.start_animepahe_scraper.assert_called_once_with(
+            url=None,
+            episodes=None,
+            quality=None,
+            lang=None,
+            title="Sousou no Frieren",
+        )
+        self.assertTrue(dialog.animepahe_download_started)
+        self.assertEqual(dialog._external_tools_cfg.animepahe_last_title, "Sousou no Frieren")
 
     def test_external_tools_config_periodic_settings(self):
         """ExternalToolsConfig supports periodic scraper run toggle and interval."""

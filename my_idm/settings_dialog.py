@@ -2150,7 +2150,7 @@ class SettingsDialog(QDialog):
 
         url_row = QHBoxLayout()
         url_lbl = QLabel("AnimePahe URL:")
-        url_lbl.setMinimumWidth(110)
+        url_lbl.setMinimumWidth(130)
         url_row.addWidget(url_lbl)
 
         self._animepahe_url_edit = QLineEdit()
@@ -2162,10 +2162,24 @@ class SettingsDialog(QDialog):
         url_row.addWidget(self._animepahe_url_edit, 1)
         dl_layout.addLayout(url_row)
 
+        title_row = QHBoxLayout()
+        title_lbl = QLabel("Title / Folder Name:")
+        title_lbl.setMinimumWidth(130)
+        title_row.addWidget(title_lbl)
+
+        self._animepahe_title_edit = QLineEdit()
+        self._animepahe_title_edit.setPlaceholderText(
+            "e.g. Frieren or Frieren (2023) (optional custom folder name)"
+        )
+        self._animepahe_title_edit.setClearButtonEnabled(True)
+        self._animepahe_title_edit.returnPressed.connect(self._on_download_animepahe_url)
+        title_row.addWidget(self._animepahe_title_edit, 1)
+        dl_layout.addLayout(title_row)
+
         options_row = QHBoxLayout()
 
         ep_lbl = QLabel("Episode Range:")
-        ep_lbl.setMinimumWidth(110)
+        ep_lbl.setMinimumWidth(130)
         options_row.addWidget(ep_lbl)
 
         self._animepahe_episodes_edit = QLineEdit()
@@ -3804,6 +3818,7 @@ class SettingsDialog(QDialog):
         self._animepahe_interval_spin.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_interval_lbl.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_url_edit.setText(self._external_tools_cfg.animepahe_last_url)
+        self._animepahe_title_edit.setText(self._external_tools_cfg.animepahe_last_title)
         self._animepahe_episodes_edit.setText(self._external_tools_cfg.animepahe_last_episodes)
         q_idx = self._animepahe_quality_combo.findText(self._external_tools_cfg.animepahe_last_quality)
         if q_idx >= 0:
@@ -3948,26 +3963,34 @@ class SettingsDialog(QDialog):
 
     def _on_download_animepahe_url(self):
         url = self._animepahe_url_edit.text().strip()
+        title = self._animepahe_title_edit.text().strip()
         episodes = self._animepahe_episodes_edit.text().strip()
 
-        if not url:
-            QMessageBox.warning(self, "Missing URL", "Please enter an AnimePahe anime or episode URL.")
+        if not url and not title:
+            QMessageBox.warning(
+                self,
+                "Missing URL or Title",
+                "Please enter an AnimePahe anime URL or a title / folder name.",
+            )
             self._animepahe_url_edit.setFocus()
             return
 
-        # Direct UUID or numeric ID support (e.g. 4380 or ef667bb4-3a9b-449e-1a22-26156a642e47)
-        if re.match(r'^[a-f0-9-]+$', url, re.IGNORECASE):
-            url = f"https://animepahe.ru/anime/{url}"
-        elif not url.startswith(("http://", "https://")):
-            url = "https://" + url
+        if url:
+            # Direct UUID or numeric ID support (e.g. 4380 or ef667bb4-3a9b-449e-1a22-26156a642e47)
+            if re.match(r'^[a-f0-9-]+$', url, re.IGNORECASE):
+                url = f"https://animepahe.ru/anime/{url}"
+            elif not url.startswith(("http://", "https://")):
+                url = "https://" + url
 
-        # Normalize /play/ or /a/ URLs to /anime/<id>
-        play_or_a_match = re.search(r'/(?:play|a)/([a-f0-9-]+)', url, re.IGNORECASE)
-        if play_or_a_match and '/anime/' not in url:
-            domain_match = re.search(r'https?://([^/]+)', url)
-            domain = domain_match.group(1) if domain_match else "animepahe.ru"
-            aid = play_or_a_match.group(1)
-            url = f"https://{domain}/anime/{aid}"
+            # Normalize /play/ or /a/ URLs to /anime/<id>
+            play_or_a_match = re.search(r'/(?:play|a)/([a-f0-9-]+)', url, re.IGNORECASE)
+            if play_or_a_match and '/anime/' not in url:
+                domain_match = re.search(r'https?://([^/]+)', url)
+                domain = domain_match.group(1) if domain_match else "animepahe.ru"
+                aid = play_or_a_match.group(1)
+                url = f"https://{domain}/anime/{aid}"
+        else:
+            url = None
 
         # Validate episodes format if provided
         if episodes:
@@ -3990,7 +4013,8 @@ class SettingsDialog(QDialog):
             episodes = ', '.join(cleaned_parts)
 
         self._external_tools_cfg.animepahe_repo_path = self._animepahe_repo_edit.text().strip()
-        self._external_tools_cfg.animepahe_last_url = url
+        self._external_tools_cfg.animepahe_last_url = url or ""
+        self._external_tools_cfg.animepahe_last_title = title
         self._external_tools_cfg.animepahe_last_episodes = episodes
         self._external_tools_cfg.animepahe_last_quality = self._animepahe_quality_combo.currentText()
         self._external_tools_cfg.animepahe_last_lang = self._animepahe_lang_combo.currentText()
@@ -4018,6 +4042,7 @@ class SettingsDialog(QDialog):
                 episodes=episodes or None,
                 quality=quality,
                 lang=lang,
+                title=title or None,
             )
         else:
             ok, msg, proc = launch_animepahe_cli(
@@ -4026,6 +4051,7 @@ class SettingsDialog(QDialog):
                 episodes=episodes or None,
                 quality=quality,
                 lang=lang,
+                title=title or None,
             )
 
         if ok:
@@ -4765,6 +4791,7 @@ class SettingsDialog(QDialog):
         self._external_tools_cfg.animepahe_periodic_run = self._animepahe_periodic_cb.isChecked()
         self._external_tools_cfg.animepahe_interval_hours = self._animepahe_interval_spin.value()
         self._external_tools_cfg.animepahe_last_url = self._animepahe_url_edit.text().strip()
+        self._external_tools_cfg.animepahe_last_title = self._animepahe_title_edit.text().strip()
         self._external_tools_cfg.animepahe_last_episodes = self._animepahe_episodes_edit.text().strip()
         self._external_tools_cfg.animepahe_last_quality = self._animepahe_quality_combo.currentText()
         self._external_tools_cfg.animepahe_last_lang = self._animepahe_lang_combo.currentText()

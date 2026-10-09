@@ -136,11 +136,12 @@ def launch_animepahe_cli(
     quality: Optional[str] = None,
     lang: Optional[str] = None,
     extra_args: Optional[list[str]] = None,
+    title: Optional[str] = None,
 ) -> Tuple[bool, str, Optional[subprocess.Popen]]:
     """
     Launch AnimePahe scraper in background CLI mode.
     Outputs stdout and stderr into console_log.txt and forwards items to My-IDM backlog.
-    Optionally targets a specific anime URL and episode range.
+    Optionally targets a specific anime URL, custom title / folder name, and episode range.
     """
     repo = config.get_effective_repo_path()
     if not repo or not os.path.isdir(repo):
@@ -157,6 +158,8 @@ def launch_animepahe_cli(
     cmd = [sys.executable, "-u", str(script), "--my-idm"]
     if my_idm_dir:
         cmd.extend(["--my-idm-dir", str(my_idm_dir)])
+    if title and title.strip():
+        cmd.append(title.strip())
     if url:
         cmd.extend(["--url", url.strip()])
     if episodes:

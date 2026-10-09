@@ -54,7 +54,7 @@ def _requires_curl_impersonation(url: str) -> bool:
     if not _HAS_CURL_CFFI or not url:
         return False
     u_lower = url.lower()
-    return any(domain in u_lower for domain in ("owocdn.top", "kwik.cx", "kwik.si", "pahe.win"))
+    return any(domain in u_lower for domain in ("owocdn.top", "uwucdn.top", "kwik.cx", "kwik.si", "pahe.win"))
 
 
 
@@ -383,9 +383,9 @@ class HTTPEngine:
                 req_headers["Referer"] = entry.metadata["referer"]
 
         url_check = url or (entry.url if entry else "")
-        if url_check and ("owocdn.top" in url_check or "kwik." in url_check):
-            if "Referer" not in req_headers:
-                req_headers["Referer"] = "https://kwik.cx/"
+        if url_check and any(cdn in url_check for cdn in ("owocdn.top", "uwucdn.top", "kwik.")):
+            # Kwik CDN servers (owocdn.top, uwucdn.top, kwik.*) strictly require https://kwik.cx/ as Referer
+            req_headers["Referer"] = "https://kwik.cx/"
 
         if headers:
             req_headers.update(headers)

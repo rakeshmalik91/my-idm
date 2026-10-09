@@ -1,5 +1,6 @@
 """Unit tests for the bottom details panel and sub-tabs (Overview, Files, Peers, Trackers, Segments)."""
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -1789,6 +1790,34 @@ class TestDetailsPanel(unittest.TestCase):
             "Detach Window", panel._btn_float_browser.text(),
             "the button label must not change when the toggle was a no-op",
         )
+
+    def test_details_panel_displays_referrer_from_headers_and_metadata(self):
+        panel = self.win._details_panel
+        # Case 1: referrer in metadata headers dict
+        entry1 = DownloadEntry(
+            id="test-ref-1",
+            url="https://vault-01.uwucdn.top/test.mp4",
+            filename="test.mp4",
+            save_path="C:/Downloads",
+            metadata_json=json.dumps({"headers": {"Referer": "https://kwik.cx/"}}),
+        )
+        self.db.add_download(entry1)
+        self.win._model.add_entry(entry1)
+        panel.set_download_id("test-ref-1")
+        self.assertEqual(panel._ov_referrer.text(), "https://kwik.cx/")
+
+        # Case 2: referrer in metadata directly
+        entry2 = DownloadEntry(
+            id="test-ref-2",
+            url="https://example.com/test.zip",
+            filename="test.zip",
+            save_path="C:/Downloads",
+            metadata_json=json.dumps({"referer": "https://example.com/source"}),
+        )
+        self.db.add_download(entry2)
+        self.win._model.add_entry(entry2)
+        panel.set_download_id("test-ref-2")
+        self.assertEqual(panel._ov_referrer.text(), "https://example.com/source")
 
 
 if __name__ == "__main__":

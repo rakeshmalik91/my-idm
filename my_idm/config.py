@@ -671,6 +671,7 @@ class ExternalToolsConfig:
     animepahe_periodic_run: bool = False
     animepahe_interval_hours: int = 6
     animepahe_last_url: str = ""
+    animepahe_last_title: str = ""
     animepahe_last_episodes: str = ""
     animepahe_last_quality: str = "Auto"
     animepahe_last_lang: str = "Auto"
@@ -697,6 +698,7 @@ class ExternalToolsConfig:
             "animepahe_periodic_run": self.animepahe_periodic_run,
             "animepahe_interval_hours": self.animepahe_interval_hours,
             "animepahe_last_url": self.animepahe_last_url,
+            "animepahe_last_title": self.animepahe_last_title,
             "animepahe_last_episodes": self.animepahe_last_episodes,
             "animepahe_last_quality": self.animepahe_last_quality,
             "animepahe_last_lang": self.animepahe_last_lang,
@@ -724,6 +726,7 @@ class ExternalToolsConfig:
             animepahe_periodic_run=bool(data.get("animepahe_periodic_run", False)),
             animepahe_interval_hours=max(1, int(data.get("animepahe_interval_hours", 6) or 6)),
             animepahe_last_url=str(data.get("animepahe_last_url", "")),
+            animepahe_last_title=str(data.get("animepahe_last_title", "")),
             animepahe_last_episodes=str(data.get("animepahe_last_episodes", "")),
             animepahe_last_quality=str(data.get("animepahe_last_quality", "Auto")),
             animepahe_last_lang=str(data.get("animepahe_last_lang", "Auto")),
@@ -752,8 +755,9 @@ class ExternalToolsConfig:
         settings.setValue("animepahe_launch_on_startup", self.animepahe_launch_on_startup)
         settings.setValue("animepahe_periodic_run", self.animepahe_periodic_run)
         settings.setValue("animepahe_interval_hours", self.animepahe_interval_hours)
-        # Don't persist last URL and episode range - only for current session
+        # Don't persist last URL, title, and episode range - only for current session
         # settings.setValue("animepahe_last_url", self.animepahe_last_url)
+        # settings.setValue("animepahe_last_title", self.animepahe_last_title)
         # settings.setValue("animepahe_last_episodes", self.animepahe_last_episodes)
         settings.setValue("animepahe_last_quality", self.animepahe_last_quality)
         settings.setValue("animepahe_last_lang", self.animepahe_last_lang)
@@ -783,10 +787,12 @@ class ExternalToolsConfig:
         animepahe_launch_on_startup = settings.value("animepahe_launch_on_startup", False, type=bool)
         animepahe_periodic_run = settings.value("animepahe_periodic_run", False, type=bool)
         animepahe_interval_hours = settings.value("animepahe_interval_hours", 6, type=int)
-        # Don't persist last URL and episode range - only for current session
+        # Don't persist last URL, title, and episode range - only for current session
         # animepahe_last_url = settings.value("animepahe_last_url", "", type=str)
+        # animepahe_last_title = settings.value("animepahe_last_title", "", type=str)
         # animepahe_last_episodes = settings.value("animepahe_last_episodes", "", type=str)
         animepahe_last_url = ""
+        animepahe_last_title = ""
         animepahe_last_episodes = ""
         animepahe_last_quality = settings.value("animepahe_last_quality", "Auto", type=str)
         animepahe_last_lang = settings.value("animepahe_last_lang", "Auto", type=str)
@@ -837,6 +843,7 @@ class ExternalToolsConfig:
             animepahe_periodic_run=bool(animepahe_periodic_run),
             animepahe_interval_hours=max(1, int(animepahe_interval_hours or 6)),
             animepahe_last_url=str(animepahe_last_url or ""),
+            animepahe_last_title=str(animepahe_last_title or ""),
             animepahe_last_episodes=str(animepahe_last_episodes or ""),
             animepahe_last_quality=str(animepahe_last_quality or "Auto"),
             animepahe_last_lang=str(animepahe_last_lang or "Auto"),

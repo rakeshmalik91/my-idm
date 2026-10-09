@@ -392,7 +392,7 @@ def parse_backlog_entry(
             pass
 
     # Auto-referer for known video CDNs
-    if url and ("owocdn.top" in url or "kwik." in url):
+    if url and any(cdn in url for cdn in ("owocdn.top", "uwucdn.top", "kwik.")):
         if "Referer" not in headers:
             headers["Referer"] = "https://kwik.cx/"
 
@@ -1341,6 +1341,7 @@ class DownloadManager(QObject):
         episodes: Optional[str] = None,
         quality: Optional[str] = None,
         lang: Optional[str] = None,
+        title: Optional[str] = None,
     ) -> tuple[bool, str]:
         """Launch the AnimePahe scraper in CLI mode in the background, or queue if already running."""
         with self._animepahe_queue_lock:
@@ -1350,14 +1351,17 @@ class DownloadManager(QObject):
                     "episodes": episodes,
                     "quality": quality,
                     "lang": lang,
+                    "title": title,
                 }
                 self._animepahe_queue.append(task)
                 q_pos = len(self._animepahe_queue)
                 self.animepahe_queue_changed.emit(q_pos)
-                target_str = f" for '{url}'" if url else ""
+                target_str = f" for '{title or url}'" if (title or url) else ""
                 return True, f"AnimePahe task queued at position #{q_pos}{target_str}."
 
-            return self._launch_animepahe_task(url=url, episodes=episodes, quality=quality, lang=lang)
+            return self._launch_animepahe_task(
+                url=url, episodes=episodes, quality=quality, lang=lang, title=title
+            )
 
     def _launch_animepahe_task(
         self,
@@ -1365,6 +1369,7 @@ class DownloadManager(QObject):
         episodes: Optional[str] = None,
         quality: Optional[str] = None,
         lang: Optional[str] = None,
+        title: Optional[str] = None,
     ) -> tuple[bool, str]:
         ok, msg, proc = launch_animepahe_cli(
             self._external_tools_config,
@@ -1374,6 +1379,7 @@ class DownloadManager(QObject):
             episodes=episodes,
             quality=quality,
             lang=lang,
+            title=title,
         )
         if ok and proc:
             self._animepahe_process = proc
@@ -1404,6 +1410,7 @@ class DownloadManager(QObject):
                         episodes=next_task.get("episodes"),
                         quality=next_task.get("quality"),
                         lang=next_task.get("lang"),
+                        title=next_task.get("title"),
                     )
                 else:
                     with self._animepahe_queue_lock:
@@ -2050,6 +2057,10 @@ class DownloadManager(QObject):
             entry_metadata["security_warning"] = sec_details
         if headers:
             entry_metadata["headers"] = headers
+            if "referer" not in entry_metadata and "referrer" not in entry_metadata:
+                ref = headers.get("Referer") or headers.get("referer")
+                if ref:
+                    entry_metadata["referer"] = ref
 
         # Create new entry
         entry = DownloadEntry(
@@ -3514,7 +3525,7 @@ class DownloadManager(QObject):
         lowered = url.lower()
         if any(host in lowered for host in self._YOUTUBE_HOSTS):
             return _SOURCE_QUEUE_BY_KEY.get("youtube", "")
-        if any(cdn in lowered for cdn in ("owocdn.top", "kwik.cx", "kwik.")):
+        if any(cdn in lowered for cdn in ("owocdn.top", "uwucdn.top", "kwik.cx", "kwik.")):
             return _SOURCE_QUEUE_BY_KEY.get("animepahe", "")
         return ""
 
@@ -3814,13 +3825,16 @@ class DownloadManager(QObject):
             if "animepahe" in last_comment.lower():
                 entry_source["added_by"] = "animepahe"
             
-            # Also extract anime_url and anime_title from parsed headers if present
+            # Also extract anime_url, anime_title, and referer from parsed headers if present
             # (added by AnimePahe downloader as custom key=value in backlog line)
             if hasattr(parsed, "headers") and parsed.headers:
                 if "anime_url" in parsed.headers:
                     entry_source["anime_url"] = parsed.headers["anime_url"]
                 if "anime_title" in parsed.headers:
                     entry_source["anime_title"] = parsed.headers["anime_title"]
+                ref = parsed.headers.get("Referer") or parsed.headers.get("referer")
+                if ref:
+                    entry_source["referer"] = ref
             if "anime_url" in entry_source or "anime_title" in entry_source:
                 entry_source["added_by"] = "animepahe"
             
@@ -3869,6 +3883,8 @@ class DownloadManager(QObject):
             try:
                 if successful_download_lines == total_download_lines:
                     # All download entries processed successfully; empty the file
+                    removed_lines = [raw_line for _, raw_line, is_download, success in entries_info if is_download and success]
+                    self._append_to_backlog_backup(removed_lines)
                     with open(filepath, "w", encoding="utf-8") as f:
                         pass
                     log.info("Backlog file cleared completely: %s", filepath)
@@ -3878,6 +3894,11 @@ class DownloadManager(QObject):
                         raw_line for _, raw_line, is_download, success in entries_info
                         if not (is_download and success)
                     ]
+                    removed_lines = [
+                        raw_line for _, raw_line, is_download, success in entries_info
+                        if is_download and success
+                    ]
+                    self._append_to_backlog_backup(removed_lines)
                     with open(filepath, "w", encoding="utf-8") as f:
                         f.writelines(remaining_lines)
                     log.info("Backlog file updated: removed %d successful entries from %s", successful_download_lines, filepath)
@@ -3885,6 +3906,32 @@ class DownloadManager(QObject):
                 log.error("Failed to clear / update backlog file %s: %s", filepath, exc)
 
         return count
+
+    def _append_to_backlog_backup(self, lines: list[str]) -> None:
+        """Append removed backlog lines to data_dir/backlog.backup.txt at the top."""
+        if not lines:
+            return
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return
+        try:
+            from my_idm.paths import data_dir
+            backup_path = data_dir() / "backlog.backup.txt"
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            # Read existing backup content
+            existing_content = ""
+            if backup_path.exists():
+                with open(backup_path, "r", encoding="utf-8") as f:
+                    existing_content = f.read()
+            # Prepend new lines (with timestamp marker)
+            from datetime import datetime
+            timestamp = datetime.now().isoformat()
+            new_content = f"# Backed up {timestamp}\n" + "".join(lines)
+            if existing_content:
+                new_content += "\n" + existing_content
+            with open(backup_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        except Exception as exc:
+            log.debug("Failed to write backlog backup: %s", exc)
 
     def process_backlogs(self, extra_filepath: Optional[str] = None) -> int:
         """Scan configured locations (project root, user home, app dir) and extra_filepath,

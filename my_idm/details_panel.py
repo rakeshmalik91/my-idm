@@ -794,6 +794,7 @@ class DetailsPanel(QWidget):
         self._ov_security, _ = self._create_info_row(right_col, "Malware Scan:")
         self._ov_url, self._ov_url_copy_btn = self._create_info_row(right_col, "Source URL / Magnet:", copyable=True)
         self._ov_anime_url, self._ov_anime_url_copy_btn = self._create_info_row(right_col, "Show URL:", copyable=True)
+        self._ov_referrer, self._ov_referrer_copy_btn = self._create_info_row(right_col, "Referrer:", copyable=True)
         right_col.addStretch()
         grid_layout.addLayout(right_col, stretch=1)
 
@@ -1055,6 +1056,7 @@ class DetailsPanel(QWidget):
         self._ov_security.setText("—")
         self._ov_url.setText("—")
         self._ov_anime_url.setText("—")
+        self._ov_referrer.setText("—")
 
         self._table_files.setRowCount(0)
         self._table_peers.setRowCount(0)
@@ -1223,6 +1225,23 @@ class DetailsPanel(QWidget):
         else:
             self._ov_anime_url.setText("—")
 
+        # Referrer (from metadata or headers)
+        referrer = ""
+        if entry.metadata:
+            headers_dict = entry.metadata.get("headers") if isinstance(entry.metadata.get("headers"), dict) else {}
+            referrer = (
+                entry.metadata.get("referer", "")
+                or entry.metadata.get("referrer", "")
+                or headers_dict.get("Referer", "")
+                or headers_dict.get("referer", "")
+            )
+        if referrer:
+            if len(referrer) > 80:
+                referrer = referrer[:77] + "..."
+            self._ov_referrer.setText(referrer)
+        else:
+            self._ov_referrer.setText("—")
+
         # Show/hide copy buttons based on whether value is not "—"
         self._ov_filename_copy_btn.setVisible(self._ov_filename.text() != "—")
         self._ov_anime_title_copy_btn.setVisible(self._ov_anime_title.text() != "—")
@@ -1230,6 +1249,7 @@ class DetailsPanel(QWidget):
         self._ov_hash_copy_btn.setVisible(self._ov_hash.text() != "—")
         self._ov_url_copy_btn.setVisible(self._ov_url.text() != "—")
         self._ov_anime_url_copy_btn.setVisible(self._ov_anime_url.text() != "—")
+        self._ov_referrer_copy_btn.setVisible(self._ov_referrer.text() != "—")
 
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id)
@@ -2660,7 +2680,8 @@ class DetailsPanel(QWidget):
         out = [line.rstrip("\r\n") for line in header]
         out.extend(line.rstrip("\r\n") for line in shown if line.strip())
         self._console_text.setPlainText("\n".join(out))
-        if self._console_autoscroll_cb.isChecked():
+        # Only auto-scroll if user is following the live (newest) session
+        if self._console_autoscroll_cb.isChecked() and self._console_session_tabs.is_following_live():
             self._scroll_to_bottom()
 
     def _console_visible_text(self) -> str:

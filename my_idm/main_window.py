@@ -2054,6 +2054,12 @@ class MainWindow(QMainWindow):
         # started there and the dialog closes — nothing should be added as a
         # plain HTTP download in that case.
         if getattr(dlg, "animepahe_handoff", False) is True:
+            # Switch bottom panel to AnimePahe console so user sees scraper progress
+            if not self._details_panel.isVisible():
+                self._details_panel.setVisible(True)
+                self._act_toggle_details.setChecked(True)
+            self._details_panel.set_mode("console")
+            self._act_toggle_details.setChecked(True)
             return
 
         yt_selection = getattr(dlg, "youtube_selection", None)
