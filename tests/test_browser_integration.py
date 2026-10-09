@@ -367,6 +367,17 @@ class TestBrowserServerLiveEndpoints:
                         pending_min_bytes=0,
                     )
 
+                    # 4a-bis: POST /add with 'referer' alias
+                    mock_manager.add_download_from_browser.reset_mock()
+                    alt_payload = {
+                        "url": "https://example.com/testfile2.iso",
+                        "referer": "https://example.com/alt-ref",
+                    }
+                    async with session.post(f"http://127.0.0.1:{test_port}/add", json=alt_payload) as resp:
+                        assert resp.status == 200
+                    mock_manager.add_download_from_browser.assert_called_once()
+                    assert mock_manager.add_download_from_browser.call_args[1]["referrer"] == "https://example.com/alt-ref"
+
                     # 4b. POST /add with file size below min_file_size_kb threshold -> ignored
                     server.set_config(BrowserIntegrationConfig(enabled=True, port=test_port, min_file_size_kb=500))
                     small_payload = {

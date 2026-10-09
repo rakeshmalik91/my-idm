@@ -288,9 +288,16 @@ class BrowserServer:
         filename = body.get("filename", "").strip()
         save_path = body.get("save_path", "").strip()
         cookies = body.get("cookies", "")
-        referrer = body.get("referrer", "").strip()
-        user_agent = body.get("user_agent", "").strip()
         extra_headers = body.get("headers", {})
+        referrer = str(
+            body.get("referrer")
+            or body.get("referer")
+            or body.get("Referer")
+            or (extra_headers.get("Referer") if isinstance(extra_headers, dict) else "")
+            or (extra_headers.get("referer") if isinstance(extra_headers, dict) else "")
+            or ""
+        ).strip()
+        user_agent = body.get("user_agent", "").strip()
 
         # Check minimum file size
         raw_size = body.get("total_bytes", 0) or body.get("file_size", 0)
