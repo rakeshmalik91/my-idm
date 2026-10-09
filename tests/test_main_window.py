@@ -586,6 +586,7 @@ class TestMainWindowToolbar(_MainWindowTestCase):
             self.win._act_delete,
             self.win._act_move,
             self.win._act_recheck,
+            self.win._act_stats,
         ):
             btn = toolbar.widgetForAction(act)
             self.assertIsInstance(btn, QToolButton)
@@ -1825,9 +1826,10 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         report over the whole history. They live in Edit ▸ Queues and Tools ▸ Statistics.
         """
         labels = [a.text() for a in self.win._toolbar.actions() if not a.isSeparator()]
-        for gone in ("All Queues", "Statistics…", "Stats…", "Move to Queue"):
+        for gone in ("All Queues", "Move to Queue"):
             with self.subTest(label=gone):
                 self.assertNotIn(gone, labels)
+        self.assertIn(self.win._act_stats, self.win._toolbar.actions())
         widget_names = [
             self.win._toolbar.widgetForAction(a).objectName()
             for a in self.win._toolbar.actions()

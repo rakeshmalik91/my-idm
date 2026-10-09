@@ -892,6 +892,12 @@ class MainWindow(QMainWindow):
         self._act_move_down.setToolTip("Move selected download down in queue order")
         self._act_move_down.triggered.connect(self._on_move_queue_down)
 
+        self._act_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
+        self._act_stats.setToolTip(
+            "Statistics: download and upload totals for today, this week, this month and this year"
+        )
+        self._act_stats.triggered.connect(self._on_show_statistics)
+
         self._act_preferences = QAction(_create_emoji_icon("⚙"), "Preferences…", self)
         self._act_preferences.setShortcut(QKeySequence("Ctrl+,"))
         self._act_preferences.setToolTip(
@@ -1046,11 +1052,13 @@ class MainWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
-        # Separate the search field from the preferences button
+        # Separate the search field from the stats button, and stats from preferences
+        toolbar.addSeparator()
+        toolbar.addAction(self._act_stats)
         toolbar.addSeparator()
         toolbar.addAction(self._act_preferences)
 
-        # Show only icons without text for playback and action buttons
+        # Show only icons without text for playback, action, and stats buttons
         for act in (
             self._act_resume,
             self._act_force_start,
@@ -1063,6 +1071,7 @@ class MainWindow(QMainWindow):
             self._act_delete,
             self._act_move,
             self._act_recheck,
+            self._act_stats,
         ):
             btn = toolbar.widgetForAction(act)
             if isinstance(btn, QToolButton):

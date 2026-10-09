@@ -20,7 +20,7 @@ import pytest
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QPixmap
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QToolButton, QWidget
 
 IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI") == "true"
 
@@ -1175,22 +1175,24 @@ class TestToolbarAction(unittest.TestCase):
         self.assertIn("Statistics", self.window._act_tools_stats.toolTip())
         self.assertIn("Configure", self.window._act_preferences.toolTip())
 
-    def test_it_lives_in_the_tools_menu_and_not_the_toolbar(self):
-        """Statistics is a read-only view, so it belongs in a menu rather than the strip.
+    def test_stats_button_on_toolbar_precedes_preferences_and_is_icon_only(self):
+        """The stats button sits on the left side of Preferences on the toolbar and is icon-only."""
+        actions = self.window._toolbar.actions()
+        self.assertIn(self.window._act_stats, actions)
+        idx = actions.index(self.window._act_stats)
+        self.assertTrue(actions[idx + 1].isSeparator())
+        self.assertEqual(actions[idx + 2], self.window._act_preferences)
 
-        It used to sit in the toolbar immediately before Preferences. The toolbar is a row of
-        transport and file commands now; a button there read as an action on the selection when
-        it acts on the whole history.
-        """
+        btn = self.window._toolbar.widgetForAction(self.window._act_stats)
+        self.assertIsInstance(btn, QToolButton)
+        self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonIconOnly)
+
+    def test_it_lives_in_the_tools_menu(self):
         tools = next(
             top.menu() for top in self.window.menuBar().actions()
             if top.menu() is not None and top.text().replace("&", "") == "Tools"
         )
         self.assertIn(self.window._act_tools_stats, tools.actions())
-        self.assertNotIn(
-            self.window._act_tools_stats, self.window._toolbar.actions(),
-            "Statistics must not creep back onto the toolbar",
-        )
 
     def test_it_has_no_shortcut(self):
         """Ctrl+, is Preferences; a read-only view must not take a shortcut slot."""
