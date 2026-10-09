@@ -881,6 +881,35 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.assertFalse(dlg._tab_sidebar.isHidden())
         self.assertTrue(dlg._no_results_label.isHidden())
 
+    def test_settings_dialog_search_highlights_matching_items_and_restores(self):
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        # Initially no highlights
+        self.assertEqual(getattr(dlg, "_highlighted_widgets", {}), {})
+
+        # Search for a setting: "kill switch"
+        dlg._search_input.setText("kill switch")
+        highlighted = getattr(dlg, "_highlighted_widgets", {})
+        self.assertGreater(len(highlighted), 0, "matching widgets should be highlighted")
+
+        # Verify that highlighted widgets carry the yellow tint background rule
+        sample_w = next(iter(highlighted.keys()))
+        sample_style = sample_w.styleSheet()
+        self.assertIn("background-color: rgba(", sample_style)
+        self.assertTrue(
+            "234, 179, 8" in sample_style or "250, 204, 21" in sample_style,
+            f"style should contain yellow tint: {sample_style}",
+        )
+
+        # Clearing the search input must restore original styles and empty the highlight registry
+        dlg._search_input.clear()
+        self.assertEqual(dlg._highlighted_widgets, {})
+        # The sample widget should no longer have the yellow background tint
+        restored_style = sample_w.styleSheet()
+        self.assertNotIn("234, 179, 8", restored_style)
+        self.assertNotIn("250, 204, 21", restored_style)
+
 
 class TestPreferencesPageRegistry(unittest.TestCase):
     """``TAB_ORDER`` / ``TAB_TITLES`` are the single source of truth for page identity.

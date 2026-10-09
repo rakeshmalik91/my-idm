@@ -772,7 +772,55 @@ class SettingsDialog(QDialog):
             else:
                 scroll_area.verticalScrollBar().setValue(0)
 
+    def _clear_search_highlights(self) -> None:
+        """Restore all search-highlighted widgets to their original stylesheets."""
+        for w, orig_style in getattr(self, "_highlighted_widgets", {}).items():
+            try:
+                w.setStyleSheet(orig_style)
+            except (RuntimeError, Exception):
+                pass
+        self._highlighted_widgets = {}
+
+    def _get_search_highlight_style(self, w: QWidget) -> str:
+        """Return a light yellow background tint rule suitable for the widget and active theme."""
+        from my_idm.styles import current_theme
+        is_light = current_theme() == "light"
+        cls_name = w.__class__.__name__
+
+        if isinstance(w, QGroupBox):
+            bg = "rgba(250, 204, 21, 0.15)" if is_light else "rgba(234, 179, 8, 0.12)"
+            border = "1px solid rgba(202, 138, 4, 0.60)" if is_light else "1px solid rgba(234, 179, 8, 0.65)"
+            return f"{cls_name} {{ background-color: {bg}; border: {border}; border-radius: 6px; }}"
+        elif isinstance(w, (QLabel, QAbstractButton)):
+            bg = "rgba(250, 204, 21, 0.35)" if is_light else "rgba(234, 179, 8, 0.28)"
+            border = "1px solid rgba(202, 138, 4, 0.60)" if is_light else "1px solid rgba(234, 179, 8, 0.65)"
+            return f"{cls_name} {{ background-color: {bg}; border: {border}; border-radius: 4px; padding: 1px 4px; }}"
+        else:
+            bg = "rgba(250, 204, 21, 0.30)" if is_light else "rgba(234, 179, 8, 0.25)"
+            border = "1px solid rgba(202, 138, 4, 0.60)" if is_light else "1px solid rgba(234, 179, 8, 0.75)"
+            return f"{cls_name} {{ background-color: {bg}; border: {border}; border-radius: 4px; }}"
+
+    def _apply_search_highlights(self, widgets: list[QWidget]) -> None:
+        """Apply a light yellow highlight tint to matching widgets."""
+        if not hasattr(self, "_highlighted_widgets"):
+            self._highlighted_widgets = {}
+
+        seen: set[QWidget] = set()
+        for w in widgets:
+            if w in seen:
+                continue
+            seen.add(w)
+            try:
+                orig_style = w.styleSheet()
+                self._highlighted_widgets[w] = orig_style
+                rule = self._get_search_highlight_style(w)
+                combined = f"{orig_style}\n{rule}" if orig_style else rule
+                w.setStyleSheet(combined)
+            except (RuntimeError, Exception):
+                pass
+
     def _on_search_text_changed(self, text: str) -> None:
+        self._clear_search_highlights()
         query = self._clean_search_text(text)
         if not query:
             self._current_search_best_widgets = {}
@@ -792,6 +840,7 @@ class SettingsDialog(QDialog):
         terms = query.split()
         matched_indices: list[int] = []
         best_widgets: dict[int, Optional[QWidget]] = {}
+        widgets_to_highlight: list[QWidget] = []
 
         if not hasattr(self, "_search_index") or not self._search_index:
             self._build_search_index()
@@ -811,7 +860,17 @@ class SettingsDialog(QDialog):
                     if score > best_score:
                         best_score = score
                         best_w = w
+                    if query in wt or all(term in wt for term in terms):
+                        widgets_to_highlight.append(w)
                 best_widgets[i] = best_w
+
+        # If no specific widget matched all terms, fall back to widgets matching any term
+        if not widgets_to_highlight:
+            for i in matched_indices:
+                tab_data = self._search_index[i]
+                for w, wt in tab_data["widgets"]:
+                    if any(term in wt for term in terms):
+                        widgets_to_highlight.append(w)
 
         self._current_search_best_widgets = best_widgets
 
@@ -839,6 +898,7 @@ class SettingsDialog(QDialog):
         elif self._tabs.currentIndex() != target_tab:
             self._tabs.setCurrentIndex(target_tab)
 
+        self._apply_search_highlights(widgets_to_highlight)
         self._scroll_to_matching_widget(target_tab)
 
     def _on_sidebar_row_changed(self, row: int) -> None:
@@ -904,10 +964,12 @@ class SettingsDialog(QDialog):
             log.warning("Failed to save preferences dialog size to DB: %s", exc)
 
     def done(self, result: int):
+        self._clear_search_highlights()
         self._save_size_to_db()
         super().done(result)
 
     def closeEvent(self, event):
+        self._clear_search_highlights()
         self._save_size_to_db()
         # Drop the probe's result connection before the dialog goes.
         #
