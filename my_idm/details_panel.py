@@ -48,7 +48,7 @@ logger = logging.getLogger("my_idm.details_panel")
 
 from my_idm.database import DEFAULT_QUEUE_ID, DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
-from my_idm.external_tools import embedded_browser_supported, find_chrome_hwnd
+from my_idm.external_tools import embedded_browser_supported, find_chrome_hwnd, launch_animepahe_gui
 from my_idm.manager import DownloadManager
 from my_idm.styles import Colors, themed, themed_widget
 from my_idm.utils import send_to_trash, to_int, unlock_path
@@ -2656,6 +2656,13 @@ class DetailsPanel(QWidget):
         self._console_action_btn.clicked.connect(self._on_toggle_scraper_clicked)
         ctrl_bar.addWidget(self._console_action_btn)
 
+        # Open GUI button
+        self._console_open_gui_btn = QPushButton("🎬 Open GUI", widget)
+        self._console_open_gui_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._console_open_gui_btn.setToolTip("Open AnimePahe desktop GUI")
+        self._console_open_gui_btn.clicked.connect(self._on_open_animepahe_gui_clicked)
+        ctrl_bar.addWidget(self._console_open_gui_btn)
+
         layout.addLayout(ctrl_bar)
 
         # Session list on the left, log text on the right. The text stays a
@@ -3138,6 +3145,37 @@ class DetailsPanel(QWidget):
             self._manager.stop_animepahe_scraper()
         else:
             self._manager.start_animepahe_scraper()
+
+    def _on_open_animepahe_gui_clicked(self):
+        cfg = self._manager.external_tools_config
+        repo = cfg.get_effective_repo_path()
+        if not repo or not os.path.isdir(repo):
+            win = self.window()
+            if win is not None and hasattr(win, "_on_open_external_tools_settings"):
+                res = QMessageBox.question(
+                    self,
+                    "AnimePahe Not Configured",
+                    "The AnimePahe repository folder is not configured or does not exist.\n\n"
+                    "Would you like to configure the repository location in Preferences now?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if res == QMessageBox.StandardButton.Yes:
+                    win._on_open_external_tools_settings()
+                return
+
+            QMessageBox.warning(
+                self,
+                "AnimePahe Not Configured",
+                "The AnimePahe repository folder is not configured or does not exist.\n\n"
+                "Please configure the repository location in Preferences.",
+            )
+            return
+
+        ok, msg = launch_animepahe_gui(cfg)
+        if ok:
+            self._show_status_message("Launched AnimePahe Downloader GUI")
+        else:
+            QMessageBox.warning(self, "Failed to Launch AnimePahe GUI", msg)
 
     def _scroll_to_bottom(self):
         sb = self._console_text.verticalScrollBar()

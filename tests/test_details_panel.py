@@ -1321,6 +1321,28 @@ class TestDetailsPanel(unittest.TestCase):
             QPlainTextEdit.LineWrapMode.NoWrap,
         )
 
+        # Test Open GUI button
+        self.assertEqual(panel._console_open_gui_btn.text(), "🎬 Open GUI")
+        with unittest.mock.patch("my_idm.details_panel.launch_animepahe_gui", return_value=(True, "Launched AnimePahe GUI")) as mock_gui:
+            panel._console_open_gui_btn.click()
+            mock_gui.assert_called_once_with(cfg)
+
+    def test_animepahe_console_open_gui_button_prompts_if_not_configured(self):
+        """Clicking Open GUI when repo path is invalid prompts user to configure preferences."""
+        from my_idm.config import ExternalToolsConfig
+
+        cfg = ExternalToolsConfig(animepahe_repo_path="/nonexistent/path/for/test")
+        self.manager._external_tools_config = cfg
+
+        panel = self.win._details_panel
+        panel.show_animepahe_console()
+        panel._log_timer.stop()
+        self.addCleanup(panel._log_timer.stop)
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question", return_value=QMessageBox.StandardButton.No) as mock_q:
+            panel._console_open_gui_btn.click()
+            mock_q.assert_called_once()
+
     @staticmethod
     def _session_banner(ts, cmd="py scraper.py"):
         rule = "=" * 55
