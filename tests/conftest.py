@@ -60,6 +60,7 @@ _INTERACTIVE_MODULES = frozenset({
     "test_dialogs",            # modal dialogs
     "test_entrypoint_and_notifications",  # toast / tray notification paths
     "test_main_window",        # MainWindow + system tray
+    "test_preferences_probe",  # SettingsDialog background probes
     "test_settings",           # SettingsDialog
     "test_single_instance",    # QMainWindow + Win32 activation
     "test_splash",             # splash window

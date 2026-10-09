@@ -316,6 +316,21 @@ class TestStatsBuckets(StatsTestCase):
         self.assertEqual(per_minute.series[0][1].downloaded, 3 * GB)
         self.assertEqual(per_minute.series[1][1].count, 1)
 
+    def test_a_5min_bucket_groups_by_5min_quantized(self):
+        self.add("m1", 0, total=1 * GB, hour=10, minute=11)
+        self.add("m2", 0, total=2 * GB, hour=10, minute=14)
+        self.add("m3", 0, total=3 * GB, hour=10, minute=17)
+        self.add("m4", 0, total=4 * GB, hour=10, minute=20)
+        per_5m = self.stats(since=TODAY, bucket="5min")
+        self.assertEqual(per_5m.bucket, "5min")
+        self.assertEqual([m for m, _s in per_5m.series], ["2026-09-30 10:10", "2026-09-30 10:15", "2026-09-30 10:20"])
+        self.assertEqual(per_5m.series[0][1].count, 2)
+        self.assertEqual(per_5m.series[0][1].downloaded, 3 * GB)
+        self.assertEqual(per_5m.series[1][1].count, 1)
+        self.assertEqual(per_5m.series[1][1].downloaded, 3 * GB)
+        self.assertEqual(per_5m.series[2][1].count, 1)
+        self.assertEqual(per_5m.series[2][1].downloaded, 4 * GB)
+
     def test_the_summary_buckets_do_not_follow_the_chart_selection(self):
         """Picking a chart range must not silently redefine 'this week'."""
         self.add("today", 0, total=1 * GB)
@@ -405,6 +420,9 @@ class TestStatsBucketByLocalDay(StatsTestCase):
 
     def test_the_minute_expression_converts_too(self):
         self.assertIn("localtime", Database._STATS_LOCAL_MINUTE)
+
+    def test_the_5min_expression_converts_too(self):
+        self.assertIn("localtime", Database._STATS_LOCAL_5MIN)
 
     def test_sqlite_and_python_agree_on_the_converted_day(self):
         """Pins the conversion contract whatever the host offset is."""
@@ -948,7 +966,10 @@ class TestStatisticsPopup(PopupTestCase):
     def test_the_chart_receives_the_daily_series(self):
         self.add("a", 0), self.add("b", 2)
         popup = self.popup()
-        self.assertEqual(len(popup._chart.days()), 2)
+        # Default range is 30 days; gaps are filled so days are continuous
+        self.assertEqual(len(popup._chart.days()), 30)
+        active = [s for _d, s in popup._chart.days() if s.count > 0]
+        self.assertEqual(len(active), 2)
 
     def test_it_paints(self):
         self.add("a", 0, total=2 * GB, uploaded=1 * GB)
@@ -1350,7 +1371,7 @@ class TestChartSelectors(PopupTestCase):
     def test_the_offered_granularities(self):
         self.assertEqual(
             [key for _label, key in StatisticsPopup.BUCKETS],
-            ["minute", "hour", "day", "month"],
+            ["5min", "hour", "day", "month"],
         )
 
     def test_the_default_is_thirty_days_by_day(self):
@@ -1364,29 +1385,32 @@ class TestChartSelectors(PopupTestCase):
         self.add("old", 1, total=1 * GB)
         self.add("new", 0, total=1 * GB)
         popup = self.popup()
-        self.assertEqual(len(popup.snapshot().series), 2)
+        self.assertEqual(len(popup.snapshot().series), 30)
         popup._range_combo.setCurrentIndex(0)
         self.assertEqual(popup.snapshot().since, TODAY.isoformat())
         self.assertEqual(len(popup.snapshot().series), 1)
+        self.assertEqual(sum(s.count for _d, s in popup.snapshot().series), 1)
 
     def test_picking_last_seven_days_narrows_the_series(self):
         self.add("old", 20, total=1 * GB)
         self.add("new", 2, total=1 * GB)
         popup = self.popup()
-        self.assertEqual(len(popup.snapshot().series), 2)
+        self.assertEqual(len(popup.snapshot().series), 30)
         popup._range_combo.setCurrentIndex(1)
         self.assertEqual(popup.snapshot().since, (TODAY - timedelta(days=6)).isoformat())
         self.assertEqual(
-            len(popup.snapshot().series), 1,
+            len(popup.snapshot().series), 7,
             "a 20-day-old download must fall outside a 7-day chart",
         )
+        self.assertEqual(sum(s.count for _d, s in popup.snapshot().series), 1)
 
     def test_all_time_has_no_lower_bound(self):
         self.add("ancient", 900, total=1 * GB)
         popup = self.popup()
         popup._range_combo.setCurrentIndex(4)
         self.assertEqual(popup.snapshot().since, "", "all time means no cut-off at all")
-        self.assertEqual(len(popup.snapshot().series), 1)
+        self.assertEqual(len(popup.snapshot().series), 901)
+        self.assertEqual(sum(s.count for _d, s in popup.snapshot().series), 1)
 
     def test_changing_the_range_refreshes_the_chart(self):
         self.add("a", 0, total=1 * GB)
@@ -1415,19 +1439,21 @@ class TestChartSelectors(PopupTestCase):
         popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("hour"))
         snap = popup.snapshot()
         self.assertEqual(snap.bucket, "hour")
-        self.assertEqual(len(snap.series), 2)
+        self.assertEqual(len(snap.series), 24)
         self.assertEqual(popup._chart.bucket(), "hour")
+        self.assertEqual(sum(s.count for _h, s in snap.series), 2)
 
-    def test_switching_to_per_minute_groups_by_minute(self):
+    def test_switching_to_per_5min_groups_by_5min(self):
         self.add("m1", 0, total=1 * GB, hour=9, minute=10)
         self.add("m2", 0, total=1 * GB, hour=9, minute=20)
         popup = self.popup()
         popup._range_combo.setCurrentIndex(0)
-        popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("minute"))
+        popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("5min"))
         snap = popup.snapshot()
-        self.assertEqual(snap.bucket, "minute")
-        self.assertEqual(len(snap.series), 2)
-        self.assertEqual(popup._chart.bucket(), "minute")
+        self.assertEqual(snap.bucket, "5min")
+        self.assertEqual(len(snap.series), 288)
+        self.assertEqual(popup._chart.bucket(), "5min")
+        self.assertEqual(sum(s.count for _m, s in snap.series), 2)
 
     def test_switching_the_granularity_alone_is_enough(self):
         for days in (0, 1, 40):
@@ -1492,6 +1518,23 @@ class TestChartMonthLabels(unittest.TestCase):
         chart.set_days([("2026-09-30 14:35", DownloadStats(1, 100, 0, 1))], bucket="minute")
         self.addCleanup(chart.deleteLater)
 
+    def test_a_5min_bucket_paints(self):
+        chart = StatsChartWidget()
+        chart.resize(520, 220)
+        chart.set_days([("2026-09-30 14:35", DownloadStats(1, 100, 0, 1))], bucket="5min")
+        self.addCleanup(chart.deleteLater)
+        paint(chart)
+
+    def test_a_dense_5min_seven_days_paints_without_error(self):
+        from my_idm.database import fill_series_gaps
+        chart = StatsChartWidget()
+        chart.resize(520, 220)
+        since = TODAY - timedelta(days=6)
+        filled = fill_series_gaps([("2026-09-30 14:35", DownloadStats(1, 100, 0, 1))], "5min", start=since, end=TODAY)
+        chart.set_days(filled, bucket="5min")
+        self.addCleanup(chart.deleteLater)
+        paint(chart)
+
     def test_the_tooltip_names_the_right_unit(self):
         self.assertIn("day of month", self._chart("day").toolTip())
         self.assertIn("month", self._chart("month").toolTip())
@@ -1504,6 +1547,64 @@ class TestChartMonthLabels(unittest.TestCase):
         chart_min.set_days([], bucket="minute")
         self.assertIn("minute", chart_min.toolTip())
         chart_min.deleteLater()
+        chart_5min = StatsChartWidget()
+        chart_5min.set_days([], bucket="5min")
+        self.assertIn("5 minutes", chart_5min.toolTip())
+        chart_5min.deleteLater()
+
+
+class TestStatsGapFilling(StatsTestCase):
+    """Gaps in the time series must be filled with zeroes rather than skipped."""
+
+    def test_day_series_fills_seven_days(self):
+        self.add("d1", 6, total=1 * GB)
+        self.add("d2", 0, total=2 * GB)
+        since = TODAY - timedelta(days=6)
+        snap = self.db.get_download_stats(TODAY, since=since, bucket="day", fill_gaps=True)
+        self.assertEqual(len(snap.series), 7)
+        self.assertEqual(snap.series[0][0], since.strftime("%Y-%m-%d"))
+        self.assertEqual(snap.series[-1][0], TODAY.strftime("%Y-%m-%d"))
+        self.assertEqual(snap.series[0][1].count, 1)
+        self.assertEqual(snap.series[-1][1].count, 1)
+        self.assertEqual(sum(s.count for _, s in snap.series), 2)
+
+    def test_hour_series_fills_seven_days(self):
+        self.add("h1", 6, total=1 * GB, hour=10)
+        self.add("h2", 0, total=2 * GB, hour=14)
+        since = TODAY - timedelta(days=6)
+        snap = self.db.get_download_stats(TODAY, since=since, bucket="hour", fill_gaps=True)
+        self.assertEqual(len(snap.series), 7 * 24)
+        active = [s for _, s in snap.series if s.count > 0]
+        self.assertEqual(len(active), 2)
+
+    def test_5min_series_fills_seven_days(self):
+        self.add("m1", 6, total=1 * GB, hour=10, minute=15)
+        self.add("m2", 0, total=2 * GB, hour=14, minute=20)
+        since = TODAY - timedelta(days=6)
+        snap = self.db.get_download_stats(TODAY, since=since, bucket="5min", fill_gaps=True)
+        self.assertEqual(len(snap.series), 7 * 288)
+        active = [s for _, s in snap.series if s.count > 0]
+        self.assertEqual(len(active), 2)
+
+    def test_5min_series_fills_today(self):
+        self.add("m1", 0, total=1 * GB, hour=10, minute=15)
+        snap = self.db.get_download_stats(TODAY, since=TODAY, bucket="5min", fill_gaps=True)
+        self.assertEqual(len(snap.series), 288)
+        active = [s for _, s in snap.series if s.count > 0]
+        self.assertEqual(len(active), 1)
+
+    def test_hour_series_fills_today(self):
+        self.add("h1", 0, total=1 * GB, hour=10)
+        snap = self.db.get_download_stats(TODAY, since=TODAY, bucket="hour", fill_gaps=True)
+        self.assertEqual(len(snap.series), 24)
+        active = [s for _, s in snap.series if s.count > 0]
+        self.assertEqual(len(active), 1)
+
+    def test_empty_database_with_range_fills_all_zeroes(self):
+        since = TODAY - timedelta(days=6)
+        snap = self.db.get_download_stats(TODAY, since=since, bucket="day", fill_gaps=True)
+        self.assertEqual(len(snap.series), 7)
+        self.assertTrue(all(s.count == 0 for _, s in snap.series))
 
 
 if __name__ == "__main__":

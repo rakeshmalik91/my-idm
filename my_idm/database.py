@@ -11,7 +11,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from my_idm.paths import data_dir, database_path
 from my_idm.utils import normalize_path, to_int
@@ -97,6 +97,206 @@ class StatsSnapshot:
             "bucket": self.bucket,
             "since": self.since,
         }
+
+
+def fill_series_gaps(
+    series: Sequence[tuple[str, DownloadStats]],
+    bucket: str,
+    start: Optional[date | datetime | str] = None,
+    end: Optional[date | datetime | str] = None,
+) -> tuple[tuple[str, DownloadStats], ...]:
+    """Fill gaps in a time series with zero DownloadStats so the time axis is continuous.
+
+    Days/hours/minutes with no activity must not be dropped: dropping them compresses the
+    time axis and distorts temporal spacing.
+    """
+    valid_buckets = ("5min", "minute", "hour", "day", "month")
+    bucket = bucket if bucket in valid_buckets else "day"
+    if bucket == "minute":
+        bucket = "5min"
+
+    data_map = dict(series)
+
+    def to_date(val: Any) -> Optional[date]:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.date()
+        if isinstance(val, date):
+            return val
+        if isinstance(val, str):
+            try:
+                return datetime.fromisoformat(val[:10]).date()
+            except Exception:
+                return None
+        return None
+
+    def to_datetime(val: Any) -> Optional[datetime]:
+        if val is None:
+            return None
+        if isinstance(val, datetime):
+            return val.astimezone().replace(tzinfo=None) if val.tzinfo is not None else val
+        if isinstance(val, date):
+            return datetime(val.year, val.month, val.day)
+        if isinstance(val, str):
+            clean = val.replace(" ", "T")
+            if len(clean) == 13:
+                clean += ":00:00"
+            elif len(clean) == 16:
+                clean += ":00"
+            try:
+                dt = datetime.fromisoformat(clean)
+                return dt.astimezone().replace(tzinfo=None) if dt.tzinfo is not None else dt
+            except Exception:
+                return None
+        return None
+
+    if not series and start is None:
+        return ()
+
+    if bucket == "month":
+        start_dt = to_date(start)
+        end_dt = to_date(end) or date.today()
+        if start_dt is None:
+            if series:
+                try:
+                    parts = [int(p) for p in series[0][0].split("-")]
+                    start_year, start_month = parts[0], parts[1]
+                except Exception:
+                    return tuple(series)
+            else:
+                return ()
+        else:
+            start_year, start_month = start_dt.year, start_dt.month
+
+        end_year, end_month = end_dt.year, end_dt.month
+        if series:
+            try:
+                last_parts = [int(p) for p in series[-1][0].split("-")]
+                if (last_parts[0], last_parts[1]) > (end_year, end_month):
+                    end_year, end_month = last_parts[0], last_parts[1]
+            except Exception:
+                pass
+
+        total_months = (end_year - start_year) * 12 + (end_month - start_month) + 1
+        if total_months <= 0 or total_months > 50000:
+            return tuple(series)
+
+        result = []
+        cy, cm = start_year, start_month
+        for _ in range(total_months):
+            key = f"{cy:04d}-{cm:02d}"
+            result.append((key, data_map.get(key, DownloadStats())))
+            if cm == 12:
+                cy += 1
+                cm = 1
+            else:
+                cm += 1
+        return tuple(result)
+
+    elif bucket == "day":
+        start_d = to_date(start)
+        end_d = to_date(end) or date.today()
+        if start_d is None:
+            if series:
+                start_d = to_date(series[0][0])
+            if start_d is None:
+                return ()
+        if series:
+            last_d = to_date(series[-1][0])
+            if last_d and last_d > end_d:
+                end_d = last_d
+
+        total_days = (end_d - start_d).days + 1
+        if total_days <= 0 or total_days > 50000:
+            return tuple(series)
+
+        result = []
+        cur = start_d
+        for _ in range(total_days):
+            key = cur.strftime("%Y-%m-%d")
+            result.append((key, data_map.get(key, DownloadStats())))
+            cur += timedelta(days=1)
+        return tuple(result)
+
+    elif bucket == "hour":
+        start_dt = to_datetime(start)
+        end_dt = to_datetime(end)
+        if end_dt is None:
+            today_d = to_date(end) or date.today()
+            end_dt = datetime(today_d.year, today_d.month, today_d.day, 23, 0)
+        else:
+            if isinstance(end, date) and not isinstance(end, datetime):
+                end_dt = datetime(end.year, end.month, end.day, 23, 0)
+            else:
+                end_dt = end_dt.replace(minute=0, second=0, microsecond=0)
+
+        if start_dt is None:
+            if series:
+                start_dt = to_datetime(series[0][0])
+            if start_dt is None:
+                return ()
+        else:
+            start_dt = start_dt.replace(minute=0, second=0, microsecond=0)
+
+        if series:
+            last_dt = to_datetime(series[-1][0])
+            if last_dt and last_dt > end_dt:
+                end_dt = last_dt.replace(minute=0, second=0, microsecond=0)
+
+        total_hours = int((end_dt - start_dt).total_seconds() // 3600) + 1
+        if total_hours <= 0 or total_hours > 50000:
+            return tuple(series)
+
+        result = []
+        cur = start_dt
+        for _ in range(total_hours):
+            key = cur.strftime("%Y-%m-%d %H")
+            result.append((key, data_map.get(key, DownloadStats())))
+            cur += timedelta(hours=1)
+        return tuple(result)
+
+    else:  # "5min"
+        start_dt = to_datetime(start)
+        end_dt = to_datetime(end)
+        if end_dt is None:
+            today_d = to_date(end) or date.today()
+            end_dt = datetime(today_d.year, today_d.month, today_d.day, 23, 55)
+        else:
+            if isinstance(end, date) and not isinstance(end, datetime):
+                end_dt = datetime(end.year, end.month, end.day, 23, 55)
+            else:
+                m = (end_dt.minute // 5) * 5
+                end_dt = end_dt.replace(minute=m, second=0, microsecond=0)
+
+        if start_dt is None:
+            if series:
+                start_dt = to_datetime(series[0][0])
+            if start_dt is None:
+                return ()
+        else:
+            m = (start_dt.minute // 5) * 5
+            start_dt = start_dt.replace(minute=m, second=0, microsecond=0)
+
+        if series:
+            last_dt = to_datetime(series[-1][0])
+            if last_dt:
+                lm = (last_dt.minute // 5) * 5
+                last_dt = last_dt.replace(minute=lm, second=0, microsecond=0)
+                if last_dt > end_dt:
+                    end_dt = last_dt
+
+        total_slots = int((end_dt - start_dt).total_seconds() // 300) + 1
+        if total_slots <= 0 or total_slots > 50000:
+            return tuple(series)
+
+        result = []
+        cur = start_dt
+        for _ in range(total_slots):
+            key = cur.strftime("%Y-%m-%d %H:%M")
+            result.append((key, data_map.get(key, DownloadStats())))
+            cur += timedelta(minutes=5)
+        return tuple(result)
 
 
 def _json_default(obj: Any) -> Any:
@@ -1489,8 +1689,14 @@ CREATE TABLE IF NOT EXISTS segments (
     #: Hour expression, width 13 ('YYYY-MM-DD HH').
     _STATS_LOCAL_HOUR = "substr(datetime(added_at, 'localtime'), 1, 13)"
 
-    #: Minute expression, width 16 ('YYYY-MM-DD HH:MM').
-    _STATS_LOCAL_MINUTE = "substr(datetime(added_at, 'localtime'), 1, 16)"
+    #: 5-minute expression, width 16 ('YYYY-MM-DD HH:MM' with minutes quantized to multiples of 5).
+    _STATS_LOCAL_5MIN = (
+        "substr(datetime(added_at, 'localtime'), 1, 14) || "
+        "printf('%02d', (CAST(substr(datetime(added_at, 'localtime'), 15, 2) AS INTEGER) / 5) * 5)"
+    )
+
+    #: Minute expression, alias for backward compatibility.
+    _STATS_LOCAL_MINUTE = _STATS_LOCAL_5MIN
 
     #: Excludes rows that cannot be bucketed by date: blank, hand-edited garbage, and
     #: well-shaped but impossible dates like ``2026-13-45`` (which passes the GLOB shape
@@ -1550,8 +1756,9 @@ CREATE TABLE IF NOT EXISTS segments (
     def get_download_stats(
         self,
         today=None,
-        since: Optional[date] = None,
+        since: Optional[date | datetime | str] = None,
         bucket: str = "day",
+        fill_gaps: bool = False,
     ) -> StatsSnapshot:
         """Read every statistics bucket in one call.
 
@@ -1568,15 +1775,15 @@ CREATE TABLE IF NOT EXISTS segments (
         while still failing if the conversion is removed.
 
         *since* and *bucket* drive the chart series: the range to plot (None = all time)
-        and whether to group by minute, hour, day, or month. The summary buckets above are
-        fixed and unaffected - they are the headline numbers, and a chart range should not
-        silently redefine them.
+        and whether to group by 5-minute intervals, hour, day, or month. The summary buckets
+        above are fixed and unaffected - they are the headline numbers, and a chart range
+        should not silently redefine them.
         """
         if today is None:
             today = datetime.now().astimezone().date()
         elif isinstance(today, datetime):
             today = today.date()
-        if isinstance(since, datetime) and bucket not in ("hour", "minute"):
+        if isinstance(since, datetime) and bucket not in ("hour", "5min", "minute"):
             since = since.date()
 
         values = {}
@@ -1585,7 +1792,7 @@ CREATE TABLE IF NOT EXISTS segments (
             values[name] = self._stats_sum_for(cutoff)
         values["lifetime"] = self._stats_sum_for(None)
 
-        valid_buckets = ("minute", "hour", "day", "month")
+        valid_buckets = ("5min", "minute", "hour", "day", "month")
         bucket_val = bucket if bucket in valid_buckets else "day"
 
         return StatsSnapshot(
@@ -1594,22 +1801,26 @@ CREATE TABLE IF NOT EXISTS segments (
             month=values["month"],
             year=values["year"],
             lifetime=values["lifetime"],
-            series=self._stats_series(since, bucket_val),
+            series=self._stats_series(since, bucket_val, fill_gaps=fill_gaps, today=today),
             bucket=bucket_val,
             since=since.isoformat() if hasattr(since, "isoformat") else str(since or ""),
         )
 
     def _stats_series(
-        self, since: Optional[date | datetime | str], bucket: str
+        self,
+        since: Optional[date | datetime | str],
+        bucket: str,
+        fill_gaps: bool = False,
+        today: Optional[date | datetime] = None,
     ) -> tuple[tuple[str, DownloadStats], ...]:
-        """The chart series, grouped by local minute, hour, day, or month and clipped to *since*.
+        """The chart series, grouped by local 5min, hour, day, or month and clipped to *since*.
 
         Same ``_STATS_PARSABLE`` guard and same local conversion as the cut-off buckets.
         The group expression is repeated verbatim in the WHERE clause - SQLite will not let
         a WHERE reference a SELECT alias, so the two must be written out identically.
         """
-        if bucket == "minute":
-            width, day_expr = 16, self._STATS_LOCAL_MINUTE
+        if bucket in ("5min", "minute"):
+            width, day_expr = 16, self._STATS_LOCAL_5MIN
         elif bucket == "hour":
             width, day_expr = 13, self._STATS_LOCAL_HOUR
         elif bucket == "month":
@@ -1626,7 +1837,12 @@ CREATE TABLE IF NOT EXISTS segments (
             where += f" AND {day_expr} >= ?"
             if isinstance(since, datetime):
                 dt = since.astimezone() if since.tzinfo is not None else since
-                since_str = dt.strftime("%Y-%m-%d %H:%M:%S")[:width]
+                if bucket in ("5min", "minute"):
+                    m = (dt.minute // 5) * 5
+                    dt = dt.replace(minute=m, second=0, microsecond=0)
+                    since_str = dt.strftime("%Y-%m-%d %H:%M")
+                else:
+                    since_str = dt.strftime("%Y-%m-%d %H:%M:%S")[:width]
             elif isinstance(since, date):
                 if width == 7:
                     since_str = since.strftime("%Y-%m")
@@ -1651,7 +1867,10 @@ CREATE TABLE IF NOT EXISTS segments (
             "GROUP BY bucket ORDER BY bucket",
             params,
         ).fetchall()
-        return tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
+        raw_series = tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
+        if fill_gaps:
+            return fill_series_gaps(raw_series, bucket, start=since, end=today)
+        return raw_series
 
     def get_next_queue_order(self, queue_id: str = "") -> int:
         """Next priority value *within* a queue.

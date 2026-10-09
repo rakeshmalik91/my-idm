@@ -68,8 +68,8 @@ class StatsChartWidget(QWidget):
         self._update_tooltip()
 
     def _update_tooltip(self) -> None:
-        if self._bucket == "minute":
-            unit = "minute"
+        if self._bucket in ("5min", "minute"):
+            unit = "5 minutes"
         elif self._bucket == "hour":
             unit = "hour"
         elif self._bucket == "month":
@@ -84,7 +84,7 @@ class StatsChartWidget(QWidget):
 
     def set_days(self, days: Sequence[tuple[str, DownloadStats]], bucket: str = "day") -> None:
         self._days = tuple(days)
-        self._bucket = bucket if bucket in ("minute", "hour", "day", "month") else "day"
+        self._bucket = bucket if bucket in ("5min", "minute", "hour", "day", "month") else "day"
         self._update_tooltip()
         self.update()
 
@@ -159,6 +159,7 @@ class StatsChartWidget(QWidget):
         bar_width = max(1.0, slot * 0.68)
         # Sparse ticks: label roughly six dates regardless of the range.
         label_every = max(1, len(self._days) // 6)
+        same_day = len(self._days) > 0 and (self._days[0][0][:10] == self._days[-1][0][:10])
 
         downloaded_brush = QColor(Colors.ACCENT)
         uploaded_brush = QColor(Colors.GREEN)
@@ -184,23 +185,19 @@ class StatsChartWidget(QWidget):
                 if self._bucket == "month":
                     label = day
                 elif self._bucket == "hour":
-                    same_day = len(self._days) > 0 and all(
-                        d[:10] == self._days[0][0][:10] for d, _ in self._days
-                    )
                     hour_part = day[11:13] if len(day) >= 13 else day
                     date_part = day[5:10] if len(day) >= 10 else day
                     label = f"{hour_part}:00" if same_day else f"{date_part} {hour_part}h"
-                elif self._bucket == "minute":
-                    same_day = len(self._days) > 0 and all(
-                        d[:10] == self._days[0][0][:10] for d, _ in self._days
-                    )
+                elif self._bucket in ("5min", "minute"):
                     min_part = day[11:16] if len(day) >= 16 else day
                     date_part = day[5:10] if len(day) >= 10 else day
                     label = min_part if same_day else f"{date_part} {min_part}"
                 else:
                     label = day[5:] if len(day) >= 5 else day
+                tick_x = plot.left() + index * slot + slot / 2.0
+                label_w = 64.0
                 painter.drawText(
-                    QRectF(plot.left() + index * slot, plot.bottom() + 2, slot * 1.6, 16),
+                    QRectF(tick_x - label_w / 2.0, plot.bottom() + 2, label_w, 16),
                     Qt.AlignmentFlag.AlignCenter, label,
                 )
 
@@ -310,7 +307,7 @@ class StatisticsPopup(QDialog):
         ("All time", None),
     )
     BUCKETS = (
-        ("Per minute", "minute"),
+        ("Per 5 minutes", "5min"),
         ("Per hour", "hour"),
         ("Per day", "day"),
         ("Per month", "month"),
@@ -325,7 +322,13 @@ class StatisticsPopup(QDialog):
         self._snapshot: Optional[StatsSnapshot] = None
         self._timer: Optional[QTimer] = None
         self._range_index = range_index
-        self._bucket = bucket if bucket in dict(self.BUCKETS).values() else "day"
+        valid_buckets = dict(self.BUCKETS).values()
+        if bucket == "minute":
+            self._bucket = "5min"
+        elif bucket in valid_buckets:
+            self._bucket = bucket
+        else:
+            self._bucket = "day"
 
         self.setWindowTitle("📊  Statistics")
         self.setMinimumWidth(680)
@@ -447,7 +450,7 @@ class StatisticsPopup(QDialog):
         bucket = self.bucket_selection()
         try:
             snap = self._db.get_download_stats(
-                self._resolve_today(), since=since, bucket=bucket
+                self._resolve_today(), since=since, bucket=bucket, fill_gaps=True
             )
         except Exception:
             log.warning("Could not read download statistics", exc_info=True)

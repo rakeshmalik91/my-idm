@@ -146,7 +146,8 @@ GROUP BY bucket
 ORDER BY bucket;
 ```
 
-The two constants in `Database` — `_STATS_LOCAL_DAY` (width 10) and
+The four constants in `Database` — `_STATS_LOCAL_5MIN` (width 16),
+`_STATS_LOCAL_HOUR` (width 13), `_STATS_LOCAL_DAY` (width 10) and
 `_STATS_LOCAL_MONTH` (width 7) — are written out verbatim in both the SELECT list and the
 WHERE clause. SQLite will not let a `WHERE` reference a `SELECT` alias, so the expressions
 are duplicated by necessity; keep them identical or the filter and the group key diverge.
@@ -217,15 +218,16 @@ progress and speed delegates), so the charts follow suit:
 If the project later decides to standardise on matplotlib, that is a `requirements.txt`
 change and a deliberate one, not something to discover at runtime.
 
-### 4.2 Tier 1 — daily volume chart
+### 4.2 Tier 1 — volume chart
 
-Data comes from a `GROUP BY` on the **local** day (`_STATS_LOCAL_DAY`) or local month
-(`_STATS_LOCAL_MONTH`) — see §3 for why the stored UTC stamp has to be converted first. Two
-independent pickers drive it — **Range** (last 7 days / 30 days / 12 months / all time) and
-**Group by** (per day / per month) — because they are independent questions: “the last year”
-and “per month” have to be combinable, or the chart is useless at both extremes.
-`Database.get_download_stats(today, since=..., bucket=...)` takes both explicitly, and the
-fixed summary rows are deliberately unaffected, so a chart range cannot silently redefine
+Data comes from a `GROUP BY` on the **local** 5-minute interval (`_STATS_LOCAL_5MIN`), hour
+(`_STATS_LOCAL_HOUR`), day (`_STATS_LOCAL_DAY`), or month (`_STATS_LOCAL_MONTH`) — see §3
+for why the stored UTC stamp has to be converted first. Two independent pickers drive it —
+**Range** (Today / last 7 days / 30 days / 12 months / all time) and **Group by**
+(per 5 minutes / per hour / per day / per month) — because they are independent questions:
+“the last 7 days” and “per hour” have to be combinable, or the chart is useless at both extremes.
+`Database.get_download_stats(today, since=..., bucket=..., fill_gaps=True)` takes both explicitly,
+and the fixed summary rows are deliberately unaffected, so a chart range cannot silently redefine
 “this week”.
 
 ```
@@ -237,9 +239,11 @@ Downloads per day — last 30 days
          01  04  07  10  13  16  19  22  25  28
 ```
 
-Stacked bars: downloaded and uploaded share a day column, so a seeding session's upload
-shows against the day it happened. Bars for days with no activity are drawn at zero width
-rather than skipped — a compressed time axis lies about spacing.
+Stacked bars: downloaded and uploaded share a bucket column, so a seeding session's upload
+shows against the period it happened. Empty intervals with no activity are populated with
+zero values (`fill_series_gaps`) rather than skipped: dropping them compresses the time axis
+and makes sparse activity look identical across different granularities. Instead, intervals
+occupy their true proportional slots along the timeline.
 
 Detail worth pinning: `added_at` is when the download was *added*, so a large file added
 on the 1st and finished on the 5th appears entirely in the 1st's column. The chart is a
