@@ -2588,7 +2588,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.win._load_history()
 
         # Menu structure verification
-        self.assertEqual(self.win._act_segregated_view.text(), "On")
+        self.assertEqual(self.win._act_segregated_view.text(), "Enabled")
         menu_actions = self.win._menu_segregated_view.actions()
         self.assertIn(self.win._act_segregated_view, menu_actions)
         self.assertIn(self.win._act_seg_by_status, menu_actions)

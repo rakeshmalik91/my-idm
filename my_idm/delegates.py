@@ -400,7 +400,7 @@ def get_section_select_all_btn_rect(cell_rect: QRect, viewport_width: int = 0) -
 
 
 class SectionHeaderDelegate(QStyledItemDelegate):
-    """Renders section header rows in segregated view with a 'Select All' / 'Clear Selection' button at the right edge.
+    """Renders section header rows in grouped view with a 'Select All' / 'Clear Selection' button at the right edge.
 
     For ordinary download rows in column 0 (Col.QUEUE), it delegates to default painting
     to show the queue order/row number.
@@ -431,7 +431,10 @@ class SectionHeaderDelegate(QStyledItemDelegate):
 
         # 2. Text (arrow + section title + count)
         arrow = "▶" if entry.section_collapsed else "▼"
-        title_text = f"  {arrow}   {entry.section_title.upper()} ({entry.section_count})"
+        title_text = f"  {arrow}   {entry.section_title.upper()}"
+        active_count = getattr(entry, "section_active_count", 0)
+        seeding_count = getattr(entry, "section_seeding_count", 0)
+        total_count = getattr(entry, "section_count", 0)
 
         fg_color = index.data(Qt.ItemDataRole.ForegroundRole)
         painter.setPen(QColor(fg_color) if fg_color else QColor(Colors.ACCENT))
@@ -439,12 +442,82 @@ class SectionHeaderDelegate(QStyledItemDelegate):
         painter.setFont(hdr_font)
 
         text_rect = option.rect.adjusted(12, 0, -120, 0)
+        
+        # Draw title
         painter.drawText(
             text_rect,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
             title_text,
         )
-
+        
+        # Draw count parts with different colors
+        title_width = painter.fontMetrics().horizontalAdvance(title_text)
+        x_pos = 12 + title_width + 2
+        
+        # Active count in green
+        if active_count > 0:
+            active_text = f" {active_count} Active"
+            active_rect = option.rect.adjusted(x_pos, 0, -120, 0)
+            active_width = painter.fontMetrics().horizontalAdvance(active_text)
+            green_color = QColor(Colors.GREEN) if hasattr(Colors, 'GREEN') else QColor("#2ea043")
+            painter.setPen(green_color)
+            painter.drawText(
+                active_rect,
+                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                active_text,
+            )
+            x_pos += active_width
+        
+        # Seeding count in purple
+        if seeding_count > 0:
+            seeding_text = f" / {seeding_count} Seeding"
+            seeding_rect = option.rect.adjusted(x_pos, 0, -120, 0)
+            seeding_width = painter.fontMetrics().horizontalAdvance(seeding_text)
+            purple_color = QColor(Colors.PURPLE) if hasattr(Colors, 'PURPLE') else QColor("#a371f7")
+            painter.setPen(purple_color)
+            painter.drawText(
+                seeding_rect,
+                int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                seeding_text,
+            )
+            x_pos += seeding_width
+        
+# Total count in muted color
+        total_text = f" / {total_count} Total" if (active_count > 0 or seeding_count > 0) else f" {total_count} Total"
+        total_rect = option.rect.adjusted(x_pos, 0, -120, 0)
+        count_color = QColor(Colors.TEXT_MUTED) if hasattr(Colors, 'TEXT_MUTED') else QColor("#8fa0b5")
+        painter.setPen(count_color)
+        painter.drawText(
+            total_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            total_text,
+        )
+        
+        # 2b. Draw consolidated progress bar for active downloads
+        active_progress = getattr(entry, "section_active_progress", 0.0)
+        if active_count > 0 and active_progress > 0:
+            # Progress bar positioned after the count text
+            total_width = painter.fontMetrics().horizontalAdvance(total_text)
+            progress_x = x_pos + total_width + 10
+            progress_rect = option.rect.adjusted(progress_x, 0, -120, 0)
+            progress_rect.setWidth(min(150, progress_rect.width()))
+            progress_rect.setHeight(8)
+            progress_rect.moveTop(option.rect.center().y() - 4)
+            
+            # Background
+            painter.setBrush(QColor("#21262d"))
+            painter.setPen(QPen(QColor("#30363d"), 1))
+            painter.drawRoundedRect(progress_rect, 2, 2)
+            
+            # Progress fill
+            fill_width = int(progress_rect.width() * active_progress / 100.0)
+            if fill_width > 0:
+                fill_rect = progress_rect.adjusted(1, 1, 1 - (progress_rect.width() - fill_width), -1)
+                # Use green for active progress
+                painter.setBrush(QColor(Colors.GREEN) if hasattr(Colors, 'GREEN') else QColor("#2ea043"))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRoundedRect(fill_rect, 2, 2)
+        
         # 3. 'Select All' / 'Clear Selection' button at the right edge
         if getattr(entry, "section_count", 0) > 0:
             vw = option.widget.width() if option.widget else 0

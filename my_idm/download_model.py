@@ -26,7 +26,7 @@ from my_idm.database import (
     DownloadEntry,
 )
 from my_idm.styles import Colors
-from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, to_int
+from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, split_extension, to_int
 from my_idm import fonts
 
 _ICON_CACHE: dict[str, Any] = {}
@@ -283,6 +283,11 @@ SECTION_TYPE_DOCUMENTS = "type_documents"
 SECTION_TYPE_PHOTO = "type_photo"
 SECTION_TYPE_GENERAL = "type_general"
 
+# -- Name-based segregation (series/grouping by show name) -----------------
+# Groups downloads by show/series name using normalized name matching with
+# edit distance threshold.
+SECTION_NAME_PREFIX = "name_"
+
 #: Extension -> category. Lower-case, no leading dot. Ordered most-specific first: a
 #: compound extension like ``tar.gz`` is matched by its **last** component below, so only
 #: the tail needs listing here.
@@ -338,7 +343,7 @@ TYPE_SECTION_DEFS = [
 ]
 
 #: The segregated modes the View menu offers, in menu order.
-SEGREGATED_MODES = ("status", "date", "type")
+SEGREGATED_MODES = ("status", "date", "type", "name")
 DEFAULT_SEGREGATED_MODE = "status"
 
 #: Menu / UI labels for the modes, kept beside the modes so the View menu and the
@@ -347,24 +352,8 @@ SEGREGATED_MODE_LABELS = {
     "status": "Status (Active / Seeding / Inactive)",
     "date": "Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)",
     "type": "File Type (Video / Audio / Archives / Documents / Photos / General)",
+    "name": "Name (Smart Series / Show Grouping)",
 }
-
-
-def split_extension(name: str) -> tuple[str, str]:
-    """Split *name* into (stem, extension-with-dot), lower-cased and dot-prefixed.
-
-    Returns ``("", "")`` for a blank name. Mirrors ``utils.split_extension`` but is kept
-    local so ``download_model`` stays importable without ``utils`` (and therefore without
-    Qt-free test collection pulling in the whole app).
-    """
-    if not name:
-        return "", ""
-    base = name.replace("\\", "/").rstrip("/").split("/")[-1]
-    idx = base.rfind(".")
-    # A leading dot is a hidden file, not an extension (".gitignore" has none).
-    if idx <= 0 or idx == len(base) - 1:
-        return base, ""
-    return base[:idx], base[idx:].lower()
 
 
 def get_entry_type_category(entry: DownloadEntry) -> str:
@@ -456,6 +445,354 @@ def get_entry_date_category(entry: DownloadEntry, now_dt: Optional[datetime] = N
         return SECTION_DATE_OLDER
 
 
+def _normalize_name_for_grouping(name: str) -> str:
+    """Normalize a name for series/grouping comparison.
+    
+    Strips non-alphanumeric characters (except spaces), lowercases, and collapses whitespace.
+    """
+    if not name:
+        return ""
+    # Keep alphanumeric and spaces, replace other chars with space
+    normalized = re.sub(r'[^a-zA-Z0-9\s]+', ' ', name)
+    # Collapse multiple spaces
+    normalized = re.sub(r'\s+', ' ', normalized)
+    return normalized.strip().lower()
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        s1, s2 = s2, s1
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def _names_are_similar(name1: str, name2: str, threshold: float = 0.1) -> bool:
+    """Check if two normalized names are similar based on edit distance.
+    
+    Returns True if edit distance is at most threshold * max(len(name1), len(name2)).
+    """
+    if not name1 or not name2:
+        return False
+    if name1 == name2:
+        return True
+    max_len = max(len(name1), len(name2))
+    if max_len == 0:
+        return True
+    distance = _levenshtein_distance(name1, name2)
+    return distance <= max_len * threshold
+
+
+_COMPILED_STRIP_REGEX: Optional[re.Pattern] = None
+
+
+def _get_strip_keywords_pattern() -> re.Pattern:
+    """Return the compiled regex for stripping keywords loaded from assets/strip_keywords.txt."""
+    global _COMPILED_STRIP_REGEX
+    if _COMPILED_STRIP_REGEX is not None:
+        return _COMPILED_STRIP_REGEX
+
+    keywords = []
+    assets_file = Path(__file__).resolve().parent.parent / "assets" / "strip_keywords.txt"
+    if assets_file.exists():
+        try:
+            with open(assets_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        keywords.append(line)
+        except Exception:
+            pass
+
+    if not keywords:
+        keywords = [
+            "1080p", "720p", "480p", "4k", "2160p", "hd", "sd", "uhd", "hdr",
+            "x264", "x265", "h264", "h265", "hevc", "av1", "xvid", "divx",
+            "web-dl", "webdl", "webrip", "bluray", "bdrip", "brrip", "dvdrip", "hdrip", "tvrip", "hdtv",
+            "animepahe", "repack", "proper", "remastered", "uncut",
+        ]
+
+    # Sort keywords by descending length so multi-word or longer keywords match first
+    keywords = sorted(set(keywords), key=len, reverse=True)
+    escaped = [re.escape(k) for k in keywords]
+    pattern_str = r'\b(?:' + '|'.join(escaped) + r')\b'
+    _COMPILED_STRIP_REGEX = re.compile(pattern_str, re.IGNORECASE)
+    return _COMPILED_STRIP_REGEX
+
+
+def _extract_show_name(filename: str) -> str:
+    """Extract a potential show/series name from a filename.
+    
+    Attempts to find the show name by removing common episode/season patterns,
+    quality tags, release group tags, etc. loaded from assets/strip_keywords.txt.
+    Preserves common season identifiers like "Season 4" that are shared across episodes.
+    """
+    if not filename:
+        return ""
+    
+    # Remove file extension
+    stem, _ = split_extension(filename)
+    
+    # Common structural patterns to remove
+    structural_patterns = [
+        # Season/episode patterns - remove specific episode markers but keep season context
+        r'\b[Ss]\d{1,2}[Ee]\d{1,2}\b',
+        r'\b[Ee]pisode\s*\d+\b',
+        r'\b\d{1,2}x\d{1,2}\b',
+        r'(?i)[-.]\s*(ep|episode)\s*\d+\s*$',
+        r'(?i)[-.]\s*e\d+\s*$',
+        r'\(\d{4}\)',
+        r'\[[^\]]*\]',
+        r'\([^)]*\)',
+    ]
+    
+    result = stem
+    for pattern in structural_patterns:
+        result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+    
+    # Strip keywords from assets file
+    result = _get_strip_keywords_pattern().sub('', result)
+    
+    # Clean up trailing release group or tags (e.g. - FLUX or [group])
+    result = re.sub(r'[-\[\s]([a-zA-Z0-9]{2,})\s*$', '', result)
+    
+    # Clean up separators
+    result = re.sub(r'[._\-]+', ' ', result)
+    result = re.sub(r'\s+', ' ', result)
+    
+    return result.strip()
+
+
+def _group_entries_by_name(entries: list[DownloadEntry]) -> dict[str, list[DownloadEntry]]:
+    """Group entries by show/series name using normalized name matching.
+    
+    Groups entries that:
+    1. Start with the same normalized prefix and have repetitive rest, OR
+    2. Have at most 50% edit distance between normalized names
+    
+    Single-item groups are merged into "Uncategorized".
+    
+    Returns a dict mapping group name -> list of entries.
+    """
+    if not entries:
+        return {}
+    
+    # First, extract and normalize names for all entries
+    entry_data = []
+    for entry in entries:
+        # Check metadata for show_title first
+        show_title = None
+        try:
+            meta = getattr(entry, 'metadata', None)
+            if meta:
+                show_title = (meta.get('show_title') or 
+                             meta.get('series_title') or 
+                             meta.get('series_name') or 
+                             meta.get('anime_title') or 
+                             meta.get('title') or 
+                             meta.get('name'))
+        except Exception:
+            pass
+        
+        if show_title:
+            # Use show_title from metadata as the primary grouping key
+            # Remove strip keywords from show_title for proper grouping
+            show_title_clean = _get_strip_keywords_pattern().sub('', show_title)
+            show_title_clean = re.sub(r'[._\-]+', ' ', show_title_clean)
+            show_title_clean = re.sub(r'\s+', ' ', show_title_clean).strip()
+            display_name = show_title_clean  # Preserve original case for display
+            show_name = show_title_clean
+            normalized = _normalize_name_for_grouping(show_name)
+        else:
+            # Use filename as the primary name source
+            filename = getattr(entry, 'filename', '') or getattr(entry, 'name', '') or ''
+            show_name = _extract_show_name(filename)
+            display_name = show_name  # Use extracted name for display
+            normalized = _normalize_name_for_grouping(show_name) if show_name else _normalize_name_for_grouping(filename)
+        entry_data.append((entry, normalized, display_name, show_name or (getattr(entry, 'filename', '') or getattr(entry, 'name', '') or '')))
+    
+    # Group similar names
+    groups: dict[str, list[DownloadEntry]] = {}
+    norm_to_key: dict[str, str] = {}
+    used = set()
+    
+    for i, (entry_i, norm_i, display_i, orig_i) in enumerate(entry_data):
+        if i in used:
+            continue
+        
+        # Find all similar entries
+        group_entries = [entry_i]
+        group_names = [display_i]  # Use display names for grouping logic
+        used.add(i)
+        
+        for j, (entry_j, norm_j, display_j, orig_j) in enumerate(entry_data):
+            if j in used or i == j:
+                continue
+            
+            # Check if names are similar
+            if _names_are_similar(norm_i, norm_j):
+                group_entries.append(entry_j)
+                group_names.append(display_j if display_j else orig_j)
+                used.add(j)
+        
+        # Determine group name - use the most common prefix or shortest name
+        if len(group_entries) == 1:
+            group_key = display_i if display_i else (orig_i if orig_i else norm_i)
+        else:
+            # Find common prefix among group names
+            group_key = _find_common_prefix([n for n in group_names if n])
+            if not group_key:
+                group_key = min(group_names, key=len)
+        
+        # Clean up group key: remove strip keywords (PSA, 720p, etc.) for display
+        group_key = _get_strip_keywords_pattern().sub('', group_key)
+        group_key = re.sub(r'[._\-]+', ' ', group_key)
+        group_key = re.sub(r'\s+', ' ', group_key).strip()
+        
+        group_key = group_key or f"Group {len(groups) + 1}"
+        norm_key = _normalize_name_for_grouping(group_key)
+        if norm_key in norm_to_key:
+            existing_key = norm_to_key[norm_key]
+            groups[existing_key].extend(group_entries)
+            if sum(1 for c in group_key if c.isupper()) > sum(1 for c in existing_key if c.isupper()):
+                groups[group_key] = groups.pop(existing_key)
+                norm_to_key[norm_key] = group_key
+        else:
+            norm_to_key[norm_key] = group_key
+            groups[group_key] = group_entries
+    
+    # Handle any remaining ungrouped entries
+    for i, (entry_i, norm_i, display_i, orig_i) in enumerate(entry_data):
+        if i not in used:
+            group_key = display_i if display_i else (orig_i if orig_i else norm_i)
+            if not group_key:
+                group_key = f"Ungrouped {len(groups) + 1}"
+            norm_key = _normalize_name_for_grouping(group_key)
+            if norm_key in norm_to_key:
+                existing_key = norm_to_key[norm_key]
+                groups[existing_key].append(entry_i)
+            else:
+                norm_to_key[norm_key] = group_key
+                groups[group_key] = [entry_i]
+    
+    # Merge single-item groups into "Uncategorized" - but keep entries with show_title as their own groups
+    multi_item_groups = {k: v for k, v in groups.items() if len(v) > 1}
+    multi_norm_to_key = {_normalize_name_for_grouping(k): k for k in multi_item_groups}
+    single_items = []
+    
+    for k, v in groups.items():
+        if len(v) == 1:
+            entry = v[0]
+            # Check if this entry has a show/series title in metadata.
+            # Only use show_title, series_title, series_name, and anime_title — NOT the generic
+            # 'title' or 'name' keys, which any download might have and would cause
+            # false positives that keep random single downloads out of Uncategorized.
+            has_show_title = False
+            try:
+                meta = getattr(entry, 'metadata', None)
+                if meta:
+                    has_show_title = bool(meta.get('show_title') or meta.get('series_title') or meta.get('series_name') or meta.get('anime_title'))
+            except Exception:
+                pass
+            
+            norm_k = _normalize_name_for_grouping(k)
+            if norm_k in multi_norm_to_key:
+                target_key = multi_norm_to_key[norm_k]
+                multi_item_groups[target_key].extend(v)
+            elif has_show_title:
+                multi_item_groups[k] = v
+                multi_norm_to_key[norm_k] = k
+            else:
+                single_items.extend(v)
+    
+    if single_items:
+        multi_item_groups["Uncategorized"] = single_items
+
+    # Final pass: merge any groups whose normalized names match
+    final_groups: dict[str, list[DownloadEntry]] = {}
+    final_norm_to_key: dict[str, str] = {}
+    for k, v in multi_item_groups.items():
+        if k == "Uncategorized":
+            if "Uncategorized" in final_groups:
+                final_groups["Uncategorized"].extend(v)
+            else:
+                final_groups["Uncategorized"] = list(v)
+            continue
+        norm_k = _normalize_name_for_grouping(k)
+        if norm_k in final_norm_to_key:
+            target_k = final_norm_to_key[norm_k]
+            final_groups[target_k].extend(v)
+            if sum(1 for c in k if c.isupper()) > sum(1 for c in target_k if c.isupper()):
+                final_groups[k] = final_groups.pop(target_k)
+                final_norm_to_key[norm_k] = k
+        else:
+            final_norm_to_key[norm_k] = k
+            final_groups[k] = list(v)
+    
+    return final_groups
+
+
+def _find_common_prefix(names: list[str]) -> str:
+    """Find the longest common prefix among a list of names.
+    
+    Returns a prefix that ends at a word boundary (space, dash, underscore, dot)
+    to avoid returning incomplete words like "Season 4 - e0".
+    """
+    if not names:
+        return ""
+    if len(names) == 1:
+        return names[0]
+    
+    # Sort to bring most different names to ends
+    names = sorted(names, key=len)
+    shortest = names[0]
+    
+    for i in range(len(shortest), 0, -1):
+        prefix = shortest[:i]
+        if all(n.startswith(prefix) for n in names):
+            # Clean up the prefix - remove trailing separators
+            prefix = re.sub(r'[\s\-\._]+$', '', prefix)
+            if len(prefix) < 3:  # Minimum meaningful prefix length
+                continue
+            # Check if the prefix ends in the middle of a word by looking at the next
+            # character in the SHORTEST string - if it's alphanumeric, we cut off a word
+            cut_mid_word = False
+            if len(shortest) > len(prefix):
+                next_char = shortest[len(prefix)]
+                if next_char.isalnum():
+                    cut_mid_word = True
+            if cut_mid_word:
+                # Find last word boundary in prefix
+                last_boundary = max(
+                    prefix.rfind(' '),
+                    prefix.rfind('-'),
+                    prefix.rfind('_'),
+                    prefix.rfind('.')
+                )
+                if last_boundary >= 3:
+                    prefix = prefix[:last_boundary + 1].rstrip(' -_.')
+                    if len(prefix) >= 3:
+                        return prefix
+            else:
+                # Prefix ends at a word boundary naturally
+                return prefix
+    return ""
+
+
+import re
+
+
 class DownloadTableModel(QAbstractTableModel):
     """Table model backed by a list of DownloadEntry objects with filtering support."""
 
@@ -477,6 +814,7 @@ class DownloadTableModel(QAbstractTableModel):
         self._segregated_view: bool = False
         self._segregated_mode: str = "status"
         self._collapsed_sections: set[str] = set()
+        self._name_sections_auto_collapsed: bool = False
         # Local calendar date the last "date" segregation was built against. The sections are
         # relative to today (Today / Yesterday / Last 7 Days), so the grouping silently goes
         # stale when the local day rolls over under a running app. None means "never built",
@@ -499,6 +837,21 @@ class DownloadTableModel(QAbstractTableModel):
         self._queue_filter: Optional[Set[str]] = None
         # Download IDs pending paced batch deletion. Rows in this set are dimmed and disabled.
         self._deleting_ids: set[str] = set()
+        # Cached groups for segregated view: list of (sec_id, title, group_entries, hdr_id)
+        self._cached_segregated_groups: Optional[list[tuple[str, str, list[DownloadEntry], str]]] = None
+        self._cached_name_groups: Optional[dict[str, list[DownloadEntry]]] = None
+        # Reverse lookup: entry.id -> section_id for name mode. Built from the actual
+        # grouping result so _entry_section_id does not need to recompute independently
+        # (which could mismatch due to edit-distance grouping).
+        self._name_section_map: dict[str, str] = {}
+        # Explicitly expanded sections in modes that are collapsed by default (such as "name" mode)
+        self._expanded_sections: set[str] = set()
+
+    def _invalidate_grouping_cache(self):
+        """Invalidate the cached segregated groups so they are recomputed on next state change."""
+        self._cached_segregated_groups = None
+        self._cached_name_groups = None
+        self._name_section_map = {}
 
     @property
     def tor_config(self) -> Optional[TorConfig]:
@@ -645,6 +998,7 @@ class DownloadTableModel(QAbstractTableModel):
         return True
 
     def _reapply_filter(self, now_dt: Optional[datetime] = None):
+        self._invalidate_grouping_cache()
         self.beginResetModel()
         self._apply_sort(now_dt)
         self._rebuild_index()
@@ -661,6 +1015,9 @@ class DownloadTableModel(QAbstractTableModel):
         if self._segregated_view == enabled and mode is None:
             return
         self._segregated_view = enabled
+        # Reset auto-collapse flag when segregation is enabled
+        if enabled:
+            self._name_sections_auto_collapsed = False
         self._reapply_filter()
 
     def is_segregated_view(self) -> bool:
@@ -671,6 +1028,8 @@ class DownloadTableModel(QAbstractTableModel):
             mode = DEFAULT_SEGREGATED_MODE
         if self._segregated_mode != mode:
             self._segregated_mode = mode
+            # Reset auto-collapse flag when mode changes
+            self._name_sections_auto_collapsed = False
             if self._segregated_view:
                 self._reapply_filter()
 
@@ -709,12 +1068,84 @@ class DownloadTableModel(QAbstractTableModel):
         self._reapply_filter(now_dt)
         return True
 
+    def _build_entries_from_cached_groups(self):
+        """Build self._entries from self._cached_segregated_groups without recalculating grouping."""
+        if self._cached_segregated_groups is None:
+            return
+
+        entries_by_id = {e.id: e for e in self._all_entries}
+
+        entries: list[DownloadEntry] = []
+        for sec_id, title, group_entries, hdr_id in self._cached_segregated_groups:
+            # Sync group_entries with canonical entries in _all_entries so in-place status/progress
+            # and fresh entry updates are reflected accurately when expanding/collapsing.
+            for idx, e in enumerate(group_entries):
+                canonical = entries_by_id.get(e.id)
+                if canonical is not None:
+                    group_entries[idx] = canonical
+
+            is_col = self.is_section_collapsed(sec_id)
+
+            active_count = sum(1 for e in group_entries if e.status in ACTIVE_QUEUE_STATUSES)
+            seeding_count = sum(1 for e in group_entries if e.status == "seeding")
+            active_entries = [e for e in group_entries if e.status in ACTIVE_QUEUE_STATUSES]
+            active_progress = 0.0
+            if active_entries:
+                total_size = sum(e.total_size for e in active_entries if e.total_size > 0)
+                downloaded_size = sum(e.downloaded_size for e in active_entries if e.downloaded_size > 0)
+                if total_size > 0:
+                    active_progress = min(100.0, (downloaded_size / total_size) * 100.0)
+
+            hdr = DownloadEntry(
+                id=hdr_id,
+                is_section_header=True,
+                status="section_header",
+                section_id=sec_id,
+                section_title=title,
+                section_count=len(group_entries),
+                section_active_count=active_count,
+                section_seeding_count=seeding_count,
+                section_active_progress=active_progress,
+                section_collapsed=is_col,
+            )
+            entries.append(hdr)
+            if not is_col:
+                entries.extend(group_entries)
+
+        self._entries = entries
+
     def set_section_collapsed(self, section_id: str, collapsed: bool):
         if collapsed:
             self._collapsed_sections.add(section_id)
         else:
             self._collapsed_sections.discard(section_id)
-        self._reapply_filter()
+            # Prevent auto-collapse from re-adding this section
+            if section_id.startswith(SECTION_NAME_PREFIX):
+                self._name_sections_auto_collapsed = True
+
+        if self._cached_segregated_groups is not None:
+            # Fast path: rebuild the visible entry list from the cached groups without
+            # recomputing grouping. The group entries are the same Python objects as in
+            # _all_entries, so in-place status/progress updates are already reflected.
+            self.beginResetModel()
+            self._build_entries_from_cached_groups()
+            self._rebuild_index()
+            self.endResetModel()
+        else:
+            # Cache is None (should not happen in normal segregated view, but can if
+            # entries were added/removed since last rebuild). Rebuild the cache first,
+            # then use the fast path to avoid a full regrouping which can reorder
+            # entries within groups (active vs inactive split).
+            if self._segregated_view:
+                self._cached_segregated_groups = None
+                self._cached_name_groups = None
+                self._apply_sort()
+                self.beginResetModel()
+                self._build_entries_from_cached_groups()
+                self._rebuild_index()
+                self.endResetModel()
+            else:
+                self._reapply_filter()
 
     def is_section_collapsed(self, section_id: str) -> bool:
         return section_id in self._collapsed_sections
@@ -727,17 +1158,46 @@ class DownloadTableModel(QAbstractTableModel):
     def get_section_header_row_indices(self) -> list[int]:
         return [i for i, e in enumerate(self._entries) if getattr(e, "is_section_header", False)]
 
+    def collapse_all_sections(self):
+        """Collapse all sections in the current segregated view."""
+        if not self._segregated_view:
+            return
+        if self._cached_segregated_groups:
+            for sec_id, _, _, _ in self._cached_segregated_groups:
+                self._collapsed_sections.add(sec_id)
+        for e in self._entries:
+            if getattr(e, "is_section_header", False):
+                self._collapsed_sections.add(e.section_id)
+
+        if self._cached_segregated_groups is not None:
+            self.beginResetModel()
+            self._build_entries_from_cached_groups()
+            self._rebuild_index()
+            self.endResetModel()
+        else:
+            self._reapply_filter()
+
+    def expand_all_sections(self):
+        """Expand all sections in the current segregated view."""
+        if not self._segregated_view:
+            return
+        self._collapsed_sections.clear()
+
+        if self._cached_segregated_groups is not None:
+            self.beginResetModel()
+            self._build_entries_from_cached_groups()
+            self._rebuild_index()
+            self.endResetModel()
+        else:
+            self._reapply_filter()
+
     def toggle_section_collapsed(self, row: int) -> Optional[tuple[str, bool]]:
         if 0 <= row < len(self._entries):
             e = self._entries[row]
             if getattr(e, "is_section_header", False):
                 sec_id = e.section_id
-                now_collapsed = sec_id not in self._collapsed_sections
-                if now_collapsed:
-                    self._collapsed_sections.add(sec_id)
-                else:
-                    self._collapsed_sections.discard(sec_id)
-                self._reapply_filter()
+                now_collapsed = not self.is_section_collapsed(sec_id)
+                self.set_section_collapsed(sec_id, now_collapsed)
                 return (sec_id, now_collapsed)
         return None
 
@@ -984,6 +1444,7 @@ class DownloadTableModel(QAbstractTableModel):
     # -- data population -----------------------------------------------------
 
     def load_entries(self, entries: list[DownloadEntry]):
+        self._invalidate_grouping_cache()
         self.beginResetModel()
         self._deleting_ids.clear()
         self._all_entries = list(entries)
@@ -1094,6 +1555,7 @@ class DownloadTableModel(QAbstractTableModel):
             order = Qt.SortOrder.DescendingOrder if column == Col.ADDED else Qt.SortOrder.AscendingOrder
         self._sort_column = column
         self._sort_order = order
+        self._cached_segregated_groups = None
         if not self._entries:
             return
 
@@ -1131,54 +1593,88 @@ class DownloadTableModel(QAbstractTableModel):
             self._entries = filtered
             return
 
-        buckets: dict[str, list[DownloadEntry]]
-        if self._segregated_mode == "date":
-            # Segregated view: group by Today, Yesterday, Last 7 Days, Last 30 Days, Older.
-            # Buckets and section ids both come from DATE_SECTION_DEFS so the header rows and
-            # the classifier cannot drift apart; the literals used to be spelled twice.
-            buckets = {
-                sec_id: [] for sec_id, _t, _s in DATE_SECTION_DEFS
-            }
-
-            if now_dt is None:
-                now_dt = datetime.now().astimezone()
-            # Remember the day this snapshot was built against so refresh_date_grouping() can
-            # tell a stale grouping from a current one without diffing the sections.
-            self._segregation_date = now_dt.date()
-            for e in filtered:
-                # get_entry_date_category only ever returns the five ids above (the old
-                # "date_this_week"/"date_this_month" spellings are aliased onto the canonical
-                # ones at module level), but an unknown value must not silently drop a row.
-                buckets.setdefault(
-                    get_entry_date_category(e, now_dt), buckets[SECTION_DATE_OLDER]
-                ).append(e)
-
-            groups = [
-                (sec_id, title, buckets[sec_id], hdr_id)
-                for sec_id, title, hdr_id in DATE_SECTION_DEFS
-            ]
-        else:
-            # Segregated view: group by Active, Seeding, Inactive, or by file type.
-            if self._segregated_mode == "type":
+        if self._cached_segregated_groups is None:
+            buckets: dict[str, list[DownloadEntry]]
+            if self._segregated_mode == "date":
+                # Grouped view: group by Today, Yesterday, Last 7 Days, Last 30 Days, Older.
+                # Buckets and section ids both come from DATE_SECTION_DEFS so the header rows and
+                # the classifier cannot drift apart; the literals used to be spelled twice.
                 buckets = {
-                    cat: [] for cat, _t, _s in TYPE_SECTION_DEFS
+                    sec_id: [] for sec_id, _t, _s in DATE_SECTION_DEFS
                 }
+
+                if now_dt is None:
+                    now_dt = datetime.now().astimezone()
+                # Remember the day this snapshot was built against so refresh_date_grouping() can
+                # tell a stale grouping from a current one without diffing the sections.
+                self._segregation_date = now_dt.date()
                 for e in filtered:
-                    buckets[get_entry_type_category(e)].append(e)
+                    # get_entry_date_category only ever returns the five ids above (the old
+                    # "date_this_week"/"date_this_month" spellings are aliased onto the canonical
+                    # ones at module level), but an unknown value must not silently drop a row.
+                    buckets.setdefault(
+                        get_entry_date_category(e, now_dt), buckets[SECTION_DATE_OLDER]
+                    ).append(e)
+
                 groups = [
-                    (cat, title, buckets[cat], sentinel)
-                    for cat, title, sentinel in TYPE_SECTION_DEFS
+                    (sec_id, title, buckets[sec_id], hdr_id)
+                    for sec_id, title, hdr_id in DATE_SECTION_DEFS
                 ]
             else:
-                active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
-                seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
-                inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
+                # Grouped view: group by Active, Seeding, Inactive, or by file type, or by name.
+                if self._segregated_mode == "type":
+                    buckets = {
+                        cat: [] for cat, _t, _s in TYPE_SECTION_DEFS
+                    }
+                    for e in filtered:
+                        buckets[get_entry_type_category(e)].append(e)
+                    groups = [
+                        (cat, title, buckets[cat], sentinel)
+                        for cat, title, sentinel in TYPE_SECTION_DEFS
+                    ]
+                elif self._segregated_mode == "name":
+                    # Group by show/series name using normalized name matching
+                    if self._cached_name_groups is None:
+                        self._cached_name_groups = _group_entries_by_name(filtered)
+                        # Build the reverse lookup: entry.id -> section_id so that
+                        # _entry_section_id can return the *actual* group assignment
+                        # rather than recomputing independently (which can mismatch
+                        # due to edit-distance grouping).
+                        self._name_section_map = {}
+                        for key, entries_in_group in self._cached_name_groups.items():
+                            sec_id = f"{SECTION_NAME_PREFIX}{key}"
+                            for e in entries_in_group:
+                                self._name_section_map[e.id] = sec_id
+                    else:
+                        entries_by_id = {e.id: e for e in filtered}
+                        for key, grp_entries in self._cached_name_groups.items():
+                            for idx, e in enumerate(grp_entries):
+                                if e.id in entries_by_id:
+                                    grp_entries[idx] = entries_by_id[e.id]
+                    # Sort groups alphabetically (including Uncategorized)
+                    sorted_keys = sorted(self._cached_name_groups.keys(), key=str.lower)
+                    groups = [
+                        (f"{SECTION_NAME_PREFIX}{key}", key, list(self._cached_name_groups[key]), f"__section_name_{key}__")
+                        for key in sorted_keys
+                    ]
+                    # Collapse name-based sections by default (only on first creation with entries, not on rebuild)
+                    if not self._name_sections_auto_collapsed and groups:
+                        for sec_id, _, _, _ in groups:
+                            if sec_id not in self._collapsed_sections:
+                                self._collapsed_sections.add(sec_id)
+                        self._name_sections_auto_collapsed = True
+                else:
+                    active_entries = [e for e in filtered if e.status in ACTIVE_SECTION_STATUSES]
+                    seeding_entries = [e for e in filtered if e.status in SEEDING_SECTION_STATUSES]
+                    inactive_entries = [e for e in filtered if e.status in INACTIVE_SECTION_STATUSES]
 
-                groups = [
-                    (SECTION_ACTIVE, "Active", active_entries, "__section_active__"),
-                    (SECTION_SEEDING, "Seeding", seeding_entries, "__section_seeding__"),
-                    (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
-                ]
+                    groups = [
+                        (SECTION_ACTIVE, "Active", active_entries, "__section_active__"),
+                        (SECTION_SEEDING, "Seeding", seeding_entries, "__section_seeding__"),
+                        (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
+                    ]
+        else:
+            groups = self._cached_segregated_groups
 
         if self._sort_column in (Col.ADDED, Col.QUEUE) or self._sort_column is None:
             for sec_id, _, group_entries, _ in groups:
@@ -1207,22 +1703,29 @@ class DownloadTableModel(QAbstractTableModel):
                     reverse=reverse,
                 )
 
-        entries: list[DownloadEntry] = []
-        for sec_id, title, group_entries, hdr_id in groups:
-            hdr = DownloadEntry(
-                id=hdr_id,
-                is_section_header=True,
-                status="section_header",
-                section_id=sec_id,
-                section_title=title,
-                section_count=len(group_entries),
-                section_collapsed=(sec_id in self._collapsed_sections),
-            )
-            entries.append(hdr)
-            if sec_id not in self._collapsed_sections:
-                entries.extend(group_entries)
+        if self._segregated_mode == "name":
+            def _group_sort_key(grp: tuple[str, str, list[DownloadEntry], str]) -> Any:
+                _sec_id, title, group_entries, _hdr_id = grp
+                if not group_entries:
+                    return (0, "")
+                if self._sort_column is None or self._sort_column == Col.NAME:
+                    return title.lower()
+                if self._sort_column == Col.SIZE:
+                    return sum(e.total_size for e in group_entries if e.total_size > 0)
+                if self._sort_column == Col.SPEED:
+                    return sum(e.speed for e in group_entries if e.status == "downloading")
+                if self._sort_column == Col.PROGRESS:
+                    tot = sum(e.total_size for e in group_entries if e.total_size > 0)
+                    don = sum(e.downloaded_size for e in group_entries if e.downloaded_size > 0)
+                    return (don / tot) if tot > 0 else 0.0
+                return self._entry_sort_key(group_entries[0], self._sort_column, ascending)
 
-        self._entries = entries
+            # Sort all groups uniformly — Uncategorized participates in the same
+            # sort order as every other group instead of being pinned at the bottom.
+            groups.sort(key=_group_sort_key, reverse=reverse)
+
+        self._cached_segregated_groups = groups
+        self._build_entries_from_cached_groups()
 
     def _entry_sort_key(self, entry: DownloadEntry, col: int, ascending: bool) -> Any:
         if col == Col.QUEUE:
@@ -1361,6 +1864,13 @@ class DownloadTableModel(QAbstractTableModel):
             return e if getattr(e, "is_section_header", False) else None
         return None
 
+    def _find_section_header_row(self, section_id: str) -> Optional[int]:
+        """Find the row index of the section header for the given section_id."""
+        for i, e in enumerate(self._entries):
+            if getattr(e, "is_section_header", False) and getattr(e, "section_id", None) == section_id:
+                return i
+        return None
+
     def get_section_download_rows(self, section_id: str) -> list[int]:
         """Visible row indices of downloads belonging to *section_id*."""
         hdr_idx = None
@@ -1469,24 +1979,61 @@ class DownloadTableModel(QAbstractTableModel):
                 e.upload_speed = upload_speed
                 break
 
+        # Find the entry in _all_entries to get its section_id and update section header progress
+        entry_obj = None
+        for e in self._all_entries:
+            if e.id == download_id:
+                entry_obj = e
+                break
+        
         row = self._id_to_row.get(download_id)
-        if row is None:
-            return
+        
+        # If in segregated view mode, update the section header's progress bar
+        if self._segregated_view and entry_obj:
+            section_id = self._entry_section_id(entry_obj)
+            if section_id:
+                hdr_row = self._find_section_header_row(section_id)
+                if hdr_row is not None:
+                    # Recalculate section active progress from _all_entries (includes collapsed sections)
+                    active_entries = [
+                        e for e in self._all_entries
+                        if self._entry_section_id(e) == section_id and e.status in ACTIVE_QUEUE_STATUSES
+                    ]
+                    # Calculate consolidated progress
+                    if active_entries:
+                        total_size = sum(e.total_size for e in active_entries if e.total_size > 0)
+                        downloaded_size = sum(e.downloaded_size for e in active_entries if e.downloaded_size > 0)
+                        if total_size > 0:
+                            progress = min(100.0, (downloaded_size / total_size) * 100.0)
+                        else:
+                            progress = 0.0
+                    else:
+                        progress = 0.0
+                    
+                    hdr_entry = self._entries[hdr_row]
+                    if hdr_entry.section_id == section_id:
+                        hdr_entry.section_active_progress = progress
+                    
+                    # Emit dataChanged for the section header row
+                    hdr_left = self.index(hdr_row, Col.QUEUE)
+                    hdr_right = self.index(hdr_row, Col.SEEDS_PEERS)
+                    self.dataChanged.emit(hdr_left, hdr_right, [Qt.ItemDataRole.DisplayRole])
 
-        # Emit change for relevant columns
-        left = self.index(row, Col.SIZE)
-        right = self.index(row, Col.SEEDS_PEERS)
-        self.dataChanged.emit(left, right, [Qt.ItemDataRole.DisplayRole])
+        # Emit change for the entry row if visible
+        if row is not None:
+            left = self.index(row, Col.SIZE)
+            right = self.index(row, Col.SEEDS_PEERS)
+            self.dataChanged.emit(left, right, [Qt.ItemDataRole.DisplayRole])
 
-        # The engine can also stamp the seeding telemetry columns from the poll
-        # without any status transition (a session backfilled on upgrade, or the
-        # last_seen_complete backstop), so those cells would otherwise keep
-        # showing a stale value until the whole table reloaded.
-        self.dataChanged.emit(
-            self.index(row, Col.LAST_SEEDED),
-            self.index(row, Col.SEEDING_STARTED_AT),
-            [Qt.ItemDataRole.DisplayRole],
-        )
+            # The engine can also stamp the seeding telemetry columns from the poll
+            # without any status transition (a session backfilled on upgrade, or the
+            # last_seen_complete backstop), so those cells would otherwise keep
+            # showing a stale value until the whole table reloaded.
+            self.dataChanged.emit(
+                self.index(row, Col.LAST_SEEDED),
+                self.index(row, Col.SEEDING_STARTED_AT),
+                [Qt.ItemDataRole.DisplayRole],
+            )
 
     def _entry_section_id(self, entry: Optional[DownloadEntry]) -> Optional[str]:
         if not entry:
@@ -1495,6 +2042,33 @@ class DownloadTableModel(QAbstractTableModel):
             return get_entry_date_category(entry)
         elif self._segregated_mode == "type":
             return get_entry_type_category(entry)
+        elif self._segregated_mode == "name":
+            # Use the reverse lookup built from the actual grouping result.
+            # The old approach recomputed the section_id independently from the
+            # entry's filename/show_title, but that could mismatch the group that
+            # edit-distance matching actually placed the entry into — causing
+            # progress bar updates to target the wrong (or non-existent) header.
+            if entry.id in self._name_section_map:
+                return self._name_section_map[entry.id]
+            # Fallback for entries added after the last grouping rebuild
+            # (shouldn't normally happen because _reapply_filter rebuilds the map).
+            show_title = None
+            try:
+                meta = getattr(entry, 'metadata', None)
+                if meta:
+                    show_title = (meta.get('show_title') or
+                                 meta.get('series_title') or
+                                 meta.get('series_name'))
+            except Exception:
+                pass
+            if show_title:
+                show_title_clean = _get_strip_keywords_pattern().sub('', show_title)
+                show_title_clean = re.sub(r'[._\-]+', ' ', show_title_clean)
+                show_title_clean = re.sub(r'\s+', ' ', show_title_clean).strip()
+                return f"{SECTION_NAME_PREFIX}{show_title_clean}"
+            else:
+                filename = getattr(entry, 'filename', '') or getattr(entry, 'name', '') or ''
+                return f"{SECTION_NAME_PREFIX}{_extract_show_name(filename)}"
         else:
             if entry.status in ACTIVE_SECTION_STATUSES:
                 return SECTION_ACTIVE
@@ -1523,6 +2097,26 @@ class DownloadTableModel(QAbstractTableModel):
                     e.eta_seconds = 0
                 entry_all = e
                 break
+
+        # Also update any instances in cached groups
+        if self._cached_segregated_groups:
+            for sec_id, title, group_entries, hdr_id in self._cached_segregated_groups:
+                for ge in group_entries:
+                    if ge.id == download_id:
+                        ge.status = status
+                        ge.error_message = error_msg
+                        if status in ("paused", "completed", "error", "stopped"):
+                            ge.speed = 0
+                            ge.eta_seconds = 0
+        if self._cached_name_groups:
+            for group_entries in self._cached_name_groups.values():
+                for ge in group_entries:
+                    if ge.id == download_id:
+                        ge.status = status
+                        ge.error_message = error_msg
+                        if status in ("paused", "completed", "error", "stopped"):
+                            ge.speed = 0
+                            ge.eta_seconds = 0
 
         if self._segregated_view:
             new_sec = self._entry_section_id(entry_all) if entry_all else None
@@ -1612,6 +2206,10 @@ class DownloadTableModel(QAbstractTableModel):
         if entry.save_path:
             entry.file_path = str(Path(entry.save_path) / filename)
 
+        if self._segregated_view and self._segregated_mode == "name":
+            self._reapply_filter()
+            return
+
         left = self.index(row, Col.NAME)
         right = self.index(row, Col.COUNT - 1)
         self.dataChanged.emit(
@@ -1651,6 +2249,10 @@ class DownloadTableModel(QAbstractTableModel):
             entry.file_path = str(Path(entry.save_path) / filename)
         elif entry.file_path:
             entry.file_path = str(Path(entry.file_path).parent / filename)
+
+        if self._segregated_view and self._segregated_mode == "name":
+            self._reapply_filter()
+            return
 
         left = self.index(row, 0)
         right = self.index(row, Col.COUNT - 1)
@@ -1703,6 +2305,18 @@ class DownloadTableModel(QAbstractTableModel):
                 break
         else:
             self._all_entries.append(entry)
+
+        # Keep cached group entries pointing to the refreshed entry object
+        if self._cached_segregated_groups:
+            for sec_id, title, group_entries, hdr_id in self._cached_segregated_groups:
+                for idx, ge in enumerate(group_entries):
+                    if ge.id == download_id:
+                        group_entries[idx] = entry
+        if self._cached_name_groups:
+            for group_entries in self._cached_name_groups.values():
+                for idx, ge in enumerate(group_entries):
+                    if ge.id == download_id:
+                        group_entries[idx] = entry
 
         if self._segregated_view:
             new_sec = self._entry_section_id(entry)
@@ -1808,6 +2422,11 @@ class DownloadTableModel(QAbstractTableModel):
                 elif entry.section_id in (SECTION_DATE_LAST_30_DAYS, "date_this_month", SECTION_TYPE_VIDEO):
                     return QColor("#64b5f6")
                 elif entry.section_id == SECTION_TYPE_DOCUMENTS:
+                    return QColor(Colors.CYAN)
+                elif entry.section_id.startswith(SECTION_NAME_PREFIX):
+                    # Uncategorized group in purple, other name groups in cyan
+                    if entry.section_id.endswith("Uncategorized"):
+                        return QColor(Colors.PURPLE)
                     return QColor(Colors.CYAN)
                 else:
                     return QColor("#8fa0b5")

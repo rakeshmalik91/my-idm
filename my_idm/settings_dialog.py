@@ -591,14 +591,6 @@ class SettingsDialog(QDialog):
         except Exception:
             return None
 
-    def closeEvent(self, event):
-        worker = getattr(self, "_probe_worker", None)
-        if worker is not None and worker.is_alive():
-            try:
-                worker.join(timeout=0.5)
-            except Exception:
-                pass
-        super().closeEvent(event)
 
     def reject(self):
         worker = getattr(self, "_probe_worker", None)
@@ -643,6 +635,7 @@ class SettingsDialog(QDialog):
 
         self._tab_sidebar = QListWidget()
         self._tab_sidebar.setObjectName("preferencesSidebar")
+        self._tab_sidebar.setMaximumWidth(sidebar_width)
         self._tab_sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._tab_sidebar.setSpacing(1)
         for i in range(self._tabs.count()):
@@ -989,6 +982,12 @@ class SettingsDialog(QDialog):
     def closeEvent(self, event):
         self._clear_search_highlights()
         self._save_size_to_db()
+        worker = getattr(self, "_probe_worker", None)
+        if worker is not None and worker.is_alive():
+            try:
+                worker.join(timeout=0.5)
+            except Exception:
+                pass
         # Drop the probe's result connection before the dialog goes.
         #
         # The worker thread cannot be interrupted and is left to finish on its own; it is a daemon
@@ -1110,8 +1109,8 @@ class SettingsDialog(QDialog):
         theme_layout.addWidget(self._theme_combo, 1)
         layout.addWidget(theme_group)
 
-        # -- Segregated view ---------------------------------------------------
-        seg_group = QGroupBox("Segregated View")
+        # -- Grouped view ---------------------------------------------------
+        seg_group = QGroupBox("Grouped View")
         seg_layout = QVBoxLayout(seg_group)
 
         self._seg_enabled_cb = QCheckBox("Group downloads into sections")
@@ -1127,9 +1126,19 @@ class SettingsDialog(QDialog):
         self._seg_mode_combo.setToolTip(
             "Status groups Active / Seeding / Inactive. Date groups Today / Yesterday / "
             "Last 7 Days / Last 30 Days / Older. File Type groups Video / Audio / Archives "
-            "/ Documents / Photos / General."
+            "/ Documents / Photos / General. Name groups A-Z alphabetically."
         )
         seg_layout.addWidget(self._seg_mode_combo)
+
+        # View strip visibility
+        self._seg_strip_visible_cb = QCheckBox("Show view control strip")
+        self._seg_strip_visible_cb.setToolTip(
+            "Show the strip below the table header with Collapse/Expand All and Group By buttons "
+            "when grouped view is enabled."
+        )
+        self._seg_strip_visible_cb.setChecked(True)
+        seg_layout.addWidget(self._seg_strip_visible_cb)
+
         layout.addWidget(seg_group)
 
         # -- Columns -----------------------------------------------------------
@@ -1235,7 +1244,7 @@ class SettingsDialog(QDialog):
         silently let the user pick a mode that does nothing.
 
         Mirrors ``MainWindow._sync_segregation_mode_actions``, which does the same job for the View
-        menu's three actions.
+        menu's four actions.
         """
         if checked is None:
             checked = self._seg_enabled_cb.isChecked()
@@ -1249,7 +1258,7 @@ class SettingsDialog(QDialog):
 
         # `_get_db()`, not `self._db`: the raw attribute is still None this early in construction
         # (the Views page is built before anything resolves it), so reading it here silently skipped
-        # the database and left the Segregated View checkbox at its default - so the page opened
+        # the database and left the Grouped View checkbox at its default - so the page opened
         # showing "off" for a saved "on", and with it the mode combo's enabled state wrong too.
         db = self._get_db()
         if db is not None:
@@ -1259,7 +1268,8 @@ class SettingsDialog(QDialog):
                 mode = DEFAULT_SEGREGATED_MODE
             index = self._seg_mode_combo.findData(mode)
             self._seg_mode_combo.setCurrentIndex(max(0, index))
-        # The mode choices are meaningless while segregation is off, so they follow the checkbox -
+            self._seg_strip_visible_cb.setChecked(bool(db.get_ui_state("seg_strip_visible", True)))
+        # The mode choices are meaningless while grouping is off, so they follow the checkbox -
         # the same coupling `_seg_enabled_cb.toggled` maintains interactively (see `_build_views_tab`).
         self._sync_seg_controls()
 
@@ -1347,6 +1357,7 @@ class SettingsDialog(QDialog):
         if mode not in SEGREGATED_MODES:
             mode = DEFAULT_SEGREGATED_MODE
         theme = normalize_theme(self._theme_combo.currentData())
+        strip_visible = self._seg_strip_visible_cb.isChecked()
 
         # The database write comes first and is unconditional, because the dialog is also
         # constructed standalone (that is how the tests use it) where there is no parent to
@@ -1357,6 +1368,7 @@ class SettingsDialog(QDialog):
             db.set_ui_state("segregated_view_enabled", enabled)
             db.set_ui_state("segregated_view_mode", mode)
             db.set_ui_state("theme", theme)
+            db.set_ui_state("seg_strip_visible", strip_visible)
 
         parent = self.parent()
         # Applied, not just recorded, so the choice is visible before Save and the combo
@@ -1389,8 +1401,8 @@ class SettingsDialog(QDialog):
         # `_on_toggle_segregated_view` is the canonical handler for the enable flag: it
         # applies it to the model, syncs the View-menu checkmark, and owns the
         # `segregated_view_enabled` DB write. It must run *before* the mode change, because
-        # `_set_segregation_mode` force-enables segregation when it is currently off - the
-        # previous order meant (a) saving with the box unticked silently turned segregation
+        # `_set_segregation_mode` force-enables grouping when it is currently off - the
+        # previous order meant (a) saving with the box unticked silently turned grouping
         # back on and overwrote the `False` just written, and (b) unticking it did nothing
         # at all until the next restart, because `_set_segregation_mode` was checked first
         # and the `_on_toggle_segregated_view` branch behind it was unreachable.

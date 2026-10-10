@@ -1385,8 +1385,173 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(self.model.rowCount(), 3)
 
 
+class TestNameSegregatedSorting(unittest.TestCase):
+    def setUp(self):
+        self.model = DownloadTableModel()
+
+    def test_name_segregated_natural_sort_and_group_sorting(self):
+        # Anime series with episode numbers that would fail standard lexicographic sort (10 before 2)
+        e1 = _make_entry("1", "[Subs] My Anime - 01 [1080p].mkv", size=100)
+        e2 = _make_entry("2", "[Subs] My Anime - 02 [1080p].mkv", size=200)
+        e10 = _make_entry("10", "[Subs] My Anime - 10 [1080p].mkv", size=300)
+
+        # Another series
+        b1 = _make_entry("b1", "[Group] Another Series - 01.mkv", size=50)
+        b2 = _make_entry("b2", "[Group] Another Series - 02.mkv", size=60)
+
+        self.model.load_entries([e10, e1, b2, e2, b1])
+        self.model.set_segregated_view(True, "name")
+        
+        # Expand sections for testing (name-based sections are collapsed by default)
+        self.model.expand_all_sections()
+
+        # Sort by Name ascending
+        self.model.sort(Col.NAME, Qt.SortOrder.AscendingOrder)
+
+        # Should have 2 groups: "Another Series" and "My Anime"
+        header_rows = self.model.get_section_header_row_indices()
+        self.assertEqual(len(header_rows), 2)
+        h0 = self.model._entries[header_rows[0]]
+        h1 = self.model._entries[header_rows[1]]
+        self.assertEqual(h0.section_title, "Another Series")
+        self.assertEqual(h1.section_title, "My Anime")
+
+        # Check natural sorting of episodes within "My Anime" group: e1, e2, e10
+        # header 1 is at header_rows[1]
+        my_anime_items = [
+            self.model._entries[r].id
+            for r in range(header_rows[1] + 1, self.model.rowCount())
+        ]
+        self.assertEqual(my_anime_items, ["1", "2", "10"])
+
+        # Sort by Name descending
+        self.model.sort(Col.NAME, Qt.SortOrder.DescendingOrder)
+        header_rows_desc = self.model.get_section_header_row_indices()
+        h0_desc = self.model._entries[header_rows_desc[0]]
+        h1_desc = self.model._entries[header_rows_desc[1]]
+        self.assertEqual(h0_desc.section_title, "My Anime")
+        self.assertEqual(h1_desc.section_title, "Another Series")
+
+        # In descending order, episodes within My Anime: 10, 2, 1
+        my_anime_desc_items = [
+            self.model._entries[r].id
+            for r in range(header_rows_desc[0] + 1, header_rows_desc[1])
+        ]
+        self.assertEqual(my_anime_desc_items, ["10", "2", "1"])
+
+    def test_collapse_expand_preserves_downloading_status(self):
+        """Collapsing and expanding a section must not revert downloading items to queued."""
+        e1 = _make_entry("1", "Anime Show - 01.mkv", size=1000, status="queued")
+        e2 = _make_entry("2", "Anime Show - 02.mkv", size=1000, status="queued")
+
+        self.model.load_entries([e1, e2])
+        self.model.set_segregated_view(True, "name")
+        self.model.expand_all_sections()
+
+        # Simulate download starting for e1
+        self.model.update_status("1", "downloading")
+        fresh1 = _make_entry("1", "Anime Show - 01.mkv", size=1000, status="downloading", speed=500000, progress=50.0)
+        self.model.refresh_entry("1", fresh1)
+        self.model.update_progress("1", 500, 1000, 500000, 10.0)
+
+        # Verify initial downloading state
+        row1 = self.model._id_to_row["1"]
+        self.assertEqual(self.model.data(self.model.index(row1, Col.STATUS)), "Downloading")
+        self.assertEqual(self.model.data(self.model.index(row1, Col.PROGRESS))["status"], "downloading")
+
+        # Collapse the section
+        sec_id = self.model._entry_section_id(fresh1)
+        self.assertIsNotNone(sec_id)
+        self.model.set_section_collapsed(sec_id, True)
+        self.assertTrue(self.model.is_section_collapsed(sec_id))
+
+        # Progress continues while collapsed
+        self.model.update_progress("1", 600, 1000, 600000, 8.0)
+
+        # Expand the section
+        self.model.set_section_collapsed(sec_id, False)
+        self.assertFalse(self.model.is_section_collapsed(sec_id))
+
+        # Verify that row1 still shows Downloading (not Queued)
+        row1_after = self.model._id_to_row["1"]
+        self.assertEqual(self.model.data(self.model.index(row1_after, Col.STATUS)), "Downloading")
+        prog1 = self.model.data(self.model.index(row1_after, Col.PROGRESS))
+        self.assertEqual(prog1["status"], "downloading")
+        self.assertEqual(prog1["progress"], 60.0)
+
+        # Now test transitioning status while collapsed
+        self.model.set_section_collapsed(sec_id, True)
+        self.model.update_status("2", "downloading")
+        fresh2 = _make_entry("2", "Anime Show - 02.mkv", size=1000, status="downloading", speed=400000, progress=20.0)
+        self.model.refresh_entry("2", fresh2)
+        self.model.update_progress("2", 200, 1000, 400000, 15.0)
+
+        # Expand section and verify e2 shows Downloading
+        self.model.set_section_collapsed(sec_id, False)
+        row2 = self.model._id_to_row["2"]
+        self.assertEqual(self.model.data(self.model.index(row2, Col.STATUS)), "Downloading")
+        prog2 = self.model.data(self.model.index(row2, Col.PROGRESS))
+        self.assertEqual(prog2["status"], "downloading")
+        self.assertEqual(prog2["progress"], 20.0)
+
+    def test_name_and_anime_title_groups_merged_without_duplicates(self):
+        """Test that name-based and anime_title metadata-based entries merge into a single group."""
+        from my_idm.download_model import _group_entries_by_name
+
+        # Filename-based entries (no anime_title metadata)
+        e1 = _make_entry("1", "AnimePahe_Link Click Season 3_-_08_720p_SubsPlease.mp4")
+        e2 = _make_entry("2", "AnimePahe_Link Click Season 3_-_09_720p_SubsPlease.mp4")
+
+        # Metadata-based entry (with anime_title)
+        e3 = _make_entry("3", "AnimePahe_Link Click Season 3_-_10_720p_SubsPlease.mp4")
+        e3.metadata = {"anime_title": "Link Click Season 3"}
+
+        # Another series with both kinds of entries
+        e4 = _make_entry("4", "AnimePahe_Re ZERO -Starting Life in Another World- Season 4_-_80_720p_EngDub.mp4")
+        e5 = _make_entry("5", "AnimePahe_Re ZERO -Starting Life in Another World- Season 4_-_81_720p_EngDub.mp4")
+        e6 = _make_entry("6", "AnimePahe_Re ZERO -Starting Life in Another World- Season 4_-_82_720p_EngDub.mp4")
+        e6.metadata = {"anime_title": "Re ZERO -Starting Life in Another World- Season 4"}
+
+        entries = [e1, e2, e3, e4, e5, e6]
+        groups = _group_entries_by_name(entries)
+
+        # There should be exactly 2 groups, not 4 (no duplicate "(2)" groups)
+        self.assertEqual(len(groups), 2)
+        group_keys = list(groups.keys())
+        self.assertTrue(any("Link Click Season 3" in k for k in group_keys))
+        self.assertFalse(any("(2)" in k for k in group_keys))
+
+        # Check that e1, e2, e3 are all in the Link Click group
+        link_click_group = next(v for k, v in groups.items() if "Link Click" in k)
+        self.assertEqual(len(link_click_group), 3)
+        self.assertEqual({e.id for e in link_click_group}, {"1", "2", "3"})
+
+        # Check that e4, e5, e6 are all in the Re ZERO group
+        re_zero_group = next(v for k, v in groups.items() if "Re ZERO" in k)
+        self.assertEqual(len(re_zero_group), 3)
+        self.assertEqual({e.id for e in re_zero_group}, {"4", "5", "6"})
+
+        # Now test within the DownloadTableModel in segregated view
+        self.model.load_entries([e1, e2, e3])
+        self.model.set_segregated_view(True, "name")
+
+        # By default sections are collapsed -> exactly 1 section header row
+        self.assertEqual(self.model.rowCount(), 1)
+        self.assertTrue(self.model.is_section_header_row(0))
+        header_title = self.model._entries[0].section_title
+        self.assertIn("Link Click Season 3", header_title)
+        self.assertNotIn("(2)", header_title)
+
+        # Expand the section -> 1 header + 3 entries = 4 rows
+        self.model.expand_all_sections()
+        self.assertEqual(self.model.rowCount(), 4)
+        entry_ids = [self.model._entries[r].id for r in range(1, 4)]
+        self.assertEqual(set(entry_ids), {"1", "2", "3"})
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

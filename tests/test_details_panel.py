@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSplitter,
     QTableWidget,
+    QTableView,
+    QWidget,
 )
 
 from my_idm.database import Database, DownloadEntry, SegmentEntry
@@ -97,7 +99,13 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(splitter.orientation(), Qt.Orientation.Vertical)
         self.assertEqual(splitter.count(), 2)
 
-        self.assertIs(splitter.widget(0), self.win._table)
+        # Table is now wrapped in a container for the segregated view control strip
+        table_container = splitter.widget(0)
+        self.assertIsInstance(table_container, QWidget)
+        # The table should be a child of the container
+        self.assertIsInstance(self.win._table, QTableView)
+        self.assertTrue(self.win._table.parent() is table_container or 
+                       self.win._table in table_container.findChildren(QTableView))
         self.assertIs(splitter.widget(1), self.win._details_panel)
         self.assertIsInstance(self.win._details_panel, DetailsPanel)
 

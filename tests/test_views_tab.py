@@ -1594,5 +1594,124 @@ class TestDisabledStyling(unittest.TestCase):
                 self.assertIn("QMenu::item:disabled:selected", sheet)
 
 
+class TestNameSegregatedView(unittest.TestCase):
+    """Tests for name-based (show/series) segregation mode and bulk collapse/expand."""
+
+    def setUp(self):
+        self.model = DownloadTableModel()
+
+    def test_group_entries_by_name_series(self):
+        e1 = DownloadEntry(id="1", filename="Frieren S01E01 1080p.mkv", url="http://x/1")
+        e2 = DownloadEntry(id="2", filename="Frieren S01E02 1080p.mkv", url="http://x/2")
+        e3 = DownloadEntry(id="3", filename="Frieren S01E03 1080p.mkv", url="http://x/3")
+        e4 = DownloadEntry(id="4", filename="Random Single Movie (2024).mp4", url="http://x/4")
+
+        self.model.load_entries([e1, e2, e3, e4])
+        self.model.set_segregated_view(True, "name")
+
+        # Must have Frieren header and Uncategorized header
+        header_titles = [
+            self.model._entries[r].section_title.upper()
+            for r in range(self.model.rowCount())
+            if self.model.is_section_header_row(r)
+        ]
+        self.assertTrue(any("FRIEREN" in t for t in header_titles))
+        self.assertTrue(any("UNCATEGORIZED" in t for t in header_titles))
+
+    def test_collapse_and_expand_all_sections(self):
+        e1 = DownloadEntry(id="1", filename="Show A Episode 1.mkv", url="http://x/1")
+        e2 = DownloadEntry(id="2", filename="Show A Episode 2.mkv", url="http://x/2")
+        e3 = DownloadEntry(id="3", filename="Show B Episode 1.mkv", url="http://x/3")
+        e4 = DownloadEntry(id="4", filename="Show B Episode 2.mkv", url="http://x/4")
+
+        self.model.load_entries([e1, e2, e3, e4])
+        self.model.set_segregated_view(True, "name")
+
+        # Name-based sections are auto-collapsed by default -> only 2 headers visible initially
+        self.assertEqual(self.model.rowCount(), 2)
+
+        # Expand all -> 2 headers + 4 items = 6 rows
+        self.model.expand_all_sections()
+        self.assertEqual(self.model.rowCount(), 6)
+
+        # Collapse all -> back to 2 headers
+        self.model.collapse_all_sections()
+        self.assertEqual(self.model.rowCount(), 2)
+        for r in range(self.model.rowCount()):
+            self.assertTrue(self.model.is_section_header_row(r))
+
+    def test_section_active_counts_and_progress(self):
+        # 1 downloading at 50% (500/1000), 1 completed (1000/1000), 1 seeding
+        e1 = DownloadEntry(id="1", filename="MyAnime S01E01.mkv", url="http://x/1",
+                           status="downloading", total_size=1000, downloaded_size=500)
+        e2 = DownloadEntry(id="2", filename="MyAnime S01E02.mkv", url="http://x/2",
+                           status="completed", total_size=1000, downloaded_size=1000)
+        e3 = DownloadEntry(id="3", filename="MyAnime S01E03.mkv", url="http://x/3",
+                           status="seeding", total_size=1000, downloaded_size=1000)
+
+        self.model.load_entries([e1, e2, e3])
+        self.model.set_segregated_view(True, "name")
+
+        # Header at row 0
+        hdr = self.model._entries[0]
+        self.assertTrue(hdr.is_section_header)
+        self.assertEqual(hdr.section_count, 3)
+        self.assertEqual(hdr.section_active_count, 1)  # only e1 is downloading/active
+        self.assertEqual(hdr.section_seeding_count, 1)  # e3 is seeding
+        self.assertAlmostEqual(hdr.section_active_progress, 50.0)
+
+    def test_group_entries_by_edit_distance(self):
+        # Two names with small difference (<= 10% edit distance)
+        # e.g., length 30 with 1 char difference = 1/30 = 3.3% <= 10%
+        name1 = "The Long Journey of a Hero Part 1.mp4"
+        name2 = "The Long Journey of a Hero Part 2.mp4"
+        e1 = DownloadEntry(id="1", filename=name1, url="http://x/1")
+        e2 = DownloadEntry(id="2", filename=name2, url="http://x/2")
+
+        self.model.load_entries([e1, e2])
+        self.model.set_segregated_view(True, "name")
+
+        headers = [e for e in self.model._entries if e.is_section_header]
+        self.assertEqual(len(headers), 1)
+        self.assertIn("HERO", headers[0].section_title.upper())
+
+
+@unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
+class TestSegregatedControlStrip(ViewsTabTestCase):
+    def test_collapse_and_expand_buttons_have_vector_icons(self):
+        self.assertFalse(self.window._btn_collapse_all.icon().isNull())
+        self.assertFalse(self.window._btn_expand_all.icon().isNull())
+        self.assertFalse(self.window._act_collapse_all_sections.icon().isNull())
+        self.assertFalse(self.window._act_expand_all_sections.icon().isNull())
+
+    def test_mode_buttons_highlight_active_mode(self):
+        for mode in ("status", "date", "type", "name"):
+            self.window._set_segregation_mode(mode)
+            self.assertTrue(self.window._seg_mode_buttons[mode].isChecked())
+            for other_mode, btn in self.window._seg_mode_buttons.items():
+                if other_mode != mode:
+                    self.assertFalse(btn.isChecked())
+
+    def test_clicking_mode_button_switches_mode(self):
+        self.window._seg_mode_buttons["name"].click()
+        self.assertEqual(self.window._segregated_view_mode, "name")
+        self.assertTrue(self.window._seg_mode_buttons["name"].isChecked())
+
+    def test_collapse_and_expand_all_buttons_trigger_handlers(self):
+        from unittest.mock import patch
+        with patch.object(self.window, "_on_collapse_all_sections") as mock_col:
+            self.window._btn_collapse_all.click()
+            mock_col.assert_called_once()
+        with patch.object(self.window, "_on_expand_all_sections") as mock_exp:
+            self.window._btn_expand_all.click()
+            mock_exp.assert_called_once()
+
+    def test_refresh_seg_strip_theme_updates_styles(self):
+        self.window._refresh_seg_strip_theme()
+        self.assertFalse(self.window._btn_collapse_all.icon().isNull())
+        self.assertFalse(self.window._btn_expand_all.icon().isNull())
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -668,6 +668,9 @@ class DownloadEntry:
     section_id: str = ""               # active | seeding | inactive
     section_title: str = ""
     section_count: int = 0
+    section_active_count: int = 0
+    section_seeding_count: int = 0
+    section_active_progress: float = 0.0
     section_collapsed: bool = False
 
     # --- transient (not stored in DB) ---
@@ -1889,7 +1892,7 @@ CREATE TABLE IF NOT EXISTS segments (
 
         *today* is injected rather than read from the clock, which is what makes the whole
         aggregation testable without freezing time - the same convention the date-based
-        segregation uses. It is a **local** date, and so are the buckets the rows are
+        grouping uses. It is a **local** date, and so are the buckets the rows are
         grouped into: ``added_at`` is stored in UTC and converted per row (see
         ``_STATS_LOCAL_DAY``). Mixing the two was the off-by-one-day bug this fixes.
 

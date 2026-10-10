@@ -869,14 +869,14 @@ class DetailsPanel(QWidget):
         left_col = QVBoxLayout()
         left_col.setSpacing(6)
 
-        self._ov_status, _ = self._create_info_row(left_col, "Status:")
-        self._ov_size, _ = self._create_info_row(left_col, "Size:")
-        self._ov_downloaded, _ = self._create_info_row(left_col, "Downloaded:")
-        self._ov_seeded, _ = self._create_info_row(left_col, "Total Seeded / Uploaded:")
-        self._ov_speed, _ = self._create_info_row(left_col, "Speed:")
-        self._ov_eta, _ = self._create_info_row(left_col, "ETA:")
-        self._ov_added, _ = self._create_info_row(left_col, "Added:")
-        self._ov_completed, _ = self._create_info_row(left_col, "Completed:")
+        self._ov_status, _, _ = self._create_info_row(left_col, "Status:")
+        self._ov_size, _, _ = self._create_info_row(left_col, "Size:")
+        self._ov_downloaded, _, _ = self._create_info_row(left_col, "Downloaded:")
+        self._ov_seeded, _, _ = self._create_info_row(left_col, "Total Seeded / Uploaded:")
+        self._ov_speed, _, _ = self._create_info_row(left_col, "Speed:")
+        self._ov_eta, _, _ = self._create_info_row(left_col, "ETA:")
+        self._ov_added, _, _ = self._create_info_row(left_col, "Added:")
+        self._ov_completed, _, _ = self._create_info_row(left_col, "Completed:")
         left_col.addStretch()
         grid_layout.addLayout(left_col, stretch=1)
 
@@ -884,16 +884,16 @@ class DetailsPanel(QWidget):
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
 
-        self._ov_filename, self._ov_filename_copy_btn = self._create_info_row(right_col, "File / Folder Name:", copyable=True)
-        self._ov_anime_title, self._ov_anime_title_copy_btn = self._create_info_row(right_col, "Show Title:", copyable=True)
-        self._ov_type, _ = self._create_info_row(right_col, "Transfer Type:")
-        self._ov_swarm, _ = self._create_info_row(right_col, "Swarm / Parts:")
-        self._ov_save_path, self._ov_save_path_copy_btn = self._create_info_row(right_col, "Save Directory:", copyable=True)
-        self._ov_hash, self._ov_hash_copy_btn = self._create_info_row(right_col, "Content Hash / Infohash:", copyable=True)
-        self._ov_security, _ = self._create_info_row(right_col, "Malware Scan:")
-        self._ov_url, self._ov_url_copy_btn = self._create_info_row(right_col, "Source URL / Magnet:", copyable=True)
-        self._ov_anime_url, self._ov_anime_url_copy_btn = self._create_info_row(right_col, "Show URL:", copyable=True)
-        self._ov_referrer, self._ov_referrer_copy_btn = self._create_info_row(right_col, "Referrer:", copyable=True)
+        self._ov_filename, self._ov_filename_copy_btn, self._ov_filename_lbl = self._create_info_row(right_col, "File / Folder Name:", copyable=True)
+        self._ov_anime_title, self._ov_anime_title_copy_btn, self._ov_anime_title_lbl = self._create_info_row(right_col, "Anime Title:", copyable=True)
+        self._ov_type, _, _ = self._create_info_row(right_col, "Transfer Type:")
+        self._ov_swarm, _, _ = self._create_info_row(right_col, "Swarm / Parts:")
+        self._ov_save_path, self._ov_save_path_copy_btn, self._ov_save_path_lbl = self._create_info_row(right_col, "Save Directory:", copyable=True)
+        self._ov_hash, self._ov_hash_copy_btn, self._ov_hash_lbl = self._create_info_row(right_col, "Content Hash / Infohash:", copyable=True)
+        self._ov_security, _, _ = self._create_info_row(right_col, "Malware Scan:")
+        self._ov_url, self._ov_url_copy_btn, self._ov_url_lbl = self._create_info_row(right_col, "Source URL / Magnet:", copyable=True)
+        self._ov_anime_url, self._ov_anime_url_copy_btn, self._ov_anime_url_lbl = self._create_info_row(right_col, "Anime URL:", copyable=True)
+        self._ov_referrer, self._ov_referrer_copy_btn, self._ov_referrer_lbl = self._create_info_row(right_col, "Referrer:", copyable=True)
         right_col.addStretch()
         grid_layout.addLayout(right_col, stretch=1)
 
@@ -901,7 +901,7 @@ class DetailsPanel(QWidget):
         scroll.setWidget(container)
         return scroll
 
-    def _create_info_row(self, parent_layout: QVBoxLayout, label_text: str, copyable: bool = False) -> tuple[QLabel, QPushButton]:
+    def _create_info_row(self, parent_layout: QVBoxLayout, label_text: str, copyable: bool = False) -> tuple[QLabel, QPushButton, QLabel]:
         row = QHBoxLayout()
         row.setSpacing(6)
         lbl = QLabel(label_text)
@@ -940,7 +940,7 @@ class DetailsPanel(QWidget):
         
         row.addStretch()  # Push everything left
         parent_layout.addLayout(row)
-        return val, copy_btn
+        return val, copy_btn, lbl
 
     def _create_files_tab(self) -> QWidget:
         container = QWidget()
@@ -2034,8 +2034,12 @@ class DetailsPanel(QWidget):
             if len(anime_title) > 80:
                 anime_title = anime_title[:77] + "..."
             self._ov_anime_title.setText(anime_title)
+            self._ov_anime_title_lbl.setVisible(True)
+            self._ov_anime_title.setVisible(True)
         else:
             self._ov_anime_title.setText("—")
+            self._ov_anime_title_lbl.setVisible(False)
+            self._ov_anime_title.setVisible(False)
 
         # Anime URL (from metadata)
         anime_url = ""
@@ -2045,8 +2049,12 @@ class DetailsPanel(QWidget):
             if len(anime_url) > 80:
                 anime_url = anime_url[:77] + "..."
             self._ov_anime_url.setText(anime_url)
+            self._ov_anime_url_lbl.setVisible(True)
+            self._ov_anime_url.setVisible(True)
         else:
             self._ov_anime_url.setText("—")
+            self._ov_anime_url_lbl.setVisible(False)
+            self._ov_anime_url.setVisible(False)
 
         # Referrer (from metadata or headers)
         referrer = ""
