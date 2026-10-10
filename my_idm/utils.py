@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from functools import lru_cache
@@ -622,8 +623,6 @@ def send_to_trash(file_path: str | Path) -> bool:
 
 def compute_file_sha256(path: Path | str, chunk_size: int = 1024 * 1024) -> str:
     """Compute the SHA-256 hex digest of a file in streaming chunks."""
-    import hashlib
-
     h = hashlib.sha256()
     with open(path, "rb") as f:
         while True:

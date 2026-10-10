@@ -1221,12 +1221,12 @@ class TestToolbarAction(unittest.TestCase):
     def test_stats_button_on_toolbar_precedes_preferences_and_is_icon_only(self):
         """The stats button sits on the left side of Preferences on the toolbar and is icon-only."""
         actions = self.window._toolbar.actions()
-        self.assertIn(self.window._act_stats, actions)
-        idx = actions.index(self.window._act_stats)
+        self.assertIn(self.window._act_toolbar_stats, actions)
+        idx = actions.index(self.window._act_toolbar_stats)
         self.assertTrue(actions[idx + 1].isSeparator())
         self.assertEqual(actions[idx + 2], self.window._act_preferences)
 
-        btn = self.window._toolbar.widgetForAction(self.window._act_stats)
+        btn = self.window._toolbar.widgetForAction(self.window._act_toolbar_stats)
         self.assertIsInstance(btn, QToolButton)
         self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonIconOnly)
 

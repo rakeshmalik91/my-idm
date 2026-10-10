@@ -747,8 +747,9 @@ class MainWindow(QMainWindow):
         # Splitter with download table on top and details panel on bottom
         self._splitter = QSplitter(Qt.Orientation.Vertical, self)
         self._splitter.addWidget(self._table)
-        self._details_panel = DetailsPanel(self._manager, self)
+        self._details_panel = DetailsPanel(self._manager, self, model=self._model)
         self._details_panel.setMinimumHeight(140)
+        self._model.queue_filter_changed.connect(self._on_model_queue_filter_changed)
         if hasattr(self._details_panel, "browser_container_hwnd"):
             try:
                 self._manager.set_browser_container_hwnd(self._details_panel.browser_container_hwnd)
@@ -903,11 +904,11 @@ class MainWindow(QMainWindow):
         self._act_move_down.setToolTip("Move selected download down in queue order")
         self._act_move_down.triggered.connect(self._on_move_queue_down)
 
-        self._act_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
-        self._act_stats.setToolTip(
+        self._act_toolbar_stats = QAction(_create_emoji_icon("📊"), "Statistics…", self)
+        self._act_toolbar_stats.setToolTip(
             "Statistics: download and upload totals for today, this week, this month and this year"
         )
-        self._act_stats.triggered.connect(self._on_show_statistics)
+        self._act_toolbar_stats.triggered.connect(self._on_show_statistics)
 
         self._act_preferences = QAction(_create_emoji_icon("⚙"), "Preferences…", self)
         self._act_preferences.setShortcut(QKeySequence("Ctrl+,"))
@@ -1065,7 +1066,7 @@ class MainWindow(QMainWindow):
 
         # Separate the search field from the stats button, and stats from preferences
         toolbar.addSeparator()
-        toolbar.addAction(self._act_stats)
+        toolbar.addAction(self._act_toolbar_stats)
         toolbar.addSeparator()
         toolbar.addAction(self._act_preferences)
 
@@ -1082,7 +1083,7 @@ class MainWindow(QMainWindow):
             self._act_delete,
             self._act_move,
             self._act_recheck,
-            self._act_stats,
+            self._act_toolbar_stats,
         ):
             btn = toolbar.widgetForAction(act)
             if isinstance(btn, QToolButton):
@@ -2012,6 +2013,15 @@ class MainWindow(QMainWindow):
 
     def _on_header_filter_requested(self, column: int, selected_keys: object):
         self._update_count_label()
+        if column == Col.QUEUE_NAME and hasattr(self, "_details_panel"):
+            self._details_panel._update_queues()
+
+    def _on_model_queue_filter_changed(self, filter_set: object):
+        self._update_count_label()
+        if hasattr(self, "_table"):
+            self._table.horizontalHeader().viewport().update()
+        if hasattr(self, "_details_panel"):
+            self._details_panel._update_queues()
 
     def _on_section_moved(self, logical_index: int, old_visual: int, new_visual: int):
         if not hasattr(self, "_splitter"):
@@ -2261,8 +2271,8 @@ class MainWindow(QMainWindow):
 
     def _on_force_start(self):
         ids = self._selected_ids()
-        if ids:
-            self._manager.force_start_downloads(ids)
+        for did in ids:
+            self._manager.force_start_download(did)
 
     def _on_delete(self):
         ids = self._selected_ids()

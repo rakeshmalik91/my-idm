@@ -54,6 +54,7 @@ from PySide6.QtCore import QSettings
 # an unmarked stray widget is what makes an unattended run disruptive. Individual tests inside
 # otherwise-safe modules can opt in with `@pytest.mark.ui`.
 _INTERACTIVE_MODULES = frozenset({
+    "test_browser_integration",  # SettingsDialog + browser integration
     "test_capture",            # MainWindow integration, real RegisterHotKey
     "test_delegates",          # needs a live QAbstractItemView
     "test_details_panel",      # DetailsPanel widget tree

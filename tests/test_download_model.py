@@ -28,7 +28,8 @@ IS_HEADLESS_WIN_CI = sys.platform == "win32" and os.environ.get("CI") == "true"
 def _make_entry(id: str, name: str, size: int = 1000, progress: float = 0.0,
                 status: str = "queued", speed: float = 0.0, eta: float = 0.0,
                 download_type: str = "http", added_at: str = "2026-01-01T00:00:00Z",
-                completed_at: str = "", queue_order: int = 0) -> DownloadEntry:
+                completed_at: str = "", queue_order: int = 0,
+                queue_id: str = "") -> DownloadEntry:
     return DownloadEntry(
         id=id,
         url=f"https://example.com/{name}",
@@ -43,6 +44,7 @@ def _make_entry(id: str, name: str, size: int = 1000, progress: float = 0.0,
         speed=speed,
         eta_seconds=eta,
         queue_order=queue_order,
+        queue_id=queue_id,
     )
 
 
@@ -1340,6 +1342,47 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(self.model.get_aggregate_speeds(), (2000.0, 0.0))
         self.model.mark_deleting(["1"])
         self.assertEqual(self.model.get_aggregate_speeds(), (1500.0, 0.0))
+
+    def test_multiselect_queue_filter_and_signals(self):
+        """Model supports filtering multiple queues and emits queue_filter_changed signal."""
+        e1 = _make_entry("1", "one.zip", queue_id="q1")
+        e2 = _make_entry("2", "two.zip", queue_id="q2")
+        e3 = _make_entry("3", "three.zip", queue_id="q3")
+        self.model.set_queue_names({"q1": "Queue 1", "q2": "Queue 2", "q3": "Queue 3"})
+        self.model.load_entries([e1, e2, e3])
+
+        received = []
+        self.model.queue_filter_changed.connect(lambda f: received.append(f))
+
+        # 1. Filter to 2 queues (hide q3)
+        self.model.set_queue_filter({"q1", "q2"})
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[-1], {"q1", "q2"})
+        self.assertTrue(self.model.is_queue_filtered())
+        self.assertEqual(self.model.rowCount(), 2)
+        visible_ids = {self.model.get_entry(r).id for r in range(self.model.rowCount())}
+        self.assertEqual(visible_ids, {"1", "2"})
+
+        # 2. Filter to 1 queue (hide q2 as well)
+        self.model.set_queue_filter({"q1"})
+        self.assertEqual(len(received), 2)
+        self.assertEqual(received[-1], {"q1"})
+        self.assertEqual(self.model.rowCount(), 1)
+        self.assertEqual(self.model.get_entry(0).id, "1")
+
+        # 3. Unhide q3 -> {"q1", "q3"}
+        self.model.set_queue_filter({"q1", "q3"})
+        self.assertEqual(len(received), 3)
+        self.assertEqual(received[-1], {"q1", "q3"})
+        visible_ids = {self.model.get_entry(r).id for r in range(self.model.rowCount())}
+        self.assertEqual(visible_ids, {"1", "3"})
+
+        # 4. Clear filter via clear_filters
+        self.model.clear_filters()
+        self.assertEqual(len(received), 4)
+        self.assertIsNone(received[-1])
+        self.assertFalse(self.model.is_queue_filtered())
+        self.assertEqual(self.model.rowCount(), 3)
 
 
 if __name__ == "__main__":

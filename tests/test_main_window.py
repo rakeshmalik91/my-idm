@@ -574,7 +574,7 @@ class TestMainWindowToolbar(_MainWindowTestCase):
             self.win._act_delete,
             self.win._act_move,
             self.win._act_recheck,
-            self.win._act_stats,
+            self.win._act_toolbar_stats,
         ):
             btn = toolbar.widgetForAction(act)
             self.assertIsInstance(btn, QToolButton)
@@ -1841,7 +1841,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         for gone in ("All Queues", "Move to Queue"):
             with self.subTest(label=gone):
                 self.assertNotIn(gone, labels)
-        self.assertIn(self.win._act_stats, self.win._toolbar.actions())
+        self.assertIn(self.win._act_toolbar_stats, self.win._toolbar.actions())
         widget_names = [
             self.win._toolbar.widgetForAction(a).objectName()
             for a in self.win._toolbar.actions()
@@ -3906,6 +3906,8 @@ class TestActionStatesDynamicGating(_MainWindowTestCase):
             self.assertTrue(self.win._act_recheck.isEnabled())
 
             self.win._on_recheck()
+            self.manager._status_job_pool.wait_idle()
+            QApplication.processEvents()
 
             self.assertEqual(self.db.get_download("fnf-recover").status, "completed")
         finally:

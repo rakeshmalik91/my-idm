@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QModelIndex,
     Qt,
     QTimer,
+    Signal,
 )
 from PySide6.QtGui import QColor, QFont
 
@@ -458,6 +459,8 @@ def get_entry_date_category(entry: DownloadEntry, now_dt: Optional[datetime] = N
 class DownloadTableModel(QAbstractTableModel):
     """Table model backed by a list of DownloadEntry objects with filtering support."""
 
+    queue_filter_changed = Signal(object)  # Optional[Set[str]]
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._all_entries: list[DownloadEntry] = []
@@ -854,13 +857,19 @@ class DownloadTableModel(QAbstractTableModel):
         label that matches nothing, and the view would silently come up empty. The popup shows
         the name; the filter stores the id.
         """
-        if allowed_ids is not None and len(allowed_ids) >= len(self._queue_names):
+        if (
+            allowed_ids is not None
+            and len(self._queue_names) > 0
+            and len(allowed_ids) >= len(self._queue_names)
+        ):
             # Everything ticked is the same as nothing ticked, which is how Select All reads.
             allowed_ids = None
-        if self._queue_filter == allowed_ids:
+        new_val = set(allowed_ids) if allowed_ids is not None else None
+        if self._queue_filter == new_val:
             return
-        self._queue_filter = set(allowed_ids) if allowed_ids is not None else None
+        self._queue_filter = new_val
         self._reapply_filter()
+        self.queue_filter_changed.emit(self._queue_filter)
 
     def queue_filter(self) -> Optional[set[str]]:
         """The queue ids currently ticked, or ``None`` for no filter."""
@@ -882,11 +891,14 @@ class DownloadTableModel(QAbstractTableModel):
             and self._queue_filter is None
         ):
             return
+        had_q_filter = self._queue_filter is not None
         self._status_filter = None
         self._type_filter = None
         self._size_filter = None
         self._queue_filter = None
         self._reapply_filter()
+        if had_q_filter:
+            self.queue_filter_changed.emit(None)
 
     def get_queue_counts(self) -> dict[str, int]:
         """Rows per queue id, honouring the other active filters.

@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 import humanize
 from datetime import datetime, timedelta, timezone
-from PySide6.QtCore import Qt, Signal, QTimer, QSize, QPointF
+from PySide6.QtCore import Qt, Signal, QTimer, QSize, QPoint, QPointF
 from PySide6.QtGui import QColor, QFont, QPainter, QTextCursor, QIcon, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -648,11 +649,12 @@ class DetailsPanel(QWidget):
     browser_tab_requested = Signal()
     manage_queues_requested = Signal()
 
-    def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None):
+    def __init__(self, manager: DownloadManager, parent: Optional[QWidget] = None, model: Optional[Any] = None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         self._manager = manager
+        self._model = model
         self._download_id: Optional[str] = None
         self._current_entry: Optional[DownloadEntry] = None
         self._files_hash: Optional[tuple] = None
@@ -685,8 +687,38 @@ class DetailsPanel(QWidget):
         self._manager.download_removed.connect(self._on_download_event_for_queues)
         self._manager.queue_order_changed.connect(self._on_download_event_for_queues)
         self._manager.checksum_computed.connect(self._on_checksum_computed)
+        if self._model is not None and hasattr(self._model, "queue_filter_changed"):
+            self._model.queue_filter_changed.connect(self._on_model_queue_filter_changed)
         if self._manager.is_animepahe_running():
             self._browser_monitor_timer.start()
+        self._update_queues()
+
+    @property
+    def model(self) -> Optional[Any]:
+        if self._model is not None:
+            return self._model
+        win = self.window()
+        if win is not None and hasattr(win, "_model"):
+            m = getattr(win, "_model")
+            if m is not None:
+                self.set_model(m)
+                return m
+        return None
+
+    def set_model(self, model: Any):
+        if self._model == model:
+            return
+        if self._model is not None and hasattr(self._model, "queue_filter_changed"):
+            try:
+                self._model.queue_filter_changed.disconnect(self._on_model_queue_filter_changed)
+            except Exception:
+                pass
+        self._model = model
+        if self._model is not None and hasattr(self._model, "queue_filter_changed"):
+            self._model.queue_filter_changed.connect(self._on_model_queue_filter_changed)
+        self._update_queues()
+
+    def _on_model_queue_filter_changed(self, _=None):
         self._update_queues()
 
     def paintEvent(self, event):
@@ -1150,6 +1182,8 @@ class DetailsPanel(QWidget):
         self._table_queues.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table_queues.setShowGrid(True)
         self._table_queues.itemDoubleClicked.connect(self._on_queue_row_double_clicked)
+        self._table_queues.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table_queues.customContextMenuRequested.connect(self._on_queues_table_context_menu)
 
         layout.addWidget(self._table_queues)
         return container
@@ -1391,11 +1425,11 @@ class DetailsPanel(QWidget):
                 btn_resume.clicked.connect(lambda _=False, qid=q.id: self._on_resume_queue_clicked(qid))
 
                 btn_filter = QPushButton()
+                btn_filter.setObjectName(f"btn_queue_filter_{q.id}")
                 btn_filter.setFixedSize(28, 26)
                 btn_filter.setIconSize(QSize(18, 18))
-                btn_filter.setCheckable(True)
                 btn_filter.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn_filter.setIcon(_create_eye_icon(visible=False, active=False))
+                btn_filter.setIcon(_create_eye_icon(visible=True, active=False))
                 themed_widget(btn_filter, """
                     QPushButton {
                         background-color: Colors.BG_LIGHT;
@@ -1410,12 +1444,12 @@ class DetailsPanel(QWidget):
                     QPushButton:pressed {
                         background-color: Colors.BG_DARK;
                     }
-                    QPushButton:checked {
-                        background-color: rgba(88, 166, 255, 0.2);
-                        border-color: Colors.ACCENT;
-                    }
                 """)
                 btn_filter.clicked.connect(lambda _=False, qid=q.id: self._on_filter_queue_clicked(qid))
+                btn_filter.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn_filter.customContextMenuRequested.connect(
+                    lambda pos, qid=q.id, btn=btn_filter: self._show_filter_queue_menu(qid, btn.mapToGlobal(pos))
+                )
 
                 act_lay.addWidget(btn_pause)
                 act_lay.addWidget(btn_resume)
@@ -1529,23 +1563,36 @@ class DetailsPanel(QWidget):
             widgets["btn_pause"].setEnabled(active > 0 or queued > 0)
             widgets["btn_resume"].setEnabled(paused > 0 or stopped > 0)
 
-            # Filter toggle state
-            active_qid = (
-                self._manager.get_active_queue()
-                if hasattr(self._manager, "get_active_queue")
-                else getattr(self._manager, "active_queue_id", "")
-            )
-            is_filtered = bool(active_qid and active_qid == q.id)
+            # Filter toggle state (synced with DownloadTableModel.queue_filter)
+            model = self.model
+            q_filter = model.queue_filter() if model else None
+            is_visible = (q_filter is None or q.id in q_filter)
+            is_filter_active = (q_filter is not None)
+
             btn_filter = widgets.get("btn_filter")
             if btn_filter:
                 btn_filter.blockSignals(True)
-                btn_filter.setChecked(is_filtered)
-                btn_filter.setIcon(_create_eye_icon(visible=is_filtered, active=is_filtered))
+                btn_filter.setIcon(_create_eye_icon(visible=is_visible, active=is_filter_active and is_visible))
                 btn_filter.blockSignals(False)
-                if is_filtered:
-                    btn_filter.setToolTip(f"Queue '{q.name}' is visible (click to show all queues)")
+                if is_visible:
+                    btn_filter.setToolTip(f"Queue '{q.name}' is visible (click to hide from downloads table)")
                 else:
-                    btn_filter.setToolTip(f"Filter view to show only '{q.name}'")
+                    btn_filter.setToolTip(f"Queue '{q.name}' is hidden (click to show in downloads table)")
+
+        # Update top status text if queues are filtered
+        model = self.model
+        q_filter = model.queue_filter() if model else None
+        if hasattr(self, "_lbl_queues_status"):
+            if q_filter is not None:
+                visible_count = sum(1 for q in queues if q.id in q_filter)
+                self._lbl_queues_status.setText(
+                    f"Queue filter active: {visible_count} of {len(queues)} queues visible in downloads table. "
+                    "Use the eye buttons or the Queue column filter to show/hide queues."
+                )
+            else:
+                self._lbl_queues_status.setText(
+                    "Named download queues, concurrency budgets, and limits. Pause, resume, or hide/unhide queues below."
+                )
 
     def _on_queue_max_concurrent_changed(self, queue_id: str, value: int):
         self._manager.set_queue_max_concurrent(queue_id, value)
@@ -1585,20 +1632,47 @@ class DetailsPanel(QWidget):
         self._update_queues()
 
     def _on_filter_queue_clicked(self, queue_id: str):
-        current_active = (
-            self._manager.get_active_queue()
-            if hasattr(self._manager, "get_active_queue")
-            else getattr(self._manager, "active_queue_id", "")
-        )
-        if current_active == queue_id:
+        model = self.model
+        if model is None:
+            return
+
+        queues = self._manager.get_queues()
+        all_qids = {q.id for q in queues}
+        current_filter = model.queue_filter()  # None or set[str]
+
+        # Reset single-queue scope if one was active so it does not conflict
+        if hasattr(self._manager, "get_active_queue") and self._manager.get_active_queue():
             self._manager.set_active_queue("")
-            self._show_status_message("Showing all queues")
+
+        q = self._manager.get_queue(queue_id)
+        name = q.name if q else queue_id
+
+        if current_filter is None:
+            # All queues are currently visible. Hiding this queue leaves all other queues visible.
+            new_filter = all_qids - {queue_id}
+            model.set_queue_filter(new_filter)
+            self._show_status_message(f"Hidden queue '{name}' from downloads table")
         else:
-            self._manager.set_active_queue(queue_id)
-            q = self._manager.get_queue(queue_id)
-            name = q.name if q else queue_id
-            self._show_status_message(f"Filtered view to queue '{name}'")
+            if queue_id in current_filter:
+                # Currently visible -> hide it!
+                new_filter = set(current_filter) - {queue_id}
+                model.set_queue_filter(new_filter)
+                self._show_status_message(f"Hidden queue '{name}' from downloads table")
+            else:
+                # Currently hidden -> unhide it!
+                new_filter = set(current_filter) | {queue_id}
+                if new_filter >= all_qids:
+                    # All queues are now visible -> reset filter
+                    model.set_queue_filter(None)
+                    self._show_status_message("Showing all queues in downloads table")
+                else:
+                    model.set_queue_filter(new_filter)
+                    self._show_status_message(f"Showing queue '{name}' in downloads table")
+
         self._update_queues()
+        win = self.window()
+        if win is not None and hasattr(win, "_table"):
+            win._table.horizontalHeader().viewport().update()
 
     def _on_queue_row_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
@@ -1606,6 +1680,80 @@ class DetailsPanel(QWidget):
             if w.get("row") == row:
                 self._on_filter_queue_clicked(qid)
                 break
+
+    def _on_queues_table_context_menu(self, pos: QPoint):
+        item = self._table_queues.itemAt(pos)
+        row = item.row() if item is not None else self._table_queues.rowAt(pos.y())
+        if row < 0:
+            return
+        for qid, w in self._queue_row_widgets.items():
+            if w.get("row") == row:
+                self._show_filter_queue_menu(qid, self._table_queues.viewport().mapToGlobal(pos))
+                break
+
+    def _show_filter_queue_menu(self, queue_id: str, global_pos: QPoint):
+        model = self.model
+        if model is None:
+            return
+        menu = QMenu(self)
+        q = self._manager.get_queue(queue_id)
+        name = q.name if q else queue_id
+
+        act_solo = menu.addAction(f"Show Only '{name}'")
+        act_solo.triggered.connect(lambda: self._filter_solo_queue(queue_id))
+
+        current_filter = model.queue_filter()
+        is_visible = (current_filter is None or queue_id in current_filter)
+        if is_visible:
+            act_toggle = menu.addAction(f"Hide '{name}'")
+        else:
+            act_toggle = menu.addAction(f"Show '{name}'")
+        act_toggle.triggered.connect(lambda: self._on_filter_queue_clicked(queue_id))
+
+        menu.addSeparator()
+        act_show_all = menu.addAction("Show All Queues")
+        act_show_all.triggered.connect(self._filter_show_all_queues)
+        act_hide_all = menu.addAction("Hide All Queues")
+        act_hide_all.triggered.connect(self._filter_hide_all_queues)
+
+        menu.exec(global_pos)
+
+    def _filter_solo_queue(self, queue_id: str):
+        model = self.model
+        if model is None:
+            return
+        if hasattr(self._manager, "get_active_queue") and self._manager.get_active_queue():
+            self._manager.set_active_queue("")
+        model.set_queue_filter({queue_id})
+        q = self._manager.get_queue(queue_id)
+        name = q.name if q else queue_id
+        self._show_status_message(f"Showing only queue '{name}' in downloads table")
+        self._update_queues()
+        win = self.window()
+        if win is not None and hasattr(win, "_table"):
+            win._table.horizontalHeader().viewport().update()
+
+    def _filter_show_all_queues(self):
+        model = self.model
+        if model is None:
+            return
+        model.set_queue_filter(None)
+        self._show_status_message("Showing all queues in downloads table")
+        self._update_queues()
+        win = self.window()
+        if win is not None and hasattr(win, "_table"):
+            win._table.horizontalHeader().viewport().update()
+
+    def _filter_hide_all_queues(self):
+        model = self.model
+        if model is None:
+            return
+        model.set_queue_filter(set())
+        self._show_status_message("Hidden all queues from downloads table")
+        self._update_queues()
+        win = self.window()
+        if win is not None and hasattr(win, "_table"):
+            win._table.horizontalHeader().viewport().update()
 
     def _on_jump_to_manage_queues(self):
         """Open Preferences dialog jumped directly to the Queues tab."""

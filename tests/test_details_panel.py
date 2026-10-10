@@ -1994,18 +1994,23 @@ class TestDetailsPanel(unittest.TestCase):
         updated_entry2 = self.db.get_download("test-queue-pause-1")
         self.assertIn(updated_entry2.status, ("queued", "downloading"))
 
-    def test_details_panel_queues_tab_double_click_filters_scope(self):
-        """Double-clicking a queue row in Queues tab scopes active queue in manager."""
+    def test_details_panel_queues_tab_double_click_toggles_queue_visibility(self):
+        """Double-clicking a queue row in Queues tab toggles queue visibility in model."""
         panel = self.win._details_panel
         queues = self.manager.get_queues()
         self.assertGreater(len(queues), 1)
+        all_qids = {q.id for q in queues}
         target_q = queues[1]
+
+        # Initially all queues visible
+        self.assertIsNone(self.win._model.queue_filter())
 
         row = panel._queue_row_widgets[target_q.id]["row"]
         item = panel._table_queues.item(row, 1) or panel._table_queues.item(row, 2)
         panel._on_queue_row_double_clicked(item)
 
-        self.assertEqual(self.manager.get_active_queue(), target_q.id)
+        # target_q should now be hidden, remaining queues visible
+        self.assertEqual(self.win._model.queue_filter(), all_qids - {target_q.id})
 
     def test_details_panel_queues_tab_filter_toggle_and_icon_buttons(self):
         """Action buttons have icon-only labels and eye button toggles queue filter."""
@@ -2013,6 +2018,7 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_mode("queues")
         queues = self.manager.get_queues()
         self.assertGreater(len(queues), 1)
+        all_qids = {q.id for q in queues}
         target_q = queues[1]
         widgets = panel._queue_row_widgets[target_q.id]
 
@@ -2021,25 +2027,69 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(widgets["btn_resume"].text(), "▶")
         self.assertEqual(widgets["btn_filter"].text(), "")
         self.assertFalse(widgets["btn_filter"].icon().isNull())
-        self.assertTrue(widgets["btn_filter"].isCheckable())
 
-        # Initially no queue filter is active (hidden/unfiltered state)
-        self.assertEqual(self.manager.active_queue_id, "")
-        self.assertFalse(widgets["btn_filter"].isChecked())
-        self.assertIn("Filter", widgets["btn_filter"].toolTip())
-
-        # Click eye button to filter to target_q (visible state)
-        widgets["btn_filter"].click()
-        self.assertEqual(self.manager.active_queue_id, target_q.id)
-        self.assertTrue(widgets["btn_filter"].isChecked())
-        self.assertFalse(widgets["btn_filter"].icon().isNull())
+        # Initially no queue filter is active (all queues visible)
+        self.assertIsNone(self.win._model.queue_filter())
         self.assertIn("visible", widgets["btn_filter"].toolTip().lower())
 
-        # Click eye button again to toggle filter off
+        # Click eye button to hide target_q
         widgets["btn_filter"].click()
-        self.assertEqual(self.manager.active_queue_id, "")
-        self.assertFalse(widgets["btn_filter"].isChecked())
-        self.assertIn("Filter", widgets["btn_filter"].toolTip())
+        self.assertEqual(self.win._model.queue_filter(), all_qids - {target_q.id})
+        self.assertIn("hidden", widgets["btn_filter"].toolTip().lower())
+
+        # Click eye button again to unhide target_q (all queues visible again -> filter resets to None)
+        widgets["btn_filter"].click()
+        self.assertIsNone(self.win._model.queue_filter())
+        self.assertIn("visible", widgets["btn_filter"].toolTip().lower())
+
+    def test_details_panel_queues_tab_multiselect_filter_synced_with_table(self):
+        """Multiple queues can be filtered and stay bidirectional synced with table model."""
+        panel = self.win._details_panel
+        panel.set_mode("queues")
+        queues = self.manager.get_queues()
+        self.assertGreaterEqual(len(queues), 3)
+        q0, q1, q2 = queues[0], queues[1], queues[2]
+
+        w0 = panel._queue_row_widgets[q0.id]
+        w1 = panel._queue_row_widgets[q1.id]
+        w2 = panel._queue_row_widgets[q2.id]
+
+        # 1. Hide q1 via eye button
+        w1["btn_filter"].click()
+        self.assertIn("hidden", w1["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w0["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w2["btn_filter"].toolTip().lower())
+
+        # 2. Hide q2 via eye button -> multiple queues filtered
+        w2["btn_filter"].click()
+        self.assertIn("hidden", w1["btn_filter"].toolTip().lower())
+        self.assertIn("hidden", w2["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w0["btn_filter"].toolTip().lower())
+        self.assertTrue(self.win._model.is_queue_filtered())
+        self.assertIn(q0.id, self.win._model.queue_filter())
+        self.assertNotIn(q1.id, self.win._model.queue_filter())
+        self.assertNotIn(q2.id, self.win._model.queue_filter())
+
+        # 3. Simulate change from queue column filter in downloads table (e.g. user checks q1)
+        self.win._model.set_queue_filter({q0.id, q1.id})
+        # Queues tab must be synced immediately
+        self.assertIn("visible", w0["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w1["btn_filter"].toolTip().lower())
+        self.assertIn("hidden", w2["btn_filter"].toolTip().lower())
+
+        # 4. Context menu Solo queue: Show only q2
+        panel._filter_solo_queue(q2.id)
+        self.assertEqual(self.win._model.queue_filter(), {q2.id})
+        self.assertIn("hidden", w0["btn_filter"].toolTip().lower())
+        self.assertIn("hidden", w1["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w2["btn_filter"].toolTip().lower())
+
+        # 5. Show all queues
+        panel._filter_show_all_queues()
+        self.assertIsNone(self.win._model.queue_filter())
+        self.assertIn("visible", w0["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w1["btn_filter"].toolTip().lower())
+        self.assertIn("visible", w2["btn_filter"].toolTip().lower())
 
     def test_details_panel_queues_tab_realtime_counts_and_speed_updates(self):
         """Downloads column shows 'X active / Y total' and speed/status updates in realtime."""

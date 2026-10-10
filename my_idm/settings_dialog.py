@@ -591,6 +591,24 @@ class SettingsDialog(QDialog):
         except Exception:
             return None
 
+    def closeEvent(self, event):
+        worker = getattr(self, "_probe_worker", None)
+        if worker is not None and worker.is_alive():
+            try:
+                worker.join(timeout=0.5)
+            except Exception:
+                pass
+        super().closeEvent(event)
+
+    def reject(self):
+        worker = getattr(self, "_probe_worker", None)
+        if worker is not None and worker.is_alive():
+            try:
+                worker.join(timeout=0.5)
+            except Exception:
+                pass
+        super().reject()
+
     def _build_tab_body(self) -> QWidget:
         """Sidebar navigator on the left, tab pages on the right, in one row.
 
