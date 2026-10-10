@@ -1253,6 +1253,94 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(self.model.get_entry(6).id, "ep01")
         self.assertEqual(self.model.data(self.model.index(6, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "")
 
+    def test_mark_deleting_dims_and_disables_rows(self):
+        """Deleting rows are marked, disabled (NoItemFlags), dimmed in text, and display Deleting..."""
+        from my_idm.styles import Colors
+        e1 = _make_entry("1", "bravo.zip", size=2000, progress=50.0, status="downloading", speed=500.0, eta=30.0)
+        e2 = _make_entry("2", "alpha.iso", size=1000, progress=100.0, status="completed")
+        e3 = _make_entry("3", "charlie.mp4", size=5000, progress=10.0, status="downloading", speed=1500.0)
+        self.model.load_entries([e1, e2, e3])
+        self.assertFalse(self.model.is_deleting("1"))
+
+        # Mark "1" and "2" as deleting
+        self.model.mark_deleting(["1", "2"])
+        self.assertTrue(self.model.is_deleting("1"))
+        self.assertTrue(self.model.is_deleting("2"))
+        self.assertFalse(self.model.is_deleting("3"))
+
+        row1 = self.model.row_for_id("1")
+        row3 = self.model.row_for_id("3")
+        idx1_name = self.model.index(row1, Col.NAME)
+        idx1_status = self.model.index(row1, Col.STATUS)
+        idx1_progress = self.model.index(row1, Col.PROGRESS)
+        idx1_speed = self.model.index(row1, Col.SPEED)
+        idx3_name = self.model.index(row3, Col.NAME)
+
+        # Flags: deleting row must have NoItemFlags (not enabled, not selectable)
+        self.assertEqual(self.model.flags(idx1_name), Qt.ItemFlag.NoItemFlags)
+        # Non-deleting row has standard flags
+        self.assertTrue(bool(self.model.flags(idx3_name) & Qt.ItemFlag.ItemIsEnabled))
+        self.assertTrue(bool(self.model.flags(idx3_name) & Qt.ItemFlag.ItemIsSelectable))
+
+        # Visual dimming: ForegroundRole returns Colors.TEXT_DISABLED for deleting rows
+        fg1 = self.model.data(idx1_name, Qt.ItemDataRole.ForegroundRole)
+        self.assertEqual(fg1, QColor(Colors.TEXT_DISABLED))
+        fg1_status = self.model.data(idx1_status, Qt.ItemDataRole.ForegroundRole)
+        self.assertEqual(fg1_status, QColor(Colors.TEXT_DISABLED))
+
+        # Status text says "Deleting..."
+        self.assertEqual(self.model.data(idx1_status, Qt.ItemDataRole.DisplayRole), "Deleting...")
+        # Progress dictionary status is "deleting"
+        prog_data = self.model.data(idx1_progress, Qt.ItemDataRole.DisplayRole)
+        self.assertEqual(prog_data.get("status"), "deleting")
+        # Speed and ETA are blanked to "—"
+        self.assertEqual(self.model.data(idx1_speed, Qt.ItemDataRole.DisplayRole), "—")
+
+        # Selection query excludes deleting rows
+        selected_ids = self.model.get_selected_ids([idx1_name, idx3_name])
+        self.assertEqual(selected_ids, ["3"])
+
+        # Unmark
+        self.model.unmark_deleting("1")
+        self.assertFalse(self.model.is_deleting("1"))
+        self.assertTrue(bool(self.model.flags(idx1_name) & Qt.ItemFlag.ItemIsEnabled))
+
+    def test_remove_entry_cleans_up_deleting_state(self):
+        """Removing an entry cleans it up from the deleting IDs set."""
+        e1 = _make_entry("1", "bravo.zip")
+        e2 = _make_entry("2", "alpha.iso")
+        self.model.load_entries([e1, e2])
+        self.model.mark_deleting(["1", "2"])
+        self.assertTrue(self.model.is_deleting("1"))
+        self.model.remove_entry("1")
+        self.assertFalse(self.model.is_deleting("1"))
+        self.assertTrue(self.model.is_deleting("2"))
+
+    def test_deleting_ignores_status_and_progress_updates(self):
+        """Progress and status updates do not overwrite deleting state."""
+        e1 = _make_entry("1", "bravo.zip", size=2000, progress=50.0, status="downloading")
+        self.model.load_entries([e1])
+        self.model.mark_deleting(["1"])
+        row = self.model.row_for_id("1")
+        idx_status = self.model.index(row, Col.STATUS)
+
+        # Attempt to update progress
+        self.model.update_progress("1", 1500, 2000, speed=1000.0, eta=5.0)
+        self.assertEqual(self.model.data(self.model.index(row, Col.SPEED), Qt.ItemDataRole.DisplayRole), "—")
+
+        # Attempt to update status
+        self.model.update_status("1", "paused")
+        self.assertEqual(self.model.data(idx_status, Qt.ItemDataRole.DisplayRole), "Deleting...")
+
+    def test_deleting_excludes_speeds_from_aggregates(self):
+        """Speeds of downloads pending deletion are excluded from aggregate speeds."""
+        e1 = _make_entry("1", "bravo.zip", speed=500.0, status="downloading")
+        e3 = _make_entry("3", "charlie.mp4", speed=1500.0, status="downloading")
+        self.model.load_entries([e1, e3])  # e1: 500 B/s, e3: 1500 B/s
+        self.assertEqual(self.model.get_aggregate_speeds(), (2000.0, 0.0))
+        self.model.mark_deleting(["1"])
+        self.assertEqual(self.model.get_aggregate_speeds(), (1500.0, 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

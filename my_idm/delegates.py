@@ -124,6 +124,7 @@ class ProgressBarDelegate(QStyledItemDelegate):
         "file_not_found":    QColor(Colors.RED),
         "stalled":           QColor(Colors.ORANGE),
         "suspended":         QColor(Colors.TEXT_DIM),
+        "deleting":          QColor(Colors.TEXT_DISABLED),
     }
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
@@ -140,6 +141,10 @@ class ProgressBarDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        is_disabled = not bool(option.state & QStyle.StateFlag.State_Enabled) or status == "deleting"
+        if is_disabled:
+            painter.setOpacity(0.35)
 
         rect: QRect = option.rect.adjusted(4, 4, -4, -4)
         radius = rect.height() // 2
@@ -179,6 +184,8 @@ class ProgressBarDelegate(QStyledItemDelegate):
             text = "Metadata..."
         elif status == "stalled":
             text = f"{progress:.1f}% (Stalled)"
+        elif status == "deleting":
+            text = "Deleting..."
         else:
             text = f"{progress:.1f}%"
         painter.setPen(QPen(QColor(Colors.TEXT)))
@@ -208,9 +215,17 @@ class DownloadNameDelegate(QStyledItemDelegate):
         if not opt.icon.isNull() and opt.text.startswith("🧅 "):
             opt.text = opt.text[2:].lstrip()
 
+        is_disabled = not bool(opt.state & QStyle.StateFlag.State_Enabled)
+        if is_disabled:
+            painter.save()
+            painter.setOpacity(0.4)
+
         widget = opt.widget
         style = widget.style() if widget else QApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        if is_disabled:
+            painter.restore()
 
 
 class SavePathDelegate(QStyledItemDelegate):
@@ -238,9 +253,17 @@ class SavePathDelegate(QStyledItemDelegate):
         # Update the text to display
         opt.text = shortened
         
+        is_disabled = not bool(opt.state & QStyle.StateFlag.State_Enabled)
+        if is_disabled:
+            painter.save()
+            painter.setOpacity(0.4)
+
         widget = opt.widget
         style = widget.style() if widget else QApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        if is_disabled:
+            painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem,
                  index: QModelIndex):
@@ -280,6 +303,8 @@ class QueueColumnDelegate(QStyledItemDelegate):
 
     def _text_colour(self, option: QStyleOptionViewItem) -> QColor:
         """Swatch-visible foreground: highlighted text on a selection, plain text otherwise."""
+        if not (option.state & QStyle.StateFlag.State_Enabled):
+            return QColor(Colors.TEXT_DISABLED)
         if option.state & QStyle.StateFlag.State_Selected:
             return option.palette.color(QPalette.ColorRole.HighlightedText)
         return option.palette.color(QPalette.ColorRole.Text)
@@ -293,6 +318,10 @@ class QueueColumnDelegate(QStyledItemDelegate):
         metrics = QFontMetrics(option.font)
 
         painter.save()
+        is_disabled = not bool(option.state & QStyle.StateFlag.State_Enabled)
+        if is_disabled:
+            painter.setOpacity(0.35)
+
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(option.rect, option.palette.highlight())
         elif option.features & QStyleOptionViewItem.ViewItemFeature.HasDisplay:

@@ -1197,6 +1197,41 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
                 f"Action '{label}' should start with a letter or digit, not a glyph",
             )
 
+    def test_delete_multiple_items_dims_and_disables_rows(self):
+        """When delete is accepted, rows are marked as deleting, dimmed, disabled, and selection cleared."""
+        from PySide6.QtWidgets import QDialog
+        e1 = DownloadEntry(id="del-1", url="https://example.com/1.bin", filename="1.bin", status="completed")
+        e2 = DownloadEntry(id="del-2", url="https://example.com/2.bin", filename="2.bin", status="completed")
+        self.db.add_download(e1)
+        self.db.add_download(e2)
+        self.win._load_history()
+
+        # Select both rows
+        self.win._table.selectAll()
+        self.assertEqual(len(self.win._selected_ids()), 2)
+
+        # Mock DeleteConfirmDialog.exec to return Accepted
+        with patch("my_idm.main_window.DeleteConfirmDialog.exec", return_value=QDialog.DialogCode.Accepted), \
+             patch.object(self.manager, "delete_downloads") as mock_del:
+            self.win._on_delete()
+            self.assertEqual(mock_del.call_count, 1)
+            self.assertEqual(set(mock_del.call_args[0][0]), {"del-1", "del-2"})
+
+        # Rows must now be marked as deleting
+        self.assertTrue(self.win._model.is_deleting("del-1"))
+        self.assertTrue(self.win._model.is_deleting("del-2"))
+
+        # Table selection must be cleared
+        self.assertEqual(len(self.win._selected_ids()), 0)
+
+        # Flags for deleting rows must be NoItemFlags
+        row1 = self.win._model.row_for_id("del-1")
+        idx1 = self.win._model.index(row1, 0)
+        self.assertEqual(self.win._model.flags(idx1), Qt.ItemFlag.NoItemFlags)
+
+        # Status displays "Deleting..."
+        idx_status = self.win._model.index(row1, Col.STATUS)
+        self.assertEqual(self.win._model.data(idx_status, Qt.ItemDataRole.DisplayRole), "Deleting...")
 
     def test_bandwidth_allocation_context_menu_and_action(self):
         """Bandwidth allocation updates entry metadata and calls engine."""

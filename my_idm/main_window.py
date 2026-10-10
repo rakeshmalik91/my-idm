@@ -1967,6 +1967,8 @@ class MainWindow(QMainWindow):
             sm.clearSelection()
             first_index = None
             for did in wanted:
+                if self._model.is_deleting(did):
+                    continue
                 row = self._model.row_for_id(did)
                 if row is None or row < 0:
                     continue
@@ -2268,6 +2270,9 @@ class MainWindow(QMainWindow):
             return
         dlg = DeleteConfirmDialog(len(ids), self)
         if dlg.exec() == DeleteConfirmDialog.DialogCode.Accepted:
+            self._model.mark_deleting(ids)
+            self._table.clearSelection()
+            self._update_action_states()
             self._manager.delete_downloads(ids, dlg.delete_files)
 
     def _on_delete_file(self):
@@ -2395,6 +2400,8 @@ class MainWindow(QMainWindow):
                 sec_id, is_col = res
                 self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
             self._apply_table_spans()
+            return
+        if self._model.is_deleting_row(index.row()):
             return
         self._on_open_file()
 
@@ -2712,6 +2719,9 @@ class MainWindow(QMainWindow):
                     act_m.triggered.connect(lambda checked=False, m=m_key: self._set_segregation_mode(m))
 
                 sec_menu.exec(self._table.viewport().mapToGlobal(pos))
+                return
+
+            if self._model.is_deleting_row(idx.row()):
                 return
 
             sm = self._table.selectionModel()

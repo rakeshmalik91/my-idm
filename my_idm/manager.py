@@ -2895,6 +2895,7 @@ class DownloadManager(QObject):
     def delete_download(self, download_id: str, delete_files: bool = False, trigger_process_queue: bool = True):
         entry = self._db.get_download(download_id)
         if not entry:
+            self.download_removed.emit(download_id)
             return
 
         # Stop active download

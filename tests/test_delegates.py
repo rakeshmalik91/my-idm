@@ -89,5 +89,66 @@ class TestShortenPath(unittest.TestCase):
         self.assertEqual(out, "D:/")
 
 
+class TestDelegatesDeleting(unittest.TestCase):
+    def test_progress_bar_delegate_deleting_renders(self):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+        from PySide6.QtCore import QRect
+        from my_idm.delegates import ProgressBarDelegate
+        from my_idm.download_model import DownloadTableModel, Col, DownloadEntry
+
+        delegate = ProgressBarDelegate()
+        model = DownloadTableModel()
+        e = DownloadEntry(id="d1", url="http://example.com/1.zip", total_size=1000, downloaded_size=500, status="downloading")
+        model.load_entries([e])
+        model.mark_deleting(["d1"])
+
+        idx = model.index(0, Col.PROGRESS)
+        pix = QPixmap(200, 30)
+        painter = QPainter(pix)
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, 200, 30)
+        opt.state = QStyle.StateFlag.State_None  # Disabled
+        try:
+            delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
+
+    def test_queue_column_delegate_disabled_text_colour(self):
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+        from my_idm.delegates import QueueColumnDelegate
+        from my_idm.styles import Colors
+
+        delegate = QueueColumnDelegate()
+        opt = QStyleOptionViewItem()
+        opt.state = QStyle.StateFlag.State_None  # Not enabled
+        self.assertEqual(delegate._text_colour(opt), QColor(Colors.TEXT_DISABLED))
+
+    def test_download_name_delegate_disabled_paint(self):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+        from PySide6.QtCore import QRect
+        from my_idm.delegates import DownloadNameDelegate
+        from my_idm.download_model import DownloadTableModel, Col, DownloadEntry
+
+        delegate = DownloadNameDelegate()
+        model = DownloadTableModel()
+        e = DownloadEntry(id="d1", url="http://example.com/1.zip", filename="test.zip", status="downloading")
+        model.load_entries([e])
+        model.mark_deleting(["d1"])
+
+        idx = model.index(0, Col.NAME)
+        pix = QPixmap(200, 30)
+        painter = QPainter(pix)
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, 200, 30)
+        opt.state = QStyle.StateFlag.State_None
+        try:
+            delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
+
+
 if __name__ == "__main__":
     unittest.main()

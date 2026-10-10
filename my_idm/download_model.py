@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any, Optional, Set
+from typing import Any, Iterable, Optional, Set
 
 import humanize
 from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
@@ -494,6 +494,8 @@ class DownloadTableModel(QAbstractTableModel):
         # Queue ids ticked in the Queue column's header filter; None means no filter. Distinct
         # from _queue_scope, which is the toolbar's single-queue selection.
         self._queue_filter: Optional[Set[str]] = None
+        # Download IDs pending paced batch deletion. Rows in this set are dimmed and disabled.
+        self._deleting_ids: set[str] = set()
 
     @property
     def tor_config(self) -> Optional[TorConfig]:
@@ -971,6 +973,7 @@ class DownloadTableModel(QAbstractTableModel):
 
     def load_entries(self, entries: list[DownloadEntry]):
         self.beginResetModel()
+        self._deleting_ids.clear()
         self._all_entries = list(entries)
         for e in self._all_entries:
             if e.download_type == "torrent" and e.metadata:
@@ -1011,6 +1014,7 @@ class DownloadTableModel(QAbstractTableModel):
             self.endInsertRows()
 
     def remove_entry(self, download_id: str):
+        self._deleting_ids.discard(download_id)
         self._all_entries = [e for e in self._all_entries if e.id != download_id]
         if self._segregated_view:
             self._reapply_filter()
@@ -1022,6 +1026,53 @@ class DownloadTableModel(QAbstractTableModel):
         self._entries.pop(row)
         self._rebuild_index()
         self.endRemoveRows()
+
+    def mark_deleting(self, download_ids: Iterable[str]) -> None:
+        """Mark download entries as pending deletion, dimming and disabling them."""
+        ids = set(download_ids)
+        if not ids:
+            return
+        self._deleting_ids.update(ids)
+        for did in ids:
+            row = self._id_to_row.get(did)
+            if row is not None and 0 <= row < len(self._entries):
+                left = self.index(row, 0)
+                right = self.index(row, Col.COUNT - 1)
+                self.dataChanged.emit(
+                    left, right,
+                    [
+                        Qt.ItemDataRole.DisplayRole,
+                        Qt.ItemDataRole.ForegroundRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                    ],
+                )
+
+    def unmark_deleting(self, download_id: str) -> None:
+        """Unmark a download entry from pending deletion state."""
+        if download_id in self._deleting_ids:
+            self._deleting_ids.discard(download_id)
+            row = self._id_to_row.get(download_id)
+            if row is not None and 0 <= row < len(self._entries):
+                left = self.index(row, 0)
+                right = self.index(row, Col.COUNT - 1)
+                self.dataChanged.emit(
+                    left, right,
+                    [
+                        Qt.ItemDataRole.DisplayRole,
+                        Qt.ItemDataRole.ForegroundRole,
+                        Qt.ItemDataRole.ToolTipRole,
+                    ],
+                )
+
+    def is_deleting(self, download_id: str) -> bool:
+        """True when the download is queued for paced batch deletion."""
+        return download_id in self._deleting_ids
+
+    def is_deleting_row(self, row: int) -> bool:
+        """True when the entry at visible *row* is queued for deletion."""
+        if 0 <= row < len(self._entries):
+            return self._entries[row].id in self._deleting_ids
+        return False
 
     # -- sorting -------------------------------------------------------------
 
@@ -1311,7 +1362,8 @@ class DownloadTableModel(QAbstractTableModel):
         for r in range(hdr_idx + 1, len(self._entries)):
             if getattr(self._entries[r], "is_section_header", False):
                 break
-            rows.append(r)
+            if self._entries[r].id not in self._deleting_ids:
+                rows.append(r)
         return rows
 
     def get_section_download_ids(self, section_id: str) -> list[str]:
@@ -1339,7 +1391,9 @@ class DownloadTableModel(QAbstractTableModel):
         rows = sorted(set(idx.row() for idx in indexes))
         return [
             self._entries[r].id for r in rows
-            if 0 <= r < len(self._entries) and not getattr(self._entries[r], "is_section_header", False)
+            if 0 <= r < len(self._entries)
+            and not getattr(self._entries[r], "is_section_header", False)
+            and self._entries[r].id not in self._deleting_ids
         ]
 
     @property
@@ -1352,8 +1406,8 @@ class DownloadTableModel(QAbstractTableModel):
 
     def get_aggregate_speeds(self) -> tuple[float, float]:
         """Returns (total_download_speed, total_upload_speed) in B/s."""
-        down = sum(e.speed for e in self._all_entries if e.status == "downloading")
-        up = sum(e.upload_speed for e in self._all_entries if e.status in ("downloading", "seeding"))
+        down = sum(e.speed for e in self._all_entries if e.status == "downloading" and e.id not in self._deleting_ids)
+        up = sum(e.upload_speed for e in self._all_entries if e.status in ("downloading", "seeding") and e.id not in self._deleting_ids)
         return down, up
 
     # -- progress updates (called from manager signals) ---------------------
@@ -1363,6 +1417,8 @@ class DownloadTableModel(QAbstractTableModel):
                         seeds: int = 0, peers: int = 0,
                         upload_speed: float = 0.0,
                         total_seeds: int = 0, total_peers: int = 0):
+        if download_id in self._deleting_ids:
+            return
         # Update canonical entry in _all_entries
         for e in self._all_entries:
             if e.id == download_id:
@@ -1438,6 +1494,8 @@ class DownloadTableModel(QAbstractTableModel):
 
     def update_status(self, download_id: str, status: str,
                       error_msg: str = ""):
+        if download_id in self._deleting_ids:
+            return False
         entry_all: Optional[DownloadEntry] = None
         old_sec: Optional[str] = None
         old_status: Optional[str] = None
@@ -1787,6 +1845,8 @@ class DownloadTableModel(QAbstractTableModel):
             return self._display_data(entry, col)
 
         if role == Qt.ItemDataRole.ForegroundRole:
+            if entry.id in self._deleting_ids:
+                return QColor(Colors.TEXT_DISABLED)
             if col == Col.STATUS:
                 if self.is_tor_active_for(entry):
                     return QColor(Colors.PURPLE)
@@ -1833,8 +1893,12 @@ class DownloadTableModel(QAbstractTableModel):
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
             return Qt.ItemFlag.NoItemFlags
-        if 0 <= index.row() < len(self._entries) and getattr(self._entries[index.row()], "is_section_header", False):
-            return Qt.ItemFlag.ItemIsEnabled
+        if 0 <= index.row() < len(self._entries):
+            entry = self._entries[index.row()]
+            if getattr(entry, "is_section_header", False):
+                return Qt.ItemFlag.ItemIsEnabled
+            if entry.id in self._deleting_ids:
+                return Qt.ItemFlag.NoItemFlags
         return (
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -1859,6 +1923,8 @@ class DownloadTableModel(QAbstractTableModel):
     def _display_data(self, entry: DownloadEntry, col: int) -> Any:
         if col == Col.QUEUE:
             if getattr(entry, "is_section_header", False) or entry.status not in ACTIVE_QUEUE_STATUSES:
+                return ""
+            if entry.id in self._deleting_ids:
                 return ""
             row = self._id_to_row.get(entry.id)
             if row is None:
@@ -1889,10 +1955,12 @@ class DownloadTableModel(QAbstractTableModel):
             prog = 100.0 if entry.status in ("completed", "seeding") else entry.progress
             return {
                 "progress": prog,
-                "status": entry.status,
+                "status": "deleting" if entry.id in self._deleting_ids else entry.status,
             }
 
         if col == Col.STATUS:
+            if entry.id in self._deleting_ids:
+                return "Deleting..."
             if entry.status == "threat_detected":
                 return "Threat Detected ⚠"
             if entry.status == "scanning":
@@ -1915,6 +1983,8 @@ class DownloadTableModel(QAbstractTableModel):
             return s
 
         if col == Col.SPEED:
+            if entry.id in self._deleting_ids:
+                return "—"
             if entry.download_type == "torrent":
                 if entry.status in ("downloading", "seeding"):
                     return f"↓ {_format_speed(entry.speed)}  ↑ {_format_speed(entry.upload_speed)}"
@@ -1926,6 +1996,8 @@ class DownloadTableModel(QAbstractTableModel):
             return "—"
 
         if col == Col.ETA:
+            if entry.id in self._deleting_ids:
+                return "—"
             if entry.status == "downloading":
                 return _format_eta(entry.eta_seconds)
             return "—"
