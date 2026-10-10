@@ -388,8 +388,8 @@ class QueueColumnDelegate(QStyledItemDelegate):
 
 
 def get_section_select_all_btn_rect(cell_rect: QRect, viewport_width: int = 0) -> QRect:
-    """Calculate the bounding rectangle for the 'Select All' button at the right edge of a section header row."""
-    btn_w = 72
+    """Calculate the bounding rectangle for the 'Select All' / 'Clear Selection' button at the right edge of a section header row."""
+    btn_w = 96
     btn_h = 20
     right_limit = min(cell_rect.right(), viewport_width) if viewport_width > 0 else cell_rect.right()
     btn_x = right_limit - btn_w - 12
@@ -400,7 +400,7 @@ def get_section_select_all_btn_rect(cell_rect: QRect, viewport_width: int = 0) -
 
 
 class SectionHeaderDelegate(QStyledItemDelegate):
-    """Renders section header rows in segregated view with a 'Select All' button at the right edge.
+    """Renders section header rows in segregated view with a 'Select All' / 'Clear Selection' button at the right edge.
 
     For ordinary download rows in column 0 (Col.QUEUE), it delegates to default painting
     to show the queue order/row number.
@@ -438,24 +438,36 @@ class SectionHeaderDelegate(QStyledItemDelegate):
         hdr_font = index.data(Qt.ItemDataRole.FontRole) or fonts.ui_font(10, bold=True)
         painter.setFont(hdr_font)
 
-        text_rect = option.rect.adjusted(12, 0, -96, 0)
+        text_rect = option.rect.adjusted(12, 0, -120, 0)
         painter.drawText(
             text_rect,
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
             title_text,
         )
 
-        # 3. 'Select All' button at the right edge
+        # 3. 'Select All' / 'Clear Selection' button at the right edge
         if getattr(entry, "section_count", 0) > 0:
             vw = option.widget.width() if option.widget else 0
             btn_rect = get_section_select_all_btn_rect(option.rect, vw)
+
+            all_selected = False
+            if option.widget and hasattr(option.widget, "selectionModel"):
+                sm = option.widget.selectionModel()
+                if sm:
+                    download_rows = getattr(model, "get_section_download_rows", lambda sid: [])(entry.section_id)
+                    all_selected = bool(download_rows) and all(sm.isRowSelected(r, QModelIndex()) for r in download_rows)
+
+            btn_label = "Clear Selection" if all_selected else "Select All"
 
             pos = option.widget.mapFromGlobal(QCursor.pos()) if option.widget else None
             is_hover = (pos is not None and btn_rect.contains(pos))
 
             if is_hover:
-                painter.setBrush(QColor(88, 166, 255, 35))
+                painter.setBrush(QColor(88, 166, 255, 45) if all_selected else QColor(88, 166, 255, 35))
                 painter.setPen(QPen(QColor(Colors.ACCENT), 1))
+            elif all_selected:
+                painter.setBrush(QColor(88, 166, 255, 20))
+                painter.setPen(QPen(QColor(88, 166, 255, 70), 1))
             else:
                 painter.setBrush(QColor(255, 255, 255, 12))
                 painter.setPen(QPen(QColor(255, 255, 255, 35), 1))
@@ -463,9 +475,13 @@ class SectionHeaderDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(btn_rect, 4, 4)
 
             painter.setFont(fonts.ui_font(9, bold=True))
-            btn_text_color = QColor(Colors.TEXT) if is_hover else QColor(Colors.TEXT_SECONDARY)
+            btn_text_color = (
+                QColor(Colors.TEXT)
+                if is_hover
+                else (QColor(Colors.ACCENT) if all_selected else QColor(Colors.TEXT_SECONDARY))
+            )
             painter.setPen(btn_text_color)
-            painter.drawText(btn_rect, int(Qt.AlignmentFlag.AlignCenter), "Select All")
+            painter.drawText(btn_rect, int(Qt.AlignmentFlag.AlignCenter), btn_label)
 
         painter.restore()
 

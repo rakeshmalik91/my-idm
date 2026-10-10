@@ -150,5 +150,54 @@ class TestDelegatesDeleting(unittest.TestCase):
             painter.end()
 
 
+class TestSectionHeaderDelegate(unittest.TestCase):
+    def test_section_header_delegate_paint_select_all_and_clear_selection(self):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyleOptionViewItem, QTableView
+        from PySide6.QtCore import QRect, QItemSelectionModel
+        from my_idm.delegates import SectionHeaderDelegate
+        from my_idm.download_model import DownloadTableModel, DownloadEntry
+
+        table = QTableView()
+        model = DownloadTableModel()
+        table.setModel(model)
+        model.set_segregated_view(True)
+
+        e1 = DownloadEntry(id="d1", url="http://example.com/1.zip", filename="1.zip", status="downloading")
+        e2 = DownloadEntry(id="d2", url="http://example.com/2.zip", filename="2.zip", status="downloading")
+        model.load_entries([e1, e2])
+
+        delegate = SectionHeaderDelegate()
+        header_idx = model.index(0, 0)
+        self.assertTrue(model.is_section_header_row(0))
+
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, 600, 28)
+        opt.widget = table
+
+        pix = QPixmap(600, 28)
+
+        # 1. Initially nothing is selected -> renders without error
+        p1 = QPainter(pix)
+        try:
+            delegate.paint(p1, opt, header_idx)
+        finally:
+            p1.end()
+
+        # 2. Select all download rows in that section
+        download_rows = model.get_section_download_rows("active")
+        self.assertEqual(len(download_rows), 2)
+        sm = table.selectionModel()
+        for r in download_rows:
+            sm.select(model.index(r, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+
+        # Renders with all rows selected -> "Clear Selection" branch
+        p2 = QPainter(pix)
+        try:
+            delegate.paint(p2, opt, header_idx)
+        finally:
+            p2.end()
+
+
 if __name__ == "__main__":
     unittest.main()

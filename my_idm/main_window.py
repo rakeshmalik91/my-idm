@@ -2348,6 +2348,45 @@ class MainWindow(QMainWindow):
         for row in self._model.get_section_header_row_indices():
             self._table.setSpan(row, 0, 1, Col.COUNT)
 
+    def _is_section_all_selected(self, sec_id_or_row: str | int) -> bool:
+        """Return True if all visible downloads in the specified section are selected."""
+        if isinstance(sec_id_or_row, int):
+            hdr = self._model.get_section_header(sec_id_or_row)
+            if not hdr:
+                return False
+            sec_id = hdr.section_id
+        else:
+            sec_id = sec_id_or_row
+
+        download_rows = self._model.get_section_download_rows(sec_id)
+        if not download_rows:
+            return False
+        sm = self._table.selectionModel()
+        from PySide6.QtCore import QModelIndex
+        return all(sm.isRowSelected(r, QModelIndex()) for r in download_rows)
+
+    def _on_clear_selection_in_section(self, row: int) -> list[str]:
+        """Clear selection for all downloads in the section header at *row*."""
+        hdr = self._model.get_section_header(row)
+        if hdr is None or getattr(hdr, "section_count", 0) <= 0:
+            return []
+        sec_id = hdr.section_id
+        download_rows = self._model.get_section_download_rows(sec_id)
+        if not download_rows:
+            return []
+
+        sm = self._table.selectionModel()
+        from PySide6.QtCore import QItemSelection, QItemSelectionModel
+        selection = QItemSelection()
+        for r in download_rows:
+            selection.select(self._model.index(r, 0), self._model.index(r, Col.COUNT - 1))
+        sm.select(
+            selection,
+            QItemSelectionModel.SelectionFlag.Deselect | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self._on_table_selection_changed()
+        return [self._model.entries[r].id for r in download_rows if 0 <= r < len(self._model.entries)]
+
     def _on_select_all_in_section(self, row: int) -> list[str]:
         """Select all downloads in the section header at *row*."""
         hdr = self._model.get_section_header(row)
@@ -2370,7 +2409,7 @@ class MainWindow(QMainWindow):
         if not ctrl_held:
             sm.clearSelection()
 
-        from PySide6.QtCore import QItemSelection
+        from PySide6.QtCore import QItemSelection, QItemSelectionModel
         selection = QItemSelection()
         for r in download_rows:
             selection.select(self._model.index(r, 0), self._model.index(r, Col.COUNT - 1))
@@ -2389,7 +2428,10 @@ class MainWindow(QMainWindow):
             btn_rect = get_section_select_all_btn_rect(cell_rect, self._table.viewport().width())
             hdr = self._model.get_section_header(row)
             if hdr and getattr(hdr, "section_count", 0) > 0 and btn_rect.contains(pos):
-                self._on_select_all_in_section(row)
+                if self._is_section_all_selected(row):
+                    self._on_clear_selection_in_section(row)
+                else:
+                    self._on_select_all_in_section(row)
                 return
             res = self._model.toggle_section_collapsed(row)
             if res:
@@ -2689,8 +2731,21 @@ class MainWindow(QMainWindow):
                 act_this.triggered.connect(_toggle_this)
                 sec_menu.addAction(act_this)
                 if getattr(entry, "section_count", 0) > 0:
-                    act_select_section = QAction(f"Select All in '{entry.section_title}'", self)
-                    act_select_section.triggered.connect(lambda _, r=idx.row(): self._on_select_all_in_section(r))
+                    is_all_sel = self._is_section_all_selected(entry.section_id)
+                    action_title = (
+                        f"Clear Selection in '{entry.section_title}'"
+                        if is_all_sel
+                        else f"Select All in '{entry.section_title}'"
+                    )
+                    act_select_section = QAction(action_title, self)
+                    if is_all_sel:
+                        act_select_section.triggered.connect(
+                            lambda _, r=idx.row(): self._on_clear_selection_in_section(r)
+                        )
+                    else:
+                        act_select_section.triggered.connect(
+                            lambda _, r=idx.row(): self._on_select_all_in_section(r)
+                        )
                     sec_menu.addAction(act_select_section)
                 sec_menu.addSeparator()
                 current_mode = self._model.segregated_mode()
@@ -4084,6 +4139,11 @@ class MainWindow(QMainWindow):
         self._update_queue_status(entry)
         self._update_action_states()
         self._update_count_label()
+        if self._model.is_segregated_view():
+            for r in self._model.get_section_header_row_indices():
+                rect = self._table.visualRect(self._model.index(r, 0))
+                if not rect.isEmpty():
+                    self._table.viewport().update(rect)
 
     def _update_queue_status(self, entry):
         """Show which queue the selected download belongs to.

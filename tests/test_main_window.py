@@ -3955,8 +3955,8 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         cell = QRect(0, 50, 1400, 28)
         rect = get_section_select_all_btn_rect(cell, 1200)
         self.assertEqual(rect.height(), 20)
-        self.assertEqual(rect.width(), 72)
-        # Should be within the visible right limit (1200 - 72 - 12 = 1116)
+        self.assertEqual(rect.width(), 96)
+        # Should be within the visible right limit (1200 - 96 - 12 = 1092)
         self.assertEqual(rect.right(), 1200 - 12 - 1)
         self.assertEqual(rect.top(), 50 + (28 - 20) // 2)
 
@@ -3994,6 +3994,79 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         selected_inact = self.win._on_select_all_in_section(inactive_row)
         self.assertEqual(selected_inact, ["c1"])
         self.assertEqual(self.win._selected_ids(), ["c1"])
+
+    def test_select_all_toggles_to_clear_selection_when_all_in_group_selected(self):
+        from my_idm.delegates import get_section_select_all_btn_rect
+
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        e2 = DownloadEntry(id="a2", url="http://e.com/2", filename="2.zip", status="queued")
+        for e in (e1, e2):
+            self.db.add_download(e)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+
+        idx = self.win._model.index(0, 0)
+        cell_rect = self.win._table.visualRect(idx)
+        btn_rect = get_section_select_all_btn_rect(cell_rect, self.win._table.viewport().width())
+        btn_center = btn_rect.center()
+
+        # Initially nothing selected
+        self.assertFalse(self.win._is_section_all_selected(0))
+        self.assertEqual(self.win._selected_ids(), [])
+
+        # First click on button selects all items in group
+        self.win._on_table_clicked(idx, click_pos=btn_center)
+        self.assertTrue(self.win._is_section_all_selected(0))
+        self.assertEqual(sorted(self.win._selected_ids()), ["a1", "a2"])
+
+        # Second click on button clears selection in group
+        self.win._on_table_clicked(idx, click_pos=btn_center)
+        self.assertFalse(self.win._is_section_all_selected(0))
+        self.assertEqual(self.win._selected_ids(), [])
+
+    def test_partial_selection_selects_all_on_click(self):
+        from my_idm.delegates import get_section_select_all_btn_rect
+
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        e2 = DownloadEntry(id="a2", url="http://e.com/2", filename="2.zip", status="queued")
+        for e in (e1, e2):
+            self.db.add_download(e)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+
+        idx = self.win._model.index(0, 0)
+        cell_rect = self.win._table.visualRect(idx)
+        btn_rect = get_section_select_all_btn_rect(cell_rect, self.win._table.viewport().width())
+        btn_center = btn_rect.center()
+
+        # Select only one of the two
+        row_a1 = self.win._model.row_for_id("a1")
+        self.win._table.selectRow(row_a1)
+        self.assertEqual(self.win._selected_ids(), ["a1"])
+        self.assertFalse(self.win._is_section_all_selected(0))
+
+        # Clicking the button when partially selected should select all
+        self.win._on_table_clicked(idx, click_pos=btn_center)
+        self.assertTrue(self.win._is_section_all_selected(0))
+        self.assertEqual(sorted(self.win._selected_ids()), ["a1", "a2"])
+
+    def test_context_menu_toggles_select_all_and_clear_selection(self):
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        self.db.add_download(e1)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+
+        # Before selecting: not all selected
+        self.assertFalse(self.win._is_section_all_selected(0))
+
+        # Select all
+        self.win._on_select_all_in_section(0)
+        self.assertTrue(self.win._is_section_all_selected(0))
+
+        # Clear selection
+        self.win._on_clear_selection_in_section(0)
+        self.assertFalse(self.win._is_section_all_selected(0))
+        self.assertEqual(self.win._selected_ids(), [])
 
     def test_select_all_in_collapsed_section_expands_and_selects(self):
         e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
