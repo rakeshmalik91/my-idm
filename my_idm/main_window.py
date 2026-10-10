@@ -1711,11 +1711,11 @@ class MainWindow(QMainWindow):
         """)
 
         status_bar = QStatusBar()
+        status_bar.addWidget(self._details_status_btn)
         status_bar.addWidget(self._status_label, 1)
         status_bar.addPermanentWidget(self._animepahe_status_btn)
         status_bar.addPermanentWidget(self._tor_footer_container)
         status_bar.addPermanentWidget(self._vpn_status_btn)
-        status_bar.addPermanentWidget(self._details_status_btn)
         status_bar.addPermanentWidget(self._speed_label)
         status_bar.addPermanentWidget(self._queue_status_label)
         status_bar.addPermanentWidget(self._count_label)
