@@ -153,6 +153,23 @@ class TestStatsBuckets(StatsTestCase):
         self.assertEqual(snap.lifetime.count, 2)
         self.assertEqual(snap.lifetime.downloaded, 6 * GB)
 
+    def test_series_bounded_by_since_and_until(self):
+        self.add("d0", 0, total=1 * GB)
+        self.add("d10", 10, total=1 * GB)
+        self.add("d20", 20, total=1 * GB)
+        self.add("d30", 30, total=1 * GB)
+        d10_date = TODAY - timedelta(days=10)
+        d20_date = TODAY - timedelta(days=20)
+        snap = self.db.get_download_stats(TODAY, since=d20_date, until=d10_date, fill_gaps=True)
+        self.assertEqual(snap.since, d20_date.isoformat())
+        self.assertEqual(snap.until, d10_date.isoformat())
+        # The series should only span d20_date to d10_date (11 days)
+        self.assertEqual(len(snap.series), 11)
+        self.assertEqual(snap.series[0][0], d20_date.isoformat())
+        self.assertEqual(snap.series[-1][0], d10_date.isoformat())
+        # Total counts should be 2 (d10 and d20), d0 and d30 are excluded
+        self.assertEqual(sum(s.count for _, s in snap.series), 2)
+
     def test_totals_are_byte_exact_not_rounded(self):
         self.add("a", 0, total=1_234_567_891, uploaded=99_999_999)
         snap = self.stats()
@@ -1365,7 +1382,22 @@ class TestChartSelectors(PopupTestCase):
     def test_the_offered_ranges(self):
         self.assertEqual(
             [label for label, _days in StatisticsPopup.RANGES],
-            ["Today", "Last 7 days", "Last 30 days", "Last 12 months", "All time"],
+            [
+                "Today",
+                "This week",
+                "Last week",
+                "Last 7 days",
+                "This month",
+                "Last month",
+                "Last 30 days",
+                "This quarter",
+                "Last quarter",
+                "Last 90 days",
+                "This year",
+                "Last year",
+                "Last 12 months",
+                "All time",
+            ],
         )
 
     def test_the_offered_granularities(self):
@@ -1376,7 +1408,7 @@ class TestChartSelectors(PopupTestCase):
 
     def test_the_default_is_thirty_days_by_day(self):
         popup = self.popup()
-        self.assertEqual(popup._range_combo.currentIndex(), 2)
+        self.assertEqual(popup._range_combo.currentIndex(), StatisticsPopup.DEFAULT_RANGE_INDEX)
         self.assertEqual(popup._range_combo.currentText(), "Last 30 days")
         self.assertEqual(popup.bucket_selection(), "day")
         self.assertEqual(popup.snapshot().since, (TODAY - timedelta(days=29)).isoformat())
@@ -1386,7 +1418,8 @@ class TestChartSelectors(PopupTestCase):
         self.add("new", 0, total=1 * GB)
         popup = self.popup()
         self.assertEqual(len(popup.snapshot().series), 30)
-        popup._range_combo.setCurrentIndex(0)
+        today_idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("Today")
+        popup._range_combo.setCurrentIndex(today_idx)
         self.assertEqual(popup.snapshot().since, TODAY.isoformat())
         self.assertEqual(len(popup.snapshot().series), 1)
         self.assertEqual(sum(s.count for _d, s in popup.snapshot().series), 1)
@@ -1396,7 +1429,8 @@ class TestChartSelectors(PopupTestCase):
         self.add("new", 2, total=1 * GB)
         popup = self.popup()
         self.assertEqual(len(popup.snapshot().series), 30)
-        popup._range_combo.setCurrentIndex(1)
+        idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("Last 7 days")
+        popup._range_combo.setCurrentIndex(idx)
         self.assertEqual(popup.snapshot().since, (TODAY - timedelta(days=6)).isoformat())
         self.assertEqual(
             len(popup.snapshot().series), 7,
@@ -1407,7 +1441,8 @@ class TestChartSelectors(PopupTestCase):
     def test_all_time_has_no_lower_bound(self):
         self.add("ancient", 900, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(4)
+        idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("All time")
+        popup._range_combo.setCurrentIndex(idx)
         self.assertEqual(popup.snapshot().since, "", "all time means no cut-off at all")
         self.assertEqual(len(popup.snapshot().series), 901)
         self.assertEqual(sum(s.count for _d, s in popup.snapshot().series), 1)
@@ -1415,14 +1450,16 @@ class TestChartSelectors(PopupTestCase):
     def test_changing_the_range_refreshes_the_chart(self):
         self.add("a", 0, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(1)
+        idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("Last 7 days")
+        popup._range_combo.setCurrentIndex(idx)
         self.assertEqual(len(popup._chart.days()), len(popup.snapshot().series))
 
     def test_switching_to_per_month_merges_the_bars(self):
         for days in (0, 1, 2, 40):
             self.add(f"d{days}", days, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(4)
+        all_time_idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("All time")
+        popup._range_combo.setCurrentIndex(all_time_idx)
         popup._bucket_combo.setCurrentIndex(
             popup._bucket_combo.findData("month")
         )
@@ -1459,22 +1496,85 @@ class TestChartSelectors(PopupTestCase):
         for days in (0, 1, 40):
             self.add(f"d{days}", days, total=1 * GB)
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(4)
+        all_time_idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("All time")
+        popup._range_combo.setCurrentIndex(all_time_idx)
         popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("month"))
         self.assertEqual(len(popup.snapshot().series), 2)
 
     def test_the_pickers_survive_a_refresh(self):
         popup = self.popup()
-        popup._range_combo.setCurrentIndex(1)
+        idx = [lbl for lbl, _ in StatisticsPopup.RANGES].index("Last 7 days")
+        popup._range_combo.setCurrentIndex(idx)
         popup._bucket_combo.setCurrentIndex(popup._bucket_combo.findData("month"))
         popup.refresh()
-        self.assertEqual(popup._range_combo.currentIndex(), 1)
+        self.assertEqual(popup._range_combo.currentIndex(), idx)
         self.assertEqual(popup.bucket_selection(), "month")
 
     def test_an_out_of_range_initial_index_falls_back(self):
         popup = self.popup(range_index=99)
-        self.assertEqual(popup._range_combo.currentIndex(), 2)
+        self.assertEqual(popup._range_combo.currentIndex(), StatisticsPopup.DEFAULT_RANGE_INDEX)
         self.assertIsNotNone(popup.snapshot())
+
+    def test_new_date_ranges_bounds_and_filtering(self):
+        """Test date bounds computation and filtering for all added ranges."""
+        popup = self.popup()
+        ranges_dict = {lbl: idx for idx, (lbl, _) in enumerate(StatisticsPopup.RANGES)}
+
+        # This week
+        popup._range_combo.setCurrentIndex(ranges_dict["This week"])
+        exp_mon = TODAY - timedelta(days=TODAY.weekday())
+        self.assertEqual(popup.snapshot().since, exp_mon.isoformat())
+        self.assertEqual(popup.snapshot().until, TODAY.isoformat())
+
+        # Last week
+        popup._range_combo.setCurrentIndex(ranges_dict["Last week"])
+        exp_last_mon = TODAY - timedelta(days=TODAY.weekday() + 7)
+        exp_last_sun = TODAY - timedelta(days=TODAY.weekday() + 1)
+        self.assertEqual(popup.snapshot().since, exp_last_mon.isoformat())
+        self.assertEqual(popup.snapshot().until, exp_last_sun.isoformat())
+
+        # This month
+        popup._range_combo.setCurrentIndex(ranges_dict["This month"])
+        self.assertEqual(popup.snapshot().since, TODAY.replace(day=1).isoformat())
+        self.assertEqual(popup.snapshot().until, TODAY.isoformat())
+
+        # Last month
+        popup._range_combo.setCurrentIndex(ranges_dict["Last month"])
+        first_of_this_m = TODAY.replace(day=1)
+        last_of_prev_m = first_of_this_m - timedelta(days=1)
+        first_of_prev_m = last_of_prev_m.replace(day=1)
+        self.assertEqual(popup.snapshot().since, first_of_prev_m.isoformat())
+        self.assertEqual(popup.snapshot().until, last_of_prev_m.isoformat())
+
+        # This quarter
+        popup._range_combo.setCurrentIndex(ranges_dict["This quarter"])
+        q_m = ((TODAY.month - 1) // 3) * 3 + 1
+        self.assertEqual(popup.snapshot().since, TODAY.replace(month=q_m, day=1).isoformat())
+        self.assertEqual(popup.snapshot().until, TODAY.isoformat())
+
+        # Last quarter
+        popup._range_combo.setCurrentIndex(ranges_dict["Last quarter"])
+        first_of_q = TODAY.replace(month=q_m, day=1)
+        last_of_prev_q = first_of_q - timedelta(days=1)
+        prev_q_m = ((last_of_prev_q.month - 1) // 3) * 3 + 1
+        first_of_prev_q = last_of_prev_q.replace(month=prev_q_m, day=1)
+        self.assertEqual(popup.snapshot().since, first_of_prev_q.isoformat())
+        self.assertEqual(popup.snapshot().until, last_of_prev_q.isoformat())
+
+        # Last 90 days
+        popup._range_combo.setCurrentIndex(ranges_dict["Last 90 days"])
+        self.assertEqual(popup.snapshot().since, (TODAY - timedelta(days=89)).isoformat())
+        self.assertEqual(popup.snapshot().until, TODAY.isoformat())
+
+        # This year
+        popup._range_combo.setCurrentIndex(ranges_dict["This year"])
+        self.assertEqual(popup.snapshot().since, date(TODAY.year, 1, 1).isoformat())
+        self.assertEqual(popup.snapshot().until, TODAY.isoformat())
+
+        # Last year
+        popup._range_combo.setCurrentIndex(ranges_dict["Last year"])
+        self.assertEqual(popup.snapshot().since, date(TODAY.year - 1, 1, 1).isoformat())
+        self.assertEqual(popup.snapshot().until, date(TODAY.year - 1, 12, 31).isoformat())
 
     def test_an_unknown_initial_bucket_falls_back(self):
         popup = self.popup(bucket="fortnight")

@@ -338,14 +338,25 @@ class StatisticsPopup(QDialog):
 
     UI_STATE_KEY = "statistics_dialog_size"
 
-    #: (label, days back, or None for all time)
+    #: (label, days back or range key, or None for all time)
     RANGES = (
         ("Today", 0),
+        ("This week", "this_week"),
+        ("Last week", "last_week"),
         ("Last 7 days", 6),
+        ("This month", "this_month"),
+        ("Last month", "last_month"),
         ("Last 30 days", 29),
+        ("This quarter", "this_quarter"),
+        ("Last quarter", "last_quarter"),
+        ("Last 90 days", 89),
+        ("This year", "this_year"),
+        ("Last year", "last_year"),
         ("Last 12 months", 364),
         ("All time", None),
     )
+    DEFAULT_RANGE_INDEX = 6  # "Last 30 days"
+
     BUCKETS = (
         ("Per 5 minutes", "5min"),
         ("Per hour", "hour"),
@@ -354,7 +365,7 @@ class StatisticsPopup(QDialog):
     )
 
     def __init__(self, db: Database, parent=None, today: Optional[date] = None,
-                 speed_provider=None, range_index: int = 2, bucket: str = "day",
+                 speed_provider=None, range_index: int = DEFAULT_RANGE_INDEX, bucket: str = "day",
                  cumulative: bool = False):
         super().__init__(parent)
         self._db = db
@@ -402,10 +413,10 @@ class StatisticsPopup(QDialog):
 
         controls.addWidget(QLabel("Range:"))
         self._range_combo = QComboBox()
-        for label, _days in self.RANGES:
+        for label, _spec in self.RANGES:
             self._range_combo.addItem(label)
         self._range_combo.setCurrentIndex(
-            self._range_index if 0 <= self._range_index < len(self.RANGES) else 2
+            self._range_index if 0 <= self._range_index < len(self.RANGES) else self.DEFAULT_RANGE_INDEX
         )
         self._range_combo.currentIndexChanged.connect(self._on_range_changed)
         controls.addWidget(self._range_combo)
@@ -456,17 +467,54 @@ class StatisticsPopup(QDialog):
     # -- chart selection ----------------------------------------------------
 
     def range_selection(self):
-        """The chosen range as ``(label, days_back_or_None)``."""
+        """The chosen range as ``(label, spec)``."""
         return self.RANGES[max(0, self._range_combo.currentIndex())]
 
     def bucket_selection(self) -> str:
         return self._bucket_combo.currentData() or "day"
 
+    def _date_bounds_for_range(self) -> tuple[Optional[date], Optional[date]]:
+        """Compute the (since, until) dates for the selected range."""
+        _label, spec = self.range_selection()
+        today = self._resolve_today()
+        if spec is None:
+            return None, None
+        if isinstance(spec, int):
+            return today - timedelta(days=spec), today
+        if spec == "this_week":
+            return today - timedelta(days=today.weekday()), today
+        if spec == "last_week":
+            mon = today - timedelta(days=today.weekday() + 7)
+            sun = today - timedelta(days=today.weekday() + 1)
+            return mon, sun
+        if spec == "this_month":
+            return today.replace(day=1), today
+        if spec == "last_month":
+            first_of_this_month = today.replace(day=1)
+            last_of_prev_month = first_of_this_month - timedelta(days=1)
+            return last_of_prev_month.replace(day=1), last_of_prev_month
+        if spec == "this_quarter":
+            q_month = ((today.month - 1) // 3) * 3 + 1
+            return today.replace(month=q_month, day=1), today
+        if spec == "last_quarter":
+            q_month = ((today.month - 1) // 3) * 3 + 1
+            first_of_this_q = today.replace(month=q_month, day=1)
+            last_of_prev_q = first_of_this_q - timedelta(days=1)
+            prev_q_month = ((last_of_prev_q.month - 1) // 3) * 3 + 1
+            return last_of_prev_q.replace(month=prev_q_month, day=1), last_of_prev_q
+        if spec == "this_year":
+            return date(today.year, 1, 1), today
+        if spec == "last_year":
+            return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31)
+        return today - timedelta(days=29), today
+
     def _since_for_range(self) -> Optional[date]:
-        _label, days_back = self.range_selection()
-        if days_back is None:
-            return None
-        return self._resolve_today() - timedelta(days=days_back)
+        since, _until = self._date_bounds_for_range()
+        return since
+
+    def _until_for_range(self) -> Optional[date]:
+        _since, until = self._date_bounds_for_range()
+        return until
 
     def _on_range_changed(self, _index: int) -> None:
         self._range_index = self._range_combo.currentIndex()
@@ -516,10 +564,11 @@ class StatisticsPopup(QDialog):
         and nothing to report, which is how a stats view becomes impossible to diagnose.
         """
         since = self._since_for_range()
+        until = self._until_for_range()
         bucket = self.bucket_selection()
         try:
             snap = self._db.get_download_stats(
-                self._resolve_today(), since=since, bucket=bucket, fill_gaps=True
+                self._resolve_today(), since=since, bucket=bucket, fill_gaps=True, until=until
             )
         except Exception:
             log.warning("Could not read download statistics", exc_info=True)

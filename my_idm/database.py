@@ -85,6 +85,7 @@ class StatsSnapshot:
     series: tuple[tuple[str, DownloadStats], ...] = ()
     bucket: str = "day"
     since: str = ""
+    until: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -96,6 +97,7 @@ class StatsSnapshot:
             "series": [[label, s.to_dict()] for label, s in self.series],
             "bucket": self.bucket,
             "since": self.since,
+            "until": self.until,
         }
 
 
@@ -1881,6 +1883,7 @@ CREATE TABLE IF NOT EXISTS segments (
         since: Optional[date | datetime | str] = None,
         bucket: str = "day",
         fill_gaps: bool = False,
+        until: Optional[date | datetime | str] = None,
     ) -> StatsSnapshot:
         """Read every statistics bucket in one call.
 
@@ -1896,7 +1899,7 @@ CREATE TABLE IF NOT EXISTS segments (
         rather than hard-coding a UTC date. That keeps the test meaningful on any host
         while still failing if the conversion is removed.
 
-        *since* and *bucket* drive the chart series: the range to plot (None = all time)
+        *since*, *until*, and *bucket* drive the chart series: the range to plot (None = all time)
         and whether to group by 5-minute intervals, hour, day, or month. The summary buckets
         above are fixed and unaffected - they are the headline numbers, and a chart range
         should not silently redefine them.
@@ -1907,6 +1910,8 @@ CREATE TABLE IF NOT EXISTS segments (
             today = today.date()
         if isinstance(since, datetime) and bucket not in ("hour", "5min", "minute"):
             since = since.date()
+        if isinstance(until, datetime) and bucket not in ("hour", "5min", "minute"):
+            until = until.date()
 
         values = {}
         for name, days_back in self._STATS_BUCKETS:
@@ -1923,9 +1928,10 @@ CREATE TABLE IF NOT EXISTS segments (
             month=values["month"],
             year=values["year"],
             lifetime=values["lifetime"],
-            series=self._stats_series(since, bucket_val, fill_gaps=fill_gaps, today=today),
+            series=self._stats_series(since, bucket_val, fill_gaps=fill_gaps, today=today, until=until),
             bucket=bucket_val,
             since=since.isoformat() if hasattr(since, "isoformat") else str(since or ""),
+            until=until.isoformat() if hasattr(until, "isoformat") else str(until or ""),
         )
 
     def _stats_series(
@@ -1934,8 +1940,9 @@ CREATE TABLE IF NOT EXISTS segments (
         bucket: str,
         fill_gaps: bool = False,
         today: Optional[date | datetime] = None,
+        until: Optional[date | datetime | str] = None,
     ) -> tuple[tuple[str, DownloadStats], ...]:
-        """The chart series, grouped by local 5min, hour, day, or month and clipped to *since*.
+        """The chart series, grouped by local 5min, hour, day, or month and clipped to *since* and *until*.
 
         Same ``_STATS_PARSABLE`` guard and same local conversion as the cut-off buckets.
         The group expression is repeated verbatim in the WHERE clause - SQLite will not let
@@ -1979,6 +1986,32 @@ CREATE TABLE IF NOT EXISTS segments (
             else:
                 since_str = str(since)[:width]
             params.append(since_str)
+
+        if until is not None:
+            where += f" AND {day_expr} <= ?"
+            if isinstance(until, datetime):
+                dt = until.astimezone() if until.tzinfo is not None else until
+                if bucket in ("5min", "minute"):
+                    m = (dt.minute // 5) * 5
+                    dt = dt.replace(minute=m, second=0, microsecond=0)
+                    until_str = dt.strftime("%Y-%m-%d %H:%M")
+                else:
+                    until_str = dt.strftime("%Y-%m-%d %H:%M:%S")[:width]
+            elif isinstance(until, date):
+                if width == 7:
+                    until_str = until.strftime("%Y-%m")
+                elif width == 13:
+                    until_str = until.strftime("%Y-%m-%d 23")
+                elif width == 16:
+                    until_str = until.strftime("%Y-%m-%d 23:55")
+                else:
+                    until_str = until.strftime("%Y-%m-%d")
+            elif isinstance(until, str):
+                until_str = until.replace("T", " ")[:width]
+            else:
+                until_str = str(until)[:width]
+            params.append(until_str)
+
         rows = self._conn.execute(
             f"SELECT {day_expr} AS bucket, "
             "       COUNT(*) AS count, "
@@ -1992,11 +2025,15 @@ CREATE TABLE IF NOT EXISTS segments (
 
         has_bw = self._conn.execute("SELECT 1 FROM bandwidth_history LIMIT 1").fetchone() is not None
         if has_bw:
-            bw_where = ""
+            bw_where_parts = []
             bw_params = []
             if since is not None:
-                bw_where = f" WHERE substr(period_start, 1, {width}) >= ?"
+                bw_where_parts.append(f"substr(period_start, 1, {width}) >= ?")
                 bw_params.append(since_str)
+            if until is not None:
+                bw_where_parts.append(f"substr(period_start, 1, {width}) <= ?")
+                bw_params.append(until_str)
+            bw_where = f" WHERE {' AND '.join(bw_where_parts)}" if bw_where_parts else ""
             bw_rows = self._conn.execute(
                 f"SELECT substr(period_start, 1, {width}) AS bucket, "
                 "       COALESCE(SUM(downloaded_bytes), 0) AS downloaded, "
@@ -2024,7 +2061,8 @@ CREATE TABLE IF NOT EXISTS segments (
             raw_series = tuple((str(r["bucket"]), self._stats_row_to_bucket(r)) for r in rows)
 
         if fill_gaps:
-            return fill_series_gaps(raw_series, bucket, start=since, end=today)
+            end_limit = until if until is not None else today
+            return fill_series_gaps(raw_series, bucket, start=since, end=end_limit)
         return raw_series
 
     def get_next_queue_order(self, queue_id: str = "") -> int:
