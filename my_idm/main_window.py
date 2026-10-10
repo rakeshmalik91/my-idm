@@ -568,6 +568,42 @@ def _create_expand_all_icon(size: int = 24, color: Optional[QColor] = None) -> Q
     return QIcon(pix)
 
 
+def _create_view_toolbar_icon(size: int = 32) -> QIcon:
+    """Create a sleek icon showing window layout with a highlighted view strip across the top."""
+    icon = QIcon()
+    for state_on in (False, True):
+        pix = QPixmap(size, size)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Window outer outline
+        outline_color = QColor("#79c0ff") if state_on else QColor("#6e7681")
+        pen = QPen(outline_color, max(1.5, size * 0.07))
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        rect = QRectF(size * 0.12, size * 0.12, size * 0.76, size * 0.76)
+        p.drawRoundedRect(rect, 2.5, 2.5)
+
+        # Top view strip
+        strip_color = QColor("#58a6ff") if state_on else QColor(110, 118, 129, 100)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(strip_color)
+        strip_rect = QRectF(size * 0.16, size * 0.16, size * 0.68, size * 0.22)
+        p.drawRoundedRect(strip_rect, 1.5, 1.5)
+
+        # Content rows beneath
+        row_color = QColor("#388bfd" if state_on else "#484f58")
+        p.setPen(QPen(row_color, max(1.2, size * 0.05)))
+        p.drawLine(QPointF(size * 0.20, size * 0.54), QPointF(size * 0.80, size * 0.54))
+        p.drawLine(QPointF(size * 0.20, size * 0.70), QPointF(size * 0.80, size * 0.70))
+        p.end()
+
+        icon.addPixmap(pix, QIcon.Mode.Normal, QIcon.State.On if state_on else QIcon.State.Off)
+    return icon
+
+
 class _RightClickGuard(QObject):
     """Event filter that makes a ``QMenu`` ignore the right mouse button entirely.
 
@@ -843,7 +879,7 @@ class MainWindow(QMainWindow):
         self._seg_control_strip.setStyleSheet(
             f"background-color: {Colors.BG_MID}; border-bottom: 1px solid {Colors.BORDER};"
         )
-        self._seg_control_strip.setVisible(self._segregated_view_enabled and self._manager.db.get_ui_state("seg_strip_visible", True))
+        self._seg_control_strip.setVisible(bool(self._manager.db.get_ui_state("seg_strip_visible", True)))
         seg_strip_layout = QHBoxLayout(self._seg_control_strip)
         seg_strip_layout.setContentsMargins(10, 2, 10, 2)
         seg_strip_layout.setSpacing(8)
@@ -855,6 +891,7 @@ class MainWindow(QMainWindow):
         self._btn_collapse_all.setIconSize(QSize(16, 16))
         self._btn_collapse_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_collapse_all.setToolTip("Collapse all sections in the grouped view")
+        self._btn_collapse_all.setEnabled(self._segregated_view_enabled)
         self._btn_collapse_all.clicked.connect(self._on_collapse_all_sections)
         
         self._btn_expand_all = QPushButton(self._seg_control_strip)
@@ -863,6 +900,7 @@ class MainWindow(QMainWindow):
         self._btn_expand_all.setIconSize(QSize(16, 16))
         self._btn_expand_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_expand_all.setToolTip("Expand all sections in the grouped view")
+        self._btn_expand_all.setEnabled(self._segregated_view_enabled)
         self._btn_expand_all.clicked.connect(self._on_expand_all_sections)
         
         icon_btn_style = f"""
@@ -879,6 +917,11 @@ class MainWindow(QMainWindow):
         }}
         QPushButton:pressed {{
             background-color: {Colors.BG_DARK};
+        }}
+        QPushButton:disabled {{
+            background-color: {Colors.BG_DARK};
+            border-color: {Colors.BORDER};
+            color: {Colors.TEXT_DISABLED};
         }}
         """
         self._btn_collapse_all.setStyleSheet(icon_btn_style)
@@ -900,6 +943,7 @@ class MainWindow(QMainWindow):
         self._seg_mode_btn_group.setExclusive(True)
         self._seg_mode_buttons = {}
         mode_buttons_data = [
+            ("None", "none", "No grouping / flat table view"),
             ("Status", "status", "Active / Seeding / Inactive"),
             ("Date", "date", "Today / Yesterday / Last 7 / Last 30 / Older"),
             ("File Type", "type", "Video / Audio / Archives / Documents / Photos / General"),
@@ -947,9 +991,12 @@ class MainWindow(QMainWindow):
             btn = QPushButton(label, self._seg_control_strip)
             btn.setFixedHeight(22)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolTip(f"Group by {tooltip}")
+            btn.setToolTip("No grouping / flat table view" if mode_key == "none" else f"Group by {tooltip}")
             btn.setCheckable(True)
-            is_checked = self._segregated_view_enabled and (mode_key == self._segregated_view_mode)
+            if mode_key == "none":
+                is_checked = not self._segregated_view_enabled
+            else:
+                is_checked = self._segregated_view_enabled and (mode_key == self._segregated_view_mode)
             btn.setChecked(is_checked)
             btn.setStyleSheet(mode_btn_style)
             btn.clicked.connect(lambda checked, mk=mode_key: self._on_seg_mode_button_clicked(mk))
@@ -1133,6 +1180,15 @@ class MainWindow(QMainWindow):
             lambda: self._on_open_preferences(TAB_GENERAL)
         )
 
+        self._act_toggle_view_toolbar = QAction(
+            _create_view_toolbar_icon(24), "View Toolbar", self
+        )
+        self._act_toggle_view_toolbar.setCheckable(True)
+        strip_vis = bool(self._manager.db.get_ui_state("seg_strip_visible", True))
+        self._act_toggle_view_toolbar.setChecked(strip_vis)
+        self._act_toggle_view_toolbar.setToolTip("Show or hide the view toolbar")
+        self._act_toggle_view_toolbar.toggled.connect(self._on_toggle_view_toolbar)
+
         self._act_torrent_settings = QAction(_create_emoji_icon("🧲"), "BitTorrent Settings…", self)
         self._act_torrent_settings.setToolTip(
             "Configure BitTorrent seeding behavior, speed limits, and metadata timeout"
@@ -1283,6 +1339,8 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self._act_toolbar_stats)
         toolbar.addSeparator()
         toolbar.addAction(self._act_preferences)
+        toolbar.addSeparator()
+        toolbar.addAction(self._act_toggle_view_toolbar)
 
         # Show only icons without text for playback, action, and stats buttons
         for act in (
@@ -1298,6 +1356,7 @@ class MainWindow(QMainWindow):
             self._act_move,
             self._act_recheck,
             self._act_toolbar_stats,
+            self._act_toggle_view_toolbar,
         ):
             btn = toolbar.widgetForAction(act)
             if isinstance(btn, QToolButton):
@@ -1488,6 +1547,7 @@ class MainWindow(QMainWindow):
 
         self._sync_segregation_mode_actions()
 
+        view_menu.addAction(self._act_toggle_view_toolbar)
         view_menu.addAction(self._act_toggle_details)
         view_menu.addSeparator()
         select_all_act = QAction(_create_emoji_icon("☑️"), "Select All", self)
@@ -2739,12 +2799,8 @@ class MainWindow(QMainWindow):
                 btn.update()
 
         if not self._segregated_view_enabled:
-            # Turning a mode on implies turning segregation on. Unreachable from the View menu,
-            # which greys these actions out while segregation is off, but kept for programmatic
-            # callers - and it must never run while a caller is deliberately applying the user's
-            # *unchecked* box, which is why SettingsDialog._apply_views_tab calls
-            # _on_toggle_segregated_view first.
-            self._act_segregated_view.setChecked(True)
+            # Turning a mode on implies turning segregation on.
+            self._on_toggle_segregated_view(True)
         else:
             self._model.set_segregated_mode(mode)
             self._apply_table_spans()
@@ -2757,7 +2813,27 @@ class MainWindow(QMainWindow):
 
     def _on_seg_mode_button_clicked(self, mode: str):
         """Handle clicks on the mode buttons in the grouped view control strip."""
-        self._set_segregation_mode(mode)
+        if mode == "none":
+            if self._segregated_view_enabled:
+                self._on_toggle_segregated_view(False)
+            else:
+                if hasattr(self, "_seg_mode_buttons"):
+                    for mk, btn in self._seg_mode_buttons.items():
+                        btn.blockSignals(True)
+                        btn.setChecked(mk == "none")
+                        btn.blockSignals(False)
+        else:
+            self._set_segregation_mode(mode)
+
+    def _on_toggle_view_toolbar(self, checked: bool):
+        """Toggle visibility of the view strip under the toolbar."""
+        self._manager.db.set_ui_state("seg_strip_visible", checked)
+        if hasattr(self, "_seg_control_strip"):
+            self._seg_control_strip.setVisible(checked)
+        if hasattr(self, "_act_toggle_view_toolbar") and self._act_toggle_view_toolbar.isChecked() != checked:
+            self._act_toggle_view_toolbar.blockSignals(True)
+            self._act_toggle_view_toolbar.setChecked(checked)
+            self._act_toggle_view_toolbar.blockSignals(False)
 
     def _on_toggle_segregated_view(self, checked: bool):
         self._segregated_view_enabled = checked
@@ -2784,10 +2860,32 @@ class MainWindow(QMainWindow):
         # this method, and only this method knows the resulting state.
         self._sync_segregation_mode_actions(checked)
         
-        # Show/hide the grouped view control strip
+        # Show/hide the view control strip based on seg_strip_visible (remains visible even when non-grouped)
         if hasattr(self, "_seg_control_strip"):
             strip_visible = self._manager.db.get_ui_state("seg_strip_visible", True)
-            self._seg_control_strip.setVisible(checked and strip_visible)
+            self._seg_control_strip.setVisible(strip_visible)
+        
+        if hasattr(self, "_seg_mode_buttons"):
+            for mk, btn in self._seg_mode_buttons.items():
+                btn.blockSignals(True)
+                if checked:
+                    btn.setChecked(mk == self._segregated_view_mode)
+                else:
+                    btn.setChecked(mk == "none")
+                btn.blockSignals(False)
+                btn.update()
+
+        if hasattr(self, "_btn_collapse_all"):
+            self._btn_collapse_all.setEnabled(checked)
+        if hasattr(self, "_btn_expand_all"):
+            self._btn_expand_all.setEnabled(checked)
+
+        if hasattr(self, "_act_toggle_view_toolbar"):
+            strip_visible = self._manager.db.get_ui_state("seg_strip_visible", True)
+            if self._act_toggle_view_toolbar.isChecked() != strip_visible:
+                self._act_toggle_view_toolbar.blockSignals(True)
+                self._act_toggle_view_toolbar.setChecked(strip_visible)
+                self._act_toggle_view_toolbar.blockSignals(False)
         
         if checked:
             mode_str = self._segregation_mode_label(self._segregated_view_mode)
@@ -4839,6 +4937,14 @@ class MainWindow(QMainWindow):
             )
             self._act_toggle_details.setToolTip(tip)
             self._sync_panel_buttons()
+
+            strip_vis = bool(state.get("seg_strip_visible", True))
+            if hasattr(self, "_seg_control_strip"):
+                self._seg_control_strip.setVisible(strip_vis)
+            if hasattr(self, "_act_toggle_view_toolbar"):
+                self._act_toggle_view_toolbar.blockSignals(True)
+                self._act_toggle_view_toolbar.setChecked(strip_vis)
+                self._act_toggle_view_toolbar.blockSignals(False)
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
         finally:

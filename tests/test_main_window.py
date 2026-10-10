@@ -1827,10 +1827,11 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertEqual(self.win._model.search_query(), "a")
         self.win._search_edit.clear()
 
-    def test_preferences_is_the_last_toolbar_control(self):
+    def test_view_toolbar_toggle_is_the_last_toolbar_control(self):
         actions = self.win._toolbar.actions()
         self.assertTrue(actions, "toolbar has no actions")
-        self.assertIs(actions[-1], self.win._act_preferences)
+        self.assertIs(actions[-1], self.win._act_toggle_view_toolbar)
+        self.assertIn(self.win._act_preferences, actions)
 
     def test_toolbar_search_precedes_preferences(self):
         """The search box is the last stretch of the strip, and Preferences the last control."""
@@ -4125,6 +4126,72 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         self.win._on_table_clicked(idx, click_pos=outside_pos)
         # Should toggle collapse to True
         self.assertTrue(self.win._model.is_section_collapsed("active"))
+
+
+class TestViewToolbarAndGrouping(_MainWindowTestCase):
+    """Tests for View Toolbar toggle action, button, and Group by None button."""
+
+    def test_view_strip_visible_when_non_grouped(self):
+        self.win._on_toggle_segregated_view(False)
+        self.assertFalse(self.win._segregated_view_enabled)
+        # Strip remains visible (not hidden) even when grouping is disabled
+        self.assertFalse(self.win._seg_control_strip.isHidden())
+        self.assertTrue(self.win._seg_mode_buttons["none"].isChecked())
+        for mode in ("status", "date", "type", "name"):
+            self.assertFalse(self.win._seg_mode_buttons[mode].isChecked())
+        # Collapse and expand all buttons disabled when non-grouped
+        self.assertFalse(self.win._btn_collapse_all.isEnabled())
+        self.assertFalse(self.win._btn_expand_all.isEnabled())
+
+    def test_group_by_mode_button_enables_grouping(self):
+        self.win._on_toggle_segregated_view(False)
+        self.win._on_seg_mode_button_clicked("status")
+        self.assertTrue(self.win._segregated_view_enabled)
+        self.assertTrue(self.win._model.is_segregated_view())
+        self.assertEqual(self.win._segregated_view_mode, "status")
+        self.assertTrue(self.win._seg_mode_buttons["status"].isChecked())
+        self.assertFalse(self.win._seg_mode_buttons["none"].isChecked())
+        self.assertTrue(self.win._btn_collapse_all.isEnabled())
+        self.assertTrue(self.win._btn_expand_all.isEnabled())
+
+    def test_group_by_none_button_disables_grouping(self):
+        self.win._set_segregation_mode("status")
+        self.assertTrue(self.win._segregated_view_enabled)
+        self.win._on_seg_mode_button_clicked("none")
+        self.assertFalse(self.win._segregated_view_enabled)
+        self.assertFalse(self.win._model.is_segregated_view())
+        self.assertTrue(self.win._seg_mode_buttons["none"].isChecked())
+        self.assertFalse(self.win._seg_mode_buttons["status"].isChecked())
+        self.assertFalse(self.win._btn_collapse_all.isEnabled())
+        self.assertFalse(self.win._btn_expand_all.isEnabled())
+        self.assertFalse(self.win._seg_control_strip.isHidden())
+
+    def test_view_toolbar_toggle_action_and_button(self):
+        self.assertTrue(hasattr(self.win, "_act_toggle_view_toolbar"))
+        self.assertEqual(self.win._act_toggle_view_toolbar.text(), "View Toolbar")
+        self.assertTrue(self.win._act_toggle_view_toolbar.isChecked())
+        self.assertFalse(self.win._seg_control_strip.isHidden())
+
+        # Toggle to hide
+        self.win._act_toggle_view_toolbar.setChecked(False)
+        self.assertTrue(self.win._seg_control_strip.isHidden())
+        self.assertFalse(self.db.get_ui_state("seg_strip_visible"))
+
+        # Toggle to show
+        self.win._act_toggle_view_toolbar.setChecked(True)
+        self.assertFalse(self.win._seg_control_strip.isHidden())
+        self.assertTrue(self.db.get_ui_state("seg_strip_visible"))
+
+    def test_view_toolbar_right_edge_button_icon_only(self):
+        from PySide6.QtWidgets import QToolBar, QToolButton
+        found = False
+        for tb in self.win.findChildren(QToolBar):
+            btn = tb.widgetForAction(self.win._act_toggle_view_toolbar)
+            if isinstance(btn, QToolButton):
+                self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonIconOnly)
+                found = True
+                break
+        self.assertTrue(found, "Could not find toolbar widget for _act_toggle_view_toolbar")
 
 
 if __name__ == "__main__":
