@@ -26,7 +26,7 @@ from my_idm.database import (
     DownloadEntry,
 )
 from my_idm.styles import Colors
-from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, split_extension, to_int
+from my_idm.utils import create_emoji_icon, extract_source_domain, normalize_path, to_int
 from my_idm import fonts
 
 _ICON_CACHE: dict[str, Any] = {}
@@ -356,6 +356,21 @@ SEGREGATED_MODE_LABELS = {
 }
 
 
+def split_extension(name: str) -> tuple[str, str]:
+    """Split *name* into (stem, extension-with-dot), lower-cased and dot-prefixed.
+
+    Returns ``("", "")`` for a blank name.
+    """
+    if not name:
+        return "", ""
+    base = name.replace("\\", "/").rstrip("/").split("/")[-1]
+    idx = base.rfind(".")
+    # A leading dot is a hidden file, not an extension (".gitignore" has none).
+    if idx <= 0 or idx == len(base) - 1:
+        return base, ""
+    return base[:idx], base[idx:].lower()
+
+
 def get_entry_type_category(entry: DownloadEntry) -> str:
     """Classify a download into Video / Audio / Archive / Documents / Photo / General.
 
@@ -544,6 +559,16 @@ def _extract_show_name(filename: str) -> str:
     # Remove file extension
     stem, _ = split_extension(filename)
     
+    # 1. Standard AnimePahe / anime release pattern:
+    #    AnimePahe_<Show Name>_-_<Episode>_<Quality>_<Audio>.<ext>
+    #    e.g. AnimePahe_Ranma ½ (2024) Season 3_-_25_720p_EngDub.mp4
+    #    or AnimePahe_Detective_Conan_-_1214_720p_SubsPlease.mp4
+    m_animepahe = re.match(r'^AnimePahe[_\s]+(.+?)[_\s]+-[_\s]+(?:\d+|ep?\d+).*$', stem, re.IGNORECASE)
+    if m_animepahe:
+        cand = m_animepahe.group(1).strip()
+        cand = re.sub(r'[._\-]+', ' ', cand)
+        return re.sub(r'\s+', ' ', cand).strip()
+
     # Common structural patterns to remove
     structural_patterns = [
         # Season/episode patterns - remove specific episode markers but keep season context
@@ -646,8 +671,22 @@ def _group_entries_by_name(entries: list[DownloadEntry]) -> dict[str, list[Downl
                 group_names.append(display_j if display_j else orig_j)
                 used.add(j)
         
-        # Determine group name - use the most common prefix or shortest name
-        if len(group_entries) == 1:
+        # Determine group name:
+        # If any entry in the group has an explicit show/anime title in metadata,
+        # prefer that clean title as the group key.
+        explicit_title = None
+        for ge in group_entries:
+            meta = getattr(ge, 'metadata', None)
+            if meta:
+                t = (meta.get('show_title') or meta.get('series_title') or
+                     meta.get('series_name') or meta.get('anime_title'))
+                if t and str(t).strip():
+                    explicit_title = str(t).strip()
+                    break
+
+        if explicit_title:
+            group_key = explicit_title
+        elif len(group_entries) == 1:
             group_key = display_i if display_i else (orig_i if orig_i else norm_i)
         else:
             # Find common prefix among group names

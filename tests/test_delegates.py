@@ -243,6 +243,99 @@ class TestSectionHeaderDelegate(unittest.TestCase):
         # Visual center should be within [17, 21] (centered around 19 for 36px row)
         self.assertAlmostEqual(track_rect.center().y(), 19, delta=2)
 
+    def test_section_header_seeding_without_active_has_no_leading_slash(self):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        from PySide6.QtCore import QRect
+        from unittest.mock import MagicMock
+        from my_idm.delegates import SectionHeaderDelegate
+        from my_idm.download_model import DownloadEntry
+
+        delegate = SectionHeaderDelegate()
+        entry = DownloadEntry(id="sec-today", section_id="today", section_title="Today", section_count=3)
+        entry.section_active_count = 0
+        entry.section_seeding_count = 1
+
+        model = MagicMock()
+        model.is_section_header_row.return_value = True
+        model.get_section_header.return_value = entry
+
+        idx = MagicMock()
+        idx.row.return_value = 0
+        idx.model.return_value = model
+        idx.data.return_value = None
+
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, 500, 36)
+
+        drawn_texts = []
+        pix = QPixmap(500, 36)
+        painter = QPainter(pix)
+        try:
+            orig_draw_text = painter.drawText
+            def mock_draw_text(*args):
+                # drawText(rect, flags, text)
+                for a in args:
+                    if isinstance(a, str):
+                        drawn_texts.append(a)
+                return orig_draw_text(*args)
+            painter.drawText = mock_draw_text
+            delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
+
+        # Drawn texts should be title, " 1 Seeding", " / 3 Total"
+        # Specifically, seeding text MUST NOT start with " / "
+        self.assertIn(" 1 Seeding", drawn_texts)
+        self.assertNotIn(" / 1 Seeding", drawn_texts)
+        self.assertIn(" / 3 Total", drawn_texts)
+
+    def test_section_header_seeding_with_active_has_separator(self):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        from PySide6.QtCore import QRect
+        from unittest.mock import MagicMock
+        from my_idm.delegates import SectionHeaderDelegate
+        from my_idm.download_model import DownloadEntry
+
+        delegate = SectionHeaderDelegate()
+        entry = DownloadEntry(id="sec-today", section_id="today", section_title="Today", section_count=3)
+        entry.section_active_count = 1
+        entry.section_seeding_count = 1
+
+        model = MagicMock()
+        model.is_section_header_row.return_value = True
+        model.get_section_header.return_value = entry
+
+        idx = MagicMock()
+        idx.row.return_value = 0
+        idx.model.return_value = model
+        idx.data.return_value = None
+
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, 500, 36)
+
+        drawn_texts = []
+        pix = QPixmap(500, 36)
+        painter = QPainter(pix)
+        try:
+            orig_draw_text = painter.drawText
+            def mock_draw_text(*args):
+                for a in args:
+                    if isinstance(a, str):
+                        drawn_texts.append(a)
+                return orig_draw_text(*args)
+            painter.drawText = mock_draw_text
+            delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
+
+        # Drawn texts should have " 1 Active", " / ", "1 Seeding", " / 3 Total"
+        self.assertIn(" 1 Active", drawn_texts)
+        self.assertIn(" / ", drawn_texts)
+        self.assertIn("1 Seeding", drawn_texts)
+        self.assertIn(" / 3 Total", drawn_texts)
+
 
 if __name__ == "__main__":
     unittest.main()

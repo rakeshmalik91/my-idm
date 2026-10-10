@@ -1548,6 +1548,50 @@ class TestNameSegregatedSorting(unittest.TestCase):
         entry_ids = [self.model._entries[r].id for r in range(1, 4)]
         self.assertEqual(set(entry_ids), {"1", "2", "3"})
 
+    def test_group_name_fixed_from_anime_title(self):
+        """Group name is resolved to clean anime_title from metadata even if filenames have underscores."""
+        from my_idm.download_model import _group_entries_by_name
+
+        e1 = _make_entry("1", "AnimePahe_Detective_Conan_-_1214_720p_SubsPlease.mp4")
+        e2 = _make_entry("2", "AnimePahe_Detective_Conan_-_1215_720p_SubsPlease.mp4")
+        e3 = _make_entry("3", "AnimePahe_Detective_Conan_-_1216_720p_SubsPlease.mp4")
+        e3.metadata = {"anime_title": "Detective Conan"}
+
+        groups = _group_entries_by_name([e1, e2, e3])
+        self.assertEqual(len(groups), 1)
+        self.assertIn("Detective Conan", groups)
+        self.assertEqual(len(groups["Detective Conan"]), 3)
+
+    def test_single_entry_moves_out_of_uncategorized_when_second_episode_arrives(self):
+        """A single item in Uncategorized moves into the named group when a 2nd episode arrives."""
+        # Episode 25 alone with no anime_title metadata
+        e25 = _make_entry("25", "AnimePahe_Ranma \u00bd (2024) Season 3_-_25_720p_EngDub.mp4")
+        self.model.load_entries([e25])
+        self.model.set_segregated_view(True, "name")
+
+        # Because it's alone without show_title metadata, it starts in Uncategorized
+        header_rows = self.model.get_section_header_row_indices()
+        self.assertEqual(len(header_rows), 1)
+        self.assertEqual(self.model._entries[header_rows[0]].section_title.upper(), "UNCATEGORIZED")
+
+        # Now 2nd episode arrives (Episode 26 with anime_title metadata)
+        e26 = _make_entry("26", "AnimePahe_Ranma \u00bd (2024) Season 3_-_26_720p_EngDub.mp4")
+        e26.metadata = {"anime_title": "Ranma \u00bd (2024) Season 3"}
+        self.model.add_entry(e26)
+
+        # Both entries should now be grouped together under Ranma ½ (2024) Season 3
+        # and NOT in Uncategorized
+        header_rows = self.model.get_section_header_row_indices()
+        self.assertEqual(len(header_rows), 1)
+        h_title = self.model._entries[header_rows[0]].section_title
+        self.assertIn("Ranma", h_title)
+        self.assertIn("Season 3", h_title)
+
+        self.model.expand_all_sections()
+        self.assertEqual(self.model.rowCount(), 3)  # 1 header + 2 entries
+        row_ids = [self.model._entries[r].id for r in range(1, 3)]
+        self.assertEqual(set(row_ids), {"25", "26"})
+
 
 if __name__ == "__main__":
     unittest.main()

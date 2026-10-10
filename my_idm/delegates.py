@@ -468,9 +468,25 @@ class SectionHeaderDelegate(QStyledItemDelegate):
             )
             x_pos += active_width
         
+        count_color = QColor(Colors.TEXT_MUTED) if hasattr(Colors, 'TEXT_MUTED') else QColor("#8fa0b5")
+
         # Seeding count in purple
         if seeding_count > 0:
-            seeding_text = f" / {seeding_count} Seeding"
+            if active_count > 0:
+                sep_text = " / "
+                sep_rect = option.rect.adjusted(x_pos, 0, -120, 0)
+                sep_width = painter.fontMetrics().horizontalAdvance(sep_text)
+                painter.setPen(count_color)
+                painter.drawText(
+                    sep_rect,
+                    int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                    sep_text,
+                )
+                x_pos += sep_width
+                seeding_text = f"{seeding_count} Seeding"
+            else:
+                seeding_text = f" {seeding_count} Seeding"
+
             seeding_rect = option.rect.adjusted(x_pos, 0, -120, 0)
             seeding_width = painter.fontMetrics().horizontalAdvance(seeding_text)
             purple_color = QColor(Colors.PURPLE) if hasattr(Colors, 'PURPLE') else QColor("#a371f7")
@@ -482,7 +498,7 @@ class SectionHeaderDelegate(QStyledItemDelegate):
             )
             x_pos += seeding_width
         
-# Total count in muted color
+        # Total count in muted color
         total_text = f" / {total_count} Total" if (active_count > 0 or seeding_count > 0) else f" {total_count} Total"
         total_rect = option.rect.adjusted(x_pos, 0, -120, 0)
         count_color = QColor(Colors.TEXT_MUTED) if hasattr(Colors, 'TEXT_MUTED') else QColor("#8fa0b5")
