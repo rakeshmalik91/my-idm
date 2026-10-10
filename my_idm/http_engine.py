@@ -66,6 +66,18 @@ StatusCallback = Callable[[str, str, str], None]  # download_id, status, error_m
 FilenameCallback = Callable[[str, str], None]      # download_id, filename
 
 
+_NON_HTTP_HEADER_KEYS = frozenset({
+    "anime_url",
+    "anime_title",
+    "added_by",
+    "original_name",
+    "explicit_filename",
+    "use_curl_cffi",
+    "next_retry_at",
+    "retry_delay",
+})
+
+
 class HTTPEngine:
     """Manages HTTP(S) downloads with segmented parallel streaming."""
 
@@ -368,28 +380,59 @@ class HTTPEngine:
             )
         return self._session
 
-
     def _build_headers(
         self,
         headers: Optional[dict] = None,
         entry: Optional[DownloadEntry] = None,
         url: str = "",
     ) -> dict:
-        req_headers = {"User-Agent": DEFAULT_USER_AGENT}
+        raw_headers = {"User-Agent": DEFAULT_USER_AGENT}
         if entry and entry.metadata:
             if "headers" in entry.metadata and isinstance(entry.metadata["headers"], dict):
-                req_headers.update(entry.metadata["headers"])
+                for k, v in entry.metadata["headers"].items():
+                    if isinstance(k, str) and k.lower() not in _NON_HTTP_HEADER_KEYS:
+                        raw_headers[k] = v
             if "referer" in entry.metadata and entry.metadata["referer"]:
-                req_headers["Referer"] = entry.metadata["referer"]
+                raw_headers["Referer"] = entry.metadata["referer"]
 
         url_check = url or (entry.url if entry else "")
         if url_check and any(cdn in url_check for cdn in ("owocdn.top", "uwucdn.top", "kwik.")):
             # Kwik CDN servers (owocdn.top, uwucdn.top, kwik.*) strictly require https://kwik.cx/ as Referer
-            req_headers["Referer"] = "https://kwik.cx/"
+            raw_headers["Referer"] = "https://kwik.cx/"
 
         if headers:
-            req_headers.update(headers)
-        return req_headers
+            for k, v in headers.items():
+                if isinstance(k, str) and k.lower() not in _NON_HTTP_HEADER_KEYS:
+                    raw_headers[k] = v
+
+        clean_headers: dict[str, str] = {}
+        for k, v in raw_headers.items():
+            if not isinstance(k, str) or k.lower() in _NON_HTTP_HEADER_KEYS:
+                continue
+            try:
+                k_clean = k.encode("ascii").decode("ascii").strip()
+            except UnicodeError:
+                continue
+            if not k_clean:
+                continue
+            if isinstance(v, bytes):
+                try:
+                    v_clean = v.decode("ascii")
+                except UnicodeError:
+                    continue
+            elif isinstance(v, str):
+                try:
+                    v_clean = v.encode("ascii").decode("ascii")
+                except UnicodeError:
+                    continue
+            else:
+                v_clean = str(v)
+                try:
+                    v_clean = v_clean.encode("ascii").decode("ascii")
+                except UnicodeError:
+                    continue
+            clean_headers[k_clean] = v_clean
+        return clean_headers
 
     def _request_kwargs(
         self,

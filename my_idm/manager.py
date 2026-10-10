@@ -2102,7 +2102,12 @@ class DownloadManager(QObject):
         if risk_level != "clean":
             entry_metadata["security_warning"] = sec_details
         if headers:
-            entry_metadata["headers"] = headers
+            filtered_headers = {
+                k: v for k, v in headers.items()
+                if isinstance(k, str) and k.lower() not in ("anime_url", "anime_title")
+            }
+            if filtered_headers:
+                entry_metadata["headers"] = filtered_headers
             if "referer" not in entry_metadata and "referrer" not in entry_metadata:
                 ref = headers.get("Referer") or headers.get("referer")
                 if ref:
@@ -4034,11 +4039,15 @@ class DownloadManager(QObject):
                         self.resume_download(existing.id)
                     success = True
                 else:
+                    clean_entry_headers = {
+                        k: v for k, v in entry_headers.items()
+                        if isinstance(k, str) and k.lower() not in ("anime_url", "anime_title")
+                    }
                     res = self.add_download(
                         url,
                         save_path=save_path,
                         filename=entry_filename,
-                        headers=entry_headers,
+                        headers=clean_entry_headers or None,
                         metadata=entry_source or None,
                         # Blank when the file named no queue, which lets add_download infer
                         # one from the source instead.

@@ -121,6 +121,32 @@ class TestBuildHeaders(unittest.TestCase):
         headers = self.engine._build_headers(entry=entry, url=entry.url)
         self.assertEqual(headers["User-Agent"], DEFAULT_USER_AGENT)
 
+    def test_pseudo_headers_are_filtered_out(self):
+        entry = DownloadEntry(id="d1", url="https://example.com/a.zip")
+        entry.metadata = {
+            "headers": {
+                "anime_title": "Ranma \u00bd (2024)",
+                "anime_url": "https://animepahe.pw/anime/123",
+                "X-Custom": "custom-val",
+            }
+        }
+        headers = self.engine._build_headers(entry=entry, url=entry.url)
+        self.assertNotIn("anime_title", headers)
+        self.assertNotIn("anime_url", headers)
+        self.assertEqual(headers.get("X-Custom"), "custom-val")
+
+    def test_non_ascii_header_values_are_filtered_out(self):
+        entry = DownloadEntry(id="d1", url="https://example.com/a.zip")
+        entry.metadata = {
+            "headers": {
+                "X-Unicode": "Ranma \u00bd",
+                "X-Valid": "ascii-only",
+            }
+        }
+        headers = self.engine._build_headers(entry=entry, url=entry.url)
+        self.assertNotIn("X-Unicode", headers)
+        self.assertEqual(headers.get("X-Valid"), "ascii-only")
+
 
 class TestRetryPolicy(unittest.TestCase):
     """Retry counts and backoff."""
