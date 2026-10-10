@@ -546,17 +546,18 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         # Initially details panel is visible in Details mode
         self.assertTrue(self.win._details_panel.isVisible())
         self.assertEqual(self.win._details_panel.current_mode(), "details")
-        self.assertIn("ON", details_btn.text())
+        self.assertFalse(details_btn.icon().isNull())
+        self.assertIn("ON", details_btn.toolTip())
 
         # Click Details button on footer -> hides bottom panel
         details_btn.click()
         self.assertFalse(self.win._details_panel.isVisible())
-        self.assertIn("OFF", details_btn.text())
+        self.assertIn("OFF", details_btn.toolTip())
 
         # Click Details button on footer -> opens panel
         details_btn.click()
         self.assertTrue(self.win._details_panel.isVisible())
-        self.assertIn("ON", details_btn.text())
+        self.assertIn("ON", details_btn.toolTip())
 
         # Switch to console mode
         self.win._details_panel.set_mode("console")
@@ -566,12 +567,12 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         # Click Details button on footer -> hides bottom panel directly (does not just switch mode)
         details_btn.click()
         self.assertFalse(self.win._details_panel.isVisible())
-        self.assertIn("OFF", details_btn.text())
+        self.assertIn("OFF", details_btn.toolTip())
 
         # Click Details button on footer -> opens panel directly
         details_btn.click()
         self.assertTrue(self.win._details_panel.isVisible())
-        self.assertIn("ON", details_btn.text())
+        self.assertIn("ON", details_btn.toolTip())
 
     def test_icon_only_buttons_on_toolbar(self):
         """Resume, Pause, Stop, Delete, Move, and Recheck must be icon-only on toolbar, while Preferences shows text."""

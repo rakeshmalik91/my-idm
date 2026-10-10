@@ -386,7 +386,7 @@ def _create_force_start_icon(size: int = 32) -> QIcon:
     return QIcon(pix)
 
 
-def _create_details_panel_icon(size: int = 32) -> QIcon:
+def _create_details_panel_icon(size: int = 32, active: bool = True) -> QIcon:
     """Create a sleek icon showing window layout with bottom details panel highlighted."""
     pix = QPixmap(size, size)
     pix.fill(Qt.GlobalColor.transparent)
@@ -394,22 +394,27 @@ def _create_details_panel_icon(size: int = 32) -> QIcon:
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     # Window outer outline
-    pen = QPen(QColor("#8b949e"), max(1.5, size * 0.065))
+    outline_color = QColor("#79c0ff") if active else QColor("#6e7681")
+    pen = QPen(outline_color, max(1.5, size * 0.07))
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
     rect = QRectF(size * 0.12, size * 0.12, size * 0.76, size * 0.76)
-    p.drawRoundedRect(rect, 3, 3)
+    p.drawRoundedRect(rect, 2.5, 2.5)
 
     # Divider line
-    p.setPen(QPen(QColor("#8b949e"), max(1.2, size * 0.055)))
+    div_color = QColor("#79c0ff") if active else QColor("#484f58")
+    p.setPen(QPen(div_color, max(1.2, size * 0.06)))
     p.drawLine(QPointF(size * 0.12, size * 0.54), QPointF(size * 0.88, size * 0.54))
 
-    # Highlighted bottom details panel
-    p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#58a6ff"))
+    # Bottom details panel
     bot_rect = QRectF(size * 0.16, size * 0.58, size * 0.68, size * 0.26)
-    p.drawRoundedRect(bot_rect, 2, 2)
+    p.setPen(Qt.PenStyle.NoPen)
+    if active:
+        p.setBrush(QColor("#58a6ff"))
+    else:
+        p.setBrush(QColor(48, 54, 61, 120))
+    p.drawRoundedRect(bot_rect, 1.5, 1.5)
 
     p.end()
     return QIcon(pix)
@@ -1679,10 +1684,12 @@ class MainWindow(QMainWindow):
         )
         self._vpn_status_btn.clicked.connect(self._on_open_network_settings)
 
-        self._details_status_btn = QPushButton("📋 Details: ON")
+        self._details_status_btn = QPushButton()
         self._details_status_btn.setFlat(True)
         self._details_status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._details_status_btn.setToolTip("Toggle bottom download details panel (F4)")
+        self._details_status_btn.setIcon(_create_details_panel_icon(20, active=True))
+        self._details_status_btn.setIconSize(QSize(16, 16))
+        self._details_status_btn.setToolTip("Details Panel: ON (Toggle, F4)")
         self._details_status_btn.clicked.connect(self._on_toggle_details_btn_clicked)
 
         # AnimePahe background scraper status badge
@@ -4021,38 +4028,34 @@ class MainWindow(QMainWindow):
             return """
                 QPushButton {
                     background: rgba(88, 166, 255, 0.15);
-                    color: #58a6ff;
                     border: 1px solid #58a6ff;
                     border-radius: 4px;
-                    padding: 2px 8px;
-                    font-size: 11px;
-                    font-weight: bold;
+                    padding: 2px 6px;
                 }
                 QPushButton:hover {
                     background: rgba(88, 166, 255, 0.25);
                     border-color: #79c0ff;
-                    color: #79c0ff;
                 }
             """
         return """
             QPushButton {
                 background: transparent;
-                color: #8892b0;
                 border: 1px solid #3b4252;
                 border-radius: 4px;
-                padding: 2px 8px;
-                font-size: 11px;
+                padding: 2px 6px;
             }
             QPushButton:hover {
                 background: #2e3440;
-                color: #d8dee9;
+                border-color: #484f58;
             }
         """
 
     def _sync_panel_buttons(self):
         is_vis = getattr(self, "_act_toggle_details", None) is not None and self._act_toggle_details.isChecked() and not self._details_panel.isHidden()
         if hasattr(self, "_details_status_btn"):
-            self._details_status_btn.setText("📋 Details: ON" if is_vis else "📋 Details: OFF")
+            self._details_status_btn.setText("")
+            self._details_status_btn.setIcon(_create_details_panel_icon(20, active=is_vis))
+            self._details_status_btn.setToolTip(f"Details Panel: {'ON' if is_vis else 'OFF'} (Toggle, F4)")
             self._details_status_btn.setStyleSheet(self._footer_toggle_style(is_vis))
 
     def _on_open_animepahe_console_log_file(self):

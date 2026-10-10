@@ -669,19 +669,19 @@ class TestDetailsPanel(unittest.TestCase):
             self.assertTrue(win2._act_toggle_details.isChecked())
             sizes = win2._splitter.sizes()
             self.assertGreaterEqual(sizes[1], 140)
-            self.assertEqual(win2._details_status_btn.text(), "📋 Details: ON")
+            self.assertIn("ON", win2._details_status_btn.toolTip())
 
             # Toggle off
             win2._act_toggle_details.setChecked(False)
             self.assertFalse(win2._details_panel.isVisible())
-            self.assertEqual(win2._details_status_btn.text(), "📋 Details: OFF")
+            self.assertIn("OFF", win2._details_status_btn.toolTip())
 
             # Toggle back on — must not restore to 0 height
             win2._act_toggle_details.setChecked(True)
             self.assertTrue(win2._details_panel.isVisible())
             sizes2 = win2._splitter.sizes()
             self.assertGreaterEqual(sizes2[1], 140)
-            self.assertEqual(win2._details_status_btn.text(), "📋 Details: ON")
+            self.assertIn("ON", win2._details_status_btn.toolTip())
         finally:
             win2.close()
 
