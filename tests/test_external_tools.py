@@ -176,13 +176,31 @@ class TestExternalTools(unittest.TestCase):
                 mock_popen.assert_called_once()
                 argv = mock_popen.call_args[0][0]
                 self.assertEqual(argv[0], "explorer", "a file must be revealed with explorer /select")
-                self.assertIn(f"/select,{sample_file.resolve()}", argv)
+                self.assertEqual(argv[1], "/select,", "/select, must be separate so spaces do not quote the flag")
+                self.assertEqual(argv[2], str(sample_file.resolve()))
                 mock_startfile.assert_not_called()
                 mock_openurl.assert_not_called()
             else:
                 mock_openurl.assert_called_once()
                 self.assertEqual(mock_popen.call_count, 0)
                 self.assertEqual(mock_startfile.call_count, 0)
+
+        # Test highlighting file with spaces in path
+        sample_file_spaces = folder / "my download with spaces.zip"
+        sample_file_spaces.write_text("dummy")
+        with patch("subprocess.Popen") as mock_popen, \
+             patch("os.startfile", create=True) as mock_startfile, \
+             patch("PySide6.QtGui.QDesktopServices.openUrl", return_value=True) as mock_openurl:
+            ok, msg = show_in_folder(sample_file_spaces)
+            self.assertTrue(ok)
+            if sys.platform == "win32":
+                mock_popen.assert_called_once()
+                argv = mock_popen.call_args[0][0]
+                self.assertEqual(argv[0], "explorer")
+                self.assertEqual(argv[1], "/select,")
+                self.assertEqual(argv[2], str(sample_file_spaces.resolve()))
+            else:
+                mock_openurl.assert_called_once()
 
         # Test opening folder
         with patch("subprocess.Popen") as mock_popen, \

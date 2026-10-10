@@ -355,7 +355,15 @@ def show_in_folder(path: Path | str) -> Tuple[bool, str]:
     try:
         if sys.platform == "win32":
             if p.is_file():
-                subprocess.Popen(["explorer", f"/select,{p}"])
+                # On Windows, explorer requires `/select,` to be unquoted. If `/select,`
+                # is combined with the path in a single argv element, Python's list2cmdline
+                # wraps the entire argument in quotes whenever the path has spaces:
+                # `explorer "/select,C:\path with spaces\file.ext"`.
+                # Windows Explorer fails to recognise the quoted `/select` flag and falls
+                # back to opening the user's default Documents folder.
+                # Passing `/select,` and the path as separate elements ensures `/select,`
+                # remains unquoted so Explorer opens the correct directory and selects the file.
+                subprocess.Popen(["explorer", "/select,", str(p)])
             else:
                 os.startfile(str(p))
             return True, f"Opened '{p.name}' in File Explorer"

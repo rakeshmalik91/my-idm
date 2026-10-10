@@ -2989,12 +2989,12 @@ class DetailsPanel(QWidget):
         if not self._current_entry:
             return
         folder = self._current_entry.save_path
-        file_path = self._current_entry.file_path
+        file_path = self._current_entry.file_path or (
+            str(Path(folder) / self._current_entry.filename)
+            if folder and self._current_entry.filename
+            else ""
+        )
         if file_path and Path(file_path).exists():
-            # Hands the file over so the platform can *select* it, which is what the Windows
-            # `explorer /select,` branch was reaching for. The old non-Windows branch opened the
-            # containing folder instead, and the Windows branch passed `/select,` as a separate
-            # argv element, which Explorer only tolerates by accident.
             show_in_folder(file_path)
         elif folder and Path(folder).exists():
             show_in_folder(folder)

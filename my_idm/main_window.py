@@ -2582,12 +2582,10 @@ class MainWindow(QMainWindow):
         from my_idm.external_tools import show_in_folder
 
         folder = entry.save_path
-        file_path = entry.file_path
+        file_path = entry.file_path or (
+            str(Path(folder) / entry.filename) if folder and entry.filename else ""
+        )
         if file_path and Path(file_path).exists():
-            # Pass the file, not the folder, so the platform can select it. The old Windows branch
-            # sent `explorer /select,` as its own argv element (Explorer tolerates that by
-            # accident) and the non-Windows branch called `os.startfile`, which does not exist
-            # outside Windows.
             show_in_folder(file_path)
         elif folder and Path(folder).exists():
             show_in_folder(folder)
