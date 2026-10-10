@@ -1716,6 +1716,80 @@ class TestTransferredBytesStatistics(StatsTestCase):
         finally:
             os.unlink(db_file.name)
 
+class TestCumulativeStats(PopupTestCase):
+    def test_chart_cumulative_toggle_and_display_days(self):
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        self.assertFalse(chart.cumulative())
+
+        days = [
+            ("2026-09-28", DownloadStats(count=1, downloaded=100 * MB, uploaded=20 * MB, completed=1)),
+            ("2026-09-29", DownloadStats(count=2, downloaded=50 * MB, uploaded=10 * MB, completed=1)),
+            ("2026-09-30", DownloadStats(count=1, downloaded=200 * MB, uploaded=30 * MB, completed=1)),
+        ]
+        chart.set_days(days)
+        # Non-cumulative
+        self.assertEqual(chart.display_days(), tuple(days))
+
+        # Toggle cumulative
+        chart.set_cumulative(True)
+        self.assertTrue(chart.cumulative())
+        disp = chart.display_days()
+        self.assertEqual(len(disp), 3)
+        self.assertEqual(disp[0][1].downloaded, 100 * MB)
+        self.assertEqual(disp[0][1].uploaded, 20 * MB)
+        self.assertEqual(disp[1][1].downloaded, 150 * MB)
+        self.assertEqual(disp[1][1].uploaded, 30 * MB)
+        self.assertEqual(disp[2][1].downloaded, 350 * MB)
+        self.assertEqual(disp[2][1].uploaded, 60 * MB)
+        self.assertEqual(disp[2][1].count, 4)
+        self.assertEqual(disp[2][1].completed, 3)
+
+        # Tooltip mentions cumulative
+        self.assertIn("Cumulative", chart.toolTip())
+        self.assertIn("added", chart.toolTip())
+
+    def test_chart_cumulative_paints_without_error(self):
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        chart.resize(500, 200)
+        chart.set_days([
+            ("2026-09-28", DownloadStats(count=1, downloaded=100 * MB, uploaded=20 * MB, completed=1)),
+            ("2026-09-29", DownloadStats(count=2, downloaded=50 * MB, uploaded=10 * MB, completed=1)),
+        ])
+        chart.set_cumulative(True)
+        pm = paint(chart)
+        self.assertFalse(pm.isNull())
+
+    def test_popup_cumulative_button_exists_and_toggles(self):
+        self.add("dl1", 1, total=200 * MB)
+        popup = self.popup()
+        self.assertIsNotNone(popup._cumulative_btn)
+        self.assertTrue(popup._cumulative_btn.isCheckable())
+        self.assertFalse(popup.is_cumulative())
+        self.assertFalse(popup._chart.cumulative())
+
+        # Click cumulative button
+        popup._cumulative_btn.click()
+        self.assertTrue(popup.is_cumulative())
+        self.assertTrue(popup._chart.cumulative())
+        self.assertEqual(popup._volume_header.text(), "<b>Volume (Cumulative)</b>")
+
+        # Click again to untoggle
+        popup._cumulative_btn.click()
+        self.assertFalse(popup.is_cumulative())
+        self.assertFalse(popup._chart.cumulative())
+        self.assertEqual(popup._volume_header.text(), "<b>Volume</b>")
+
+    def test_popup_cumulative_persists_in_ui_state(self):
+        # Set state in DB
+        self.db.set_ui_state(StatisticsPopup.UI_STATE_KEY, {"width": 700, "height": 500, "cumulative": True})
+        popup = self.popup()
+        self.assertTrue(popup.is_cumulative())
+        self.assertTrue(popup._cumulative_btn.isChecked())
+        self.assertTrue(popup._chart.cumulative())
+
 
 if __name__ == "__main__":
     unittest.main()
+

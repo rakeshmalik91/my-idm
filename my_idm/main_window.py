@@ -3654,11 +3654,11 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Failed to Start Scraper", msg)
 
     def _on_toggle_details_btn_clicked(self):
-        if self._details_panel.isVisible() and self._details_panel.current_mode() == "details":
-            self._act_toggle_details.setChecked(False)
+        new_state = not (self._details_panel.isVisible() and not self._details_panel.isHidden())
+        if self._act_toggle_details.isChecked() != new_state:
+            self._act_toggle_details.setChecked(new_state)
         else:
-            self._details_panel.set_mode("details")
-            self._act_toggle_details.setChecked(True)
+            self._on_toggle_details(new_state)
 
     def _on_toggle_console_btn_clicked(self):
         if self._details_panel.isVisible() and self._details_panel.current_mode() == "console":

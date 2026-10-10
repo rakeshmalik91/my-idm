@@ -63,9 +63,20 @@ class StatsChartWidget(QWidget):
         super().__init__(parent)
         self._days: tuple[tuple[str, DownloadStats], ...] = ()
         self._bucket = "day"
+        self._cumulative = False
         self.setMinimumHeight(190)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._update_tooltip()
+
+    def set_cumulative(self, cumulative: bool) -> None:
+        cum = bool(cumulative)
+        if self._cumulative != cum:
+            self._cumulative = cum
+            self._update_tooltip()
+            self.update()
+
+    def cumulative(self) -> bool:
+        return self._cumulative
 
     def _update_tooltip(self) -> None:
         if self._bucket == "5min":
@@ -78,8 +89,9 @@ class StatsChartWidget(QWidget):
             unit = "month"
         else:
             unit = "day of month"
+        mode = "Cumulative volume" if self._cumulative else "Grouped"
         self.setToolTip(
-            f"Grouped by {unit}. Tracks actual bytes transferred during each interval "
+            f"{mode} by {unit}. Tracks actual bytes transferred during each interval "
             "(instead of only when downloads were added)."
         )
 
@@ -91,6 +103,32 @@ class StatsChartWidget(QWidget):
 
     def days(self):
         return self._days
+
+    def display_days(self) -> tuple[tuple[str, DownloadStats], ...]:
+        if not self._cumulative:
+            return self._days
+        result = []
+        cum_down = 0
+        cum_up = 0
+        cum_count = 0
+        cum_completed = 0
+        for day, stats in self._days:
+            cum_down += stats.downloaded
+            cum_up += stats.uploaded
+            cum_count += stats.count
+            cum_completed += stats.completed
+            result.append(
+                (
+                    day,
+                    DownloadStats(
+                        count=cum_count,
+                        downloaded=cum_down,
+                        uploaded=cum_up,
+                        completed=cum_completed,
+                    ),
+                )
+            )
+        return tuple(result)
 
     def bucket(self) -> str:
         return self._bucket
@@ -134,8 +172,9 @@ class StatsChartWidget(QWidget):
             painter.end()
             return
 
+        display_days = self.display_days()
         peak = 0
-        for _day, stats in self._days:
+        for _day, stats in display_days:
             peak = max(peak, stats.downloaded + stats.uploaded)
         if peak <= 0:
             peak = 1
@@ -156,16 +195,16 @@ class StatsChartWidget(QWidget):
             painter.setPen(QPen(QColor(Colors.BORDER), 1, Qt.PenStyle.DotLine))
             value += step
 
-        slot = plot.width() / len(self._days)
+        slot = plot.width() / len(display_days)
         bar_width = max(1.0, slot * 0.68)
         # Sparse ticks: label roughly six dates regardless of the range.
-        label_every = max(1, len(self._days) // 6)
-        same_day = len(self._days) > 0 and (self._days[0][0][:10] == self._days[-1][0][:10])
+        label_every = max(1, len(display_days) // 6)
+        same_day = len(display_days) > 0 and (display_days[0][0][:10] == display_days[-1][0][:10])
 
         downloaded_brush = QColor(Colors.ACCENT)
         uploaded_brush = QColor(Colors.GREEN)
 
-        for index, (day, stats) in enumerate(self._days):
+        for index, (day, stats) in enumerate(display_days):
             x = plot.left() + index * slot + (slot - bar_width) / 2.0
             total = stats.downloaded + stats.uploaded
             if total > 0:
@@ -315,7 +354,8 @@ class StatisticsPopup(QDialog):
     )
 
     def __init__(self, db: Database, parent=None, today: Optional[date] = None,
-                 speed_provider=None, range_index: int = 2, bucket: str = "day"):
+                 speed_provider=None, range_index: int = 2, bucket: str = "day",
+                 cumulative: bool = False):
         super().__init__(parent)
         self._db = db
         self._today = today
@@ -323,6 +363,7 @@ class StatisticsPopup(QDialog):
         self._snapshot: Optional[StatsSnapshot] = None
         self._timer: Optional[QTimer] = None
         self._range_index = range_index
+        self._cumulative = bool(cumulative)
         valid_buckets = dict(self.BUCKETS).values()
         if bucket == "minute":
             self._bucket = "5min"
@@ -355,7 +396,8 @@ class StatisticsPopup(QDialog):
 
         # -- chart controls --------------------------------------------------
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("<b>Volume</b>"))
+        self._volume_header = QLabel("<b>Volume</b>")
+        controls.addWidget(self._volume_header)
         controls.addStretch()
 
         controls.addWidget(QLabel("Range:"))
@@ -377,9 +419,17 @@ class StatisticsPopup(QDialog):
         )
         self._bucket_combo.currentIndexChanged.connect(self._on_bucket_changed)
         controls.addWidget(self._bucket_combo)
+
+        self._cumulative_btn = QPushButton("📈 Cumulative")
+        self._cumulative_btn.setCheckable(True)
+        self._cumulative_btn.setChecked(self._cumulative)
+        self._cumulative_btn.setToolTip("Toggle cumulative volume (accumulated running totals)")
+        self._cumulative_btn.toggled.connect(self._on_cumulative_toggled)
+        controls.addWidget(self._cumulative_btn)
         root.addLayout(controls)
 
         self._chart = StatsChartWidget()
+        self._chart.set_cumulative(self._cumulative)
         root.addWidget(self._chart, 1)
 
         legend = QLabel(
@@ -426,6 +476,24 @@ class StatisticsPopup(QDialog):
         self._bucket = self.bucket_selection()
         self.refresh()
 
+    def is_cumulative(self) -> bool:
+        return self._cumulative
+
+    def set_cumulative(self, cumulative: bool) -> None:
+        self._cumulative = bool(cumulative)
+        if hasattr(self, "_cumulative_btn"):
+            self._cumulative_btn.setChecked(self._cumulative)
+        if hasattr(self, "_volume_header"):
+            self._volume_header.setText(
+                "<b>Volume (Cumulative)</b>" if self._cumulative else "<b>Volume</b>"
+            )
+        if hasattr(self, "_chart"):
+            self._chart.set_cumulative(self._cumulative)
+
+    def _on_cumulative_toggled(self, checked: bool) -> None:
+        self.set_cumulative(checked)
+        self._save_size()
+
     # -- data ---------------------------------------------------------------
 
     def _resolve_today(self) -> date:
@@ -458,6 +526,7 @@ class StatisticsPopup(QDialog):
             snap = None
         self._snapshot = snap
         self._populate_grid()
+        self._chart.set_cumulative(self._cumulative)
         self._chart.set_days(snap.series if snap else (), bucket=bucket)
         self._sample_speed()
 
@@ -530,9 +599,11 @@ class StatisticsPopup(QDialog):
         if isinstance(state, dict):
             try:
                 self.resize(int(state.get("width", 680)), int(state.get("height", 560)))
-                return
             except (TypeError, ValueError):
-                pass
+                self.resize(680, 560)
+            if "cumulative" in state:
+                self.set_cumulative(bool(state.get("cumulative")))
+            return
         self.resize(680, 560)
 
     def _save_size(self) -> None:
@@ -540,7 +611,12 @@ class StatisticsPopup(QDialog):
             return
         try:
             self._db.set_ui_state(
-                self.UI_STATE_KEY, {"width": self.width(), "height": self.height()}
+                self.UI_STATE_KEY,
+                {
+                    "width": self.width(),
+                    "height": self.height(),
+                    "cumulative": self._cumulative,
+                },
             )
         except Exception:
             pass

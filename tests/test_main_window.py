@@ -553,10 +553,24 @@ class TestMainWindowToolbar(_MainWindowTestCase):
         self.assertFalse(self.win._details_panel.isVisible())
         self.assertIn("OFF", details_btn.text())
 
-        # Click Details button on footer -> opens panel in Details mode
+        # Click Details button on footer -> opens panel
         details_btn.click()
         self.assertTrue(self.win._details_panel.isVisible())
-        self.assertEqual(self.win._details_panel.current_mode(), "details")
+        self.assertIn("ON", details_btn.text())
+
+        # Switch to console mode
+        self.win._details_panel.set_mode("console")
+        self.assertEqual(self.win._details_panel.current_mode(), "console")
+        self.assertTrue(self.win._details_panel.isVisible())
+
+        # Click Details button on footer -> hides bottom panel directly (does not just switch mode)
+        details_btn.click()
+        self.assertFalse(self.win._details_panel.isVisible())
+        self.assertIn("OFF", details_btn.text())
+
+        # Click Details button on footer -> opens panel directly
+        details_btn.click()
+        self.assertTrue(self.win._details_panel.isVisible())
         self.assertIn("ON", details_btn.text())
 
     def test_icon_only_buttons_on_toolbar(self):

@@ -669,6 +669,18 @@ def _stylesheet_for_palette() -> str:
         background-color: {Colors.BG_DARK};
     }}
 
+    QPushButton:checked {{
+        background-color: {Colors.ACCENT};
+        border-color: {Colors.ACCENT};
+        color: #ffffff;
+    }}
+
+    QPushButton:checked:hover {{
+        background-color: {Colors.ACCENT_HOVER};
+        border-color: {Colors.ACCENT_HOVER};
+        color: #ffffff;
+    }}
+
     QPushButton:disabled {{
         color: {Colors.TEXT_DIM};
         background-color: {Colors.BG_DARK};
