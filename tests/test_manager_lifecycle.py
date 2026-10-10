@@ -519,12 +519,12 @@ class TestManagerLifecycle(unittest.TestCase):
         self.manager.recheck_download("recheck-deleted")
 
         self.assertEqual(len(status_events), 1)
-        self.assertEqual(status_events[0], ("recheck-deleted", "queued", "File not found"))
+        self.assertEqual(status_events[0], ("recheck-deleted", "paused", "File not found"))
         self.assertEqual(progress_events[0][1], 0)
 
         updated = self.db.get_download("recheck-deleted")
         self.assertEqual(updated.downloaded_size, 0)
-        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.status, "paused")
 
     def test_recheck_partial_preallocated_file_updates_from_segments(self):
         """Recheck with pre-allocated full size file reads actual written bytes from segments."""
@@ -611,10 +611,10 @@ class TestManagerLifecycle(unittest.TestCase):
             mock_resume.assert_not_called()
 
         updated = self.db.get_download("d1")
-        self.assertEqual(updated.status, "queued")
+        self.assertEqual(updated.status, "paused")
         self.assertEqual(updated.downloaded_size, 0)
         self.assertEqual(
-            status_events, [("d1", "queued", "File not found")],
+            status_events, [("d1", "paused", "File not found")],
             "the UI must be told why the entry was reset",
         )
 
@@ -648,7 +648,7 @@ class TestManagerLifecycle(unittest.TestCase):
         self.manager.recheck_download("recheck-model")
         prog_after = model.data(model.index(row, Col.PROGRESS))
         self.assertAlmostEqual(prog_after["progress"], 0.0)
-        self.assertEqual(model.data(model.index(row, Col.STATUS)), "Queued")
+        self.assertEqual(model.data(model.index(row, Col.STATUS)), "Paused")
 
     def test_delete_download_file_keeps_entry_and_resets_progress(self):
         """delete_download_file deletes disk file, pauses download, and resets progress to 0 while keeping entry."""
@@ -679,6 +679,63 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertIsNotNone(updated)
         self.assertEqual(updated.status, "paused")
         self.assertEqual(updated.downloaded_size, 0)
+
+    def test_delete_download_file_on_paused_download_rechecks_and_stays_paused(self):
+        """When a download is paused and 'Delete File' is executed, it rechecks, resets progress to 0, and stays paused."""
+        test_file = Path(self.tmp_dir.name) / "paused_test.mp4"
+        test_file.write_bytes(b"data" * 100)
+        self.assertTrue(test_file.exists())
+
+        entry = DownloadEntry(
+            id="del-paused-1",
+            url="https://example.com/paused_test.mp4",
+            filename="paused_test.mp4",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=1000,
+            downloaded_size=400,
+            status="paused",
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        with patch.object(self.manager, "recheck_download", wraps=self.manager.recheck_download) as mock_recheck:
+            self.manager.delete_download_file("del-paused-1")
+            mock_recheck.assert_called_once_with("del-paused-1")
+
+        self.assertFalse(test_file.exists())
+        updated = self.db.get_download("del-paused-1")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.status, "paused")
+        self.assertEqual(updated.downloaded_size, 0)
+        self.assertEqual(updated.progress, 0.0)
+
+    def test_recheck_incomplete_download_stays_paused_without_downloading(self):
+        """When recheck is performed on an incomplete file (< 100%), it must not start downloading and must stay paused."""
+        test_file = Path(self.tmp_dir.name) / "incomplete.bin"
+        test_file.write_bytes(b"A" * 300)
+
+        entry = DownloadEntry(
+            id="recheck-incomplete-1",
+            url="https://example.com/incomplete.bin",
+            filename="incomplete.bin",
+            file_path=str(test_file),
+            save_path=self.tmp_dir.name,
+            total_size=1000,
+            downloaded_size=300,
+            status="queued",  # Even if queued before recheck
+            download_type="http",
+        )
+        self.db.add_download(entry)
+
+        with patch.object(self.manager, "_start_entry") as mock_start:
+            self.manager.recheck_download("recheck-incomplete-1")
+            mock_start.assert_not_called()
+
+        updated = self.db.get_download("recheck-incomplete-1")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.status, "paused")
+        self.assertEqual(updated.downloaded_size, 300)
 
     def test_delete_download_with_delete_files_moves_to_trash(self):
         """delete_download(..., delete_files=True) removes entry from DB and moves files to trash."""

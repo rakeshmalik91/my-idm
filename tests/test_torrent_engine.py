@@ -277,6 +277,75 @@ class TestTorrentEngine(unittest.TestCase):
         self.assertEqual(updated.status, "downloading")
         self.assertEqual(status_updates, [("t_check", "downloading")])
 
+    def test_torrent_explicit_recheck_incomplete_stays_paused(self):
+        """When an explicit recheck is requested on an incomplete torrent, it settles into paused."""
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+
+        entry = DownloadEntry(
+            id="t_explicit_check",
+            download_type="torrent",
+            status="paused",
+            total_size=10000,
+            downloaded_size=3000,
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        mock_handle.status.return_value.paused = False
+        mock_handle.status.return_value.is_paused = False
+        te._handles["t_explicit_check"] = mock_handle
+
+        status_updates = []
+        te.set_callbacks(None, lambda did, stat, err: status_updates.append((did, stat)))
+
+        # Explicitly request recheck
+        te.recheck("t_explicit_check")
+        mock_handle.force_recheck.assert_called_once()
+        self.assertIn("t_explicit_check", te._recheck_requested)
+
+        with patch.object(te, "get_status", return_value={
+            "total_size": 10000,
+            "downloaded": 3000,
+            "progress": 30.0,
+            "state": "downloading",
+            "speed": 0.0,
+            "upload_speed": 0.0,
+            "seeds": 0,
+            "peers": 0,
+            "eta": 0,
+            "name": "test_torrent",
+        }):
+            te.poll_all()
+
+        mock_handle.pause.assert_called()
+        updated = self.db.get_download("t_explicit_check")
+        self.assertEqual(updated.status, "paused")
+        self.assertIn(("t_explicit_check", "paused"), status_updates)
+
+    def test_torrent_recheck_adds_missing_handle_if_needed(self):
+        """When handle is missing during recheck, torrent is loaded into session first."""
+        te = TorrentEngine(self.db)
+        te._running = True
+        te._session = MagicMock()
+
+        entry = DownloadEntry(
+            id="t_missing_handle",
+            download_type="torrent",
+            status="paused",
+            total_size=10000,
+            downloaded_size=0,
+        )
+        self.db.add_download(entry)
+
+        mock_handle = MagicMock()
+        with patch.object(te, "add_torrent", side_effect=lambda e: te._handles.update({e.id: mock_handle})) as mock_add:
+            te.recheck("t_missing_handle")
+            mock_add.assert_called_once()
+            mock_handle.force_recheck.assert_called_once()
+            self.assertIn("t_missing_handle", te._recheck_requested)
+
     def test_stalled_torrent_detection(self):
         """Downloads with zero seeds and zero speed for >45s are marked stalled and reannounced."""
         te = TorrentEngine(self.db)

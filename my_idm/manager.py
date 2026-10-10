@@ -2959,7 +2959,7 @@ class DownloadManager(QObject):
                 except Exception:
                     pass
         elif entry.download_type == "torrent":
-            self._torrent.remove(download_id, delete_files=False)
+            self._torrent.remove(download_id, delete_files=False, keep_torrent_cache=True)
 
         # 2. Move file / directory to trash
         target_path = entry.file_path
@@ -2977,20 +2977,8 @@ class DownloadManager(QObject):
         # 3. Clean up HTTP segment records in DB
         self._db.delete_segments(download_id)
 
-        # 4. Reset entry progress, speed, and status to paused
-        entry.downloaded_size = 0
-        entry.status = "paused"
-        entry.speed = 0.0
-        entry.upload_speed = 0.0
-        entry.eta_seconds = 0.0
-        self._db.update_download(entry)
-
-        # 5. Emit status and progress signals
-        self.status_changed.emit(download_id, "paused", "")
-        self.progress_updated.emit(
-            download_id, 0, entry.total_size, 0.0, 0.0, 0, 0, 0.0
-        )
-        self._process_queue()
+        # 4. Perform a recheck to set progress to 0 and stay paused
+        self.recheck_download(download_id)
 
     # -- move ----------------------------------------------------------------
 
@@ -3842,6 +3830,19 @@ class DownloadManager(QObject):
             self._torrent.recheck(download_id)
             self.status_changed.emit(download_id, "checking", "")
         else:
+            # If download is active, cancel / pause the active worker first so files are flushed
+            is_ytdlp = self._is_ytdlp_native_entry(entry)
+            if is_ytdlp:
+                self._stop_ytdlp_worker(download_id, "rechecking", force=True)
+            elif self._loop and self._loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._http.cancel(download_id), self._loop
+                )
+                try:
+                    fut.result(timeout=5.0)
+                except Exception:
+                    pass
+
             # HTTP: the engine pre-allocates the full file via truncate(), so
             # st_size is always == total_size even when the download is partial.
             # Use the segment downloaded_bytes sum (or entry.downloaded_size from
@@ -3851,14 +3852,18 @@ class DownloadManager(QObject):
             if not fp or not fp.exists():
                 # File doesn't exist at all — full reset
                 entry.downloaded_size = 0
-                entry.status = "queued"
+                entry.status = "paused"
+                entry.speed = 0.0
+                entry.upload_speed = 0.0
+                entry.eta_seconds = 0.0
                 self._db.update_download(entry)
                 self._db.delete_segments(download_id)
-                self.status_changed.emit(download_id, "queued", "File not found")
+                self.status_changed.emit(download_id, "paused", "File not found")
                 self.progress_updated.emit(
                     download_id, 0, entry.total_size,
                     0.0, 0.0, 0, 0, 0.0,
                 )
+                self._process_queue()
             else:
                 # File exists — use actual written bytes from segment records
                 segments = self._db.get_segments(download_id)
@@ -3917,13 +3922,15 @@ class DownloadManager(QObject):
                     )
                     self._process_queue()
                 else:
-                    # Partial — update size and reset to paused
+                    # Partial — update size and reset to paused (never auto-start downloading)
                     entry.downloaded_size = actual_downloaded
-                    if entry.status in ("completed", "downloading"):
-                        entry.status = "paused"
+                    entry.status = "paused"
+                    entry.speed = 0.0
+                    entry.upload_speed = 0.0
+                    entry.eta_seconds = 0.0
                     self._db.update_download(entry)
                     self.status_changed.emit(
-                        download_id, entry.status,
+                        download_id, "paused",
                         f"Downloaded: {actual_downloaded} / {entry.total_size}",
                     )
                     self.progress_updated.emit(

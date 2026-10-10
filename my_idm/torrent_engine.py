@@ -251,6 +251,9 @@ class TorrentEngine:
         # Downloads already checked against free disk space, so the check runs once
         # per download rather than on every 1 Hz poll.
         self._disk_checked: set[str] = set()
+        # Explicit recheck requests: torrents whose recheck was explicitly invoked
+        # must settle into 'paused' rather than 'downloading' when progress < 100%.
+        self._recheck_requested: set[str] = set()
 
     def set_general_config(self, config: object):
         """Set general configuration for timeout settings."""
@@ -1141,7 +1144,8 @@ class TorrentEngine:
                 self._status_cb(download_id, new_status, "")
 
 
-    def remove(self, download_id: str, delete_files: bool = False):
+    def remove(self, download_id: str, delete_files: bool = False, keep_torrent_cache: bool = False):
+        self._recheck_requested.discard(download_id)
         handle = self._handles.pop(download_id, None)
         if handle and self._session:
             if delete_files:
@@ -1152,13 +1156,20 @@ class TorrentEngine:
         resume_path = FASTRESUME_DIR / f"{download_id}.fastresume"
         if resume_path.exists():
             resume_path.unlink(missing_ok=True)
-        cached_torrent = FASTRESUME_DIR / f"{download_id}.torrent"
-        if cached_torrent.exists():
-            cached_torrent.unlink(missing_ok=True)
+        if not keep_torrent_cache:
+            cached_torrent = FASTRESUME_DIR / f"{download_id}.torrent"
+            if cached_torrent.exists():
+                cached_torrent.unlink(missing_ok=True)
 
     def recheck(self, download_id: str):
         handle = self._handles.get(download_id)
+        if not handle:
+            entry = self._db.get_download(download_id)
+            if entry and entry.download_type == "torrent":
+                self.add_torrent(entry)
+                handle = self._handles.get(download_id)
         if handle:
+            self._recheck_requested.add(download_id)
             self._db.update_status(download_id, "checking")
             # Ensure the handle is unpaused so checking can proceed
             try:
@@ -1684,6 +1695,8 @@ class TorrentEngine:
                 if self._status_cb:
                     self._status_cb(download_id, new_status, "")
             elif entry.status == "checking" and state not in ("checking_files", "queued_for_checking"):
+                is_explicit_recheck = download_id in self._recheck_requested
+                self._recheck_requested.discard(download_id)
                 if status["total_size"] > 0 and status["downloaded"] >= status["total_size"]:
                     new_status = "seeding" if (not self._torrent_config or self._torrent_config.seeding_after_complete) else "completed"
                     if new_status == "seeding":
@@ -1698,7 +1711,17 @@ class TorrentEngine:
                             is_paused = bool(getattr(s, "is_paused", False))
                     except Exception:
                         is_paused = False
-                    new_status = "paused" if is_paused else "downloading"
+                    if is_explicit_recheck:
+                        # Recheck was explicitly invoked and progress is < 100%: stay paused
+                        try:
+                            if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                                handle.unset_flags(lt.torrent_flags.auto_managed)
+                        except Exception:
+                            pass
+                        handle.pause()
+                        new_status = "paused"
+                    else:
+                        new_status = "paused" if is_paused else "downloading"
                 self._db.update_status(download_id, new_status)
                 if self._status_cb:
                     self._status_cb(download_id, new_status, "")
@@ -1714,7 +1737,18 @@ class TorrentEngine:
                             is_paused = bool(getattr(s, "is_paused", False))
                     except Exception:
                         is_paused = False
-                    new_status = "paused" if is_paused else "downloading"
+                    is_explicit_recheck = download_id in self._recheck_requested
+                    if is_explicit_recheck or is_paused:
+                        self._recheck_requested.discard(download_id)
+                        try:
+                            if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                                handle.unset_flags(lt.torrent_flags.auto_managed)
+                        except Exception:
+                            pass
+                        handle.pause()
+                        new_status = "paused"
+                    else:
+                        new_status = "downloading"
                     self._db.update_status(download_id, new_status)
                     if self._status_cb:
                         self._status_cb(download_id, new_status, "")

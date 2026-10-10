@@ -1958,8 +1958,6 @@ class DownloadTableModel(QAbstractTableModel):
                         e.downloaded_size = max(downloaded, e.downloaded_size)
                     elif e.total_size > 0:
                         e.downloaded_size = e.total_size
-                elif e.status in ("paused", "stopped") and downloaded == 0 and e.downloaded_size > 0:
-                    pass
                 else:
                     e.downloaded_size = downloaded
                 if total > 0:
