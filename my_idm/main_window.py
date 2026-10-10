@@ -1334,15 +1334,13 @@ class MainWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._on_search_changed)
         toolbar.addWidget(self._search_edit)
 
-        # Separate the search field from the stats button, and stats from preferences
-        toolbar.addSeparator()
-        toolbar.addAction(self._act_toolbar_stats)
+        # Separate the search field from preferences
         toolbar.addSeparator()
         toolbar.addAction(self._act_preferences)
         toolbar.addSeparator()
         toolbar.addAction(self._act_toggle_view_toolbar)
 
-        # Show only icons without text for playback, action, and stats buttons
+        # Show only icons without text for playback, action, and toggle buttons
         for act in (
             self._act_resume,
             self._act_force_start,
@@ -1355,7 +1353,6 @@ class MainWindow(QMainWindow):
             self._act_delete,
             self._act_move,
             self._act_recheck,
-            self._act_toolbar_stats,
             self._act_toggle_view_toolbar,
         ):
             btn = toolbar.widgetForAction(act)
@@ -3955,42 +3952,13 @@ class MainWindow(QMainWindow):
                 btn.setStyleSheet(mode_btn_style)
 
     def _on_show_statistics(self):
-        """Raise the statistics popup, beside Preferences in the toolbar, or open it.
-
-        The speed sparkline reads the same aggregate the status bar shows, so the chart and
-        the status bar can never disagree - see ``docs/architecture/statistics.md``.
-
-        One popup at a time: it is modeless (``show()``, not ``exec()``) and nothing
-        ``WA_DeleteOnClose``s it, so without this guard every toolbar click would leave
-        another live dialog - each with its own widgets and 1 Hz QTimer - on screen for
-        the rest of the session, and the user would have to hunt for the one they wanted.
-        """
-        from my_idm.stats_dialog import StatisticsPopup
-
-        existing = self._stats_dialog
-        if existing is not None:
-            try:
-                if existing.isVisible():
-                    existing.raise_()
-                    existing.activateWindow()
-                    return existing
-            except RuntimeError:
-                # The C++ side is already gone (closed and destroyed); fall through and
-                # build a fresh one rather than raising into a dangling wrapper.
-                self._stats_dialog = None
-
-        dlg = StatisticsPopup(
-            self._manager._db,
-            parent=self,
-            speed_provider=lambda: self._model.get_aggregate_speeds()[0],
-        )
-        # Qt deletes the dialog on close, and we drop our reference at the same time, so a
-        # session's worth of toolbar clicks cannot pile up hidden dialogs and their timers.
-        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self._stats_dialog = dlg
-        dlg.finished.connect(self._on_statistics_closed)
-        dlg.show()
-        return dlg
+        """Open Bandwidth Statistics in the bottom panel."""
+        if self._details_panel.isHidden():
+            self._details_panel.setVisible(True)
+            self._act_toggle_details.setChecked(True)
+        self._details_panel.show_stats()
+        self._act_toggle_details.setChecked(True)
+        return getattr(self._details_panel, "_stats_view", None)
 
     def _on_statistics_closed(self, _result: int) -> None:
         """Drop our reference once the popup is gone, so the next click rebuilds it.
@@ -5085,6 +5053,14 @@ class MainWindow(QMainWindow):
             unregister_notification_handler(self.show_tray_notification)
         except Exception:
             pass
+
+        if hasattr(self, "_details_panel"):
+            try:
+                self._details_panel._stop_stats_timer()
+                self._details_panel._stop_queues_timer()
+                self._details_panel._stop_log_timer()
+            except Exception:
+                pass
 
         # Stop UI timer immediately so no further GUI updates fire
         if hasattr(self, "_details_timer"):

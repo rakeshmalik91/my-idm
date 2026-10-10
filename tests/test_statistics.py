@@ -35,6 +35,7 @@ from my_idm.settings_dialog import TAB_GENERAL
 from my_idm.stats_dialog import (
     SparklineWidget,
     StatisticsPopup,
+    StatisticsView,
     StatsChartWidget,
     _fmt_bytes,
     _fmt_rate,
@@ -1235,17 +1236,11 @@ class TestToolbarAction(unittest.TestCase):
         self.assertIn("Statistics", self.window._act_tools_stats.toolTip())
         self.assertIn("Configure", self.window._act_preferences.toolTip())
 
-    def test_stats_button_on_toolbar_precedes_preferences_and_is_icon_only(self):
-        """The stats button sits on the left side of Preferences on the toolbar and is icon-only."""
+    def test_stats_button_is_removed_from_toolbar(self):
+        """Statistics was moved to the bottom panel, so toolbar has no stats action."""
         actions = self.window._toolbar.actions()
-        self.assertIn(self.window._act_toolbar_stats, actions)
-        idx = actions.index(self.window._act_toolbar_stats)
-        self.assertTrue(actions[idx + 1].isSeparator())
-        self.assertEqual(actions[idx + 2], self.window._act_preferences)
-
-        btn = self.window._toolbar.widgetForAction(self.window._act_toolbar_stats)
-        self.assertIsInstance(btn, QToolButton)
-        self.assertEqual(btn.toolButtonStyle(), Qt.ToolButtonStyle.ToolButtonIconOnly)
+        stats_acts = [a for a in actions if not a.isSeparator() and "Stat" in a.text()]
+        self.assertEqual(stats_acts, [])
 
     def test_it_lives_in_the_tools_menu(self):
         tools = next(
@@ -1258,115 +1253,61 @@ class TestToolbarAction(unittest.TestCase):
         """Ctrl+, is Preferences; a read-only view must not take a shortcut slot."""
         self.assertTrue(self.window._act_tools_stats.shortcut().isEmpty())
 
-    def test_opening_it_produces_a_popup_with_a_snapshot(self):
-        popup = self.window._on_show_statistics()
-        self.addCleanup(popup.deleteLater)
-        self.assertIsInstance(popup, StatisticsPopup)
-        self.assertIsInstance(popup.snapshot(), StatsSnapshot)
-        popup.close()
+    def test_opening_it_activates_stats_tab_on_bottom_panel(self):
+        self.window._details_panel.hide()
+        view = self.window._on_show_statistics()
+        self.assertFalse(self.window._details_panel.isHidden())
+        self.assertTrue(self.window._act_toggle_details.isChecked())
+        self.assertEqual(self.window._details_panel.current_mode(), "stats")
+        self.assertIsInstance(view.snapshot(), StatsSnapshot)
 
-    def test_the_popup_reads_the_real_database(self):
+    def test_the_stats_view_reads_the_real_database(self):
         self.db.add_download(DownloadEntry(
             id="toolbar-1", url="https://e.com/x", filename="x.bin", save_path="C:/t",
             total_size=2 * GB, downloaded_size=2 * GB, status="completed",
             added_at=iso(0),
         ))
-        popup = self._open()
-        self.assertGreaterEqual(popup.snapshot().lifetime.count, 1)
-        popup.close()
+        view = self.window._on_show_statistics()
+        self.assertGreaterEqual(view.snapshot().lifetime.count, 1)
 
-    def _open(self):
-        """Open the popup and register a cleanup that tolerates its own deletion.
+    def test_stats_subtabs_exist(self):
+        view = self.window._on_show_statistics()
+        subtab_names = [view._tabs.tabText(i) for i in range(view._tabs.count())]
+        self.assertEqual(subtab_names, ["Volumes", "Current Speed", "Totals"])
 
-        ``_on_show_statistics`` sets ``WA_DeleteOnClose``, so closing the popup destroys
-        the C++ object - a plain ``addCleanup(popup.deleteLater)`` would then raise
-        "Internal C++ object already deleted" and mask the real assertion.
-        """
-        popup = self.window._on_show_statistics()
-        self.addCleanup(self._safely_close, popup)
-        return popup
+    def test_switching_away_from_stats_stops_timer(self):
+        view = self.window._on_show_statistics()
+        self.assertIsNotNone(view._timer)
+        self.window._details_panel.set_mode("details")
+        self.assertIsNone(view._timer)
+        self.window._details_panel.set_mode("stats")
+        self.assertIsNotNone(view._timer)
 
-    @staticmethod
-    def _safely_close(popup):
+    def test_hiding_details_panel_stops_timer(self):
+        view = self.window._on_show_statistics()
+        self.assertIsNotNone(view._timer)
+        self.window._details_panel.hide()
+        self.assertIsNone(view._timer)
+        self.window._details_panel.show()
+        self.window._details_panel.set_mode("stats")
+        self.assertIsNotNone(view._timer)
+
+    def test_shutting_the_window_stops_the_speed_timer(self):
+        from my_idm.main_window import MainWindow
+
+        win = MainWindow(self.manager)
         try:
-            popup.close()
-            popup.deleteLater()
-        except RuntimeError:
-            pass  # already destroyed by WA_DeleteOnClose
-
-    def test_the_window_holds_a_reference_to_the_open_popup(self):
-        """A popup whose only reference is a local is collectable, timer and all."""
-        popup = self._open()
-        self.assertIs(self.window._stats_dialog, popup)
-        popup.close()
-
-    def test_a_second_click_reuses_the_open_popup(self):
-        """It is modeless and nothing deleted it, so clicks used to stack dialogs."""
-        first = self._open()
-        second = self.window._on_show_statistics()
-        self.assertIs(
-            second, first,
-            "a second click built another dialog instead of raising the first",
-        )
-        first.close()
-
-    def test_clicking_many_times_never_stacks_dialogs(self):
-        seen = [self._open() for _ in range(5)]
-        self.assertEqual(
-            len({id(p) for p in seen}), 1,
-            "five clicks produced more than one popup",
-        )
-        seen[0].close()
-
-    def test_the_popup_is_marked_for_deletion_on_close(self):
-        popup = self._open()
-        self.assertTrue(
-            popup.testAttribute(Qt.WidgetAttribute.WA_DeleteOnClose),
-            "without this the C++ dialog outlives every click",
-        )
-        popup.close()
-
-    def test_closing_the_popup_releases_the_reference(self):
-        popup = self._open()
-        popup.close()
-        QApplication.processEvents()
-        self.assertIsNone(self.window._stats_dialog)
-
-    def test_a_fresh_popup_is_built_after_the_first_was_closed(self):
-        first = self._open()
-        first.close()
-        QApplication.processEvents()
-        second = self._open()
-        self.assertIsNot(second, first)
-        self.assertIs(self.window._stats_dialog, second)
-        second.close()
-
-    def test_a_destroyed_popup_does_not_wedge_the_toolbar(self):
-        """A dangling C++ object must be replaced, not raised into."""
-        first = self._open()
-        first.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        first.close()
-        # Deliberately keep the reference: `finished` cleared the window's, so this walks
-        # the path where a stale wrapper is still reachable.
-        self.window._stats_dialog = first
-        first.deleteLater()
-        QApplication.processEvents()
-        fresh = self._open()
-        self.assertIsNot(fresh, first)
-        self.assertIs(self.window._stats_dialog, fresh)
-        fresh.close()
-
-    def test_shutting_the_window_closes_the_popup(self):
-        """Its 1 Hz timer must not outlive the manager it samples."""
-        popup = self._open()
-        popup.start_speed_timer()
-        self.assertIsNotNone(popup._timer)
-        self.window._force_exit = True
-        self.window.close()
-        QApplication.processEvents()
-        self.assertIsNone(self.window._stats_dialog)
-        self.assertIsNone(popup._timer, "the popup timer survived the shutdown")
-        self.window._force_exit = False
+            view = win._on_show_statistics()
+            self.assertIsNotNone(view._timer)
+            win._force_exit = True
+            win.close()
+            QApplication.processEvents()
+            self.assertIsNone(view._timer, "the stats timer survived the shutdown")
+        finally:
+            win._force_exit = True
+            win.close()
+            win.deleteLater()
+            QApplication.processEvents()
 
 
 @pytest.mark.ui

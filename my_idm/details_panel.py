@@ -231,10 +231,12 @@ class SideTabBar(QWidget):
         self._btn_details = self._create_tab_button("📋 Details", 0)
         self._btn_queues = self._create_tab_button("🗂️ Queues", 1)
         self._btn_console = self._create_tab_button("📄 Console", 2)
+        self._btn_stats = self._create_tab_button("📊 Stats", 3)
 
         layout.addWidget(self._btn_details)
         layout.addWidget(self._btn_queues)
         layout.addWidget(self._btn_console)
+        layout.addWidget(self._btn_stats)
         layout.addStretch(1)
 
         self.setFixedWidth(112)
@@ -846,8 +848,32 @@ class DetailsPanel(QWidget):
         self._tab_console = self._console_widget
         self._mode_stack.addWidget(self._console_widget)
 
+        # Page 3: Stats View
+        self._stats_view = self._create_stats_view()
+        self._mode_stack.addWidget(self._stats_view)
+
         right_layout.addWidget(self._mode_stack, stretch=1)
         outer_layout.addWidget(right_container, stretch=1)
+
+    def _create_stats_view(self) -> QWidget:
+        from my_idm.stats_dialog import StatisticsView
+
+        db = getattr(self._manager, "_db", None)
+        return StatisticsView(
+            db=db,
+            parent=self,
+            speed_provider=self._get_speed_sample,
+        )
+
+    def _get_speed_sample(self) -> int:
+        m = self.model
+        if m is not None and hasattr(m, "get_aggregate_speeds"):
+            try:
+                speeds = m.get_aggregate_speeds()
+                return int(speeds[0]) if speeds else 0
+            except Exception:
+                return 0
+        return 0
 
     def _create_overview_tab(self) -> QWidget:
         scroll = QScrollArea(self)
@@ -3242,22 +3268,35 @@ class DetailsPanel(QWidget):
             mode = "queues"
         elif index == 2:
             mode = "console"
+        elif index == 3:
+            mode = "stats"
         else:
             mode = "details"
 
         if mode == "console":
             self._stop_queues_timer()
+            self._stop_stats_timer()
             self._update_console_header()
             if self.isVisible():
                 self._start_log_timer()
         elif mode == "queues":
             self._stop_log_timer()
+            self._stop_stats_timer()
             self._update_queues_header()
             self._update_queues()
             self._start_queues_timer()
+        elif mode == "stats":
+            self._stop_log_timer()
+            self._stop_queues_timer()
+            self._update_stats_header()
+            if hasattr(self, "_stats_view"):
+                self._stats_view.refresh()
+            if not self.isHidden():
+                self._start_stats_timer()
         else:
             self._stop_log_timer()
             self._stop_queues_timer()
+            self._stop_stats_timer()
             if self._current_entry:
                 self._update_header(self._current_entry)
             else:
@@ -3265,23 +3304,32 @@ class DetailsPanel(QWidget):
         self.mode_changed.emit(mode)
 
     def current_mode(self) -> str:
-        """Returns 'details', 'queues', or 'console' based on active left-side tab."""
+        """Returns 'details', 'queues', 'console', or 'stats' based on active left-side tab."""
         idx = self._side_tabs.currentIndex()
         if idx == 1:
             return "queues"
         elif idx == 2:
             return "console"
+        elif idx == 3:
+            return "stats"
         return "details"
 
-    def set_mode(self, mode: str):
-        """Switch left-side tab mode ('details', 'queues', or 'console')."""
+    def set_mode(self, mode: str, subtab: Optional[int | str] = None):
+        """Switch left-side tab mode ('details', 'queues', 'console', or 'stats')."""
         if mode == "queues":
             idx = 1
         elif mode == "console":
             idx = 2
+        elif mode == "stats":
+            idx = 3
         else:
             idx = 0
-        self._side_tabs.setCurrentIndex(idx)
+        if self._side_tabs.currentIndex() == idx:
+            self._on_mode_tab_changed(idx)
+        else:
+            self._side_tabs.setCurrentIndex(idx)
+        if mode == "stats" and subtab is not None and hasattr(self, "_stats_view"):
+            self._stats_view.set_current_tab(subtab)
 
     def _start_queues_timer(self):
         if not self._queues_timer.isActive():
@@ -3739,6 +3787,33 @@ class DetailsPanel(QWidget):
         """Returns True if the panel is currently in Console mode."""
         return self.current_mode() == "console"
 
+    def show_stats(self, subtab: Optional[int | str] = None):
+        """Switch to Stats mode, update header, and refresh stats."""
+        self.set_mode("stats", subtab=subtab)
+        self._update_stats_header()
+        if hasattr(self, "_stats_view"):
+            self._stats_view.refresh()
+        if not self.isHidden():
+            self._start_stats_timer()
+
+    def is_stats_active(self) -> bool:
+        """Returns True if the panel is currently in Stats mode."""
+        return self.current_mode() == "stats"
+
+    def _update_stats_header(self):
+        self._lbl_icon.setText("📊")
+        self._lbl_title.setText("Bandwidth Statistics")
+        self._lbl_badge.setVisible(False)
+        self._btn_open_folder.setVisible(False)
+
+    def _start_stats_timer(self):
+        if hasattr(self, "_stats_view"):
+            self._stats_view.start_speed_timer()
+
+    def _stop_stats_timer(self):
+        if hasattr(self, "_stats_view"):
+            self._stats_view.stop_speed_timer()
+
     @property
     def browser_container_hwnd(self) -> Optional[int]:
         """HWND of the embedded browser container widget."""
@@ -3886,6 +3961,7 @@ class DetailsPanel(QWidget):
         super().hideEvent(event)
         self._stop_log_timer()
         self._stop_queues_timer()
+        self._stop_stats_timer()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3895,6 +3971,11 @@ class DetailsPanel(QWidget):
             self._update_queues_header()
             self._update_queues()
             self._start_queues_timer()
+        elif self.current_mode() == "stats":
+            self._update_stats_header()
+            if hasattr(self, "_stats_view"):
+                self._stats_view.refresh()
+            self._start_stats_timer()
 
     # -- State Persistence ----------------------------------------------------
 
@@ -3903,6 +3984,7 @@ class DetailsPanel(QWidget):
         return {
             "current_mode": self.current_mode(),
             "current_tab": self._tabs.currentIndex(),
+            "stats_subtab": self._stats_view.current_tab() if hasattr(self, "_stats_view") else "Volumes",
         }
 
     def restore_state(self, state: dict[str, Any]):
@@ -3910,7 +3992,7 @@ class DetailsPanel(QWidget):
         if not isinstance(state, dict):
             return
         mode = state.get("current_mode")
-        if mode in ("details", "console", "queues"):
+        if mode in ("details", "console", "queues", "stats"):
             self.set_mode(mode)
         tab_idx = state.get("current_tab")
         if tab_idx is not None:
@@ -3920,3 +4002,6 @@ class DetailsPanel(QWidget):
                     self._tabs.setCurrentIndex(idx)
             except (ValueError, TypeError):
                 pass
+        stats_subtab = state.get("stats_subtab")
+        if stats_subtab is not None and hasattr(self, "_stats_view"):
+            self._stats_view.set_current_tab(stats_subtab)

@@ -589,7 +589,6 @@ class TestMainWindowToolbar(_MainWindowTestCase):
             self.win._act_delete,
             self.win._act_move,
             self.win._act_recheck,
-            self.win._act_toolbar_stats,
         ):
             btn = toolbar.widgetForAction(act)
             self.assertIsInstance(btn, QToolButton)
@@ -1857,7 +1856,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         for gone in ("All Queues", "Move to Queue"):
             with self.subTest(label=gone):
                 self.assertNotIn(gone, labels)
-        self.assertIn(self.win._act_toolbar_stats, self.win._toolbar.actions())
+        self.assertNotIn(getattr(self.win, "_act_toolbar_stats", None), self.win._toolbar.actions())
         widget_names = [
             self.win._toolbar.widgetForAction(a).objectName()
             for a in self.win._toolbar.actions()

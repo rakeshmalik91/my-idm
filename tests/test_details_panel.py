@@ -1260,11 +1260,12 @@ class TestDetailsPanel(unittest.TestCase):
         self.addCleanup(panel._browser_monitor_timer.stop)
         self.addCleanup(panel.deleteLater)
 
-        # Side tabs on left side for Details, Queues & Console
-        self.assertEqual(panel._side_tabs.count(), 3)
+        # Side tabs on left side for Details, Queues, Console & Stats
+        self.assertEqual(panel._side_tabs.count(), 4)
         self.assertIn("Details", panel._side_tabs.tabText(0))
         self.assertIn("Queues", panel._side_tabs.tabText(1))
         self.assertIn("Console", panel._side_tabs.tabText(2))
+        self.assertIn("Stats", panel._side_tabs.tabText(3))
 
         # Details tabs (Overview, Files, Peers, Trackers, Segments)
         self.assertEqual(panel._tabs.count(), 5)
@@ -2221,6 +2222,31 @@ class TestDetailsPanel(unittest.TestCase):
             self.assertTrue(called)
         finally:
             self.win._on_manage_queues = original_on_manage
+
+    def test_details_panel_stats_tab(self):
+        """Stats tab can be activated via show_stats() or set_mode('stats')."""
+        panel = self.win._details_panel
+        self.assertFalse(panel.is_stats_active())
+
+        # Switch via show_stats
+        panel.show_stats()
+        self.assertEqual(panel.current_mode(), "stats")
+        self.assertTrue(panel.is_stats_active())
+        self.assertEqual(panel._side_tabs.currentIndex(), 3)
+        self.assertEqual(panel._lbl_title.text(), "Bandwidth Statistics")
+        self.assertTrue(hasattr(panel, "_stats_view"))
+        self.assertIsNotNone(panel._stats_view)
+
+        # Subtabs in stats view: Volumes, Current Speed, Totals
+        self.assertEqual(panel._stats_view._tabs.count(), 3)
+        self.assertEqual(panel._stats_view._tabs.tabText(0), "Volumes")
+        self.assertEqual(panel._stats_view._tabs.tabText(1), "Current Speed")
+        self.assertEqual(panel._stats_view._tabs.tabText(2), "Totals")
+
+        # Switch back to details
+        panel.set_mode("details")
+        self.assertFalse(panel.is_stats_active())
+        self.assertEqual(panel.current_mode(), "details")
 
 
 if __name__ == "__main__":

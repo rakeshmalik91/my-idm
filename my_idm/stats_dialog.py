@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QSizePolicy,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -324,17 +325,8 @@ class SparklineWidget(QWidget):
         painter.end()
 
 
-class StatisticsPopup(QDialog):
-    """Totals for today / week / month / year / all time, plus the two charts.
-
-    The summary grid is fixed - those five rows are the headline numbers and are not
-    redefined by a chart selection. The chart has its own range and granularity pickers,
-    because "show me the last year" and "show me per month" are independent questions and
-    forcing one range for both would make the chart useless at either extreme.
-
-    The window itself is persisted through ``Database.set_ui_state`` so it reopens where
-    the user left it, matching every other dialog in the app.
-    """
+class StatisticsView(QWidget):
+    """Bandwidth statistics view hosting three subtabs: Volumes, Current Speed, and Totals."""
 
     UI_STATE_KEY = "statistics_dialog_size"
 
@@ -364,9 +356,16 @@ class StatisticsPopup(QDialog):
         ("Per month", "month"),
     )
 
-    def __init__(self, db: Database, parent=None, today: Optional[date] = None,
-                 speed_provider=None, range_index: int = DEFAULT_RANGE_INDEX, bucket: str = "day",
-                 cumulative: bool = False):
+    def __init__(
+        self,
+        db: Database,
+        parent: Optional[QWidget] = None,
+        today: Optional[date] = None,
+        speed_provider=None,
+        range_index: int = DEFAULT_RANGE_INDEX,
+        bucket: str = "day",
+        cumulative: bool = False,
+    ):
         super().__init__(parent)
         self._db = db
         self._today = today
@@ -383,30 +382,36 @@ class StatisticsPopup(QDialog):
         else:
             self._bucket = "day"
 
-        self.setWindowTitle("📊  Statistics")
-        self.setMinimumWidth(680)
         self._build_ui()
-        self._restore_size()
+        self._restore_cumulative_preference()
         self.refresh()
-
-    # -- construction -------------------------------------------------------
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setSpacing(12)
-        root.setContentsMargins(14, 14, 14, 12)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
 
-        grid_host = QWidget()
-        self._grid = QGridLayout(grid_host)
-        self._grid.setHorizontalSpacing(18)
-        self._grid.setVerticalSpacing(6)
-        self._grid.setColumnStretch(1, 1)
-        header = QLabel("<b>Totals</b>")
-        root.addWidget(header)
-        root.addWidget(grid_host)
+        self._tabs = QTabWidget(self)
 
-        # -- chart controls --------------------------------------------------
+        self._tab_volumes = self._create_volumes_tab()
+        self._tabs.addTab(self._tab_volumes, "Volumes")
+
+        self._tab_speed = self._create_speed_tab()
+        self._tabs.addTab(self._tab_speed, "Current Speed")
+
+        self._tab_totals = self._create_totals_tab()
+        self._tabs.addTab(self._tab_totals, "Totals")
+
+        root.addWidget(self._tabs)
+
+    def _create_volumes_tab(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
         controls = QHBoxLayout()
+        controls.setSpacing(8)
         self._volume_header = QLabel("<b>Volume</b>")
         controls.addWidget(self._volume_header)
         controls.addStretch()
@@ -437,34 +442,106 @@ class StatisticsPopup(QDialog):
         self._cumulative_btn.setToolTip("Toggle cumulative volume (accumulated running totals)")
         self._cumulative_btn.toggled.connect(self._on_cumulative_toggled)
         controls.addWidget(self._cumulative_btn)
-        root.addLayout(controls)
+
+        self._volumes_refresh_btn = QPushButton("🔄  Refresh")
+        self._volumes_refresh_btn.setToolTip("Refresh statistics")
+        self._volumes_refresh_btn.clicked.connect(self.refresh)
+        controls.addWidget(self._volumes_refresh_btn)
+        self._refresh_btn = self._volumes_refresh_btn
+
+        layout.addLayout(controls)
 
         self._chart = StatsChartWidget()
         self._chart.set_cumulative(self._cumulative)
-        root.addWidget(self._chart, 1)
+        layout.addWidget(self._chart, 1)
 
         legend = QLabel(
             f'<span style="color:{Colors.ACCENT}">■</span> downloaded&nbsp;&nbsp;'
             f'<span style="color:{Colors.GREEN}">■</span> uploaded'
         )
-        root.addWidget(legend)
+        layout.addWidget(legend)
+        return widget
 
-        speed_header = QLabel("<b>Current speed</b>")
-        root.addWidget(speed_header)
+    def _create_speed_tab(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        speed_header = QLabel("<b>Current Speed</b>")
+        top.addWidget(speed_header)
+
+        self._speed_label = QLabel("0 B/s")
+        self._speed_label.setStyleSheet(f"color: {Colors.ACCENT}; font-weight: bold;")
+        top.addWidget(self._speed_label)
+        top.addStretch()
+
+        self._speed_refresh_btn = QPushButton("🔄  Refresh")
+        self._speed_refresh_btn.setToolTip("Sample current throughput speed")
+        self._speed_refresh_btn.clicked.connect(self._sample_speed)
+        top.addWidget(self._speed_refresh_btn)
+        layout.addLayout(top)
+
         self._sparkline = SparklineWidget()
-        root.addWidget(self._sparkline)
+        self._sparkline.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._sparkline, 1)
+        return widget
 
-        buttons = QHBoxLayout()
-        buttons.addStretch()
-        self._refresh_btn = QPushButton("🔄  Refresh")
-        self._refresh_btn.clicked.connect(self.refresh)
-        buttons.addWidget(self._refresh_btn)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        buttons.addWidget(close_btn)
-        root.addLayout(buttons)
+    def _create_totals_tab(self) -> QWidget:
+        widget = QWidget(self)
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
-    # -- chart selection ----------------------------------------------------
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        header = QLabel("<b>Totals</b>")
+        top.addWidget(header)
+        top.addStretch()
+
+        self._totals_refresh_btn = QPushButton("🔄  Refresh")
+        self._totals_refresh_btn.setToolTip("Refresh bandwidth totals")
+        self._totals_refresh_btn.clicked.connect(self.refresh)
+        top.addWidget(self._totals_refresh_btn)
+        layout.addLayout(top)
+
+        grid_host = QWidget()
+        self._grid = QGridLayout(grid_host)
+        self._grid.setHorizontalSpacing(18)
+        self._grid.setVerticalSpacing(6)
+        self._grid.setColumnStretch(1, 1)
+        layout.addWidget(grid_host)
+        layout.addStretch(1)
+        return widget
+
+    def set_current_tab(self, index_or_name: int | str) -> None:
+        if isinstance(index_or_name, int):
+            if 0 <= index_or_name < self._tabs.count():
+                self._tabs.setCurrentIndex(index_or_name)
+        elif isinstance(index_or_name, str):
+            mapping = {
+                "volumes": 0,
+                "volume": 0,
+                "current speed": 1,
+                "speed": 1,
+                "totals": 2,
+                "total": 2,
+            }
+            idx = mapping.get(index_or_name.strip().lower())
+            if idx is not None:
+                self._tabs.setCurrentIndex(idx)
+
+    def current_tab(self) -> str:
+        idx = self._tabs.currentIndex()
+        if idx == 0:
+            return "Volumes"
+        elif idx == 1:
+            return "Current Speed"
+        elif idx == 2:
+            return "Totals"
+        return self._tabs.tabText(idx)
 
     def range_selection(self):
         """The chosen range as ``(label, spec)``."""
@@ -474,7 +551,6 @@ class StatisticsPopup(QDialog):
         return self._bucket_combo.currentData() or "day"
 
     def _date_bounds_for_range(self) -> tuple[Optional[date], Optional[date]]:
-        """Compute the (since, until) dates for the selected range."""
         _label, spec = self.range_selection()
         today = self._resolve_today()
         if spec is None:
@@ -540,9 +616,7 @@ class StatisticsPopup(QDialog):
 
     def _on_cumulative_toggled(self, checked: bool) -> None:
         self.set_cumulative(checked)
-        self._save_size()
-
-    # -- data ---------------------------------------------------------------
+        self._save_cumulative_preference()
 
     def _resolve_today(self) -> date:
         return self._today or datetime.now().date()
@@ -551,18 +625,6 @@ class StatisticsPopup(QDialog):
         return self._snapshot
 
     def refresh(self) -> None:
-        """Re-read every bucket and repaint.
-
-        The query is a handful of ``GROUP BY`` passes over the downloads table, which is
-        sub-millisecond at the row counts a real library reaches, so it runs inline on the
-        Qt thread. If that ever stops being true the fix is to move this onto a
-        ``QThreadPool`` job - the API below would not change, because ``today`` is already
-        injected.
-
-        A failure renders an em-dash in every cell rather than propagating, but it is
-        *logged*: swallowing a broken query silently leaves the user with an empty dialog
-        and nothing to report, which is how a stats view becomes impossible to diagnose.
-        """
         since = self._since_for_range()
         until = self._until_for_range()
         bucket = self.bucket_selection()
@@ -602,16 +664,38 @@ class StatisticsPopup(QDialog):
                 self._grid.addWidget(QLabel("—"), index, 1)
                 continue
             value = QLabel(f"{_fmt_bytes(stats.downloaded)} down  ·  {_fmt_bytes(stats.uploaded)} up")
+            try:
+                dl_num = f"{int(stats.downloaded):,}"
+            except (ValueError, TypeError):
+                dl_num = str(stats.downloaded)
+            try:
+                ul_num = f"{int(stats.uploaded):,}"
+            except (ValueError, TypeError):
+                ul_num = str(stats.uploaded)
+            try:
+                files_cnt = str(stats.count)
+            except Exception:
+                files_cnt = "0"
+            try:
+                comp_cnt = str(stats.completed)
+            except Exception:
+                comp_cnt = "0"
             value.setToolTip(
-                f"downloaded: {stats.downloaded:,} bytes\n"
-                f"uploaded: {stats.uploaded:,} bytes\n"
-                f"files: {stats.count}  ·  completed: {stats.completed}"
+                f"downloaded: {dl_num} bytes\n"
+                f"uploaded: {ul_num} bytes\n"
+                f"files: {files_cnt}  ·  completed: {comp_cnt}"
             )
             self._grid.addWidget(value, index, 1)
 
-        total = QLabel(
-            f"<b>{snap.lifetime.completed:,} files completed</b>" if snap else "<b>—</b>"
-        )
+        if snap is not None:
+            try:
+                completed_fmt = f"{int(snap.lifetime.completed):,}"
+            except (ValueError, TypeError, AttributeError):
+                completed_fmt = str(getattr(snap.lifetime, "completed", 0))
+            total_text = f"<b>{completed_fmt} files completed</b>"
+        else:
+            total_text = "<b>—</b>"
+        total = QLabel(total_text)
         total.setStyleSheet(f"color: {Colors.ACCENT};")
         self._grid.addWidget(total, len(rows), 0, 1, 1)
 
@@ -619,14 +703,15 @@ class StatisticsPopup(QDialog):
         if self._speed_provider is None:
             return
         try:
-            self._sparkline.add_sample(int(self._speed_provider() or 0))
+            sample = int(self._speed_provider() or 0)
+            self._sparkline.add_sample(sample)
+            if hasattr(self, "_speed_label"):
+                self._speed_label.setText(_fmt_rate(sample))
         except Exception:
-            # One dropped sample is not worth a dialog or a stack trace; the next tick
-            # samples again. A permanently broken provider shows as a flat line at zero.
             log.debug("Speed sample failed", exc_info=True)
             self._sparkline.add_sample(0)
-
-    # -- live speed timer ----------------------------------------------------
+            if hasattr(self, "_speed_label"):
+                self._speed_label.setText("0 B/s")
 
     def start_speed_timer(self, interval_ms: int = 1000) -> None:
         if self._speed_provider is None or self._timer is not None:
@@ -641,7 +726,214 @@ class StatisticsPopup(QDialog):
             self._timer.stop()
             self._timer = None
 
-    # -- window geometry -----------------------------------------------------
+    def _restore_cumulative_preference(self) -> None:
+        if not self._db:
+            return
+        try:
+            state = self._db.get_ui_state(self.UI_STATE_KEY, None)
+            if isinstance(state, dict) and "cumulative" in state:
+                self.set_cumulative(bool(state.get("cumulative")))
+        except Exception:
+            pass
+
+    def _save_cumulative_preference(self) -> None:
+        if not self._db:
+            return
+        try:
+            state = self._db.get_ui_state(self.UI_STATE_KEY, {}) or {}
+            if not isinstance(state, dict):
+                state = {}
+            state["cumulative"] = self._cumulative
+            self._db.set_ui_state(self.UI_STATE_KEY, state)
+        except Exception:
+            pass
+
+
+class StatisticsPopup(QDialog):
+    """Totals for today / week / month / year / all time, plus the two charts.
+
+    Embeds StatisticsView and provides a standalone dialog wrapper with size persistence.
+    """
+
+    UI_STATE_KEY = StatisticsView.UI_STATE_KEY
+    RANGES = StatisticsView.RANGES
+    DEFAULT_RANGE_INDEX = StatisticsView.DEFAULT_RANGE_INDEX
+    BUCKETS = StatisticsView.BUCKETS
+
+    def __init__(
+        self,
+        db: Database,
+        parent=None,
+        today: Optional[date] = None,
+        speed_provider=None,
+        range_index: int = DEFAULT_RANGE_INDEX,
+        bucket: str = "day",
+        cumulative: bool = False,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("📊  Statistics")
+        self.setMinimumWidth(680)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(12)
+
+        self._view = StatisticsView(
+            db=db,
+            parent=self,
+            today=today,
+            speed_provider=speed_provider,
+            range_index=range_index,
+            bucket=bucket,
+            cumulative=cumulative,
+        )
+        layout.addWidget(self._view, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self._refresh_btn = QPushButton("🔄  Refresh")
+        self._refresh_btn.clicked.connect(self.refresh)
+        buttons.addWidget(self._refresh_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        buttons.addWidget(close_btn)
+        layout.addLayout(buttons)
+
+        self._restore_size()
+
+    @property
+    def _db(self):
+        return self._view._db
+
+    @_db.setter
+    def _db(self, val):
+        self._view._db = val
+
+    @property
+    def _today(self):
+        return self._view._today
+
+    @_today.setter
+    def _today(self, val):
+        self._view._today = val
+
+    @property
+    def _speed_provider(self):
+        return self._view._speed_provider
+
+    @_speed_provider.setter
+    def _speed_provider(self, val):
+        self._view._speed_provider = val
+
+    @property
+    def _snapshot(self):
+        return self._view._snapshot
+
+    @_snapshot.setter
+    def _snapshot(self, val):
+        self._view._snapshot = val
+
+    @property
+    def _timer(self):
+        return self._view._timer
+
+    @_timer.setter
+    def _timer(self, val):
+        self._view._timer = val
+
+    @property
+    def _range_index(self):
+        return self._view._range_index
+
+    @_range_index.setter
+    def _range_index(self, val):
+        self._view._range_index = val
+
+    @property
+    def _bucket(self):
+        return self._view._bucket
+
+    @_bucket.setter
+    def _bucket(self, val):
+        self._view._bucket = val
+
+    @property
+    def _cumulative(self):
+        return self._view._cumulative
+
+    @_cumulative.setter
+    def _cumulative(self, val):
+        self._view._cumulative = val
+
+    @property
+    def _grid(self):
+        return self._view._grid
+
+    @property
+    def _chart(self):
+        return self._view._chart
+
+    @property
+    def _sparkline(self):
+        return self._view._sparkline
+
+    @property
+    def _range_combo(self):
+        return self._view._range_combo
+
+    @property
+    def _bucket_combo(self):
+        return self._view._bucket_combo
+
+    @property
+    def _cumulative_btn(self):
+        return self._view._cumulative_btn
+
+    @property
+    def _volume_header(self):
+        return self._view._volume_header
+
+    def range_selection(self):
+        return self._view.range_selection()
+
+    def bucket_selection(self) -> str:
+        return self._view.bucket_selection()
+
+    def _date_bounds_for_range(self):
+        return self._view._date_bounds_for_range()
+
+    def _since_for_range(self):
+        return self._view._since_for_range()
+
+    def _until_for_range(self):
+        return self._view._until_for_range()
+
+    def is_cumulative(self) -> bool:
+        return self._view.is_cumulative()
+
+    def set_cumulative(self, cumulative: bool) -> None:
+        self._view.set_cumulative(cumulative)
+
+    def _resolve_today(self):
+        return self._view._resolve_today()
+
+    def snapshot(self) -> Optional[StatsSnapshot]:
+        return self._view.snapshot()
+
+    def refresh(self) -> None:
+        self._view.refresh()
+
+    def _populate_grid(self) -> None:
+        self._view._populate_grid()
+
+    def _sample_speed(self) -> None:
+        self._view._sample_speed()
+
+    def start_speed_timer(self, interval_ms: int = 1000) -> None:
+        self._view.start_speed_timer(interval_ms)
+
+    def stop_speed_timer(self) -> None:
+        self._view.stop_speed_timer()
 
     def _restore_size(self) -> None:
         state = self._db.get_ui_state(self.UI_STATE_KEY, None) if self._db else None
@@ -670,15 +962,11 @@ class StatisticsPopup(QDialog):
         except Exception:
             pass
 
-    # -- lifecycle -----------------------------------------------------------
-
-    def showEvent(self, event):  # noqa: N802 - Qt naming
+    def showEvent(self, event):
         super().showEvent(event)
         self.start_speed_timer()
 
-    def closeEvent(self, event):  # noqa: N802 - Qt naming
-        # Stop the timer before the dialog is destroyed: a QTimer that outlives its
-        # receiver is a use-after-free waiting to happen.
+    def closeEvent(self, event):
         self.stop_speed_timer()
         self._save_size()
         super().closeEvent(event)
@@ -687,3 +975,9 @@ class StatisticsPopup(QDialog):
         self.stop_speed_timer()
         self._save_size()
         super().reject()
+
+    def __getattr__(self, name):
+        if hasattr(self, "_view"):
+            return getattr(self._view, name)
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
