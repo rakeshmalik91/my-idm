@@ -1227,6 +1227,7 @@ class DetailsPanel(QWidget):
         for q in queues:
             stats[q.id] = {
                 "active": 0,
+                "seeding": 0,
                 "queued": 0,
                 "paused": 0,
                 "stopped": 0,
@@ -1248,9 +1249,12 @@ class DetailsPanel(QWidget):
             if not st:
                 continue
             st["total"] += 1
-            if e.status in ("downloading", "checking", "fetching_metadata", "stalled", "seeding"):
+            if e.status in ("downloading", "checking", "fetching_metadata", "stalled"):
                 st["active"] += 1
                 st["down_speed"] += float(getattr(e, "speed", 0.0) or 0.0)
+                st["up_speed"] += float(getattr(e, "upload_speed", 0.0) or 0.0)
+            elif e.status == "seeding":
+                st["seeding"] += 1
                 st["up_speed"] += float(getattr(e, "upload_speed", 0.0) or 0.0)
             elif e.status == "queued":
                 st["queued"] += 1
@@ -1258,7 +1262,7 @@ class DetailsPanel(QWidget):
                 st["paused"] += 1
             elif e.status == "stopped":
                 st["stopped"] += 1
-            elif e.status in ("completed", "seeding"):
+            elif e.status == "completed":
                 st["completed"] += 1
             elif e.status == "error":
                 st["error"] += 1
@@ -1477,6 +1481,7 @@ class DetailsPanel(QWidget):
             st = stats.get(q.id, {})
 
             active = st.get("active", 0)
+            seeding = st.get("seeding", 0)
             queued = st.get("queued", 0)
             paused = st.get("paused", 0)
             stopped = st.get("stopped", 0)
@@ -1490,13 +1495,16 @@ class DetailsPanel(QWidget):
             if active > 0:
                 status_text = f"Running ({active})"
                 widgets["item_status"].setForeground(QColor(Colors.ACCENT))
+            elif seeding > 0:
+                status_text = f"Seeding ({seeding})"
+                widgets["item_status"].setForeground(QColor(Colors.ACCENT))
             elif queued > 0:
                 status_text = f"Queued ({queued})"
                 widgets["item_status"].setForeground(QColor(Colors.TEXT))
             elif paused > 0:
                 status_text = f"Paused ({paused})"
                 widgets["item_status"].setForeground(QColor(Colors.ORANGE))
-            elif total > 0 and completed == total:
+            elif total > 0 and (completed + seeding) == total:
                 status_text = "Completed"
                 widgets["item_status"].setForeground(QColor(Colors.GREEN))
             elif error > 0:
@@ -1516,6 +1524,8 @@ class DetailsPanel(QWidget):
                 widgets["item_counts"].setForeground(QColor(Colors.TEXT_MUTED if total == 0 else Colors.TEXT))
 
             tip_parts = [f"Active: {active}"]
+            if seeding > 0:
+                tip_parts.append(f"Seeding: {seeding}")
             if queued > 0:
                 tip_parts.append(f"Queued: {queued}")
             if paused > 0:

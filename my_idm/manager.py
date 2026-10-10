@@ -2296,7 +2296,7 @@ class DownloadManager(QObject):
         for did in in_flight:
             if did not in active_map:
                 entry = self._db.get_download(did)
-                if entry:
+                if entry and entry.status != "seeding":
                     key = self._db.resolve_queue_id(entry.queue_id)
                     active_map[did] = key
 

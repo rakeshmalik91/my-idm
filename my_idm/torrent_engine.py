@@ -551,8 +551,46 @@ class TorrentEngine:
             return False
 
     def get_active_download_ids(self) -> set[str]:
-        """Return download IDs of currently active torrents."""
-        return {did for did in list(self._handles) if self.is_active(did)}
+        """Return download IDs of currently active downloads (excluding seeding)."""
+        active_ids = set()
+        for did in list(self._handles):
+            if not self.is_active(did):
+                continue
+            entry = self._db.get_download(did) if hasattr(self, "_db") and self._db else None
+            if entry and entry.status == "seeding":
+                continue
+            handle = self._handles.get(did)
+            if handle:
+                try:
+                    s = handle.status()
+                    state_name = str(getattr(s, "state", "")).lower()
+                    if "seeding" in state_name or "finished" in state_name:
+                        continue
+                except Exception:
+                    pass
+            active_ids.add(did)
+        return active_ids
+
+    def get_active_seeding_ids(self) -> set[str]:
+        """Return download IDs of currently active seeding torrents."""
+        seeding_ids = set()
+        for did in list(self._handles):
+            if not self.is_active(did):
+                continue
+            entry = self._db.get_download(did) if hasattr(self, "_db") and self._db else None
+            if entry and entry.status == "seeding":
+                seeding_ids.add(did)
+                continue
+            handle = self._handles.get(did)
+            if handle:
+                try:
+                    s = handle.status()
+                    state_name = str(getattr(s, "state", "")).lower()
+                    if "seeding" in state_name or "finished" in state_name:
+                        seeding_ids.add(did)
+                except Exception:
+                    pass
+        return seeding_ids
 
     def set_torrent_tor_route(self, download_id: str, enabled: bool) -> None:
         """Flag a torrent to use the Tor SOCKS5 proxy.

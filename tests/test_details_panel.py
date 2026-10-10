@@ -2138,6 +2138,61 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_mode("details")
         self.assertFalse(panel._queues_timer.isActive())
 
+    def test_details_panel_queues_tab_seeding_not_counted_as_active(self):
+        """Active count in queues tab should not count seeding torrents."""
+        panel = self.win._details_panel
+        queues = self.manager.get_queues()
+        target_q = queues[0]
+
+        # Add a seeding entry (no active downloading entry)
+        seeding_entry = DownloadEntry(
+            id="test-seeding-1",
+            url="magnet:?xt=urn:btih:dummy1",
+            filename="seeding_file.iso",
+            status="seeding",
+            total_size=500 * 1024 * 1024,
+            downloaded_size=500 * 1024 * 1024,
+            speed=0.0,
+            upload_speed=1024 * 150,  # 150 KB/s
+            queue_id=target_q.id,
+        )
+        self.db.add_download(seeding_entry)
+        self.win._load_history()
+
+        panel.set_mode("queues")
+        widgets = panel._queue_row_widgets[target_q.id]
+
+        # Seeding must NOT count as active: should be "0 active / 1 total"
+        self.assertEqual(widgets["item_counts"].text(), "0 active / 1 total")
+        # Status should show Seeding (1), not Running
+        self.assertEqual(widgets["item_status"].text(), "Seeding (1)")
+        # Tooltip should mention Seeding
+        self.assertIn("Active: 0", widgets["item_counts"].toolTip())
+        self.assertIn("Seeding: 1", widgets["item_counts"].toolTip())
+
+        # Now add a downloading entry alongside the seeding entry
+        dl_entry = DownloadEntry(
+            id="test-downloading-1",
+            url="https://example.com/file2.zip",
+            filename="file2.zip",
+            status="downloading",
+            total_size=100 * 1024 * 1024,
+            downloaded_size=10 * 1024 * 1024,
+            speed=1024 * 500,
+            queue_id=target_q.id,
+        )
+        self.db.add_download(dl_entry)
+        self.win._load_history()
+        panel._update_queues()
+
+        # Active count is 1 (not 2!)
+        self.assertEqual(widgets["item_counts"].text(), "1 active / 2 total")
+        self.assertEqual(widgets["item_status"].text(), "Running (1)")
+        self.assertIn("Active: 1", widgets["item_counts"].toolTip())
+        self.assertIn("Seeding: 1", widgets["item_counts"].toolTip())
+
+        panel.set_mode("details")
+
     def test_details_panel_queues_tab_manage_queues_button(self):
         """Queues tab includes a button to jump to queue management in preferences."""
         panel = self.win._details_panel
