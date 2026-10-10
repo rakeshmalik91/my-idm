@@ -497,22 +497,35 @@ class SectionHeaderDelegate(QStyledItemDelegate):
         active_progress = getattr(entry, "section_active_progress", 0.0)
         if active_count > 0 and active_progress > 0:
             # Progress bar positioned after the count text
-            total_width = painter.fontMetrics().horizontalAdvance(total_text)
+            fm = painter.fontMetrics()
+            total_width = fm.horizontalAdvance(total_text)
             progress_x = x_pos + total_width + 10
-            progress_rect = option.rect.adjusted(progress_x, 0, -120, 0)
-            progress_rect.setWidth(min(150, progress_rect.width()))
-            progress_rect.setHeight(8)
-            progress_rect.moveTop(option.rect.center().y() - 4)
-            
+
+            # Vertically center with the text glyphs (cap height / baseline visual center)
+            font_top = option.rect.top() + (option.rect.height() - fm.height()) // 2
+            baseline = font_top + fm.ascent()
+            cap_center = baseline - fm.capHeight() // 2
+            bar_height = 12
+            bar_y = cap_center - bar_height // 2
+
+            max_bar_width = max(20, option.rect.right() - 120 - (option.rect.left() + progress_x))
+            bar_width = min(150, max_bar_width)
+            progress_rect = QRect(option.rect.left() + progress_x, bar_y, bar_width, bar_height)
+
             # Background
             painter.setBrush(QColor("#21262d"))
             painter.setPen(QPen(QColor("#30363d"), 1))
-            painter.drawRoundedRect(progress_rect, 2, 2)
-            
+            painter.drawRoundedRect(progress_rect, 3, 3)
+
             # Progress fill
             fill_width = int(progress_rect.width() * active_progress / 100.0)
             if fill_width > 0:
-                fill_rect = progress_rect.adjusted(1, 1, 1 - (progress_rect.width() - fill_width), -1)
+                fill_rect = QRect(
+                    progress_rect.x() + 1,
+                    progress_rect.y() + 1,
+                    min(fill_width, max(0, progress_rect.width() - 2)),
+                    bar_height - 2,
+                )
                 # Use green for active progress
                 painter.setBrush(QColor(Colors.GREEN) if hasattr(Colors, 'GREEN') else QColor("#2ea043"))
                 painter.setPen(Qt.PenStyle.NoPen)

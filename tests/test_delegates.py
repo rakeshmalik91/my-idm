@@ -198,6 +198,51 @@ class TestSectionHeaderDelegate(unittest.TestCase):
         finally:
             p2.end()
 
+    def test_section_header_delegate_group_progress_bar_geometry(self):
+        from PySide6.QtGui import QPixmap, QPainter
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        from PySide6.QtCore import QRect
+        from unittest.mock import MagicMock
+        from my_idm.delegates import SectionHeaderDelegate
+        from my_idm.download_model import DownloadEntry
+
+        delegate = SectionHeaderDelegate()
+        entry = DownloadEntry(id="sec-act", section_id="active", section_title="Active", section_count=5)
+        entry.section_active_count = 2
+        entry.section_active_progress = 60.0
+
+        model = MagicMock()
+        model.is_section_header_row.return_value = True
+        model.get_section_header.return_value = entry
+
+        idx = MagicMock()
+        idx.row.return_value = 0
+        idx.model.return_value = model
+        idx.data.return_value = None
+
+        opt = QStyleOptionViewItem()
+        opt.rect = QRect(0, 0, 500, 36)
+
+        rounded_rects = []
+        pix = QPixmap(500, 36)
+        painter = QPainter(pix)
+        try:
+            orig_draw = painter.drawRoundedRect
+            def mock_draw(r, *args):
+                rounded_rects.append(QRect(r))
+                return orig_draw(r, *args)
+            painter.drawRoundedRect = mock_draw
+            delegate.paint(painter, opt, idx)
+        finally:
+            painter.end()
+
+        # Both the progress bar track and the fill should be painted
+        self.assertGreaterEqual(len(rounded_rects), 2)
+        track_rect = rounded_rects[0]
+        self.assertEqual(track_rect.height(), 12)
+        # Visual center should be within [17, 21] (centered around 19 for 36px row)
+        self.assertAlmostEqual(track_rect.center().y(), 19, delta=2)
+
 
 if __name__ == "__main__":
     unittest.main()
