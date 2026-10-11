@@ -226,16 +226,20 @@ as `TODAY (0)` rather than disappearing.
 
 #### C. File-Type Segregation (`type`)
 Partitions downloads by what the payload *is* rather than when it was added, using the extension
-classification in `download_model`. Sections are Video, Audio, Archives, Documents, Photos and
-General, with `General` as the catch-all so no download is ever dropped from the table.
+classification in `download_model`. Sections are Video, Audio, Archives, Documents, Photos,
+**Executables** and General, with `General` as the catch-all so no download is ever dropped from
+the table. Executables is its own section rather than part of Archives because the two behave
+differently for the user: an archive is inert until unpacked, while `.exe`, `.msi`, `.apk`,
+`.deb`, `.rpm`, `.appimage`, `.dmg`, `.pkg` and friends are the ones the security layer warns
+about before a download starts.
 
-`get_entry_type_category()` (`download_model.py:447`) decides in a fixed order:
+`get_entry_type_category()` (`download_model.py:466`) decides in a fixed order:
 
 1. an explicit `metadata["type_category"]` override, so a mis-filed item can be corrected by hand;
 2. the extension of `filename`, then of the `file_path` leaf, because the display name is what the
    user recognises — a single-file `.mkv` torrent therefore lands in Video either way;
 3. when neither name recognises an extension, the **payload** of a multi-file torrent decides:
-   if one category holds more than `TYPE_CATEGORY_PAYLOAD_SHARE` (`:391`, 95%) of the bytes, that
+   if one category holds more than `TYPE_CATEGORY_PAYLOAD_SHARE` (`:410`, 95%) of the bytes, that
    section gets it. A season folder is 99.99% video plus a handful of `.nfo` / `.jpg` extras and
    the folder itself has no extension, so without this rule the whole series filed under General
    and vanished from Video. The same rule files discography folders as Audio and camera-roll

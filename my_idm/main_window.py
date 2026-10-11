@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -77,10 +78,18 @@ from my_idm.download_model import (
     SEGREGATED_MODE_LABELS,
     SEGREGATED_MODES,
     TYPE_SECTION_DEFS,
+    TYPE_SECTION_TITLES,
     Col,
     DownloadTableModel,
 )
 from my_idm.header_view import FilterHeaderView
+from my_idm.hotkey import (
+    BINDING_CAPTURE,
+    BINDING_CLIPBOARD,
+    HotkeyManager,
+    LOCK_KEY_LABELS,
+    canonical_lock_key,
+)
 from my_idm.manager import DownloadManager
 from my_idm.torrent_sources import local_torrent_paths_from_mime
 from my_idm.resources import get_app_icon, get_app_logo_pixmap
@@ -915,7 +924,7 @@ class MainWindow(QMainWindow):
         self._seg_control_strip.setStyleSheet(
             f"background-color: {Colors.BG_MID}; border-bottom: 1px solid {Colors.BORDER};"
         )
-        self._seg_control_strip.setVisible(bool(self._manager.db.get_ui_state("seg_strip_visible", True)))
+        self._seg_control_strip.setVisible(self._strip_visible())
         seg_strip_layout = QHBoxLayout(self._seg_control_strip)
         seg_strip_layout.setContentsMargins(10, 2, 10, 2)
         seg_strip_layout.setSpacing(8)
@@ -982,7 +991,9 @@ class MainWindow(QMainWindow):
             ("None", "none", "No grouping / flat table view"),
             ("Status", "status", "Active / Seeding / Inactive"),
             ("Date", "date", "Today / Yesterday / Last 7 / Last 30 / Older"),
-            ("File Type", "type", "Video / Audio / Archives / Documents / Photos / General"),
+            # Read from the sections themselves rather than retyped, so a new file-type
+            # section shows up here the moment it is declared.
+            ("File Type", "type", " / ".join(TYPE_SECTION_TITLES)),
             ("Name", "name", "Smart Series / Show Grouping"),
         ]
         
@@ -1217,12 +1228,11 @@ class MainWindow(QMainWindow):
         )
 
         self._act_toggle_view_toolbar = QAction(
-            _create_view_toolbar_icon(24), "View Toolbar", self
+            _create_view_toolbar_icon(24), "View Control Strip", self
         )
         self._act_toggle_view_toolbar.setCheckable(True)
-        strip_vis = bool(self._manager.db.get_ui_state("seg_strip_visible", True))
-        self._act_toggle_view_toolbar.setChecked(strip_vis)
-        self._act_toggle_view_toolbar.setToolTip("Show or hide the view toolbar")
+        self._act_toggle_view_toolbar.setChecked(self._strip_visible())
+        self._act_toggle_view_toolbar.setToolTip("Show or hide the view control strip")
         self._act_toggle_view_toolbar.toggled.connect(self._on_toggle_view_toolbar)
 
         self._act_torrent_settings = QAction(_create_emoji_icon("🧲"), "BitTorrent Settings…", self)
@@ -1546,7 +1556,7 @@ class MainWindow(QMainWindow):
         self._seg_mode_group.addAction(self._act_seg_by_date)
         self._menu_segregated_view.addAction(self._act_seg_by_date)
 
-        self._act_seg_by_type = QAction("File Type (Video / Audio / Archives / Documents / Photos / General)", self)
+        self._act_seg_by_type = QAction(SEGREGATED_MODE_LABELS["type"], self)
         self._act_seg_by_type.setCheckable(True)
         self._act_seg_by_type.setChecked(self._segregated_view_mode == "type")
         self._act_seg_by_type.triggered.connect(lambda: self._set_segregation_mode("type"))
@@ -1940,7 +1950,11 @@ class MainWindow(QMainWindow):
         timer or its registration with it.
         """
         from my_idm.clipboard_monitor import ClipboardMonitor
-        from my_idm.hotkey import HotkeyRegistration
+        from my_idm.hotkey import (
+            BINDING_CAPTURE,
+            BINDING_CLIPBOARD,
+            HotkeyManager,
+        )
 
         self._clipboard_monitor = ClipboardMonitor(
             self._manager,
@@ -1956,26 +1970,83 @@ class MainWindow(QMainWindow):
         self._clipboard_monitor.urls_captured.connect(self._on_clipboard_urls_captured)
         self._clipboard_monitor.urls_filtered.connect(self._on_clipboard_urls_filtered)
 
-        self._hotkey = HotkeyRegistration(self)
-        self._hotkey.triggered.connect(self._on_global_hotkey)
+        self._hotkey = HotkeyManager(self)
+        self._hotkey.triggered.connect(self._on_capture_hotkey_triggered)
+        # Monotonic deadline. A press read as genuine before it is our own echo.
+        self._ignore_key_presses_until = 0.0
+        self._in_capture_switch = False
 
         if self._manager.general_config.clipboard_monitor_enabled:
             self._clipboard_monitor.start()
-        if self._manager.general_config.capture_hotkey_enabled:
-            self._register_hotkey()
+        self._register_capture_hotkeys()
+        # After registering, not before: the tray shows a hotkey only once it is really
+        # claimed, so the labels have to wait for the outcome.
+        self._sync_capture_actions()
 
-    def _register_hotkey(self) -> tuple[bool, str]:
-        """Bind the configured chord, reporting rather than swallowing a failure.
+    def _register_capture_hotkeys(self) -> None:
+        """Register every hotkey binding the current preferences ask for.
 
-        A chord another application already owns fails here; saying nothing would leave the
-        user pressing a key that does nothing.
+        Both bindings are asked for unconditionally, so this is the same path as "enable", and
+        a changed sequence takes effect. `HotkeyRegistration.register` short-circuits when the
+        key is unchanged, so it is cheap and does not drop and re-claim a live binding on
+        every save. A **failure** is reported in the status bar rather than swallowed: the
+        user pressing a key that does nothing is worse than a status line.
+
+        A *shared* key is not reported there. Nothing overwrites the status line at startup, so
+        it would sit there for the whole session — and the tray row already names the key on
+        each capture, while both Preferences rows say the same thing under their drop-down. The
+        status line is for something the user is doing right now, not for describing a setting.
         """
-        sequence = self._manager.general_config.capture_hotkey_sequence
-        ok, message = self._hotkey.register(sequence)
-        if not ok:
-            log.warning("Global hotkey not registered: %s", message)
-            self._status_label.setText(message)
-        return ok, message
+        cfg = self._manager.general_config
+        for wanted, binding, sequence in (
+            (cfg.capture_hotkey_enabled, BINDING_CAPTURE, cfg.capture_hotkey_sequence),
+            (
+                cfg.clipboard_hotkey_enabled,
+                BINDING_CLIPBOARD,
+                cfg.clipboard_hotkey_sequence,
+            ),
+        ):
+            if wanted:
+                ok, message = self._hotkey.register(binding, sequence)
+                if not ok:
+                    log.warning("Capture key '%s' not registered: %s", sequence, message)
+                    self._status_label.setText(message)
+                elif message:
+                    log.info("Capture key '%s': %s", sequence, message)
+            else:
+                self._hotkey.unregister(binding)
+        self._sync_captures_to_lock_keys()
+
+    def _sync_captures_to_lock_keys(self) -> None:
+        """Make the bindings' key state the capture state, in the direction of the key.
+
+        Now that a capture follows its lock key, the key is the switch — including at
+        startup, where a LED left on from a previous session means the capture that key
+        drives is on. Silently, because the tray row and the menu checkmark already show
+        the result: a toast on every launch would train the user to ignore toasts.
+
+        **Not while a key-driven switch is in flight.** A capture changed by a key press
+        re-emits its change synchronously, which lands here — and Windows has not moved the
+        LED yet at that moment (it flips on the key *up*, after this handler). Reading the
+        LED now and "correcting" the capture back would undo the switch the user just made,
+        before the LED catches up, which is what made a press look unreliable.
+        """
+        if getattr(self, "_in_capture_switch", False):
+            return
+        from my_idm.hotkey import lock_key_state
+
+        for binding in (BINDING_CAPTURE, BINDING_CLIPBOARD):
+            _label, sequence = self._capture_setting_for(binding)
+            if not sequence:
+                continue
+            state = lock_key_state(sequence)
+            if state is None or not self._hotkey.is_binding_registered(binding):
+                continue
+            if binding == BINDING_CLIPBOARD:
+                if bool(self._manager.general_config.clipboard_monitor_enabled) != state:
+                    self._on_clipboard_capture_toggled(state, announce=False, mirror_key=False)
+            elif bool(self._manager.browser_config.intercept_all) != state:
+                self._on_capture_toggled(state, announce=False, mirror_key=False)
 
     def _apply_capture_preferences(self):
         """Re-apply both capture toggles after the user edits Preferences.
@@ -1999,10 +2070,7 @@ class MainWindow(QMainWindow):
         # Asked for unconditionally, so this is the same path as "enable" and a changed
         # sequence takes effect. `HotkeyRegistration.register` short-circuits when the chord is
         # unchanged, so this is cheap and does not drop and re-claim the binding every save.
-        if cfg.capture_hotkey_enabled:
-            self._register_hotkey()
-        else:
-            self._hotkey.unregister()
+        self._register_capture_hotkeys()
 
         self._sync_capture_actions()
 
@@ -2012,6 +2080,7 @@ class MainWindow(QMainWindow):
         Called after anything that can change the state, including the hotkey, so the menu can
         never disagree with what capture is actually doing.
         """
+        self._refresh_tray_capture_labels()
         for action, checked in (
             (
                 getattr(self, "_tray_act_capture", None),
@@ -2028,21 +2097,203 @@ class MainWindow(QMainWindow):
             action.setChecked(checked)
             action.blockSignals(was_blocked)
 
-    def _on_capture_toggled(self, checked: bool):
-        """Tray checkbox, tray item or global hotkey: flip browser capture."""
+    #: Base text of the two capture rows, kept apart from the hotkey suffix so the label can be
+    #: rebuilt from scratch instead of appended to once per sync.
+    _TRAY_CAPTURE_LABELS = {
+        BINDING_CAPTURE: "🎯 Download Capture",
+        BINDING_CLIPBOARD: "📋 Clipboard Capture",
+    }
+
+    def _tray_capture_label(self, binding: str) -> str:
+        """The tray row for *binding*, with its hotkey when a hotkey is actually there.
+
+        Showing the key is the difference between "capture is on" and knowing how to turn it off
+        from another application. Two details keep it honest:
+
+        * an unconfigured hotkey adds nothing, so a user who never wanted one is not shown one;
+        * a chord that failed to register is still shown but marked, because "which key *should*
+          have worked" is the first step to fixing it — a tray row listing a dead key as if it
+          lived is worse than one listing nothing.
+        """
+        cfg = self._manager.general_config
+        if binding == BINDING_CLIPBOARD:
+            enabled, sequence = (
+                bool(cfg.clipboard_hotkey_enabled),
+                cfg.clipboard_hotkey_sequence,
+            )
+        else:
+            enabled, sequence = bool(cfg.capture_hotkey_enabled), cfg.capture_hotkey_sequence
+        label = self._TRAY_CAPTURE_LABELS.get(binding, binding)
+        if not enabled or not sequence:
+            return label
+        hotkey = getattr(self, "_hotkey", None)
+        live = hotkey.is_binding_registered(binding) if hotkey is not None else False
+        marker = "" if live else "⚠ "
+        # The pretty name, not the stored spelling: "Scroll Lock" is what the key says and
+        # what the tray row should say.
+        key_label = LOCK_KEY_LABELS.get(canonical_lock_key(sequence) or sequence, sequence)
+        return f"{label}    {marker}{key_label}"
+
+    def _refresh_tray_capture_labels(self) -> None:
+        """Re-label both capture rows. Cheap, and safe to call on every sync."""
+        capture = getattr(self, "_tray_act_capture", None)
+        clipboard = getattr(self, "_tray_act_clipboard", None)
+        if capture is None or clipboard is None:
+            return
+        for binding, action in (
+            (BINDING_CAPTURE, capture),
+            (BINDING_CLIPBOARD, clipboard),
+        ):
+            label = self._tray_capture_label(binding)
+            if action.text() != label:
+                action.setText(label)
+
+    def _capture_setting_for(self, binding: str) -> tuple[str, str]:
+        """``(label, sequence)`` for *binding*: what it is called, and its key if it has one."""
+        cfg = self._manager.general_config
+        if binding == BINDING_CLIPBOARD:
+            return "Clipboard capture", (
+                cfg.clipboard_hotkey_sequence
+                if cfg.clipboard_hotkey_enabled
+                else None
+            )
+        return "Download capture", (
+            cfg.capture_hotkey_sequence if cfg.capture_hotkey_enabled else None
+        )
+
+    def _mirror_capture_lock_key(self, binding: str, enabled: bool) -> None:
+        """Drive *binding*'s lock key so its LED states what the capture state now is.
+
+        Without this the LED and the setting drift apart the moment capture is changed from
+        the tray or Preferences, and the switch would then be lying about itself.
+
+        The synthesised press is not free: **synthetic input triggers registered hotkeys**, so
+        our own chord fires and our own handler runs again — and if that handler *switches* the
+        capture, it switches it straight back. So ``press_lock_key``'s caller records a short
+        window in which incoming presses are the echo of our own write, and
+        `_on_capture_hotkey_triggered` ignores them.
+        """
+        from my_idm.hotkey import lock_key_is_on, lock_key_vk, press_lock_key
+
+        _label, sequence = self._capture_setting_for(binding)
+        if not sequence:
+            return
+        vk = lock_key_vk(sequence)
+        if vk is None or lock_key_is_on(vk) == bool(enabled):
+            return
+        if press_lock_key(vk):
+            self._ignore_key_presses_until = time.monotonic() + 0.25
+
+    def _notify_capture_state(self, binding: str, enabled: bool) -> None:
+        """A capture key was pressed: say so, because the key that changed it may be the only
+        visible thing the user has right now.
+
+        A capture key press lands with the window closed. A status line and a tray checkmark
+        are both unreadable then, and the key's own LED shows the key but not *which capture*
+        moved — so the toast names the capture and the key together.
+        """
+        from my_idm.hotkey import LOCK_KEY_LABELS, canonical_lock_key
+        from my_idm.notifications import notify_capture_switched
+
+        label, sequence = self._capture_setting_for(binding)
+        name = canonical_lock_key(sequence) if sequence else None
+        notify_capture_switched(
+            label, enabled, LOCK_KEY_LABELS.get(name, "") if name else ""
+        )
+
+    def _on_capture_toggled(
+        self, checked: bool, *, announce: bool = True, mirror_key: bool = True
+    ):
+        """Tray checkbox, tray item or capture key: set browser capture to *checked*.
+
+        The key is driven **before** the setting changes, not after. `set_capture_enabled`
+        re-emits the change synchronously, and that reaches
+        `_sync_captures_to_lock_keys`, which reads the key and makes the capture agree with it
+        — so mirroring afterwards would be overwritten by the LED that had not moved yet, and
+        the setting would snap straight back to where it was.
+
+        *mirror_key* is off on the key-press path, where Windows moves the LED itself: reading
+        it there gets the pre-press state, so the mirror would synthesise a second press and
+        leave the LED where it started.
+
+        *announce* is off for the sync path, which is not a user action and says nothing:
+        the tray row states the result, and repeating it in the status line at every launch
+        would be noise.
+        """
+        if mirror_key:
+            self._mirror_capture_lock_key(BINDING_CAPTURE, checked)
         changed, message = self._manager.set_capture_enabled(checked)
-        self._status_label.setText(message)
-        self._sync_capture_actions()
+        if announce:
+            self._status_label.setText(message)
+            self._sync_capture_actions()
+            if changed:
+                self._notify_capture_state(BINDING_CAPTURE, checked)
         return changed
 
-    def _on_clipboard_capture_toggled(self, checked: bool):
-        """Tray checkbox for clipboard capture only."""
+    def _on_clipboard_capture_toggled(
+        self, checked: bool, *, announce: bool = True, mirror_key: bool = True
+    ):
+        """Tray checkbox or capture key for clipboard capture. Key first, for the reason above."""
+        if mirror_key:
+            self._mirror_capture_lock_key(BINDING_CLIPBOARD, checked)
         cfg = self._manager.general_config
+        changed = bool(cfg.clipboard_monitor_enabled) != bool(checked)
         cfg.clipboard_monitor_enabled = bool(checked)
         self._apply_capture_preferences()
-        self._status_label.setText(
-            f"Clipboard capture {'enabled' if checked else 'disabled'}."
-        )
+        if announce:
+            self._status_label.setText(
+                f"Clipboard capture {'enabled' if checked else 'disabled'}."
+            )
+            if changed:
+                self._notify_capture_state(BINDING_CLIPBOARD, checked)
+
+    def _on_capture_hotkey_triggered(self, binding: str):
+        """A system-wide capture key was pressed: switch the capture it is bound to.
+
+        The manager emits the binding's *name* rather than a bare signal, so this is which key
+        was pressed rather than "some hotkey fired" — two bindings that look the same to a
+        handler is how one of them ends up silent.
+
+        The press **switches** the capture, and the LED is left to Windows. This is not the
+        "invert the setting" it replaces, and the difference is what makes it reliable:
+
+        * `WM_HOTKEY` arrives on the key **down**, while Windows flips a lock key's toggle bit
+          on the key **up**. Reading `GetKeyState` inside the handler therefore reads the state
+          from *before* this very press — which is why a press sometimes changed nothing and
+          sometimes seemed to fire late. The read model can only see the state of the previous
+          press.
+        * Windows moves the LED on its own for a real press, so there is nothing to mirror here.
+          Mirroring is for changes that come from the tray or Preferences, where the LED would
+          otherwise be left saying what is no longer true.
+        * If a `WM_HOTKEY` is ever missed (a busy queue, or another application holding the key
+          for a moment), the next press switches both the capture and the LED, so the pair stays
+          in step instead of accumulating the error.
+
+        The LED is still read at startup and after a Preferences save — a snapshot taken when
+        nothing is mid-press is accurate, which is how "the key was left on, so the capture is
+        on" works.
+        """
+        if time.monotonic() < self._ignore_key_presses_until:
+            # Our own `press_lock_key` echo, which synthetic input always produces.
+            log.debug("Ignoring the echo of our own lock-key press")
+            return
+
+        _label, sequence = self._capture_setting_for(binding)
+        if sequence is None:
+            return
+        self._in_capture_switch = True
+        try:
+            if binding == BINDING_CLIPBOARD:
+                self._on_clipboard_capture_toggled(
+                    not self._manager.general_config.clipboard_monitor_enabled,
+                    mirror_key=False,
+                )
+            elif binding == BINDING_CAPTURE:
+                self._on_capture_toggled(
+                    not self._manager.browser_config.intercept_all, mirror_key=False
+                )
+        finally:
+            self._in_capture_switch = False
 
     def _on_global_hotkey(self):
         """The system-wide chord was pressed: flip capture and say so."""
@@ -2100,7 +2351,7 @@ class MainWindow(QMainWindow):
             monitor.stop()
         hotkey = getattr(self, "_hotkey", None)
         if hotkey is not None:
-            hotkey.unregister()
+            hotkey.unregister_all()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason):
         """Handles user clicking or double-clicking the system tray icon."""
@@ -2837,9 +3088,7 @@ class MainWindow(QMainWindow):
         else:
             self._model.set_segregated_mode(mode)
             self._apply_table_spans()
-            if hasattr(self, "_seg_control_strip"):
-                strip_visible = self._manager.db.get_ui_state("seg_strip_visible", True)
-                self._seg_control_strip.setVisible(strip_visible)
+            self._apply_view_strip_visibility()
             self._status_label.setText(
                 f"Grouped view grouped by {self._segregation_mode_label(mode)}"
             )
@@ -2858,15 +3107,43 @@ class MainWindow(QMainWindow):
         else:
             self._set_segregation_mode(mode)
 
+    def _strip_visible(self) -> bool:
+        """Whether the view control strip shows - read from the one store that holds it.
+
+        ``seg_strip_visible`` is the authority. It used to be read *twice*, though: the
+        window-state blob also had a copy that nothing ever wrote, so its restore path fell
+        back to the default ``True`` and forced the strip visible over the stored answer.
+        That is why hiding the strip never survived a restart, and why the first click on any
+        strip button then hid it - the mode handlers read the real key and applied it for the
+        first time.
+
+        Every read of the state goes through here, so the two can never disagree again.
+        """
+        try:
+            return bool(self._manager.db.get_ui_state("seg_strip_visible", True))
+        except Exception as exc:
+            log.warning("Could not read the view control strip state: %s", exc)
+            return True
+
+    def _apply_view_strip_visibility(self) -> None:
+        """Re-assert the strip and its menu item from the stored state, both together.
+
+        Set as a pair because a strip shown without its checked menu item is a control the
+        user cannot find again.
+        """
+        visible = self._strip_visible()
+        if hasattr(self, "_seg_control_strip"):
+            self._seg_control_strip.setVisible(visible)
+        if hasattr(self, "_act_toggle_view_toolbar"):
+            if self._act_toggle_view_toolbar.isChecked() != visible:
+                self._act_toggle_view_toolbar.blockSignals(True)
+                self._act_toggle_view_toolbar.setChecked(visible)
+                self._act_toggle_view_toolbar.blockSignals(False)
+
     def _on_toggle_view_toolbar(self, checked: bool):
         """Toggle visibility of the view strip under the toolbar."""
-        self._manager.db.set_ui_state("seg_strip_visible", checked)
-        if hasattr(self, "_seg_control_strip"):
-            self._seg_control_strip.setVisible(checked)
-        if hasattr(self, "_act_toggle_view_toolbar") and self._act_toggle_view_toolbar.isChecked() != checked:
-            self._act_toggle_view_toolbar.blockSignals(True)
-            self._act_toggle_view_toolbar.setChecked(checked)
-            self._act_toggle_view_toolbar.blockSignals(False)
+        self._manager.db.set_ui_state("seg_strip_visible", bool(checked))
+        self._apply_view_strip_visibility()
 
     def _on_toggle_segregated_view(self, checked: bool):
         self._segregated_view_enabled = checked
@@ -2893,10 +3170,10 @@ class MainWindow(QMainWindow):
         # this method, and only this method knows the resulting state.
         self._sync_segregation_mode_actions(checked)
         
-        # Show/hide the view control strip based on seg_strip_visible (remains visible even when non-grouped)
-        if hasattr(self, "_seg_control_strip"):
-            strip_visible = self._manager.db.get_ui_state("seg_strip_visible", True)
-            self._seg_control_strip.setVisible(strip_visible)
+        # Show/hide the view control strip from the stored state (remains visible even when
+        # non-grouped). Read through one accessor, and applied to the strip and its menu item
+        # together, so the two cannot drift while the grouping mode changes underneath.
+        self._apply_view_strip_visibility()
         
         if hasattr(self, "_seg_mode_buttons"):
             for mk, btn in self._seg_mode_buttons.items():
@@ -2913,13 +3190,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_btn_expand_all"):
             self._btn_expand_all.setEnabled(checked)
 
-        if hasattr(self, "_act_toggle_view_toolbar"):
-            strip_visible = self._manager.db.get_ui_state("seg_strip_visible", True)
-            if self._act_toggle_view_toolbar.isChecked() != strip_visible:
-                self._act_toggle_view_toolbar.blockSignals(True)
-                self._act_toggle_view_toolbar.setChecked(strip_visible)
-                self._act_toggle_view_toolbar.blockSignals(False)
-        
         if checked:
             mode_str = self._segregation_mode_label(self._segregated_view_mode)
             self._status_label.setText(f"Grouped view enabled ({mode_str})")
@@ -4945,13 +5215,12 @@ class MainWindow(QMainWindow):
             self._act_toggle_details.setToolTip(tip)
             self._sync_panel_buttons()
 
-            strip_vis = bool(state.get("seg_strip_visible", True))
-            if hasattr(self, "_seg_control_strip"):
-                self._seg_control_strip.setVisible(strip_vis)
-            if hasattr(self, "_act_toggle_view_toolbar"):
-                self._act_toggle_view_toolbar.blockSignals(True)
-                self._act_toggle_view_toolbar.setChecked(strip_vis)
-                self._act_toggle_view_toolbar.blockSignals(False)
+            # The view strip is deliberately *not* read from this blob.            # The view strip is deliberately *not* read from this blob.            # The view strip is deliberately *not* read from this blob. It was, once, from a
+            # ``seg_strip_visible`` key nothing ever wrote into the state dict above, so the
+            # lookup defaulted to True and forced the strip visible over the real stored
+            # answer. The strip's state lives in its own ui_state key, which
+            # `_strip_visible()` reads - see `_setup_ui` / `_setup_actions`, which already
+            # applied it before this method ran.
         except Exception as exc:
             log.warning("Failed to restore window state from DB: %s", exc)
         finally:

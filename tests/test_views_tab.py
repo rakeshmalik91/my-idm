@@ -38,10 +38,12 @@ from my_idm.download_model import (
     SECTION_TYPE_ARCHIVE,
     SECTION_TYPE_AUDIO,
     SECTION_TYPE_DOCUMENTS,
+    SECTION_TYPE_EXECUTABLE,
     SECTION_TYPE_GENERAL,
     SECTION_TYPE_PHOTO,
     SECTION_TYPE_VIDEO,
     TYPE_SECTION_DEFS,
+    TYPE_SECTION_TITLES,
     Col,
     DownloadTableModel,
     get_entry_type_category,
@@ -283,12 +285,58 @@ class TestTypeCategory(unittest.TestCase):
         e.metadata["type_category"] = SECTION_TYPE_DOCUMENTS
         self.assertEqual(get_entry_type_category(e), SECTION_TYPE_DOCUMENTS)
 
+    # -- executables are their own section ---------------------------------
+
+    def test_executables_are_their_own_section(self):
+        for ext in ("exe", "msi", "msix", "appx", "com", "bat", "cmd",
+                    "deb", "rpm", "appimage", "dmg", "pkg", "apk"):
+            with self.subTest(ext=ext):
+                self.assertEqual(
+                    get_entry_type_category(entry(f"setup.{ext}")),
+                    SECTION_TYPE_EXECUTABLE,
+                )
+
+    def test_an_installer_folder_is_filed_as_executables(self):
+        """The installer-suite case is why the section exists.
+
+        A suite ships a setup.exe, a small uninstall helper and a readme; the *folder* has no
+        extension, so the 95% payload rule is what files the whole thing under Executables
+        instead of General.
+        """
+        e = payload_entry(
+            "Some Suite 2026",
+            files=[
+                {"path": "Some Suite 2026/setup.exe", "size": 900 * MB},
+                {"path": "Some Suite 2026/uninstall.exe", "size": 60 * MB},
+                {"path": "Some Suite 2026/readme.txt", "size": 4 * 1024},
+            ],
+        )
+        self.assertEqual(get_entry_type_category(e), SECTION_TYPE_EXECUTABLE)
+
+    def test_executables_sit_before_general(self):
+        """General is the catch-all and must stay last, or unmapped files win the top row."""
+        titles = list(TYPE_SECTION_TITLES)
+        self.assertEqual(titles[-1], "General")
+        self.assertIn("Executables", titles)
+        self.assertLess(titles.index("Executables"), titles.index("General"))
+        self.assertEqual(len(titles), len(TYPE_SECTION_DEFS), "titles and sections drifted")
+
+    def test_the_mode_label_names_every_section(self):
+        """One string drives the View menu, the strip tooltip and the combo tooltip."""
+        label = SEGREGATED_MODE_LABELS["type"]
+        self.assertEqual(label, f"File Type ({' / '.join(TYPE_SECTION_TITLES)})")
+        for title in TYPE_SECTION_TITLES:
+            with self.subTest(title=title):
+                self.assertIn(title, label)
+
     def test_the_section_order_is_the_display_order(self):
+        """Executables sits just before General, which has to stay last."""
         self.assertEqual(
             [cat for cat, _t, _s in TYPE_SECTION_DEFS],
             [
                 SECTION_TYPE_VIDEO, SECTION_TYPE_AUDIO, SECTION_TYPE_ARCHIVE,
-                SECTION_TYPE_DOCUMENTS, SECTION_TYPE_PHOTO, SECTION_TYPE_GENERAL,
+                SECTION_TYPE_DOCUMENTS, SECTION_TYPE_PHOTO, SECTION_TYPE_EXECUTABLE,
+                SECTION_TYPE_GENERAL,
             ],
         )
 
@@ -342,10 +390,7 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
         """An empty section is how the user discovers the mode exists at all."""
         self.model.load_entries([entry("movie.mkv", eid="v1")])
         self.model.set_segregated_view(True, "type")
-        self.assertEqual(
-            self._sections(),
-            ["Video", "Audio", "Archives", "Documents", "Photos", "General"],
-        )
+        self.assertEqual(self._sections(), list(TYPE_SECTION_TITLES))
 
     def test_a_torrent_folder_lands_in_the_section_of_its_payload(self):
         """``metadata["files"]`` decides the section for a multi-file torrent folder.
@@ -370,6 +415,28 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
         self.model.load_entries(self.entries + [folder])
         self.model.set_segregated_view(True, "type")
         self.assertEqual(self._section_of("t2"), "General")
+
+    def test_an_executable_download_lands_in_the_executables_section(self):
+        """The strip tooltip and the View menu list the sections, so the row must exist."""
+        setup = entry("Some Suite 2026", eid="ex1", download_type="torrent")
+        setup.file_path = ""
+        setup.metadata["files"] = [
+            {"path": "Some Suite 2026/setup.exe", "size": 700 * MB},
+            {"path": "Some Suite 2026/uninstall.exe", "size": 60 * MB},
+            {"path": "Some Suite 2026/readme.txt", "size": 1024},
+        ]
+        exe = entry("portable.exe", eid="ex2")
+        self.model.load_entries(self.entries + [setup, exe])
+        self.model.set_segregated_view(True, "type")
+
+        self.assertEqual(self._section_of("ex1"), "Executables")
+        self.assertEqual(self._section_of("ex2"), "Executables")
+
+        # Every declared section renders a header row, in the declared order, including the
+        # new one - General last, or unmapped files win the top row.
+        titles = self._sections()
+        self.assertEqual(titles, list(TYPE_SECTION_TITLES))
+        self.assertIn("Executables", titles)
 
     def test_the_status_mode_still_works(self):
         self.model.set_segregated_view(True, "status")

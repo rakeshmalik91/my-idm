@@ -869,7 +869,7 @@ My-IDM supports persistent background operations through Windows system tray int
 3. **Clean Teardown**:
    - `MainWindow._exit_app()` bypasses close-to-tray, gracefully flushes SQLite states, halts background threads (`HTTPEngine`, `TorrentEngine`, `TorServiceManager`), and closes cleanly.
    - `closeEvent` calls `_release_capture()` first: a system-wide hotkey left registered outlives the process, and Windows keeps the chord claimed so the next launch cannot take it.
-4. **Capture Sources**: a system-wide hotkey (`RegisterHotKey`, picked out of the native event stream by a `QAbstractNativeEventFilter`) and a debounced clipboard monitor. Both are opt-in, both share the `intercept_all` toggle, and both are released on teardown.
+4. **Capture Sources**: two system-wide hotkey bindings (`RegisterHotKey`, picked out of the native event stream by `QAbstractNativeEventFilter`s and routed by `HotkeyManager`) plus a debounced clipboard monitor. Each binding is bound to a lock key whose LED *is* the switch: the key on means the capture on, and changing a capture moves the key's light. All three are opt-in and released on teardown.
 5. For exhaustive details, see [**Window Lifecycle & System Tray Architecture**](window-system-tray.md) and [**Capture Subsystem**](capture.md).
 
 ---

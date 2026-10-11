@@ -281,6 +281,7 @@ SECTION_TYPE_AUDIO = "type_audio"
 SECTION_TYPE_ARCHIVE = "type_archive"
 SECTION_TYPE_DOCUMENTS = "type_documents"
 SECTION_TYPE_PHOTO = "type_photo"
+SECTION_TYPE_EXECUTABLE = "type_executable"
 SECTION_TYPE_GENERAL = "type_general"
 
 # -- Name-based segregation (series/grouping by show name) -----------------
@@ -330,6 +331,17 @@ TYPE_CATEGORY_EXTENSIONS: dict[str, str] = {
     "raw": SECTION_TYPE_PHOTO, "cr2": SECTION_TYPE_PHOTO, "nef": SECTION_TYPE_PHOTO,
     "arw": SECTION_TYPE_PHOTO, "dng": SECTION_TYPE_PHOTO, "psd": SECTION_TYPE_PHOTO,
     "ico": SECTION_TYPE_PHOTO,
+    # Executables. A section of their own rather than lumped in with Archives: an archive
+    # is inert until unpacked, while these are programs and installers, which is exactly
+    # what the security layer warns about before a download starts.
+    "exe": SECTION_TYPE_EXECUTABLE, "msi": SECTION_TYPE_EXECUTABLE,
+    "msp": SECTION_TYPE_EXECUTABLE, "msu": SECTION_TYPE_EXECUTABLE,
+    "msix": SECTION_TYPE_EXECUTABLE, "appx": SECTION_TYPE_EXECUTABLE,
+    "com": SECTION_TYPE_EXECUTABLE, "bat": SECTION_TYPE_EXECUTABLE,
+    "cmd": SECTION_TYPE_EXECUTABLE, "deb": SECTION_TYPE_EXECUTABLE,
+    "rpm": SECTION_TYPE_EXECUTABLE, "appimage": SECTION_TYPE_EXECUTABLE,
+    "dmg": SECTION_TYPE_EXECUTABLE, "pkg": SECTION_TYPE_EXECUTABLE,
+    "apk": SECTION_TYPE_EXECUTABLE,
 }
 
 #: Display order of the file-type sections in the table.
@@ -339,8 +351,15 @@ TYPE_SECTION_DEFS = [
     (SECTION_TYPE_ARCHIVE, "Archives", "__section_type_archive__"),
     (SECTION_TYPE_DOCUMENTS, "Documents", "__section_type_documents__"),
     (SECTION_TYPE_PHOTO, "Photos", "__section_type_photo__"),
+    # Before General on purpose: General is the catch-all and has to stay last.
+    (SECTION_TYPE_EXECUTABLE, "Executables", "__section_type_executable__"),
     (SECTION_TYPE_GENERAL, "General", "__section_type_general__"),
 ]
+
+#: The file-type section titles, in table order. `SEGREGATED_MODE_LABELS` below and the two
+#: hardcoded copies of this list in main_window (the strip button tooltip and the View-menu
+#: action) all read this, so adding a section cannot leave one of them listing the old set.
+TYPE_SECTION_TITLES = tuple(_title for _cat, _title, _sentinel in TYPE_SECTION_DEFS)
 
 #: The segregated modes the View menu offers, in menu order.
 SEGREGATED_MODES = ("status", "date", "type", "name")
@@ -351,7 +370,7 @@ DEFAULT_SEGREGATED_MODE = "status"
 SEGREGATED_MODE_LABELS = {
     "status": "Status (Active / Seeding / Inactive)",
     "date": "Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)",
-    "type": "File Type (Video / Audio / Archives / Documents / Photos / General)",
+    "type": f"File Type ({' / '.join(TYPE_SECTION_TITLES)})",
     "name": "Name (Smart Series / Show Grouping)",
 }
 
@@ -2538,6 +2557,10 @@ class DownloadTableModel(QAbstractTableModel):
                     return QColor("#64b5f6")
                 elif entry.section_id == SECTION_TYPE_DOCUMENTS:
                     return QColor(Colors.CYAN)
+                elif entry.section_id == SECTION_TYPE_EXECUTABLE:
+                    # Pink, chosen to stay clear of the five hues above it on the dark
+                    # section-header background the other type sections already share.
+                    return QColor("#f778ba")
                 elif entry.section_id.startswith(SECTION_NAME_PREFIX):
                     # Uncategorized group in purple, other name groups in cyan
                     if entry.section_id.endswith("Uncategorized"):

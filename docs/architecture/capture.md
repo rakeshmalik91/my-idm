@@ -1,6 +1,7 @@
-# Capture Subsystem (Global Hotkey & Clipboard Monitoring)
+# Capture Subsystem (Global Hotkeys & Clipboard Monitoring)
 
-**Implemented 2026-10-01.** Covers [`my_idm/hotkey.py`](file:///d:/Projects/my-idm/my_idm/hotkey.py)
+**Implemented 2026-10-01; the hotkeys became lock-key switches on 2026-10-11.**
+Covers [`my_idm/hotkey.py`](file:///d:/Projects/my-idm/my_idm/hotkey.py)
 and [`my_idm/clipboard_monitor.py`](file:///d:/Projects/my-idm/my_idm/clipboard_monitor.py): the
 two ways My-IDM notices a download the user did not hand it explicitly, plus the single
 "capture is on/off" switch they share with [browser interception](browser-integration.md).
@@ -14,14 +15,29 @@ Three capture sources feed the same queue:
 | Source | Module | Opt-in? |
 | --- | --- | --- |
 | Browser extension (automatic + right-click) | [`browser_server.py`](file:///d:/Projects/my-idm/my_idm/browser_server.py) | `BrowserIntegrationConfig.enabled` (`config.py:886`) |
-| System-wide hotkey | [`hotkey.py`](file:///d:/Projects/my-idm/my_idm/hotkey.py) | `GeneralConfig.capture_hotkey_enabled` |
+| System-wide hotkeys | [`hotkey.py`](file:///d:/Projects/my-idm/my_idm/hotkey.py) | `GeneralConfig.capture_hotkey_enabled`, `GeneralConfig.clipboard_hotkey_enabled` |
 | Clipboard | [`clipboard_monitor.py`](file:///d:/Projects/my-idm/my_idm/clipboard_monitor.py) | `GeneralConfig.clipboard_monitor_enabled` |
 
-The hotkey and the tray's **🎯 Download Capture** row both call
-`DownloadManager.set_capture_enabled()` (`manager.py:1338`), which flips
-`BrowserIntegrationConfig.intercept_all`. The clipboard monitor is a separate switch.
+There are **two hotkey bindings**, one per capture:
 
-**Both are off by default.** A global hotkey claims a chord system-wide and the clipboard
+| Binding | Controls | Config |
+| :--- | :--- | :--- |
+| `BINDING_CLIPBOARD` | the clipboard monitor | `clipboard_hotkey_*` |
+| `BINDING_CAPTURE` | `intercept_all`, i.e. browser capture | `capture_hotkey_*` |
+
+The clipboard one exists because the two switches are independent: the browser's *Take downloads
+from the browser* and the clipboard monitor are separate opt-ins, and a single key that flips both
+is not a way to silence the one the user meant. `HotkeyManager.triggered` carries the binding's
+name (`main_window.py:_on_capture_hotkey_triggered`), which is why a handler can tell them apart
+at all — a bare signal would make both bindings look identical to the slot.
+
+**These are not toggles.** A capture follows its key's *state*: Scroll Lock on means the capture
+is on, and off means off. `_on_capture_hotkey_triggered` reads the key and sets the capture to
+match (`lock_key_state`), and the reverse holds too — changing a capture from the tray or
+Preferences drives the key so its light states what the capture is doing
+(`_mirror_capture_lock_key`).
+
+**All three are off by default.** A global hotkey claims a chord system-wide and the clipboard
 monitor reads what the user copies; neither is something to switch on behind a user's back.
 
 ---
@@ -44,55 +60,148 @@ needed:
 `PySide6` binds `installNativeEventFilter` as returning **`None`**, so success is "did not
 raise"; coercing the return value to `bool` refuses every registration.
 
+**The trap that made this look like a Python/Qt crash.** `ctypes.wintypes` is a *submodule*:
+`import ctypes` does not make `ctypes.wintypes` exist, it only appears once some module has
+imported it. The filter used to decode with `ctypes.wintypes.MSG`, so in the running app every
+native message raised `AttributeError` and the filter returned `(False, 0)` — no hotkey press was
+ever recognised, logged as *"module 'ctypes' has no attribute 'wintypes'"* once per message.
+The unit tests could not see it, because the test module itself imports `ctypes.wintypes`, which
+makes the attribute exist for the whole process; and it "fixed itself" as soon as the user opened
+Preferences, because something on that path imports the submodule. The message is now decoded with
+a module-level `_MSG` struct, and the regression test *deletes* `ctypes.wintypes` from the
+namespace before feeding the filter a real message.
+
 Raw `ctypes` behind `sys.platform == "win32"`, matching every other Windows API call in the app
 (`single_instance.py:43`, `details_panel.py:472`). No `pywin32` — it is not in
 `requirements.txt`, and a hotkey is not worth a dependency.
 
-### Parsing works on the string, not on `QKeySequence`
+### The only keys are the two lock keys
 
-`parse_hotkey(sequence)` deliberately **does not** use `QKeySequence`:
+`LOCK_KEYS` is `("ScrollLock", "NumLock")` and `parse_hotkey` resolves nothing else. That is the
+rule the rest of the design depends on: a capture follows the key's LED, so the key has to be one
+whose state can be read — and a chord has no state to read. A chord is refused with a message
+that says which keys *are* usable, rather than one that only says what is wrong.
 
-| Problem | Evidence |
-| --- | --- |
-| Qt drops a Meta/Win chord entirely | `QKeySequence("Win+D").isEmpty()` is `True`; `combo.key()` is `Qt.Key_unknown` (`0x01FFFFFF`) |
-| F-keys and arrows live in a private range | `Qt.Key_F4` is `0x01000043`, not the Win32 `VK_F4` of `0x73` |
-| Only `Meta` survives round-tripping | `QKeySequence("Windows+D").toString()` is `""` |
+`lock_key_vk` accepts both spellings ("ScrollLock" and "scroll lock") because Qt writes them
+without a space and people type them with one; `canonical_lock_key` normalises to the stored form,
+and `LOCK_KEY_LABELS` gives the pretty name the tray and the drop-down show. `QKeySequence` is not
+involved at all: the stored string is compared, and `lock_key_vk` maps it to the virtual key.
 
-The stored string is what the user typed and what `QKeySequenceEdit` hands back, so it is parsed
-directly: `_SEQUENCE_RE` splits a leading modifier run from the key, `_NAMED_VK` maps named keys
-to Win32 codes, and printable characters go through **`VkKeyScanW`** so the user's own keyboard
-layout decides the virtual key.
+### The LED is the switch — and a press is not a read
 
-### The shift trap
+`lock_key_is_on(vk)` reads the low bit of `GetKeyState`, which for the lock keys *is* the toggle
+state — the LED and the state are the same thing, not two things to keep in step.
 
-`VkKeyScanW('D')` returns `0x0144` — "virtual key `0x44`, and it needs Shift" — because `D` is the
-character `D`. Using the `QKeySequence` key code (`Qt.Key_D` == `0x44` == `'D'`) would silently
-turn `Ctrl+Alt+D` into `Ctrl+Alt+Shift+D`. So ASCII letters are looked up in **lower case**
-(`_printable_key_to_vk`); anything else keeps the form the user typed, because a symbol like `!`
-genuinely does need the shift `VkKeyScanW` reports for it.
+There are two directions, and the press direction is **not** a read:
+
+- **key → capture.** A press *switches* the capture, and `_on_capture_hotkey_triggered` does not
+  read the key at all. This is deliberate, and it is the fix for the intermittency that made
+  "sometimes a press does nothing" look like a flaky hotkey: Windows delivers `WM_HOTKEY` on the
+  key **down** while a lock key's toggle bit flips on the key **up**, so a handler reading
+  `GetKeyState` in that handler could only ever see the *previous* press's state — it worked on
+  alternate presses and looked broken in between. Two follow-ons make the switch reliable:
+  - **no mirror write on a key press.** Windows moved the LED itself, and reading it here gets
+    the pre-press state, so mirroring would synthesise a second press and leave the light where
+    it started — the switch off while the capture is on.
+  - **the sync is held off mid-switch** (`_in_capture_switch`). The capture change re-emits
+    synchronously, which lands in `_sync_captures_to_lock_keys` while the LED is still pre-press,
+    so without the guard it would "correct" the capture straight back and undo the switch before
+    the key-up arrived.
+- **capture → key.** `_mirror_capture_lock_key` drives the key when the capture changes from
+  anywhere else (tray, Preferences, startup sync), so the LED never lies about the state. It runs
+  **before** the change, because `set_capture_enabled` re-emits synchronously and the sync would
+  otherwise flip the capture back on a LED that had not moved yet. It also only writes when the
+  key differs, which keeps the write a no-op in the common case.
+
+`_sync_captures_to_lock_keys` reads each configured key at startup and after a Preferences save,
+so a LED left on from a previous session means the captures it drives are on. It is silent by
+design (`announce=False`): the tray row and the menu checkmark already state the result.
+
+### Synthetic input triggers registered hotkeys
+
+`press_lock_key` synthesises a key-down plus a key-up, and Windows does not care that the input
+was synthetic — our own chord fires. So `_mirror_capture_lock_key` arms
+`_ignore_key_presses_until` (250 ms) whenever it writes, and `_on_capture_hotkey_triggered` returns
+early inside that window instead of switching the capture back. A window rather than a counter,
+because no one presses the same key twice inside 250 ms while a real press after it must still
+work.
 
 ### Safety rules
 
-- **A chord with no Ctrl, Alt or Win is refused**, not registered (`_REQUIRED_MODIFIERS`).
-  `RegisterHotKey` accepts a bare letter, and a bare letter claimed system-wide would swallow
-  that key in every other application on the desktop. A global hotkey that breaks the user's
-  editor is worse than no hotkey.
-- **Multi-step sequences are refused** (`"Ctrl+K, Ctrl+B"` has no single Win32 chord).
-- **Unknown keys and modifiers are refused** rather than guessed at.
-- **`ERROR_HOTKEY_ALREADY_REGISTERED` (1409) is reported to the user**, not swallowed: a chord
+- **Only Scroll Lock and Num Lock are offered.** Anything else — every chord, `CapsLock`,
+  `PrintScreen` — is refused rather than registered, because a capture cannot follow a key it
+  cannot read the state of. A config written before this (or hand-edited) is *coerced* to the
+  default by `config.coerce_capture_key` rather than refused: a stored key that never registers
+  looks exactly like a hotkey that stopped working.
+- **`ERROR_HOTKEY_ALREADY_REGISTERED` (1409) is reported to the user**, not swallowed: a key
   another application owns must say so instead of leaving a key that does nothing. The message
-  names the conflict; `_show_in_status_bar` surfaces it via `MainWindow._register_hotkey`.
+  names the conflict; `MainWindow._register_capture_hotkeys` surfaces it in the status bar, once
+  per binding that failed. This is the one message that stays in the status bar indefinitely,
+  because it describes a broken binding rather than an action and nothing has displaced it by the
+  time the user looks.
+- **A shared key is not reported in the status bar**, only in the log. It is a *setting*, not an
+  event: nothing overwrites the status line at startup, so the note would sit there for the whole
+  session — and the tray row already names the key on each capture while both Preferences rows say
+  the same thing under their drop-down. The status line is for what the user is doing right now.
+- **A switch is announced with a toast** (`notifications.notify_capture_switched`) when the state
+  actually moves, and only then. This is the one capture event with no other sign at the moment it
+  happens: a capture key press changes a setting with the window closed, where a status line and a
+  tray checkmark are both unreadable, and the LED shows the key but not *which capture* moved. The
+  toast names both.
+  - the **startup/Preferences key sync is silent** (`announce=False`). A LED left on means the
+    capture is on, which is a setting rather than an event, and the tray row already states it by
+    the time the user looks — a toast on every launch trains the user to ignore toasts.
+  - a press that agrees with the capture is not a change and says nothing.
+  - a key shared by both captures notifies once per capture, because one LED can be driving two
+    settings and the user needs to know what changed.
+
+### Two bindings, two ids
+
+`HotkeyManager` (`hotkey.py:365`) owns one `HotkeyRegistration` per binding, and each registers
+its own process-private id (`HOTKEY_ID`, `CLIPBOARD_HOTKEY_ID`). That is not cosmetic: the id is
+what `RegisterHotKey` echoes back in `WM_HOTKEY`, so two bindings sharing one id would make every
+press look like the same one and one of them would silently move the wrong switch. Each
+registration installs its own native filter and dispatches on its own `wParam`.
+
+`register()` short-circuits when the requested key is already the one held, so a Preferences
+save does not drop and re-claim the binding. A *different* key unregisters first, because
+leaving the old one claimed would make it unusable system-wide forever.
+
+### One key can drive both captures
+
+Win32 refuses a second `RegisterHotKey` of an **identical** `fsModifiers`/`vk` pair for the
+calling thread with `ERROR_HOTKEY_ALREADY_REGISTERED` — so the obvious setting, "Scroll Lock for
+browser capture *and* Scroll Lock for clipboard capture", used to produce one working hotkey and
+one silent failure that blamed another application for owning the key.
+
+`HotkeyManager` now keeps a `(fsModifiers, vk) -> {binding names}` map. The first binding owns the
+Win32 registration; any other binding asked to register the same key is added to that group and
+dispatched on every press of the owner. Turning one off hands the registration to a survivor
+rather than dropping it. `bindings_for(sequence)` reports the whole group, and
+`is_binding_registered(key)` answers "is this binding live" for a sharer as well as for an owner —
+which is why the tray label reads it and not `HotkeyRegistration.is_registered`.
+
+A shared key makes both captures follow it together, which is the only reading of that setting
+that is not a lie: one LED is the switch for both.
 
 ### Lifetime
 
-`register()` short-circuits when the requested chord is already the one held, so a Preferences
-save does not drop and re-claim the binding. A *different* chord unregisters first, because
-leaving the old one claimed would make it unusable system-wide forever.
+`MainWindow.closeEvent` calls `_release_capture()` (`main_window.py:2119`), which calls
+`HotkeyManager.unregister_all()`. **This is not optional**: Windows keeps a chord bound to the
+process id that claimed it, so a hotkey left registered outlives the app and the next launch then
+fails to claim it with nothing for the user to see.
 
-`MainWindow.closeEvent` calls `_release_capture()` (`main_window.py:1664`), which unregisters.
-**This is not optional**: Windows keeps a chord bound to the process id that claimed it, so a
-hotkey left registered outlives the app and the next launch then fails to claim it with nothing
-for the user to see.
+### The two capture rows in the tray
+
+`_TRAY_CAPTURE_LABELS` holds the base text and `_tray_capture_label()` appends the bound key, so
+the row reads `🎯 Download Capture    Ctrl+Alt+D` and `📋 Clipboard Capture    NumLock`
+(`_refresh_tray_capture_labels`, called from `_sync_capture_actions`). Three rules keep the suffix
+from lying:
+
+- an unconfigured hotkey adds **nothing**, so a user who never wanted one is not shown one;
+- a chord that failed to register is still shown but marked `⚠`, because "which key *should* have
+  worked" is the first step to fixing it;
+- the label is rebuilt from the base text on every sync, never appended to, so it cannot grow.
 
 ### Known limit
 
@@ -271,35 +380,56 @@ parsing, the scheme allow-list and the size probe — a paused capture must cost
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `capture_hotkey_enabled` | `bool` | `False` | Binds the chord system-wide. |
-| `capture_hotkey_sequence` | `str` | `"Ctrl+Alt+D"` | The chord. Validated by `parse_hotkey` on save and again at registration. |
+| `capture_hotkey_enabled` | `bool` | `False` | Binds the download-capture key system-wide. |
+| `capture_hotkey_sequence` | `str` | `"ScrollLock"` | The key. One of `LOCK_KEYS`; coerced to the default otherwise. |
+| `clipboard_hotkey_enabled` | `bool` | `False` | Binds the clipboard-capture key system-wide. |
+| `clipboard_hotkey_sequence` | `str` | `"ScrollLock"` | The key. Same two choices. |
 | `clipboard_monitor_enabled` | `bool` | `False` | Watches the clipboard. |
 | `clipboard_monitor_max_urls` | `int` | `20` | Ceiling on one copy event. |
 | `clipboard_min_file_size_kb` | `int` | `1024` | Minimum capture size, applied to the **resolved** file. `0` disables. |
 | `clipboard_ignored_extensions` | `list[str]` | `.txt .htm .html .jpg .jpeg .png .gif .webp` | Applied to both the copied URL and the resolved filename. |
 
-`capture_hotkey_sequence` falls back to the default when empty (a stored empty string would
-otherwise disable the hotkey silently), and `clipboard_monitor_max_urls` is clamped to `>= 1` so
-a corrupt value cannot disable capture.
+Both keys default to `"ScrollLock"`, and both pointing at the **same** key is a supported setting
+rather than a conflict: Win32 allows one registration per key per thread, so a shared key is
+registered once and dispatched to every purpose bound to it — which is the same thing as saying
+one key controls both captures. See *One key can drive both captures* above.
+
+A sequence that is not one of the two keys is coerced to `ScrollLock` rather than rejected: a
+stored key that never registers is indistinguishable from a hotkey that stopped working.
+`clipboard_monitor_max_urls` is clamped to `>= 1` so a corrupt value cannot disable capture.
 
 ---
 
 ## 5. UI surfaces
 
-- **Preferences → General & Downloads**, a **Capture** group: the two checkboxes, the per-copy
-  spin box, and a `QKeySequenceEdit` (the first in this codebase). Validation is **inline** — a
-  red status label under the field, not a modal — because `QKeySequenceEdit` commits on every
-  `editingFinished` and a `QMessageBox` per edit would be hostile. It calls the same
-  `parse_hotkey()` the runtime registration uses, so the dialog cannot accept a chord the hotkey
-  layer will later refuse.
+Each row is built by `SettingsDialog._add_capture_hotkey_row()` — one method, because the two
+tabs need the identical control and the rules have to be the same on each:
+
+- **Preferences → 📋 Clipboard Capture**: the clipboard row (checkbox + key drop-down + a status
+  label), sitting with the clipboard settings it controls.
+- **Preferences → 🌐 Browser Integration**: the download-capture row, directly under
+  **Take downloads from the browser** — the same switch, bound to a key.
+
+The chooser is a **`QComboBox` with exactly two entries**, not a `QKeySequenceEdit`. Not a
+simplified editor: only Scroll Lock and Num Lock can drive a capture, so those are the only
+choices that mean anything — and an editor would imply a chord can be bound, which it cannot.
+
+Nothing can be invalid, so the status label is advice rather than validation: `Scroll Lock on
+turns this capture on, off turns it off — the key's own light shows the state`, and
+`drives both` when both rows hold the same key. Telling the user their selection is invalid when
+the only alternative was never offered is noise. The rows report on their own status label
+(`_capture_hotkey_status_lbl_for`), so editing one never overwrites the other's advice.
+
 - **Tray**: `🎯 Download Capture` and `📋 Clipboard Capture`, both checkable so a row shows live
   state rather than describing an action. These are the menu's only checkable entries; the rest
   mutate text in `_update_tray_menu_text` because their state is not a simple on/off.
   `_sync_capture_actions()` mirrors the real state onto them with `blockSignals`, called from the
-  hotkey, the tray and both config-changed signals, so the menu can never disagree with what
-  capture is doing.
+  key, the tray and both config-changed signals, so the menu can never disagree with what
+  capture is doing. Each row also shows its bound key
+  (`🎯 Download Capture    Scroll Lock`) — the only place the user can be told how to silence a
+  capture without opening Preferences — and `⚠` marks a key that could not be claimed.
 
-Both toggles take effect from a Preferences save without a restart, via `MainWindow`'s
+Both take effect from a Preferences save without a restart, via `MainWindow`'s
 `general_config_changed` and `browser_config_changed` connections.
 
 ---
@@ -310,7 +440,17 @@ Both toggles take effect from a Preferences save without a restart, via `MainWin
   the sibling decline reasons.
 - [Window Lifecycle & System Tray](window-system-tray.md) — the tray menu and teardown order.
 - [Database & Persistence](database.md) — the config classes and their four-mirror serialization.
-- [`tests/test_capture.py`](file:///d:/Projects/my-idm/tests/test_capture.py) — 84 tests covering
-  the URL gate, debounce, suppression, chord parsing, registration, the `WM_HOTKEY` filter, the
-  tray wiring, and config round-trips. The `WM_HOTKEY` path is tested with a real
-  `ctypes.wintypes.MSG` and a faked `user32`, so the ctypes boundary is genuinely exercised.
+- [`tests/test_capture.py`](file:///d:/Projects/my-idm/tests/test_capture.py) — 158 tests covering
+  the URL gate, debounce, suppression, lock-key parsing (lock keys only, both spellings, every
+  chord refused), `GetKeyState`/`keybd_event` including the read-first that stops a write from
+  toggling twice, **the press-switch behaviour with the LED deliberately stale** (which is the
+  case the old read model got wrong), the echo guard for our own synthetic press, the sync hold
+  during a switch, both directions of the key-to-capture relationship, registration, the
+  two-binding dispatch, the shared-key group (one registration, both captures, hand-off on
+  unregister), the `WM_HOTKEY` filter, the tray rows and their key labels, and config
+  coercion. The `WM_HOTKEY` path is tested with a real `ctypes.wintypes.MSG` and a faked
+  `user32`, so the ctypes boundary is genuinely exercised. The `TestHotkeyManager` class
+  installs its fake for the whole case rather than per test: a registration that fails with 1409
+  because the developer's own running My-IDM owns that key is indistinguishable from a real bug.
+- [`tests/test_settings.py`](file:///d:/Projects/my-idm/tests/test_settings.py) — the two
+  capture rows: seeding, save, the two-entry drop-down, greyed-out choosers and per-row advice.

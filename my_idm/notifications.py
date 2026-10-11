@@ -232,6 +232,29 @@ def notify_clipboard_download_captured(
     return show_notification(title, message, duration=5)
 
 
+def notify_capture_switched(capture: str, enabled: bool, key_label: str = "") -> bool:
+    """Show notification when a capture switch is turned on or off.
+
+    This is the one capture event worth a toast, because it is the one with no other sign at
+    the moment it happens: a capture key press changes a setting **with the window closed**,
+    which is the whole point of binding a key to it. A status-bar line and a tray checkmark
+    are both invisible then.
+
+    *key_label* names the key ("Scroll Lock") so the toast explains the press that caused it.
+    It is optional because captures changed from the tray or Preferences have no key to name
+    and no press to attribute.
+
+    The caller decides *when* — a press that agrees with the capture is not a change and says
+    nothing, and the startup/Preferences sync is silent because the tray row already states
+    the result and a toast on every launch trains the user to ignore toasts.
+    """
+    title = "Capture On" if enabled else "Capture Off"
+    message = f"{capture} is now {'on' if enabled else 'off'}"
+    if key_label:
+        message += f" — {key_label} is {'on' if enabled else 'off'} too"
+    return show_notification(title, message, duration=3)
+
+
 def notify_torrent_files_added(filenames: list[str], source: str = "") -> bool:
     """Show notification when local ``.torrent`` files are added from outside the window.
 

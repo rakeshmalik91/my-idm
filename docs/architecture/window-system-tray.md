@@ -45,8 +45,10 @@ System tray behavior is managed via [`my_idm.config.GeneralConfig`](file:///d:/P
 | `close_to_tray` | `bool` | `True` | Intercepts window close (`X` button), keeping background downloads, seeding, and browser interception active. |
 | `start_minimized` | `bool` | `False` | Launches My-IDM silently to the system tray on startup without presenting the main window. |
 | `notify_on_completion`| `bool` | `True` | Fires Windows desktop toast notifications when transfers successfully complete. |
-| `capture_hotkey_enabled` | `bool` | `False` | Binds a system-wide chord that toggles download capture. Off by default: a global hotkey claims a key combination on the whole desktop. |
-| `capture_hotkey_sequence` | `str` | `"Ctrl+Alt+D"` | The chord. Must include Ctrl, Alt or Win — a bare key would be swallowed in every other application. |
+| `capture_hotkey_enabled` | `bool` | `False` | Binds a system-wide key that drives download capture. Off by default: a system-wide key is not something to bind behind your back. |
+| `capture_hotkey_sequence` | `str` | `"ScrollLock"` | The key. One of Scroll Lock / Num Lock — the key's own light *is* the switch, so a chord has no state to follow. |
+| `clipboard_hotkey_enabled` | `bool` | `False` | Separate binding for the clipboard capture row below. |
+| `clipboard_hotkey_sequence` | `str` | `"ScrollLock"` | Same two keys; different key, so one capture can be switched without the other. |
 | `clipboard_monitor_enabled` | `bool` | `False` | Adds downloads when one or more URLs are copied. Off by default: reading the clipboard without being asked is surveillance. |
 | `clipboard_monitor_max_urls` | `int` | `20` | Ceiling on URLs added by a single copy. |
 
@@ -72,11 +74,13 @@ in the status bar instead of being swallowed.
    - `⏸️ Pause All Downloads`: Pauses all active, queued, and stalled transfers.
    - `▶️ Resume All Downloads`: Resumes all paused and stopped transfers.
    - `🎯 Download Capture` and `📋 Clipboard Capture`: The only **checkable** entries in the menu.
-     They show live state rather than describing an action, because a row that reads "Enable
-     capture" while capture is on is a lie the user has to guess about. `MainWindow._sync_capture_actions()`
-     mirrors the real state onto them with `blockSignals`, and is called from the tray, the
-     global hotkey and both config-changed signals, so the menu cannot drift from what capture is
-     actually doing. See [Capture Subsystem](capture.md).
+      They show live state rather than describing an action, because a row that reads "Enable
+      capture" while capture is on is a lie the user has to guess about. `MainWindow._sync_capture_actions()`
+      mirrors the real state onto them with `blockSignals`, and is called from the tray, either
+      capture key and both config-changed signals, so the menu cannot drift from what capture is
+      actually doing. Each row also shows its bound key, because that is the only place the user can
+      be told how to switch a capture without opening Preferences — see
+      [Capture Subsystem](capture.md).
    - `⚙️ Preferences…`: Opens the Preferences modal on the General & Downloads page (`TAB_GENERAL`).
    - `🔄 Restart My-IDM`: Restarts the application in place.
    - `🚪 Exit My-IDM`: Sets `_force_exit = True` and triggers clean application termination.
@@ -159,7 +163,11 @@ My-IDM integrates deeply with the native Windows Action Center and notification 
 2. **Unified Notification Delegate Pipeline**:
    - Rather than relying solely on detached external tools, [`my_idm.notifications`](file:///d:/Projects/my-idm/my_idm/notifications.py) supports a delegate handler pattern via `register_notification_handler()`.
    - On application startup, `MainWindow._setup_system_tray()` registers `MainWindow.show_tray_notification`, dispatching toasts through `QSystemTrayIcon.showMessage()` via thread-safe Qt queued signals (`_sig_show_tray_notification`).
-   - Browser capture alerts (`notify_browser_download_caught`), download completions (`notify_download_complete`), and errors (`notify_download_error`) route seamlessly through this pipeline.
+   - Browser capture alerts (`notify_browser_download_caught`), capture switches
+     (`notify_capture_switched`), clipboard captures (`notify_clipboard_download_captured`),
+     watched-folder and file-association additions, download completions
+     (`notify_download_complete`), and errors (`notify_download_error`) route seamlessly through this
+     pipeline.
 
 3. **Click-to-Focus Window Activation**:
    - `self._tray_icon.messageClicked` connects to `self._on_tray_message_clicked` -> `self._restore_and_focus()`.

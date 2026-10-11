@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QKeySequence
+from PySide6.QtWidgets import QApplication, QComboBox
 
 from my_idm.config import (
     GeneralConfig,
@@ -549,6 +550,121 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
                 self.assertEqual(persisted.default_save_path, new_dir)
                 self.assertEqual(persisted.default_segments, 16)
                 self.assertEqual(persisted.segment_start_delay_ms, 75)
+
+    def test_both_capture_hotkeys_are_seeded_and_saved(self):
+        """Two rows, two settings: one per capture, in the tab that owns each capture."""
+        cfg = GeneralConfig(
+            capture_hotkey_enabled=True,
+            capture_hotkey_sequence="NumLock",
+            clipboard_hotkey_enabled=True,
+            clipboard_hotkey_sequence="ScrollLock",
+        )
+        dlg = SettingsDialog(general_config=cfg)
+
+        self.assertTrue(dlg._capture_hotkey_cb.isChecked())
+        self.assertEqual(dlg._capture_hotkey_edit.currentData(), "NumLock")
+        self.assertTrue(dlg._clipboard_hotkey_cb.isChecked())
+        self.assertEqual(dlg._clipboard_hotkey_edit.currentData(), "ScrollLock")
+        self.assertEqual(len(dlg._capture_hotkey_rows), 2)
+        # Only the two lock keys are offered, and Scroll Lock is the default row.
+        self.assertEqual(
+            [dlg._capture_hotkey_edit.itemData(i) for i in range(dlg._capture_hotkey_edit.count())],
+            ["ScrollLock", "NumLock"],
+        )
+        self.assertEqual(dlg._capture_hotkey_edit.currentText(), "Num Lock")
+
+        dlg._capture_hotkey_edit.setCurrentIndex(
+            dlg._capture_hotkey_edit.findData("ScrollLock")
+        )
+        dlg._clipboard_hotkey_edit.setCurrentIndex(
+            dlg._clipboard_hotkey_edit.findData("NumLock")
+        )
+        dlg._on_save()
+
+        self.assertEqual(dlg._general_cfg.capture_hotkey_sequence, "ScrollLock")
+        self.assertEqual(dlg._general_cfg.clipboard_hotkey_sequence, "NumLock")
+        self.assertTrue(dlg._general_cfg.clipboard_hotkey_enabled)
+
+    def test_the_capture_key_choosers_are_drop_downs(self):
+        """A drop-down, because only two keys can drive a capture at all."""
+        dlg = SettingsDialog(general_config=GeneralConfig())
+        for editor in (dlg._capture_hotkey_edit, dlg._clipboard_hotkey_edit):
+            self.assertIsInstance(editor, QComboBox)
+            self.assertEqual(editor.count(), 2)
+            self.assertEqual(
+                [editor.itemData(i) for i in range(editor.count())],
+                ["ScrollLock", "NumLock"],
+            )
+
+    def test_a_stored_key_that_is_not_offered_is_shown_as_the_default(self):
+        """A config from an older build must not leave a row pointing at nothing."""
+        cfg = GeneralConfig()
+        cfg.capture_hotkey_sequence = "Ctrl+Alt+D"
+        dlg = SettingsDialog(general_config=cfg)
+
+        self.assertEqual(dlg._capture_hotkey_edit.currentData(), "ScrollLock")
+
+    def test_a_disabled_hotkey_row_greys_its_editor(self):
+        cfg = GeneralConfig(capture_hotkey_enabled=False, clipboard_hotkey_enabled=False)
+        dlg = SettingsDialog(general_config=cfg)
+
+        self.assertFalse(dlg._capture_hotkey_edit.isEnabled())
+        self.assertFalse(dlg._clipboard_hotkey_edit.isEnabled())
+
+        dlg._clipboard_hotkey_cb.setChecked(True)
+        self.assertTrue(dlg._clipboard_hotkey_edit.isEnabled())
+        # The other row is a separate setting, so enabling one must not enable both.
+        self.assertFalse(dlg._capture_hotkey_edit.isEnabled())
+
+    def test_each_row_advises_about_its_own_key(self):
+        """A change on one row must not overwrite the other's advice."""
+        dlg = SettingsDialog(general_config=GeneralConfig())
+
+        # Distinct keys: each row advises about its own, which is the point of two rows.
+        dlg._capture_hotkey_edit.setCurrentIndex(
+            dlg._capture_hotkey_edit.findData("NumLock")
+        )
+        dlg._clipboard_hotkey_edit.setCurrentIndex(
+            dlg._clipboard_hotkey_edit.findData("ScrollLock")
+        )
+        dlg._update_capture_hotkey_row(dlg._clipboard_hotkey_edit)
+        self.assertIn("Scroll Lock on", dlg._clipboard_hotkey_status_lbl.text())
+        self.assertIn("Num Lock", dlg._capture_hotkey_status_lbl.text())
+
+        # The other way round, still distinct: only this row's advice moves.
+        dlg._capture_hotkey_edit.setCurrentIndex(
+            dlg._capture_hotkey_edit.findData("ScrollLock")
+        )
+        browser_status = dlg._capture_hotkey_status_lbl.text()
+        dlg._clipboard_hotkey_edit.setCurrentIndex(
+            dlg._clipboard_hotkey_edit.findData("NumLock")
+        )
+        self.assertIn("Num Lock on", dlg._clipboard_hotkey_status_lbl.text())
+        self.assertEqual(dlg._capture_hotkey_status_lbl.text(), browser_status)
+
+    def test_a_key_shared_by_both_rows_says_it_drives_both(self):
+        """The one thing worth saying now that nothing can be invalid."""
+        dlg = SettingsDialog(general_config=GeneralConfig())
+        for editor in (dlg._capture_hotkey_edit, dlg._clipboard_hotkey_edit):
+            editor.setCurrentIndex(editor.findData("ScrollLock"))
+
+        dlg._update_capture_hotkey_row(dlg._clipboard_hotkey_edit)
+
+        self.assertIn("drives both", dlg._clipboard_hotkey_status_lbl.text())
+
+    def test_the_capture_hotkeys_round_trip_through_qsettings(self):
+        cfg = GeneralConfig(
+            capture_hotkey_sequence="NumLock",
+            clipboard_hotkey_sequence="ScrollLock",
+            clipboard_hotkey_enabled=True,
+        )
+        dlg = SettingsDialog(general_config=cfg)
+        dlg._on_save()
+
+        loaded = GeneralConfig.load()
+        self.assertEqual(loaded.capture_hotkey_sequence, "NumLock")
+        self.assertEqual(loaded.clipboard_hotkey_sequence, "ScrollLock")
+        self.assertTrue(loaded.clipboard_hotkey_enabled)
 
     def test_system_tray_settings_ui(self):
         cfg = GeneralConfig(

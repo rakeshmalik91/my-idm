@@ -14,6 +14,7 @@ app reaches Windows APIs (``main.py``, ``single_instance.py``, ``details_panel.p
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import logging
 import re
 import sys
@@ -23,9 +24,33 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QObject, Signal
 
 log = logging.getLogger("my_idm")
 
-#: Process-private hotkey id. Arbitrary, but it must not collide with an id anything else in
-#: this process might register — nothing else here does.
+
+class _MSG(ctypes.Structure):
+    """Win32 ``MSG``, spelled out rather than taken from ``ctypes.wintypes``.
+
+    ``ctypes.wintypes`` is a submodule: ``import ctypes`` alone does **not** make
+    ``ctypes.wintypes`` exist, it only appears once some module has imported it. This one is
+    used at *message decode* time inside a native event filter, where the difference is
+    between a hotkey that works and one that silently doesn't — the failure shows up as
+    "module 'ctypes' has no attribute 'wintypes'" once per native message, which reads like a
+    crash in Qt rather than a missing import, and is invisible in the UI.
+
+    Only the fields the filter needs are declared; the rest of ``MSG`` is padding the decoder
+    skips.
+    """
+
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("message", ctypes.c_uint),
+        ("wParam", ctypes.wintypes.WPARAM),
+        ("lParam", ctypes.wintypes.LPARAM),
+        ("time", ctypes.c_uint),
+    ]
+
+#: Process-private hotkey ids, one per binding. Arbitrary, but they must not collide with an
+#: id anything else in this process might register — nothing else here does.
 HOTKEY_ID = 0xB101
+CLIPBOARD_HOTKEY_ID = 0xB102
 
 WM_HOTKEY = 0x0312
 
@@ -37,71 +62,33 @@ MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 
-#: Modifier spellings accepted in a stored sequence, lower-cased. ``Meta`` is what Qt emits for
-#: the Windows key; ``Win``/``Windows``/``Super`` are what a human types.
-_MODIFIER_NAMES = {
-    "ctrl": MOD_CONTROL,
-    "control": MOD_CONTROL,
-    "alt": MOD_ALT,
-    "option": MOD_ALT,
-    "shift": MOD_SHIFT,
-    "meta": MOD_WIN,
-    "win": MOD_WIN,
-    "windows": MOD_WIN,
-    "super": MOD_WIN,
-}
+#: The two binding names :class:`HotkeyManager` dispatches on.
+BINDING_CAPTURE = "capture"
+BINDING_CLIPBOARD = "clipboard"
 
-#: At least one of these must be present. A bare letter or F-key would swallow that key in
-#: every other application on the desktop, so such a chord is refused rather than registered —
-#: a global hotkey that breaks typing in the user's editor is worse than no hotkey at all.
-_REQUIRED_MODIFIERS = (MOD_ALT, MOD_CONTROL, MOD_WIN)
+#: Binding name -> the id registered for it. An id only has to be unique inside this
+#: process, so these are arbitrary; they are named so nothing else has to know the numbers.
+_BINDING_IDS = {BINDING_CAPTURE: HOTKEY_ID, BINDING_CLIPBOARD: CLIPBOARD_HOTKEY_ID}
 
-#: Splits a stored sequence into its leading modifier run and the key itself. Written against
-#: the *string*, not ``QKeySequence``: Qt drops a Meta/Win chord entirely
-#: (``QKeySequence("Win+D")`` is empty), so a Qt-based parser cannot express the Windows key at
-#: all — and Qt encodes F-keys and arrows in a private 0x01xxxxxx range that does not line up
-#: with Win32 virtual-key codes. The string is what the user typed and what
-#: ``QKeySequenceEdit`` hands back, so it is the honest input.
-_SEQUENCE_RE = re.compile(
-    r"^(?P<mods>(?:(?:ctrl|control|alt|option|shift|meta|win|windows|super)\+)+)"
-    r"(?P<key>.+)$",
-    re.IGNORECASE,
-)
+#: Win32 lock keys. Num Lock is 0x90, Scroll Lock is 0x91.
+VK_NUMLOCK = 0x90
+VK_SCROLLLOCK = 0x91
 
-_F_KEY_RE = re.compile(r"^F([1-9]|1[0-9]|2[0-4])$")
+#: The only keys a capture hotkey may be bound to, in the order the Preferences drop-down
+#: lists them, with the spelling stored in the config. Anything else — chords included — is
+#: refused, because the settings these keys drive are not toggles: a lock key carries state
+#: the app reads, and *that* is the switch.
+LOCK_KEYS = ("ScrollLock", "NumLock")
 
-#: Named keys that do not fit the one-character form. Windows virtual-key codes.
-_NAMED_VK = {
-    "SPACE": 0x20,
-    "ESC": 0x1B,
-    "ESCAPE": 0x1B,
-    "TAB": 0x09,
-    "BACKSPACE": 0x08,
-    "BKSP": 0x08,
-    "RETURN": 0x0D,
-    "ENTER": 0x0D,
-    "INSERT": 0x2D,
-    "INS": 0x2D,
-    "DELETE": 0x2E,
-    "DEL": 0x2E,
-    "HOME": 0x24,
-    "END": 0x23,
-    "PAGEUP": 0x21,
-    "PGUP": 0x21,
-    "PAGEDOWN": 0x22,
-    "PGDOWN": 0x22,
-    "PGDN": 0x22,
-    "LEFT": 0x25,
-    "UP": 0x26,
-    "RIGHT": 0x27,
-    "DOWN": 0x28,
-    "PAUSE": 0x13,
-    "PRTSC": 0x2C,
-    "PRNTSC": 0x2C,
-    "SCREENSHOT": 0x2C,
-    "MENU": 0x5D,
-    "APPS": 0x5D,
-}
+#: How those keys are shown to a user. The stored spelling is the canonical one, so the
+#: drop-down's text and the stored value need one map between them rather than a second
+#: opinion about spelling.
+LOCK_KEY_LABELS = {"ScrollLock": "Scroll Lock", "NumLock": "Num Lock"}
+
+#: The default for both capture hotkeys. Scroll Lock because it is the lock key nothing else
+#: on a desktop is likely to be watching, so it is the one whose LED the user can safely
+#: repurpose.
+DEFAULT_LOCK_KEY = "ScrollLock"
 
 _USER32 = None
 
@@ -118,88 +105,121 @@ def _user32():
     return _USER32 or None
 
 
-def _printable_key_to_vk(char: str) -> Optional[tuple[int, bool]]:
-    """Map one printable character to ``(vkCode, needsShift)`` via ``VkKeyScanW``.
+def lock_key_vk(sequence) -> Optional[int]:
+    """The virtual key for a lock-key *sequence*, or ``None`` if it is not one.
 
-    ``VkKeyScanW`` is the authority on which virtual key produces a character on the user's own
-    keyboard layout, so it is asked rather than assuming US. Its high byte says whether that
-    key requires Shift *on this layout*.
-
-    An ASCII letter is looked up in lower case, because ``VkKeyScanW('D')`` reports "needs
-    shift" for the character ``D`` — which would silently turn a plain ``Ctrl+Alt+D`` into
-    ``Ctrl+Alt+Shift+D``. For any other character the given form is used, because a symbol like
-    ``!`` genuinely does need the shift ``VkKeyScanW`` reports for it.
+    Both spellings are accepted — Qt writes them without a space, and so do I in the stored
+    config, while people type them with one. Anything that is not even a string is not a key,
+    which is what makes this safe to call on values read back from a settings file.
     """
-    query = char
-    if char.isascii() and char.isalpha():
-        query = char.lower()
+    if not isinstance(sequence, str):
+        return None
+    token = sequence.strip().upper().replace(" ", "")
+    return {
+        "SCROLLLOCK": VK_SCROLLLOCK,
+        "NUMLOCK": VK_NUMLOCK,
+    }.get(token)
+
+
+def lock_key_is_on(vk: int) -> bool:
+    """Is the lock key with virtual key *vk* currently on?
+
+    ``GetKeyState``'s low bit *is* the toggle state for the lock keys, which is what makes
+    them usable as a hardware switch for a setting: the LED and the state are the same thing,
+    not two things to keep in step.
+    """
+    if not vk or sys.platform != "win32":
+        return False
     user32 = _user32()
-    if user32 is not None:
-        try:
-            fn = user32.VkKeyScanW
-            fn.argtypes = [ctypes.c_wchar]
-            fn.restype = ctypes.c_short
-            packed = int(fn(query))
-        except Exception as exc:
-            log.debug("VkKeyScanW(%r) failed: %s", query, exc)
-            return None
-        # -1 means the layout cannot produce this character at all.
-        if packed == -1:
-            return None
-        return packed & 0xFF, bool(packed >> 8)
-    # Off Windows (tests, and the Qt-free import path) the ASCII code is the key code for
-    # letters and digits, which is exact for everything the table above does not cover.
-    return ord(query), False
+    if user32 is None:
+        return False
+    try:
+        fn = user32.GetKeyState
+        fn.argtypes = [ctypes.c_int]
+        fn.restype = ctypes.c_short
+        return bool(fn(vk) & 0x0001)
+    except Exception as exc:
+        log.warning("GetKeyState(%s) failed: %s", vk, exc)
+        return False
 
 
-def _key_token_to_vk(token: str) -> Optional[tuple[int, bool]]:
-    """Resolve the non-modifier part of a sequence to ``(vkCode, needsShift)``."""
-    if len(token) == 1:
-        return _printable_key_to_vk(token)
-    upper = token.upper()
-    if upper in _NAMED_VK:
-        return _NAMED_VK[upper], False
-    f_key = _F_KEY_RE.match(upper)
-    if f_key:
-        return 0x6F + int(f_key.group(1)), False
-    return None
+def press_lock_key(vk: int) -> bool:
+    """Synthesise one press of the lock key with virtual key *vk*.
+
+    A press is a key-down plus a key-up. Callers that only want a *change* should read first
+    and call this only when the state is wrong — see :func:`set_lock_key`.
+
+    Synthetic input triggers registered hotkeys like any other, so the caller must expect the
+    ``WM_HOTKEY`` for its own chord to come back. That is the caller's echo to ignore.
+
+    Returns whether the press was synthesised — not the resulting state, which for a pressed
+    key is the *opposite* of what was wanted and would read as failure to a caller holding
+    "did that work?" as a boolean.
+    """
+    if not vk or sys.platform != "win32":
+        return False
+    user32 = _user32()
+    if user32 is None:
+        return False
+    KEYEVENTF_EXTENDEDKEY = 0x0001
+    KEYEVENTF_KEYUP = 0x0002
+    try:
+        press = user32.keybd_event
+        press.argtypes = [ctypes.c_byte, ctypes.c_byte, ctypes.c_uint, ctypes.c_void_p]
+        press.restype = None
+        press(vk, 0, KEYEVENTF_EXTENDEDKEY, None)
+        press(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, None)
+    except Exception as exc:
+        log.warning("keybd_event(%s) failed: %s", vk, exc)
+        return False
+    return True
+
+
+def set_lock_key(vk: int, on: bool) -> bool:
+    """Drive the lock key with virtual key *vk* to *on*, synthesising a press only if needed.
+
+    The read-first is what keeps this from being a *toggle*: synthesising a press on a key that
+    is already in the wanted state would flip it, which for Scroll Lock means the LED and the
+    feature end up in opposite states — and the resulting ``WM_HOTKEY`` would then flip the
+    feature straight back, so the two would ping-pong forever.
+    """
+    if not vk or sys.platform != "win32":
+        return False
+    if lock_key_is_on(vk) == bool(on):
+        return True
+    return press_lock_key(vk)
+
+
+def lock_key_state(sequence: str) -> Optional[bool]:
+    """The current on/off state of the lock key *sequence*, or ``None`` if it is not one."""
+    vk = lock_key_vk(sequence)
+    return None if vk is None else lock_key_is_on(vk)
+
+
+def canonical_lock_key(sequence) -> Optional[str]:
+    """The canonical spelling of a lock-key *sequence*, however it was written.
+
+    One answer to "which key is this", shared by the config, the Preferences drop-down and
+    the tray labels so the same key is not stored one way and shown another.
+    """
+    vk = lock_key_vk(sequence)
+    return {VK_SCROLLLOCK: "ScrollLock", VK_NUMLOCK: "NumLock"}.get(vk) if vk else None
 
 
 def parse_hotkey(sequence: str) -> Optional[tuple[int, int]]:
     """Translate a stored key sequence into Win32 ``(fsModifiers, vkCode)``.
 
-    Returns ``None`` when *sequence* is blank, carries an unknown key or modifier, needs more
-    than one chord, or is unsafe to claim globally (see ``_REQUIRED_MODIFIERS``).
+    *Only* a lock key resolves. The capture hotkeys deliberately stopped being ordinary
+    chords: a chord has one meaning regardless of anything else, while a lock key carries
+    state the app can read, and it is that state the capture settings follow. A chord would
+    imply a toggle, which is what these are not.
+
+    Returns ``None`` for anything else, including every ordinary chord.
     """
-    text = (sequence or "").strip()
-    if not text:
+    vk = lock_key_vk(sequence)
+    if vk is None:
         return None
-    # A multi-step sequence ("Ctrl+K, Ctrl+B") has no single Win32 chord equivalent.
-    if "," in text:
-        return None
-
-    matched = _SEQUENCE_RE.match(text)
-    if matched is None:
-        # No modifier prefix at all: the whole string is a bare key, which is never global.
-        return None
-    fs_modifiers = 0
-    for name in matched.group("mods").split("+"):
-        if not name:
-            continue
-        modifier = _MODIFIER_NAMES.get(name.lower())
-        if modifier is None:
-            return None
-        fs_modifiers |= modifier
-    if not any(fs_modifiers & required for required in _REQUIRED_MODIFIERS):
-        return None
-
-    resolved = _key_token_to_vk(matched.group("key"))
-    if resolved is None:
-        return None
-    vk, needs_shift = resolved
-    if needs_shift:
-        fs_modifiers |= MOD_SHIFT
-    return fs_modifiers, vk
+    return 0, vk
 
 
 def describe_modifiers(fs_modifiers: int) -> str:
@@ -225,23 +245,32 @@ class _NativeHotkeyFilter(QAbstractNativeEventFilter):
 
     def nativeEventFilter(self, event_type, message):
         try:
-            msg = ctypes.cast(int(message), ctypes.POINTER(ctypes.wintypes.MSG)).contents
+            # `_MSG` rather than `ctypes.wintypes.MSG`: see the struct's docstring. The
+            # module-level type keeps this working in the app, where `ctypes.wintypes` may
+            # never have been imported.
+            msg = ctypes.cast(int(message), ctypes.POINTER(_MSG)).contents
         except Exception as exc:
             log.debug("Could not decode native message: %s", exc)
             return False, 0
-        if msg.message == WM_HOTKEY and int(msg.wParam) == HOTKEY_ID:
+        if msg.message == WM_HOTKEY and int(msg.wParam) == self._owner._hotkey_id:
             self._owner._on_hotkey()
             return True, 0
         return False, 0
 
 
 class HotkeyRegistration(QObject):
-    """Owns at most one system-wide hotkey for the lifetime of this object."""
+    """Owns at most one system-wide hotkey for the lifetime of this object.
+
+    *hotkey_id* is the process-private number registered alongside the chord; ``RegisterHotKey``
+    echoes it back in ``WM_HOTKEY``, so two bindings need two ids. It defaults to
+    :data:`HOTKEY_ID` because the first binding in the app predates the second.
+    """
 
     triggered = Signal()
 
-    def __init__(self, parent: Optional[QObject] = None):
+    def __init__(self, hotkey_id: int = HOTKEY_ID, parent: Optional[QObject] = None):
         super().__init__(parent)
+        self._hotkey_id = int(hotkey_id)
         self._sequence: str = ""
         self._registered: bool = False
         self._last_error: str = ""
@@ -289,9 +318,9 @@ class HotkeyRegistration(QObject):
         parsed = parse_hotkey(text)
         if parsed is None:
             self._last_error = (
-                f"'{text}' cannot be used as a global hotkey. "
-                "Use a single key combination including Ctrl, Alt or Win "
-                "(for example Ctrl+Alt+D)."
+                f"'{text}' cannot be used as a capture hotkey. "
+                "Use Scroll Lock or Num Lock: the capture follows the key's own "
+                "on / off state, so a chord cannot do it."
             )
             return False, self._last_error
         fs_modifiers, vk = parsed
@@ -308,7 +337,7 @@ class HotkeyRegistration(QObject):
             fn = user32.RegisterHotKey
             fn.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
             fn.restype = ctypes.c_bool
-            ok = bool(fn(None, HOTKEY_ID, fs_modifiers, vk))
+            ok = bool(fn(None, self._hotkey_id, fs_modifiers, vk))
             error_code = ctypes.get_last_error()
         except Exception as exc:
             log.warning("RegisterHotKey failed: %s", exc)
@@ -347,8 +376,8 @@ class HotkeyRegistration(QObject):
                 fn = user32.UnregisterHotKey
                 fn.argtypes = [ctypes.c_void_p, ctypes.c_int]
                 fn.restype = ctypes.c_bool
-                if not fn(None, HOTKEY_ID):
-                    log.warning("UnregisterHotKey(%d) returned false", HOTKEY_ID)
+                if not fn(None, self._hotkey_id):
+                    log.warning("UnregisterHotKey(%d) returned false", self._hotkey_id)
             except Exception as exc:
                 log.warning("UnregisterHotKey failed: %s", exc)
 
@@ -376,3 +405,159 @@ class HotkeyRegistration(QObject):
     def _on_hotkey(self) -> None:
         log.debug("Global hotkey %s pressed", self._sequence)
         self.triggered.emit()
+
+
+class HotkeyManager(QObject):
+    """The app's system-wide hotkeys: one binding per purpose, told apart by id.
+
+    Each binding is its own :class:`HotkeyRegistration` — and therefore its own native event
+    filter and its own process-private id — because ``RegisterHotKey`` takes an id per
+    registration and hands that same id back in the ``WM_HOTKEY`` message. Two bindings is
+    two ids, not one id shared two ways.
+
+    ``triggered`` carries the binding's *name* rather than being a bare signal, so a handler
+    can tell "the browser-capture key was pressed" from "the clipboard key was pressed"
+    without asking the config which sequence belongs to which toggle. `register` is the only
+    way in: a binding is registered with the sequence the user stored, and disabled by
+    unregistering, which is the same policy the single-binding path always had.
+
+    **The same chord may be bound to more than one purpose.** Win32 refuses a second
+    ``RegisterHotKey`` of an identical ``fsModifiers``/``vk`` pair for the calling thread with
+    ``ERROR_HOTKEY_ALREADY_REGISTERED`` — so a user who assigns Scroll Lock to both captures
+    used to get one working binding and one silent failure that blamed another application
+    for owning the key. A shared chord is now registered once and dispatched to *every*
+    purpose bound to it, which is the only reading of that setting that is not a lie.
+    """
+
+    triggered = Signal(str)
+
+    def __init__(self, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._registrations: dict[str, HotkeyRegistration] = {
+            key: HotkeyRegistration(hotkey_id, self) for key, hotkey_id in _BINDING_IDS.items()
+        }
+        # (fsModifiers, vk) -> the binding names that asked for it. The first one owns the
+        # Win32 registration; the rest are routed through it on each press.
+        self._chords: dict[tuple[int, int], set[str]] = {}
+        for key, registration in self._registrations.items():
+            # `key` is captured by name, not by the loop variable: the late-binding closure
+            # would otherwise make every binding report the last one.
+            registration.triggered.connect(
+                lambda key=key: self._on_binding_triggered(key)
+            )
+
+    def _on_binding_triggered(self, owner: str) -> None:
+        """Re-emit the press once per purpose bound to *owner*'s chord."""
+        chord = self._chord_of(owner)
+        if chord is None:
+            self.triggered.emit(owner)
+            return
+        for key in sorted(self._chords[chord]):
+            self.triggered.emit(key)
+
+    def _chord_of(self, key: str) -> Optional[tuple[int, int]]:
+        for chord, keys in self._chords.items():
+            if key in keys:
+                return chord
+        return None
+
+    def registration(self, key: str) -> HotkeyRegistration:
+        """The :class:`HotkeyRegistration` owning binding *key*.
+
+        Raises ``KeyError`` for an unknown binding: silently returning the wrong one would
+        let a caller unregister a hotkey the user never touched.
+        """
+        if key not in self._registrations:
+            raise KeyError(f"unknown hotkey binding: {key!r}")
+        return self._registrations[key]
+
+    def register(self, key: str, sequence: str) -> tuple[bool, str]:
+        """Bind *key* to *sequence* system-wide. See :meth:`HotkeyRegistration.register`.
+
+        An identical chord already held by another binding is **shared**, not a conflict: only
+        one Win32 registration exists for it and a press is emitted for every purpose bound
+        to it. The returned message still says so, because a silently shared key is how the
+        user ends up believing two keys are in play when there is one.
+        """
+        parsed = parse_hotkey(sequence)
+        if parsed is None:
+            return self.registration(key).register(sequence)
+        owner = self._owner_of(parsed)
+        if owner is not None and owner != key:
+            self._chords[parsed].add(key)
+            return True, (
+                f"'{sequence}' is also the capture key for another capture, "
+                "so it drives both."
+            )
+        if owner == key:
+            # Already holding this very chord, so registering again is a no-op Win32.
+            return True, ""
+        ok, message = self.registration(key).register(sequence)
+        if ok:
+            self._chords.setdefault(parsed, set()).add(key)
+        return ok, message
+
+    def _owner_of(self, chord: tuple[int, int]) -> Optional[str]:
+        """Which binding holds the live Win32 registration for *chord*, if any.
+
+        Only a registration that is actually registered counts. A sharer is in ``_chords``
+        while owning nothing, so treating it as the owner made the hand-off path believe the
+        chord was already claimed and skip the registration it was supposed to make.
+        """
+        for key in sorted(self._chords.get(chord, ())):
+            if self.registration(key).is_registered:
+                return key
+        return None
+
+    def unregister(self, key: str) -> None:
+        registration = self.registration(key)
+        chord = self._chord_of(key)
+        if chord is None:
+            registration.unregister()
+            return
+        self._chords[chord].discard(key)
+        remaining = self._chords[chord]
+        if not remaining:
+            # This key was the last one asking for the chord.
+            del self._chords[chord]
+            registration.unregister()
+            return
+        if registration.is_registered:
+            # Others still want this chord, so hand the registration to one of them rather
+            # than taking the key away entirely: the sharer keeps working. Read the chord
+            # back *before* unregistering, which clears the registration's copy of it.
+            sequence = registration.sequence
+            registration.unregister()
+            heir = sorted(remaining)[0]
+            _ok, _message = self.registration(heir).register(sequence)
+
+    def unregister_all(self) -> None:
+        """Release every binding. Safe to call when nothing is registered."""
+        for registration in self._registrations.values():
+            registration.unregister()
+        self._chords.clear()
+
+    @property
+    def is_any_registered(self) -> bool:
+        return any(item.is_registered for item in self._registrations.values())
+
+    def is_binding_registered(self, key: str) -> bool:
+        """Is *key* live system-wide? True for a shared chord's owner **and** its sharers.
+
+        ``HotkeyRegistration.is_registered`` answers a narrower question — "does this object
+        own the Win32 registration?" — which is False for a sharer by design. Reading that
+        here would report a configured, working hotkey as unregistered.
+        """
+        registration = self.registration(key)
+        chord = self._chord_of(key)
+        if chord is None:
+            return registration.is_registered
+        owner = self._owner_of(chord)
+        return owner is not None and self.registration(owner).is_registered
+
+    def bindings_for(self, sequence: str) -> set[str]:
+        """The binding names that resolve *sequence* to, shared chord included."""
+        parsed = parse_hotkey(sequence)
+        if parsed is None:
+            return set()
+        return set(self._chords.get(parsed, ()))

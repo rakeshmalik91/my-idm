@@ -43,7 +43,7 @@ The real blockers are narrower and sharper than "several subsystems use Win32 AP
 | 3 | **Close-to-tray** | Tray always present | Hid the window with no tray icon — **fixed** (§2.3) | High | ✅ Done |
 | 4 | **Dependencies** | `pip install -r requirements.txt` works | `win10toast` install failure — **fixed** (§2.4) | High | ✅ Done |
 | 5 | **Notifications** | `win10toast` + tray | `notify-send` / `osascript` chain behind the tray | Low | ✅ Done |
-| 6 | **Global hotkeys** | `user32.RegisterHotKey` + `WM_HOTKEY` | Refuses with *"only available on Windows"* (`hotkey.py:276`) | Med | High |
+| 6 | **Global hotkeys** | `user32.RegisterHotKey` + `WM_HOTKEY` | Refuses with *"only available on Windows"* (`hotkey.py:320`) | Med | High |
 | 7 | **Data paths** | `my_idm/paths.py` | Same module: XDG / App Support, legacy `~/.my-idm` preserved | — | ✅ Done |
 | 8 | **Antivirus** | Fail-open: no scanner = *clean*; plus a shell-injection in the custom scanner | Both fixed; verdict is tri-state, scanner takes argv, ClamAV auto-detected | — | ✅ Done |
 | 9 | **Embedded browser** | Chrome HWND reparented into a tab | Now stated as Windows-only where the user sees it | — | ✅ Done |
@@ -336,10 +336,11 @@ its folder. `QDesktopServices` already works everywhere.
 
 ### 4.2 Global hotkeys
 
-**Today.** `hotkey.py:276` refuses registration off Windows with a clear message, which is the
-right failure mode. The parsing layer is Win32-specific in two places that a backend swap alone
-will not fix: `VkKeyScanW` layout probing (`hotkey.py:139`) and the Win32 virtual-key table
-(`hotkey.py:74`), neither of which has a POSIX equivalent.
+**Today.** `hotkey.py:262` refuses registration off Windows with a clear message, which is the
+right failure mode. The lock-key layer is Win32-specific in two places that a backend swap alone
+will not fix: `GetKeyState` (`hotkey.py:100`) reads a Windows toggle bit that has no portable
+equivalent, and `keybd_event` (`hotkey.py:122`) is the only portable way to move that light.
+`lock_key_state` and `set_lock_key` both need per-platform answers, not shared ones.
 
 **Target.** Split into `platform/hotkey.py` with a `HotkeyBackend` protocol exposing
 `register(sequence) -> (ok, message)`, `unregister()`, and a `capabilities` flag surfaced to the
@@ -361,9 +362,12 @@ workaround; they are a sandbox, not a packaging format. Design the backend to re
 hotkeys unavailable — no registered desktop entry" and fall back to a local `QShortcut` rather
 than failing the feature.
 
-`parse_hotkey` (`hotkey.py:168`) also needs the layout probe and key table made backend-relative,
-and `Meta`/`Win`/`Super` (`hotkey.py:45`) need mapping to `Super_L`/`Meta_L` keycodes on X11 and
-`Command` on macOS.
+`parse_hotkey` (`hotkey.py:167`) is now a two-line lock-key lookup, which is deliberately portable
+in shape but not in meaning: Scroll Lock and Num Lock exist as virtual keys on every platform, yet
+"which key is safe to claim, and can the app read its light?" is a per-platform answer. On X11 the
+global grab goes through `XGrabKey`, and the LED state through the XKB indicator maps; on macOS
+through `CGEventTap` without any public API for the LED at all, which is the part that would have
+to be substituted rather than ported.
 
 ### 4.3 Notifications — **Done**
 

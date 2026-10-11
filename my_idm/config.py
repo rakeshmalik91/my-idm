@@ -23,6 +23,25 @@ DEFAULT_YTDLP_PLAYLIST_LIMIT = 10
 MIN_YTDLP_PLAYLIST_LIMIT = 1
 MAX_YTDLP_PLAYLIST_LIMIT = 500
 
+# Default global hotkeys for the two capture toggles. Both are the Scroll Lock key, and that is
+# the point: a lock key is the one kind of key no application types with, so the hotkey layer is
+# willing to claim it system-wide with no Ctrl/Alt/Win prefix at all.
+DEFAULT_CAPTURE_HOTKEY = "ScrollLock"
+DEFAULT_CLIPBOARD_HOTKEY = "ScrollLock"
+
+
+def coerce_capture_key(value) -> str:
+    """Snap a stored capture key onto one of the two that mean anything.
+
+    Only Scroll Lock and Num Lock can drive a capture, so a value from any other source - an
+    older build that accepted chords, a hand-edited settings file - is coerced rather than
+    refused: refusing would leave the capture bound to a key the hotkey layer never registers,
+    which looks identical to a hotkey that stopped working.
+    """
+    from my_idm.hotkey import DEFAULT_LOCK_KEY, canonical_lock_key
+
+    return canonical_lock_key(value) or DEFAULT_LOCK_KEY
+
 DEFAULT_CLIPBOARD_MIN_FILE_SIZE_KB = 1024
 DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS = [
     ".txt", ".htm", ".html", ".jpg", ".jpeg", ".png", ".gif", ".webp"
@@ -150,8 +169,13 @@ class GeneralConfig:
     )
     # A global hotkey claims a chord system-wide, so it is also opt-in and needs a real
     # modifier: a bare key would swallow that key in every other application on the desktop.
+    # (Scroll Lock and Num Lock are the two exceptions - lock keys nothing types with.)
     capture_hotkey_enabled: bool = False
-    capture_hotkey_sequence: str = "Ctrl+Alt+D"
+    capture_hotkey_sequence: str = DEFAULT_CAPTURE_HOTKEY
+    # A separate binding for the clipboard monitor, so the two captures can be silenced
+    # independently: one is about what the browser sends, the other about what you copy.
+    clipboard_hotkey_enabled: bool = False
+    clipboard_hotkey_sequence: str = DEFAULT_CLIPBOARD_HOTKEY
 
     def get_retry_delay(self, attempt: int) -> float:
         """Calculate retry delay in seconds for a given attempt index (0-indexed)."""
@@ -246,6 +270,8 @@ class GeneralConfig:
             "clipboard_ignored_extensions": list(self.clipboard_ignored_extensions),
             "capture_hotkey_enabled": self.capture_hotkey_enabled,
             "capture_hotkey_sequence": self.capture_hotkey_sequence,
+            "clipboard_hotkey_enabled": self.clipboard_hotkey_enabled,
+            "clipboard_hotkey_sequence": self.clipboard_hotkey_sequence,
         }
 
     @classmethod
@@ -297,9 +323,13 @@ class GeneralConfig:
                 data.get("clipboard_ignored_extensions", DEFAULT_CLIPBOARD_IGNORED_EXTENSIONS)
             ),
             capture_hotkey_enabled=bool(data.get("capture_hotkey_enabled", False)),
-            capture_hotkey_sequence=str(
-                data.get("capture_hotkey_sequence", "Ctrl+Alt+D")
-            ) or "Ctrl+Alt+D",
+            capture_hotkey_sequence=coerce_capture_key(
+                data.get("capture_hotkey_sequence", DEFAULT_CAPTURE_HOTKEY)
+            ),
+            clipboard_hotkey_enabled=bool(data.get("clipboard_hotkey_enabled", False)),
+            clipboard_hotkey_sequence=coerce_capture_key(
+                data.get("clipboard_hotkey_sequence", DEFAULT_CLIPBOARD_HOTKEY)
+            ) or DEFAULT_CLIPBOARD_HOTKEY,
         )
 
     def save(self, settings: Optional[QSettings] = None):
@@ -338,6 +368,8 @@ class GeneralConfig:
         settings.setValue("clipboard_ignored_extensions", self.clipboard_ignored_extensions)
         settings.setValue("capture_hotkey_enabled", self.capture_hotkey_enabled)
         settings.setValue("capture_hotkey_sequence", self.capture_hotkey_sequence)
+        settings.setValue("clipboard_hotkey_enabled", self.clipboard_hotkey_enabled)
+        settings.setValue("clipboard_hotkey_sequence", self.clipboard_hotkey_sequence)
         settings.endGroup()
 
     @classmethod
@@ -397,8 +429,14 @@ class GeneralConfig:
         capture_hotkey_enabled = settings.value(
             "capture_hotkey_enabled", False, type=bool
         )
-        capture_hotkey_sequence = settings.value(
-            "capture_hotkey_sequence", "Ctrl+Alt+D", type=str
+        capture_hotkey_sequence = coerce_capture_key(
+            settings.value("capture_hotkey_sequence", DEFAULT_CAPTURE_HOTKEY, type=str)
+        )
+        clipboard_hotkey_enabled = settings.value(
+            "clipboard_hotkey_enabled", False, type=bool
+        )
+        clipboard_hotkey_sequence = coerce_capture_key(
+            settings.value("clipboard_hotkey_sequence", DEFAULT_CLIPBOARD_HOTKEY, type=str)
         )
         settings.endGroup()
 
@@ -433,7 +471,11 @@ class GeneralConfig:
             clipboard_min_file_size_kb=int(clipboard_min_file_size_kb),
             clipboard_ignored_extensions=list(clipboard_ignored_extensions),
             capture_hotkey_enabled=bool(capture_hotkey_enabled),
-            capture_hotkey_sequence=str(capture_hotkey_sequence or "Ctrl+Alt+D"),
+            capture_hotkey_sequence=str(capture_hotkey_sequence or DEFAULT_CAPTURE_HOTKEY),
+            clipboard_hotkey_enabled=bool(clipboard_hotkey_enabled),
+            clipboard_hotkey_sequence=str(
+                clipboard_hotkey_sequence or DEFAULT_CLIPBOARD_HOTKEY
+            ),
         )
 
 

@@ -36,8 +36,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QKeySequenceEdit,
-    QLabel,
-    QLineEdit,
+    QLabel,    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -72,6 +71,8 @@ from my_idm.config import (
     clamp_ytdlp_playlist_limit,
     is_tor_reachable,
     DEFAULT_DOWNLOADS_DIR,
+    DEFAULT_CAPTURE_HOTKEY,
+    DEFAULT_CLIPBOARD_HOTKEY,
     DEFAULT_MAX_RETRIES,
     DEFAULT_RETRY_DELAY,
     DEFAULT_RETRY_BACKOFF_FACTOR,
@@ -82,6 +83,7 @@ from my_idm.config import (
 )
 from my_idm.database import Database, APP_DIR, DEFAULT_QUEUE_COLOR, normalize_queue_color
 from my_idm.download_model import Col, _format_speed
+from my_idm.hotkey import LOCK_KEYS, LOCK_KEY_LABELS
 from my_idm.dialogs import AddQueueDialog
 from my_idm.external_tools import (
     launch_animepahe_cli,
@@ -1079,6 +1081,7 @@ class SettingsDialog(QDialog):
         from my_idm.download_model import (
             SEGREGATED_MODES,
             SEGREGATED_MODE_LABELS,
+            TYPE_SECTION_TITLES,
         )
 
         tab = QWidget()
@@ -1125,8 +1128,8 @@ class SettingsDialog(QDialog):
             self._seg_mode_combo.addItem(SEGREGATED_MODE_LABELS[mode], mode)
         self._seg_mode_combo.setToolTip(
             "Status groups Active / Seeding / Inactive. Date groups Today / Yesterday / "
-            "Last 7 Days / Last 30 Days / Older. File Type groups Video / Audio / Archives "
-            "/ Documents / Photos / General. Name groups A-Z alphabetically."
+            "Last 7 Days / Last 30 Days / Older. File Type groups "
+            f"{' / '.join(TYPE_SECTION_TITLES)}. Name groups A-Z alphabetically."
         )
         seg_layout.addWidget(self._seg_mode_combo)
 
@@ -1712,42 +1715,69 @@ class SettingsDialog(QDialog):
 
         self._enable_system_tray_cb.toggled.connect(self._on_system_tray_toggled)
         layout.addWidget(tray_group)
-
-        # 3. Global Hotkey
-        hotkey_group = QGroupBox("Global Hotkey")
-        hotkey_layout = QVBoxLayout(hotkey_group)
-        hotkey_layout.setSpacing(10)
-
-        hotkey_row = QHBoxLayout()
-        self._capture_hotkey_cb = QCheckBox("Global hotkey toggles download capture")
-        self._capture_hotkey_cb.setToolTip(
-            "Bind a system-wide key combination that turns browser interception and clipboard "
-            "capture on and off, so capture can be silenced from any application."
-        )
-        hotkey_row.addWidget(self._capture_hotkey_cb)
-
-        self._capture_hotkey_edit = QKeySequenceEdit()
-        self._capture_hotkey_edit.setMaximumWidth(160)
-        self._capture_hotkey_edit.setToolTip(
-            "The key combination to claim system-wide. It must include Ctrl, Alt or Win — a "
-            "bare key would swallow that key in every other application."
-        )
-        hotkey_row.addStretch(1)
-        hotkey_row.addWidget(self._capture_hotkey_edit)
-        hotkey_layout.addLayout(hotkey_row)
-
-        self._capture_hotkey_status_lbl = QLabel("")
-        self._capture_hotkey_status_lbl.setWordWrap(True)
-        self._capture_hotkey_status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
-        hotkey_layout.addWidget(self._capture_hotkey_status_lbl)
-
-        self._capture_hotkey_cb.toggled.connect(self._on_capture_hotkey_toggled)
-        self._capture_hotkey_edit.editingFinished.connect(
-            self._on_capture_hotkey_edited
-        )
-        layout.addWidget(hotkey_group)
         layout.addStretch()
         return tab
+
+    def _add_capture_hotkey_row(
+        self, layout: QVBoxLayout, *, controls: str
+    ) -> tuple[QCheckBox, QComboBox, QLabel]:
+        """One "the capture key drives X" row, its key chooser, and its inline status label.
+
+        Both capture tabs need the identical control, and the *rules* have to be the same on
+        each, so this method is what stops the two tabs from drifting apart - the last time
+        there was one of these the rules lived next to the widget, which is exactly where they
+        could not be reached from.
+
+        The chooser is a **drop-down with two entries**, not a key-sequence editor. Not a
+        simplification of an earlier editor: a capture is driven by a *lock key*, whose LED
+        state the app reads and matches, so the only choices that mean anything are
+        Scroll Lock and Num Lock. A free-form chord would imply a toggle, which this is not,
+        and inventing one would break the illusion rather than extend it.
+        """
+        row = QHBoxLayout()
+        checkbox = QCheckBox(f"Use a key to control {controls}")
+        checkbox.setToolTip(
+            "Bind one of the two lock keys to this capture, so it can be changed from any "
+            "application with the keyboard.\n"
+            "Scroll Lock on means the capture is on; off means off — the key's own light "
+            "shows the state.\n"
+            "Off by default: a system-wide key is not something to bind behind your back."
+        )
+        row.addWidget(checkbox)
+
+        chooser = QComboBox()
+        chooser.setMaximumWidth(160)
+        for key in LOCK_KEYS:
+            chooser.addItem(LOCK_KEY_LABELS.get(key, key), key)
+        chooser.setToolTip(
+            "Scroll Lock is the default: it is the lock key nothing else on a desktop is "
+            "likely to be watching."
+        )
+        row.addStretch(1)
+        row.addWidget(chooser)
+        layout.addLayout(row)
+
+        status = QLabel("")
+        status.setWordWrap(True)
+        status.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        layout.addWidget(status)
+
+        # The row is bound by closure rather than by `self.sender()`: with two of these rows
+        # in one dialog, resolving "which chooser was toggled" from a signal sender is a
+        # lookup that silently picks the wrong one when a sender is missing.
+        rows = getattr(self, "_capture_hotkey_rows", None)
+        if rows is None:
+            rows = self._capture_hotkey_rows = []
+        rows.append((checkbox, chooser, status))
+        checkbox.toggled.connect(
+            lambda checked, chooser=chooser: self._on_capture_hotkey_toggled(chooser, checked)
+        )
+        # A change has to be reported on the row it came from, and the *other* row's advice
+        # about sharing this key is stale the moment this one moves.
+        chooser.currentIndexChanged.connect(
+            lambda _index, chooser=chooser: self._update_capture_hotkey_row(chooser)
+        )
+        return checkbox, chooser, status
 
     def _create_clipboard_tab(self) -> QWidget:
         tab = QWidget()
@@ -1814,6 +1844,16 @@ class SettingsDialog(QDialog):
         )
         ext_layout.addWidget(self._clipboard_ignored_exts_edit)
         clip_layout.addLayout(ext_layout)
+
+        hotkey_group = QGroupBox("Global Hotkey")
+        hotkey_layout = QVBoxLayout(hotkey_group)
+        hotkey_layout.setSpacing(10)
+        (
+            self._clipboard_hotkey_cb,
+            self._clipboard_hotkey_edit,
+            self._clipboard_hotkey_status_lbl,
+        ) = self._add_capture_hotkey_row(hotkey_layout, controls="clipboard capture")
+        layout.addWidget(hotkey_group)
 
         helper_lbl = QLabel(
             "💡 Each copied link is resolved with the server before it is added, and anything that is not a "
@@ -3711,6 +3751,19 @@ class SettingsDialog(QDialog):
         )
         server_layout.addWidget(self._browser_intercept_cb)
 
+        # Its own hotkey, bound to this same switch, so browser capture can be silenced from
+        # any application. It lives here rather than in the tray tab because the toggle it
+        # drives is the checkbox directly above it.
+        hotkey_group = QGroupBox("Global Hotkey")
+        hotkey_layout = QVBoxLayout(hotkey_group)
+        hotkey_layout.setSpacing(10)
+        (
+            self._capture_hotkey_cb,
+            self._capture_hotkey_edit,
+            self._capture_hotkey_status_lbl,
+        ) = self._add_capture_hotkey_row(hotkey_layout, controls="download capture")
+        server_layout.addWidget(hotkey_group)
+
         self._browser_intercept_torrent_cb = QCheckBox("Intercept .torrent files from browser")
         self._browser_intercept_torrent_cb.setToolTip("When enabled, .torrent file downloads are intercepted and added as torrents in My-IDM.")
         self._browser_intercept_torrent_cb.setChecked(self._browser_cfg.intercept_torrent_files)
@@ -4006,10 +4059,14 @@ class SettingsDialog(QDialog):
         self._close_to_tray_cb.setEnabled(self._general_cfg.enable_system_tray)
         self._start_minimized_cb.setEnabled(self._general_cfg.enable_system_tray)
         self._capture_hotkey_cb.setChecked(self._general_cfg.capture_hotkey_enabled)
-        self._capture_hotkey_edit.setKeySequence(
-            QKeySequence(self._general_cfg.capture_hotkey_sequence or "Ctrl+Alt+D")
+        self._capture_hotkey_edit.setCurrentIndex(
+            self._hotkey_key_index(
+                self._capture_hotkey_edit, self._general_cfg.capture_hotkey_sequence
+            )
         )
-        self._on_capture_hotkey_toggled(self._general_cfg.capture_hotkey_enabled)
+        self._on_capture_hotkey_toggled(
+            self._capture_hotkey_edit, self._general_cfg.capture_hotkey_enabled
+        )
         self._refresh_autostart_status()
 
         # Clipboard tab
@@ -4024,6 +4081,18 @@ class SettingsDialog(QDialog):
         )
         self._clipboard_ignored_exts_edit.setText(
             ", ".join(self._general_cfg.clipboard_ignored_extensions)
+        )
+        self._clipboard_hotkey_cb.setChecked(
+            self._general_cfg.clipboard_hotkey_enabled
+        )
+        self._clipboard_hotkey_edit.setCurrentIndex(
+            self._hotkey_key_index(
+                self._clipboard_hotkey_edit,
+                self._general_cfg.clipboard_hotkey_sequence,
+            )
+        )
+        self._on_capture_hotkey_toggled(
+            self._clipboard_hotkey_edit, self._general_cfg.clipboard_hotkey_enabled
         )
         self._on_clipboard_monitor_toggled(
             self._general_cfg.clipboard_monitor_enabled
@@ -4716,37 +4785,71 @@ class SettingsDialog(QDialog):
         """
         self._browser_skip_unknown_size_cb.setEnabled(value > 0)
 
-    def _on_capture_hotkey_toggled(self, checked: bool):
-        self._capture_hotkey_edit.setEnabled(checked)
+    def _on_capture_hotkey_toggled(self, chooser: QComboBox, checked: bool):
+        chooser.setEnabled(checked)
         if checked:
-            self._validate_capture_hotkey()
+            self._update_capture_hotkey_row(chooser)
 
-    def _on_capture_hotkey_edited(self):
-        self._validate_capture_hotkey()
+    def _on_capture_hotkey_edited(self, chooser: QComboBox):
+        self._update_capture_hotkey_row(chooser)
 
-    def _validate_capture_hotkey(self) -> bool:
-        """Report whether the chosen chord is usable, inline and without a modal dialog.
+    def _hotkey_key_index(self, chooser: QComboBox, sequence: str) -> int:
+        """The drop-down row for a stored *sequence*, falling back to the default.
 
-        Inline because this is a live-editable field, not a submit-and-wait one: a ``QMessageBox``
-        per keystroke would be hostile, and ``QKeySequenceEdit`` commits on every ``editingFinished``.
-        The validation itself is shared with the runtime registration path so the dialog cannot
-        accept a chord the hotkey layer will later refuse.
+        A stored value that is neither key can only come from a config written before the
+        choice was restricted to two keys; pointing the row at the default keeps the capture
+        bound to a key that works rather than silently leaving it on one nothing registers.
         """
-        from my_idm.hotkey import parse_hotkey
+        from my_idm.hotkey import DEFAULT_LOCK_KEY, canonical_lock_key
 
-        text = self._capture_hotkey_edit.keySequence().toString()
-        if parse_hotkey(text) is None:
-            self._capture_hotkey_status_lbl.setStyleSheet("color: #e06c75; font-size: 11px;")
-            self._capture_hotkey_status_lbl.setText(
-                f"'{text}' is not a usable global hotkey — it needs Ctrl, Alt or Win."
-                if text else "Pick a key combination."
+        wanted = canonical_lock_key(sequence) or DEFAULT_LOCK_KEY
+        for row in range(chooser.count()):
+            if chooser.itemData(row) == wanted:
+                return row
+        return 0
+
+    def _update_capture_hotkey_row(self, chooser: Optional[QComboBox] = None) -> bool:
+        """Explain what the chosen key will do, on the row the change came from.
+
+        There is nothing to *reject* now that only two keys can be chosen, so this is advice
+        rather than validation - which is the honest thing to do with a drop-down: telling the
+        user their selection is invalid, when the only alternative was not offered, is noise.
+        The one thing worth saying is the shared-key case.
+        """
+        chooser = chooser or self._capture_hotkey_edit
+        status_lbl = self._capture_hotkey_status_lbl_for(chooser)
+        data = chooser.currentData() if chooser is not None else None
+        label = LOCK_KEY_LABELS.get(data or "", data or "")
+
+        shared = False
+        for _checkbox, row_chooser, _status in getattr(self, "_capture_hotkey_rows", []):
+            if row_chooser is not chooser and row_chooser.currentData() == data:
+                shared = True
+                break
+
+        status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        if data is None:
+            status_lbl.setText("")
+        elif shared:
+            status_lbl.setText(
+                f"{label} is bound to the other capture too, so it drives both — the key's "
+                "light is the switch for each."
             )
-            return False
-        self._capture_hotkey_status_lbl.setStyleSheet("color: #a0a0a0; font-size: 11px;")
-        self._capture_hotkey_status_lbl.setText(
-            f"'{text}' will toggle download capture from any application."
-        )
+        else:
+            status_lbl.setText(
+                f"{label} on turns this capture on, off turns it off — the key's own light "
+                "shows the state, from any application."
+            )
         return True
+
+    def _capture_hotkey_status_lbl_for(self, chooser: QComboBox) -> QLabel:
+        """The status label belonging to *chooser*, so each row reports on itself."""
+        for _checkbox, row_chooser, status in getattr(self, "_capture_hotkey_rows", []):
+            if row_chooser is chooser:
+                return status
+        # A chooser built outside _add_capture_hotkey_row: fall back rather than raise, since
+        # this runs from a signal where an exception would break the activated connection.
+        return self._capture_hotkey_status_lbl
 
     def _on_retry_exp_toggled(self, checked: bool):
         self._retry_factor_lbl.setEnabled(checked)
@@ -4965,8 +5068,13 @@ class SettingsDialog(QDialog):
             self._clipboard_ignored_exts_edit.text()
         )
         self._general_cfg.capture_hotkey_enabled = self._capture_hotkey_cb.isChecked()
-        self._general_cfg.capture_hotkey_sequence = (
-            self._capture_hotkey_edit.keySequence().toString() or "Ctrl+Alt+D"
+        self._general_cfg.capture_hotkey_sequence = self._capture_hotkey_edit.currentData()
+        # The clipboard capture binding is stored next to the clipboard settings rather than
+        # with the browser one: the two captures are independent, and their fields living in
+        # one block would tie them together in anyone's head.
+        self._general_cfg.clipboard_hotkey_enabled = self._clipboard_hotkey_cb.isChecked()
+        self._general_cfg.clipboard_hotkey_sequence = (
+            self._clipboard_hotkey_edit.currentData()
         )
         self._general_cfg.metadata_fetch_timeout_days = self._metadata_timeout_spin.value()
         self._general_cfg.disk_space_check = self._disk_space_check_cb.isChecked()

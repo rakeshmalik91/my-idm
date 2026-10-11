@@ -4259,8 +4259,8 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         self.assertTrue(self.win._model.is_section_collapsed("active"))
 
 
-class TestViewToolbarAndGrouping(_MainWindowTestCase):
-    """Tests for View Toolbar toggle action, button, and Group by None button."""
+class TestViewControlStripAndGrouping(_MainWindowTestCase):
+    """Tests for the View Control Strip toggle action, its buttons, and the grouping modes."""
 
     def test_view_strip_visible_when_non_grouped(self):
         self.win._on_toggle_segregated_view(False)
@@ -4297,9 +4297,11 @@ class TestViewToolbarAndGrouping(_MainWindowTestCase):
         self.assertFalse(self.win._btn_expand_all.isEnabled())
         self.assertFalse(self.win._seg_control_strip.isHidden())
 
-    def test_view_toolbar_toggle_action_and_button(self):
+    def test_view_control_strip_toggle_action(self):
         self.assertTrue(hasattr(self.win, "_act_toggle_view_toolbar"))
-        self.assertEqual(self.win._act_toggle_view_toolbar.text(), "View Toolbar")
+        # The menu label names the strip itself, not the toolbar: it is the row of grouping
+        # controls under the toolbar, and calling it a toolbar made it unfindable.
+        self.assertEqual(self.win._act_toggle_view_toolbar.text(), "View Control Strip")
         self.assertTrue(self.win._act_toggle_view_toolbar.isChecked())
         self.assertFalse(self.win._seg_control_strip.isHidden())
 
@@ -4312,6 +4314,54 @@ class TestViewToolbarAndGrouping(_MainWindowTestCase):
         self.win._act_toggle_view_toolbar.setChecked(True)
         self.assertFalse(self.win._seg_control_strip.isHidden())
         self.assertTrue(self.db.get_ui_state("seg_strip_visible"))
+
+    def test_hiding_the_strip_survives_a_restart(self):
+        """The window-state blob used to override the stored answer with True.
+
+        It carried a ``seg_strip_visible`` field nothing ever wrote, so its restore path
+        fell back to True and re-showed the strip the moment the window was restored - which
+        is why hiding it never survived a restart. `isVisibleTo` is the assertion that counts
+        here: `isVisible()` is False for every child of a window this suite never shows.
+        """
+        self.win._act_toggle_view_toolbar.setChecked(False)
+        self.assertFalse(self.db.get_ui_state("seg_strip_visible"))
+        # The window-state blob has to exist for the restore path to reach the field the bug
+        # lived in: with no blob, `_restore_ui_state_from_db` takes the fresh-profile branch.
+        self.win._save_ui_state_to_db()
+
+        reopened = MainWindow(self.manager)
+        self.addCleanup(_destroy_window, reopened)
+        # A second launch is a fresh window, so it has its own action and strip.
+        self.assertFalse(reopened._act_toggle_view_toolbar.isChecked())
+        self.assertFalse(
+            reopened._seg_control_strip.isVisibleTo(reopened),
+            "the view control strip was re-shown from a state that says it should be hidden",
+        )
+
+    def test_clicking_a_strip_button_keeps_a_hidden_strip_hidden(self):
+        """The mode handlers read the stored state, so a hidden strip stays hidden.
+
+        Before the state had one reader, hiding was undone by the restore path and re-applied
+        by the first click - the strip appeared to vanish on any click.
+        """
+        self.win._act_toggle_view_toolbar.setChecked(False)
+        self.assertTrue(self.win._seg_control_strip.isHidden())
+
+        for mode in ("status", "date", "type", "name", "none"):
+            with self.subTest(mode=mode):
+                self.win._on_seg_mode_button_clicked(mode)
+                self.assertTrue(self.win._seg_control_strip.isHidden())
+
+        self.win._on_collapse_all_sections()
+        self.win._on_expand_all_sections()
+        self.assertTrue(self.win._seg_control_strip.isHidden())
+
+    def test_hiding_the_strip_keeps_the_menu_item_in_step(self):
+        self.win._act_toggle_view_toolbar.setChecked(False)
+        self.win._on_toggle_segregated_view(True)
+        self.assertFalse(self.win._act_toggle_view_toolbar.isChecked())
+        self.assertFalse(self.win._strip_visible())
+        self.assertTrue(self.win._seg_control_strip.isHidden())
 
     def test_view_toolbar_right_edge_button_icon_only(self):
         from PySide6.QtWidgets import QToolBar, QToolButton

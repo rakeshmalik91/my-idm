@@ -327,6 +327,22 @@ alone is 327 passed), or per small file group. Keep the per-file result lines so
 still auditable. `test_dialogs.py::test_settings_dialog_tabs_are_scrollable` also fails on a
 clean tree at `HEAD`, i.e. it is a real red test, not a flake.
 
+The crash point moves between runs: `torrent_engine.stop`, `test_main_window.py:271 setUp`,
+`test_details_panel.py:79 setUp` → `main_window.py:_setup_ui`, the settings/browser teardown,
+and `test_checksum.py:152` + a `_worker` thread computing a SHA-256 have all produced it.
+Anything in `MainWindow.__init__` is therefore suspect *only* when the same file passes on its
+own — if `pytest tests/test_main_window.py` alone is green and the crash is in `_setup_ui`, it is
+this flake and not a change to the constructor.
+
+The `test_checksum` variant is different: it reproduces **deterministically** when the run before
+it got heavier, and one measured cause is *number of `MainWindow`s constructed*. Every window
+costs a tray icon, QTimers and a clipboard thread, and the process has a budget — adding six
+`TestCaptureIntegration` tests aborted the whole basic tier in `test_checksum.py` three runs in a
+row, while the same command on a clean tree at `HEAD` passed. Consolidating into zero extra
+windows (asserting new behaviour inside the tests that already construct one) removed it.
+So: **prefer extending an existing case over adding one that needs a window**, and if a tier run
+aborts and the only difference is test count, cut the constructions before blaming anything else.
+
 ---
 
 ## 7. Test file conventions

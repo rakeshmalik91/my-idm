@@ -245,14 +245,24 @@ Rechecking verifies existing files:
      - **Last 7 Days**: Active or completed within the last 7 days.
      - **Last 30 Days**: Active or completed within the last 30 days.
      - **Older**: Older downloads or downloads without timestamps.
-   - **File Type Grouping**: Groups by what the file is rather than when it was added, into 6 collapsible sections:
-     - **Video**, **Audio**, **Archives**, **Documents**, **Photos**, and **General** for anything else.
-3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
-4. Right-click any section header to expand/collapse all sections, or switch between any of the three
-   grouping modes. This menu appears only once sections exist.
-5. The active segregation mode (`status`, `date` or `type`), enabled state, and individual collapsed
-   section states are persisted in SQLite and restored automatically on next launch.
-6. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
+    - **File Type Grouping**: Groups by what the file is rather than when it was added, into 7 collapsible
+      sections:
+      - **Video**, **Audio**, **Archives**, **Documents**, **Photos**, **Executables**, and
+        **General** for anything else.
+      - **Executables** holds programs and installers (`.exe`, `.msi`, `.apk`, `.deb`, `.rpm`,
+        `.appimage`, `.dmg`, `.pkg`, and friends) — kept out of Archives because an archive is inert
+        until unpacked while these are the files worth a look before they run.
+      - A download whose name carries no extension is filed by the files it actually contains when
+        they are overwhelmingly one kind: an installer folder full of `.exe` files lands in
+        **Executables**, a season folder in **Video**. A genuinely mixed folder stays in **General**.
+ 3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
+ 4. The **View Control Strip** — the row of grouping controls just under the toolbar — can be shown or
+    hidden with **View → View Control Strip**, and the choice is remembered for the next launch.
+ 5. Right-click any section header to expand/collapse all sections, or switch between any of the three
+    grouping modes. This menu appears only once sections exist.
+ 6. The active segregation mode (`status`, `date` or `type`), enabled state, and individual collapsed
+    section states are persisted in SQLite and restored automatically on next launch.
+ 7. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
 
 ### Context Menu
 
@@ -342,6 +352,12 @@ My-IDM integrates natively with the **Windows System Tray** (notification area) 
   - **🪟 Show My-IDM / Hide My-IDM**: Toggle window visibility.
   - **⏸️ Pause All Downloads**: Instantly pause all ongoing, queued, and stalled transfers.
   - **▶️ Resume All Downloads**: Resume all paused and stopped transfers.
+   - **🎯 Download Capture** / **📋 Clipboard Capture**: The two capture switches, each showing
+     its bound key beside the label — so you never have to open Preferences to find out
+     which key controls which capture. A key marked `⚠` is configured but could not be claimed
+     (another application is holding it), and it will not respond until it is changed.
+     Flipping either row also moves that key's light, so the light always states the capture,
+     and a Windows notification confirms which capture moved.
   - **⚙️ Preferences…**: Quick shortcut directly to Settings.
   - **ℹ️ About My-IDM**: Version, feature summary, and AI co-author credits.
   - **🔄 Restart My-IDM**: Restarts the application in place.
@@ -404,10 +420,17 @@ The settings dialog is organized into ten dedicated tabs:
   - **Automatically resume incomplete downloads when application starts**: Resumes interrupted transfers on launch.
   - **Show desktop / status notification when a download completes**: System toast notification on transfer completion.
 
-### 3. Hotkey & Clipboard Tab
+### 3. Clipboard Capture Tab
 
-- **Global Intercept Hotkey**: Configure the system-wide shortcut (default `Ctrl+Shift+D`) to capture clipboard URLs from any application.
 - **Clipboard Monitoring**: Automatically inspect the system clipboard for URLs, magnet links, or `.torrent` file paths.
+- **Global hotkey controls clipboard capture**: Bind one of the two lock keys — **Scroll Lock** or
+  **Num Lock** — to clipboard capture, so it can be changed from any application with the keyboard.
+  The key's own light is the switch: **Scroll Lock on means capture on, off means off**. Turning the
+  capture on or off from the tray or Preferences moves the key's light with it, so the light never
+  lies about the state. Each switch raises a Windows notification naming the capture and the key —
+  which is the only feedback there is when the key is pressed with the window closed.
+- **Maximum URLs per copy / Minimum file size to capture**: Ceiling on one copy event, and the smallest file worth adding (`0` = capture everything).
+- **File extensions to ignore**: Never capture links to these, matched against both the link and the filename the server reports.
 - **Resolve-Before-Capture Probe**: Automatically performs a lightweight probe on copied links to verify they point to real downloadable files rather than capturing HTML web pages.
 
 ### 4. Table Views & Appearance Tab
@@ -442,7 +465,12 @@ The settings dialog is organized into ten dedicated tabs:
   - **📦 Package Firefox Add-on (.xpi)**: Generates `my-idm-firefox.xpi`.
   - **🦊 Permanent Firefox Guide**: Interactive modal guide for developer and signed Firefox editions.
 - **Interception Filters**:
-  - **Automatically intercept downloads**.
+  - **Take downloads from the browser**: the master switch — when off, My-IDM declines every capture, automatic and right-click alike.
+  - **Global hotkey controls download capture**: One key that switches **Take downloads from the
+    browser** on and off from any application — the same switch as the tray's **🎯 Download Capture**
+    row. Only **Scroll Lock** and **Num Lock** can be chosen, and the key's light is the switch:
+    the key on means capture on. Each capture has its own key, and the tray shows both, so a single
+    key can drive both captures if that is what you want.
   - **Intercept .torrent files and magnet links**.
   - **Minimum file size to intercept (KB)** (0 = no limit; smaller files stay in browser).
   - **Bypassed File Extensions**: Comma-separated list of extensions to ignore (e.g. `.crx, .pdf`).

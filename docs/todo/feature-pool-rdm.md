@@ -149,12 +149,14 @@ Was recorded here as MISSING. That verdict was **stale**: the feature shipped, a
 exact shape this entry proposed to build — a `category_for_filename()` helper plus a
 segregation mode, mirroring `get_entry_date_category()`. Re-checked 2026-10-01 and 2026-10-07.
 
-- `TYPE_CATEGORY_EXTENSIONS` (`download_model.py:294-333`) maps ~95 lower-case extensions into
-  six buckets. `get_entry_type_category()` (`:447`) reads `filename`, falls back to the
-  leaf of `file_path` so a torrent whose *root folder* carries the extension still classifies,
-  honours a per-entry `metadata["type_category"]` override, and — when no name recognises an
+- `TYPE_CATEGORY_EXTENSIONS` (`download_model.py:295-345`) maps 96 lower-case extensions into
+  seven buckets, the newest being **Executables** (2026-10-11: programs and installers, kept out
+  of Archives because the two behave differently for the user). `get_entry_type_category()`
+  (`:466`) reads `filename`, falls back to the leaf of `file_path` so a torrent whose *root
+  folder* carries the extension still classifies, honours a per-entry
+  `metadata["type_category"]` override, and — when no name recognises an
   extension — files a multi-file torrent by its payload (see the residual note below).
-- `"type"` is one of the four segregation modes (`SEGREGATED_MODES`, `:346`), so it is
+- `"type"` is one of the four segregation modes (`SEGREGATED_MODES`, `:365`), so it is
   reachable from **View → Segregated View** and **Preferences → Views**, and composes with the
   header filter chips. Covered by `tests/test_views_tab.py`.
 
@@ -169,9 +171,10 @@ Residual, none of which is "implement the feature":
   list lives inside `metadata_json["files"]`, so one torrent lands in exactly one section and the
   Files tab still needs its own table. What *is* closed as of 2026-10-11 is the half that
   mattered in the table: `type` mode now files a torrent folder that carries no extension by its
-  payload — one category holding more than `TYPE_CATEGORY_PAYLOAD_SHARE` (`:391`, 95%) of the
-  bytes wins, so a season folder lands in Video, a discography in Audio and a camera roll in
-  Photos instead of all three falling into General. Anything below that share stays mixed, i.e.
+  payload — one category holding more than `TYPE_CATEGORY_PAYLOAD_SHARE` (`:410`, 95%) of the
+  bytes wins, so a season folder lands in Video, a discography in Audio, a camera roll in
+  Photos and an installer suite in Executables instead of all four falling into General.
+  Anything below that share stays mixed, i.e.
   General. A `files` table would still be needed for per-file sectioning, not for this.
 - **The `type_category` override has no UI writer** — only the read and the tests. A
   mis-detected item can be filed by hand only through `metadata_json`.
@@ -462,12 +465,12 @@ Found while auditing, and worth fixing in our own docs:
   | `_process_queue()` | `manager.py:1787-1827` | `manager.py:2115-2175` |
   | `_retry_timer` / `_process_retry_queue` | `manager.py:410-412` | `manager.py:497` (`_retry_timer`), `:3785` (`_process_retry_queue`) |
   | `move_queue_up` / `move_queue_down` | `manager.py:2608-2638` | `manager.py:3005-3023` |
-  | `get_entry_date_category()` | `download_model.py:417` | `download_model.py:516` |
-  | `get_entry_type_category()` | `download_model.py:353-385` | `download_model.py:447-484` |
-  | `TYPE_CATEGORY_EXTENSIONS` | `download_model.py:272-311` | `download_model.py:294-333` |
+  | `get_entry_date_category()` | `download_model.py:417` | `download_model.py:535-559` |
+  | `get_entry_type_category()` | `download_model.py:353-385` | `download_model.py:466-513` |
+  | `TYPE_CATEGORY_EXTENSIONS` | `download_model.py:272-311` | `download_model.py:295-345` |
   | `TYPE_FILTER_LABELS` (engine) | `download_model.py:197-200` | `download_model.py:214` |
-  | `category_for_name()` / `_payload_type_category()` | — | `download_model.py:374` / `:394-444` (new 2026-10-11, folder payload rule) |
-  | `TYPE_CATEGORY_PAYLOAD_SHARE` | — | `download_model.py:391` (new 2026-10-11) |
+  | `category_for_name()` / `_payload_type_category()` | — | `download_model.py:393` / `:413-465` (new 2026-10-11, folder payload rule) |
+  | `TYPE_CATEGORY_PAYLOAD_SHARE` | — | `download_model.py:410` (new 2026-10-11) |
   | Bandwidth allocation fraction table | `http_engine.py:80-86` | `utils.py:163-167` (`BANDWIDTH_ALLOCATION_FRACTIONS`), resolved in `utils.effective_rate_limit` (`:170-194`) |
   | Chunk pacers (4 sites) | `http_engine.py:868`, `:983`, `:1122`, `:1267` | `http_engine.py:961`, `:1090`, `:1232`, `:1377` |
   | HTTP segment probe & `Accept-Ranges` | `http_engine.py:686-741`, `:707` | `http_engine.py:764-825` (`Accept-Ranges` at `:787`, `:807`, `:820`) |
