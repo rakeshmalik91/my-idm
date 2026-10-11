@@ -42,6 +42,12 @@ HAS_LIBTORRENT = _HAS_LIBTORRENT
 
 FASTRESUME_DIR = fastresume_dir()
 
+#: How long ``set_torrent_file_priority`` waits for libtorrent to confirm a
+#: file priority change. libtorrent applies it on a worker thread a few
+#: milliseconds later; the wait is bounded so a stuck disk thread degrades to
+#: a one-tick UI lag instead of a stalled call.
+_FILE_PRIORITY_TIMEOUT = 0.5
+
 ProgressCallback = Callable[
     [str, int, int, float, float, int, int, float],
     # download_id, downloaded, total, speed, eta, seeds, peers, upload_speed
@@ -1910,14 +1916,57 @@ class TorrentEngine:
                 return _adjust_paths(entry.metadata["files"])
             return []
 
+    def _apply_file_priority(self, handle: Any, download_id: str,
+                              file_index: int, priority: int) -> None:
+        """Apply *priority* to *file_index* and wait until the handle confirms it.
+
+        ``handle.file_priority()`` posts the change to libtorrent's disk/nw
+        thread instead of applying it inline, so ``get_file_priorities()`` keeps
+        returning the *previous* value for a few milliseconds. Every reader
+        queries it straight back afterwards: the details panel re-checks a file
+        the user just unchecked (the tick disappears again on the next poll),
+        and ``poll_all`` persists the stale vector into ``metadata["files"]``,
+        where it outlives the tick. Confirming the write here is what makes the
+        new priority visible to all of them the moment the setter returns.
+        """
+        handle.file_priority(file_index, priority)
+
+        getter = getattr(handle, "get_file_priorities", None)
+        if not callable(getter):
+            return
+
+        deadline = time.monotonic() + _FILE_PRIORITY_TIMEOUT
+        while True:
+            try:
+                current = getter()
+            except Exception:
+                return
+            # A short or missing vector cannot confirm the write; blocking would
+            # only turn a cosmetic lag into a stall.
+            if not current or file_index >= len(current):
+                return
+            if current[file_index] == priority:
+                return
+            if time.monotonic() >= deadline:
+                log.debug(
+                    "File priority %d for %s[%d] was still not confirmed after %.2fs",
+                    priority, download_id, file_index, _FILE_PRIORITY_TIMEOUT,
+                )
+                return
+            time.sleep(0.005)
+
     def set_torrent_file_priority(self, download_id: str, file_index: int, priority: int) -> bool:
         """Sets priority for a specific file (0 = do not download, 1 = low, 4 = normal, 7 = high)."""
         entry = self._db.get_download(download_id)
         if not entry or entry.download_type != "torrent":
             return False
+
+        is_done = entry.status in ("completed", "seeding")
         handle = self._handles.get(download_id)
+
         if not handle and entry:
-            if entry.status in ("completed", "seeding") and priority == 0:
+            if is_done and priority == 0:
+                # Completed/seeding with no handle: metadata-only update, no re-add.
                 if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
                     files = entry.metadata["files"]
                     for f in files:
@@ -1932,6 +1981,10 @@ class TorrentEngine:
                     entry.metadata["files"] = files
                     self._db.update_download(entry)
                 return True
+            if is_done:
+                # Completed/seeding with no handle and priority > 0: need the
+                # handle to resume downloading the newly-wanted file.
+                pass
             self.add_torrent(entry)
             handle = self._handles.get(download_id)
 
@@ -1941,7 +1994,29 @@ class TorrentEngine:
         try:
             if not handle.is_valid():
                 return False
-            handle.file_priority(file_index, priority)
+
+            # For a completed/seeding torrent whose file is being *excluded*
+            # (priority 0), apply the priority to libtorrent but treat the
+            # rest as a metadata-only operation.  Recalculating progress from
+            # ``total_wanted`` after the priority change would regress
+            # ``downloaded_size`` (libtorrent now "wants" less), making the
+            # torrent look incomplete and triggering a re-download on the next
+            # poll tick.
+            if is_done and priority == 0:
+                self._apply_file_priority(handle, download_id, file_index, priority)
+                if entry.metadata and "files" in entry.metadata and isinstance(entry.metadata["files"], list):
+                    files = entry.metadata["files"]
+                    for f in files:
+                        if f.get("index") == file_index:
+                            f["priority"] = priority
+                            f["priority_label"] = _priority_to_label(priority)
+                            f["status"] = "skipped"
+                            break
+                    entry.metadata["files"] = files
+                    self._db.update_download(entry)
+                return True
+
+            self._apply_file_priority(handle, download_id, file_index, priority)
 
             s = handle.status()
             total_wanted = getattr(s, "total_wanted", 0)
@@ -1969,7 +2044,7 @@ class TorrentEngine:
                 self._db.update_download(entry)
 
             # If unchecked file is checked (priority > 0) after download was complete:
-            if priority > 0 and not is_all_done and entry and entry.status in ("completed", "seeding"):
+            if priority > 0 and not is_all_done and entry and is_done:
                 try:
                     if hasattr(lt, "torrent_flags"):
                         handle.set_flags(lt.torrent_flags.auto_managed)

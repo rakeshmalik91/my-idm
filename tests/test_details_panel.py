@@ -1205,6 +1205,189 @@ class TestDetailsPanel(unittest.TestCase):
             self.assertEqual(item0.text(4), "Skipped")
             self.assertEqual(item1.text(4), "Skipped")
 
+    def _engine_fake_set_priority(self, download_id: str, file_index: int, priority: int):
+        """Stand in for the engine's file-priority write.
+
+        The engine's contract after the confirmed-write fix is that a refresh
+        reading it back reports the new priority, so the fake persists the write
+        exactly where the panel reads it from when the torrent has no handle.
+        """
+        entry = self.db.get_download(download_id)
+        files = entry.metadata["files"]
+        for f in files:
+            if f.get("index") == file_index:
+                f["priority"] = priority
+                f["status"] = "skipped" if priority == 0 else "downloading"
+        entry.metadata["files"] = files
+        self.db.update_download(entry)
+        return True
+
+    def _torrent_with_two_nested_files(self, entry_id: str):
+        """A seeding torrent with one folder and two already-downloaded files."""
+        entry = DownloadEntry(
+            id=entry_id,
+            url="magnet:?xt=urn:btih:7777888899990000111122223333444455556666",
+            filename="NestedPayload",
+            download_type="torrent",
+            status="completed",
+            save_path=str(self.tmp_path),
+            metadata_json='''{
+                "files": [
+                    {
+                        "index": 0,
+                        "path": "NestedPayload/docs/readme.txt",
+                        "size": 1000,
+                        "downloaded": 1000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "completed"
+                    },
+                    {
+                        "index": 1,
+                        "path": "NestedPayload/payload.iso",
+                        "size": 2000,
+                        "downloaded": 2000,
+                        "progress": 100.0,
+                        "priority": 4,
+                        "priority_label": "Medium (50%)",
+                        "status": "completed"
+                    }
+                ]
+            }''',
+        )
+        self.db.add_download(entry)
+        self.win._model.add_entry(entry)
+        panel = self.win._details_panel
+        panel.set_download_id(entry_id)
+        root = panel._tree_files.topLevelItem(0)
+        for index, disk_path in {
+            0: self.tmp_path / "NestedPayload" / "docs" / "readme.txt",
+            1: self.tmp_path / "NestedPayload" / "payload.iso",
+        }.items():
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            disk_path.write_bytes(b"x" * (1000 * (index + 1)))
+        return panel, root
+
+    def test_unchecking_a_file_stays_unchecked_across_a_refresh(self):
+        """Regression test: the unticked file used to come back ticked.
+
+        ``_update_file_values`` writes the file data back into the tree item on
+        every refresh. ``QVariant`` hands back a fresh dict, so that write fired
+        ``itemChanged`` on the same column as the checkbox, and
+        ``_on_tree_item_changed`` ran the whole uncheck flow again from what was
+        only a programmatic refresh. The panel then set the checkbox back from
+        the value it had just read, so the tick the user removed reappeared -
+        and with it a second confirmation dialog - on the next poll tick.
+        """
+        panel, root = self._torrent_with_two_nested_files("test-uncheck-refresh")
+        item = panel._file_item_map[1]
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question",
+                                 return_value=QMessageBox.StandardButton.Yes) as mock_q, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash"), \
+             unittest.mock.patch.object(
+                 self.manager, "set_torrent_file_priority",
+                 side_effect=self._engine_fake_set_priority):
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            mock_q.assert_called_once()
+            self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked)
+
+            # The refresh the 1 Hz poll performs: the engine now reports 0.
+            panel.refresh()
+            self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked,
+                             "the user's untick must survive the refresh")
+            self.assertEqual(item.text(4), "Skipped")
+            self.assertEqual(
+                panel._tree_files.itemWidget(item, 3).currentText(), "Don't Download")
+            self.assertEqual(root.checkState(0), Qt.CheckState.PartiallyChecked)
+
+            panel.refresh()
+            self.assertEqual(mock_q.call_count, 1,
+                             "a refresh must never re-prompt for an unchecked file")
+            self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked)
+
+    def test_unchecking_a_folder_confirms_once_and_stays_unchecked(self):
+        """One folder untick is one prompt and one engine write per file.
+
+        Qt's ``ItemIsAutoTristate`` rewrites every descendant's check state from
+        inside the *parent's* ``setCheckState`` - and each descendant emits its
+        own ``itemChanged``, so a single click on the folder used to run the
+        uncheck flow once per file: one prompt per file, and one priority write
+        per file, all behind the folder's own prompt.
+        """
+        panel, root = self._torrent_with_two_nested_files("test-folder-uncheck")
+        readme = panel._file_item_map[0]
+        iso = panel._file_item_map[1]
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question",
+                                 return_value=QMessageBox.StandardButton.Yes) as mock_q, \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash") as mock_trash, \
+             unittest.mock.patch.object(
+                 self.manager, "set_torrent_file_priority",
+                 side_effect=self._engine_fake_set_priority) as mock_set_prio:
+            root.setCheckState(0, Qt.CheckState.Unchecked)
+
+            self.assertEqual(mock_q.call_count, 1,
+                             "one prompt for the whole folder, not one per file")
+            self.assertEqual(mock_trash.call_count, 2)
+            self.assertEqual(
+                sorted(c.args[0] for c in mock_trash.call_args_list),
+                sorted([self.tmp_path / "NestedPayload" / "docs" / "readme.txt",
+                        self.tmp_path / "NestedPayload" / "payload.iso"]),
+                "every downloaded descendant is trashed",
+            )
+            self.assertEqual(mock_set_prio.call_count, 2)
+
+            for item in (readme, iso):
+                self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked)
+                self.assertEqual(item.text(4), "Skipped")
+
+            panel.refresh()
+            self.assertEqual(mock_q.call_count, 1)
+            self.assertEqual(root.checkState(0), Qt.CheckState.Unchecked)
+            self.assertEqual(readme.checkState(0), Qt.CheckState.Unchecked)
+            self.assertEqual(iso.checkState(0), Qt.CheckState.Unchecked)
+
+    def test_a_dont_download_file_shows_a_disabled_progress_bar(self):
+        """A skipped file's bar reads as unavailable, not as a stalled download."""
+        panel, root = self._torrent_with_two_nested_files("test-skipped-bar")
+        readme = panel._file_item_map[0]
+        iso = panel._file_item_map[1]
+
+        def bar(item):
+            return panel._tree_files.itemWidget(item, 2)
+
+        self.assertTrue(bar(readme).isEnabled(), "a wanted file shows a live bar")
+
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question",
+                                 return_value=QMessageBox.StandardButton.Yes), \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash"), \
+             unittest.mock.patch.object(
+                 self.manager, "set_torrent_file_priority",
+                 side_effect=self._engine_fake_set_priority):
+            iso.setCheckState(0, Qt.CheckState.Unchecked)
+
+        self.assertFalse(bar(iso).isEnabled(), "an excluded file's bar is greyed out")
+        self.assertEqual(int(bar(iso).value()), 0)
+        self.assertTrue(bar(readme).isEnabled(), "the sibling is untouched")
+
+        # A refresh keeps the disabled state, because it is driven by the priority.
+        panel.refresh()
+        self.assertFalse(bar(iso).isEnabled())
+        self.assertEqual(iso.text(4), "Skipped")
+
+        # Re-checking the file brings the bar back.
+        with unittest.mock.patch("my_idm.details_panel.QMessageBox.question",
+                                 return_value=QMessageBox.StandardButton.Yes), \
+             unittest.mock.patch("my_idm.details_panel.send_to_trash"), \
+             unittest.mock.patch.object(
+                 self.manager, "set_torrent_file_priority",
+                 side_effect=self._engine_fake_set_priority):
+            iso.setCheckState(0, Qt.CheckState.Checked)
+        panel.refresh()
+        self.assertTrue(bar(iso).isEnabled(), "re-enabling the file restores its bar")
+
     def test_details_panel_overview_displays_filename(self):
         """DetailsPanel Overview tab displays filename in _ov_filename."""
         entry = DownloadEntry(

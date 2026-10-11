@@ -22,6 +22,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -86,7 +87,8 @@ class FakeHandle:
 
     def __init__(self, info_hash="aa" * 20, state=3, has_metadata=True, total_wanted=1000,
                  total_wanted_done=0, paused=False, name="Payload", num_files=1,
-                 file_progress=(0,), priorities=(4,), torrent_info=None):
+                 file_progress=(0,), priorities=(4,), torrent_info=None,
+                 apply_delay=0):
         self._info_hash = info_hash
         self._state = state
         self._has_metadata = has_metadata
@@ -102,6 +104,10 @@ class FakeHandle:
         )
         self._file_progress = list(file_progress)
         self._priorities = list(priorities)
+        # Number of reads that still return the *previous* value after a set,
+        # i.e. how long libtorrent takes to apply the change.
+        self._apply_delay = apply_delay
+        self._pending: dict[int, int] = {}
 
     # -- introspection ---------------------------------------------------
 
@@ -148,6 +154,14 @@ class FakeHandle:
         return self._file_progress
 
     def get_file_priorities(self):
+        # libtorrent applies the change on a worker thread, so the first
+        # ``_apply_delay`` reads after a set still return the previous value.
+        if self._apply_delay > 0:
+            self._apply_delay -= 1
+        elif self._pending:
+            for index, priority in self._pending.items():
+                self._priorities[index] = priority
+            self._pending.clear()
         return self._priorities
 
     # -- mutators --------------------------------------------------------
@@ -185,7 +199,10 @@ class FakeHandle:
 
     def file_priority(self, index, priority):
         if 0 <= index < len(self._priorities):
-            self._priorities[index] = priority
+            if self._apply_delay > 0:
+                self._pending[index] = priority
+            else:
+                self._priorities[index] = priority
         self.calls.append(("file_priority", index, priority))
 
     def rename_file(self, index, path):
@@ -1635,6 +1652,50 @@ class TestFilePriority(EngineTestCase):
         self.attach()
         self.engine.set_torrent_file_priority("t1", 0, 0)
         self.assertTrue(self.progress, "the details panel needs a progress refresh")
+
+    def test_a_priority_change_is_not_reported_until_the_handle_has_applied_it(self):
+        """The setter must not return while the handle still reads the old priority.
+
+        Regression test. libtorrent applies ``file_priority()`` on a worker
+        thread, so ``get_file_priorities()`` keeps returning the *previous*
+        value for a few milliseconds afterwards. Returning inside that window
+        made the details panel put the tick back in the box the user had just
+        unticked and confirmed, and ``poll_all`` wrote the stale vector back
+        into ``metadata["files"]`` where it outlived the tick.
+        """
+        self.add_torrent_entry(status="seeding")
+        handle = self.attach(num_files=2, priorities=[4, 4], apply_delay=2)
+        entry = self.db.get_download("t1")
+        entry.metadata["files"] = [
+            {"index": 0, "path": "Payload/f0.bin", "size": 100, "downloaded": 100, "progress": 100.0},
+            {"index": 1, "path": "Payload/f1.bin", "size": 100, "downloaded": 100, "progress": 100.0},
+        ]
+        self.db.update_download(entry)
+
+        self.assertTrue(self.engine.set_torrent_file_priority("t1", 1, 0))
+
+        # The handle has caught up by the time the setter returns...
+        self.assertEqual(list(handle.get_file_priorities())[1], 0)
+        self.assertEqual(handle._pending, {}, "the pending write must be drained")
+        # ...so the read the details panel performs on its next refresh - and
+        # the one poll_all persists - already reports "Don't Download".
+        self.assertEqual(
+            [(f["index"], f["priority"]) for f in self.engine.get_torrent_files("t1")],
+            [(0, 4), (1, 0)],
+        )
+
+    def test_a_priority_change_that_libtorrent_never_confirms_does_not_hang(self):
+        """A handle that never applies the write must not stall the caller.
+
+        The wait is bounded: an unconfirming disk thread degrades to a one-tick
+        UI lag rather than a blocked call on the GUI thread.
+        """
+        self.add_torrent_entry()
+        handle = self.attach(apply_delay=10 ** 6)
+        started = time.monotonic()
+        self.assertTrue(self.engine.set_torrent_file_priority("t1", 0, 0))
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertIn(("file_priority", 0, 0), handle.calls, "libtorrent is still told")
 
 
 class TestTorrentTrackersAndPeers(EngineTestCase):

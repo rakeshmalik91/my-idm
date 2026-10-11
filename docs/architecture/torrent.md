@@ -46,6 +46,13 @@ Selecting any torrent download in the main table activates rich diagnostic tabs 
   - `Normal` (Priority 4): Default swarm priority.
   - `Low` (Priority 1): Lower piece scheduling preference.
   - `Don't Download` (Priority 0): Completely skips downloading the file, saving local disk space and bandwidth.
+
+  Unticking a file's checkbox, or setting a folder's checkbox or dropdown to `Don't Download`, is the same operation, and one prompt covers every affected file. An already-downloaded file is moved to the Trash behind that prompt, and a skipped file's progress bar is greyed out rather than showing a stalled 0%.
+
+  Two invariants keep that flow honest, and each has a regression test:
+
+  - `set_torrent_file_priority` only reports success once the handle has confirmed the new priority ([`_apply_file_priority`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py#L1919)). `handle.file_priority()` is applied on libtorrent's worker thread, so `get_file_priorities()` still returns the previous value for a few milliseconds; returning inside that window let the Files tab put a removed tick straight back, and let `poll_all` persist the stale vector into `metadata["files"]` where it outlived the tick.
+  - A refresh never re-enters the checkbox handler ([`_update_file_values`](file:///d:/Projects/my-idm/my_idm/details_panel.py#L2406)). The Files tab writes each file's data back into its tree item on every tick, which emits `itemChanged` on the checkbox's own column, so a programmatic write used to run the whole uncheck flow - one confirmation dialog per already-unchecked file - and then set the checkbox back from the value it had just read.
 - Direct **Open File** and **Open Folder** action buttons.
 
 #### B. Peers Tab (Swarm Topology)
@@ -200,7 +207,7 @@ forever.
 | :--- | :--- | :--- |
 | **Torrent Engine** | [`my_idm.torrent_engine.TorrentEngine`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Core engine wrapping `libtorrent.session`, managing handles, DHT/PEX, alerts, and periodic ticks. |
 | **Fastresume Cache** | [`FASTRESUME_DIR`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py#L43) | Directory `~/.my-idm/fastresume/` storing bencoded resume buffers for instant startup. |
-| **Priority Controller** | [`set_torrent_file_priority`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Dynamically applies `lt.torrent_handle.file_priority()` across individual files. |
+| **Priority Controller** | [`set_torrent_file_priority`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Dynamically applies `lt.torrent_handle.file_priority()` across individual files, and returns only once the handle has confirmed the change. |
 | **Swarm Diagnostics** | [`get_torrent_peers`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) / [`get_torrent_trackers`](file:///d:/Projects/my-idm/my_idm/torrent_engine.py) | Queries `get_peer_info()` and `trackers()` for UI presentation. |
 | **Details Panel** | [`my_idm.details_panel.DetailsPanel`](file:///d:/Projects/my-idm/my_idm/details_panel.py) | Multi-tab inspection panel rendering files, peer tables, tracker metrics, and progress bars. |
 | **Download Manager** | [`my_idm.manager.DownloadManager`](file:///d:/Projects/my-idm/my_idm/manager.py) | Coordinates download lifecycle, transitions, speed aggregation, and database persistence. |

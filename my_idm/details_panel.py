@@ -2176,7 +2176,11 @@ class DetailsPanel(QWidget):
 
         progress_style = (
             f"QProgressBar {{ border: 1px solid {Colors.BORDER}; border-radius: 3px; background: {Colors.BG_DARK}; height: 16px; text-align: center; font-size: 10px; color: {Colors.TEXT}; }} "
-            f"QProgressBar::chunk {{ background: {Colors.ACCENT}; border-radius: 2px; }}"
+            f"QProgressBar::chunk {{ background: {Colors.ACCENT}; border-radius: 2px; }} "
+            # A stylesheet wins over the disabled palette, so the unavailable look
+            # has to be spelled out: this is the "Don't Download" file's bar.
+            f"QProgressBar:disabled {{ color: {Colors.TEXT_DISABLED}; border-color: {Colors.BORDER_LIGHT}; background: {Colors.BG_MID}; }} "
+            f"QProgressBar::chunk:disabled {{ background: {Colors.TEXT_DISABLED}; }}"
         )
 
         def _create_items(parent_widget_or_item, node_dict: dict):
@@ -2185,7 +2189,14 @@ class DetailsPanel(QWidget):
                     item = QTreeWidgetItem(parent_widget_or_item)
                     item.setText(0, f"📁 {name}")
                     item.setData(0, Qt.ItemDataRole.UserRole, {"is_folder": True, "name": name})
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsAutoTristate | Qt.ItemFlag.ItemIsUserCheckable)
+                    # Deliberately NOT ItemIsAutoTristate. Qt's cascade rewrites every
+                    # descendant's check state from inside the *parent's* setCheckState,
+                    # emitting one itemChanged per descendant - so a single click on a
+                    # folder ran _on_tree_item_changed once per file, each with its own
+                    # confirmation dialog. The folder state is maintained here instead
+                    # (see _refresh_folder_aggregates, and the descendant loop in
+                    # _on_tree_item_changed, both of which block the tree's signals).
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                     if is_torrent:
                         item.setCheckState(0, Qt.CheckState.Checked)
                     else:
@@ -2232,6 +2243,10 @@ class DetailsPanel(QWidget):
                     pb.setRange(0, 100)
                     pb.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     pb.setStyleSheet(progress_style)
+                    if not is_dl:
+                        # "Don't Download": a moving bar reads as "stalled",
+                        # a greyed-out one reads as excluded.
+                        pb.setEnabled(False)
                     self._tree_files.setItemWidget(item, 2, pb)
 
                     if is_torrent:
@@ -2389,60 +2404,68 @@ class DetailsPanel(QWidget):
         return item
 
     def _update_file_values(self, files: list[dict], is_torrent: bool):
-        for f in files:
-            f_idx = f.get("index", 0)
-            item = self._live_file_item(f_idx)
-            if not item:
-                continue
+        # A refresh must never re-enter _on_tree_item_changed. Writing the file
+        # data back into the item (setData, setText, setCheckState ...) emits
+        # itemChanged on the same column the checkbox reports, and the handler
+        # cannot tell a programmatic write from a user click: it used to run the
+        # whole uncheck flow - confirmation dialog and priority push included -
+        # once per already-unchecked file on every poll tick, and then set the
+        # checkbox back from the value it had just read.
+        self._tree_files.blockSignals(True)
+        try:
+            for f in files:
+                f_idx = f.get("index", 0)
+                item = self._live_file_item(f_idx)
+                if not item:
+                    continue
 
-            data = item.data(0, Qt.ItemDataRole.UserRole) or {}
-            data["data"] = f
-            item.setData(0, Qt.ItemDataRole.UserRole, data)
+                data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+                data["data"] = f
+                item.setData(0, Qt.ItemDataRole.UserRole, data)
 
-            size_val = f.get("size", 0)
-            dl_val = f.get("downloaded", 0)
-            size_str = humanize.naturalsize(size_val, binary=True) if size_val > 0 else "—"
-            item.setText(1, size_str)
-            if dl_val > 0 and size_val > 0 and dl_val < size_val:
-                item.setToolTip(1, f"Downloaded: {humanize.naturalsize(dl_val, binary=True)} of {size_str}")
-            else:
-                item.setToolTip(1, f"Size: {size_str}")
+                size_val = f.get("size", 0)
+                dl_val = f.get("downloaded", 0)
+                size_str = humanize.naturalsize(size_val, binary=True) if size_val > 0 else "—"
+                item.setText(1, size_str)
+                if dl_val > 0 and size_val > 0 and dl_val < size_val:
+                    item.setToolTip(1, f"Downloaded: {humanize.naturalsize(dl_val, binary=True)} of {size_str}")
+                else:
+                    item.setToolTip(1, f"Size: {size_str}")
 
-            if size_val > 0 and dl_val >= 0:
-                pct_val = min(max((dl_val / size_val) * 100.0, 0.0), 100.0)
-            else:
-                pct_raw = f.get("progress", 0.0)
-                pct_val = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
-                pct_val = min(max(pct_val, 0.0), 100.0)
-            pb = self._tree_files.itemWidget(item, 2)
-            if isinstance(pb, QProgressBar):
-                pb.setTextVisible(True)
-                pb.setFormat(f"{pct_val:.1f}%")
-                pb.setValue(int(pct_val))
-                dl_str = humanize.naturalsize(dl_val, binary=True) if dl_val > 0 else "0 B"
-                pb.setToolTip(f"{pct_val:.1f}% ({dl_str} / {size_str})")
-
-            status_str = self._get_file_status(f, self._current_entry)
-            item.setText(4, _to_str(status_str).capitalize())
-            checksum = f.get("checksum") or (self._current_entry.content_hash if self._current_entry else "")
-            if checksum:
-                item.setToolTip(0, f"{item.text(0)}\nSHA-256: {checksum}")
-                item.setToolTip(4, f"SHA-256: {checksum}")
-
-            if is_torrent:
+                if size_val > 0 and dl_val >= 0:
+                    pct_val = min(max((dl_val / size_val) * 100.0, 0.0), 100.0)
+                else:
+                    pct_raw = f.get("progress", 0.0)
+                    pct_val = pct_raw if pct_raw > 1.0 else (pct_raw * 100.0)
+                    pct_val = min(max(pct_val, 0.0), 100.0)
                 curr_prio = f.get("priority", 4)
-                combo = self._tree_files.itemWidget(item, 3)
-                if isinstance(combo, QComboBox):
-                    combo.blockSignals(True)
-                    combo.setCurrentText(_priority_to_label(curr_prio))
-                    combo.blockSignals(False)
-                expected_state = Qt.CheckState.Checked if curr_prio > 0 else Qt.CheckState.Unchecked
-                if item.checkState(0) != expected_state:
-                    self._tree_files.blockSignals(True)
-                    try:
+                pb = self._tree_files.itemWidget(item, 2)
+                if isinstance(pb, QProgressBar):
+                    pb.setTextVisible(True)
+                    pb.setFormat(f"{pct_val:.1f}%")
+                    pb.setValue(int(pct_val))
+                    dl_str = humanize.naturalsize(dl_val, binary=True) if dl_val > 0 else "0 B"
+                    pb.setToolTip(f"{pct_val:.1f}% ({dl_str} / {size_str})")
+                    pb.setEnabled(curr_prio > 0)
+
+                status_str = self._get_file_status(f, self._current_entry)
+                item.setText(4, _to_str(status_str).capitalize())
+                checksum = f.get("checksum") or (self._current_entry.content_hash if self._current_entry else "")
+                if checksum:
+                    item.setToolTip(0, f"{item.text(0)}\nSHA-256: {checksum}")
+                    item.setToolTip(4, f"SHA-256: {checksum}")
+
+                if is_torrent:
+                    combo = self._tree_files.itemWidget(item, 3)
+                    if isinstance(combo, QComboBox):
+                        combo.blockSignals(True)
+                        combo.setCurrentText(_priority_to_label(curr_prio))
+                        combo.blockSignals(False)
+                    expected_state = Qt.CheckState.Checked if curr_prio > 0 else Qt.CheckState.Unchecked
+                    if item.checkState(0) != expected_state:
                         item.setCheckState(0, expected_state)
-                    finally:
-                        self._tree_files.blockSignals(False)
+        finally:
+            self._tree_files.blockSignals(False)
 
         for folder_item in reversed(self._folder_items):
             self._refresh_folder_aggregates(folder_item, is_torrent)
@@ -2479,6 +2502,7 @@ class DetailsPanel(QWidget):
         pb = self._tree_files.itemWidget(f_it, 2)
         if isinstance(pb, QProgressBar):
             pb.setValue(0)
+            pb.setEnabled(False)
             pb.setToolTip("0.0% (0 B)")
         f_it.setText(4, "Skipped")
         size_str = f_it.text(1)
@@ -2711,11 +2735,18 @@ class DetailsPanel(QWidget):
 
         self._tree_updating = True
         try:
+            self._tree_files.blockSignals(True)
+            try:
+                for f_it in descendants:
+                    f_data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
+                    f_idx = f_data.get("file_index")
+                    new_state = Qt.CheckState.Checked if prio_val > 0 else Qt.CheckState.Unchecked
+                    f_it.setCheckState(0, new_state)
+            finally:
+                self._tree_files.blockSignals(False)
             for f_it in descendants:
                 f_data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
                 f_idx = f_data.get("file_index")
-                new_state = Qt.CheckState.Checked if prio_val > 0 else Qt.CheckState.Unchecked
-                f_it.setCheckState(0, new_state)
                 f_combo = self._tree_files.itemWidget(f_it, 3)
                 if isinstance(f_combo, QComboBox):
                     f_combo.blockSignals(True)
@@ -2781,20 +2812,32 @@ class DetailsPanel(QWidget):
                 return
         self._tree_updating = True
         try:
+            # Every check-state write here is programmatic; the tree's itemChanged
+            # would otherwise replay _on_tree_item_changed for each of them.
+            self._tree_files.blockSignals(True)
+            try:
+                for item in items:
+                    data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+                    if data.get("is_folder", False):
+                        descendants = self._get_descendant_file_items(item)
+                        item.setCheckState(0, Qt.CheckState.Checked if priority_val > 0 else Qt.CheckState.Unchecked)
+                        combo = self._tree_files.itemWidget(item, 3)
+                        if isinstance(combo, QComboBox):
+                            combo.blockSignals(True)
+                            combo.setCurrentText(_priority_to_label(priority_val))
+                            combo.blockSignals(False)
+                        for f_it in descendants:
+                            f_it.setCheckState(0, Qt.CheckState.Checked if priority_val > 0 else Qt.CheckState.Unchecked)
+                    else:
+                        item.setCheckState(0, Qt.CheckState.Checked if priority_val > 0 else Qt.CheckState.Unchecked)
+            finally:
+                self._tree_files.blockSignals(False)
             for item in items:
                 data = item.data(0, Qt.ItemDataRole.UserRole) or {}
                 if data.get("is_folder", False):
-                    descendants = self._get_descendant_file_items(item)
-                    item.setCheckState(0, Qt.CheckState.Checked if priority_val > 0 else Qt.CheckState.Unchecked)
-                    combo = self._tree_files.itemWidget(item, 3)
-                    if isinstance(combo, QComboBox):
-                        combo.blockSignals(True)
-                        combo.setCurrentText(_priority_to_label(priority_val))
-                        combo.blockSignals(False)
-                    for f_it in descendants:
+                    for f_it in self._get_descendant_file_items(item):
                         f_data = f_it.data(0, Qt.ItemDataRole.UserRole) or {}
                         f_idx = f_data.get("file_index")
-                        f_it.setCheckState(0, Qt.CheckState.Checked if priority_val > 0 else Qt.CheckState.Unchecked)
                         f_combo = self._tree_files.itemWidget(f_it, 3)
                         if isinstance(f_combo, QComboBox):
                             f_combo.blockSignals(True)
@@ -2807,7 +2850,6 @@ class DetailsPanel(QWidget):
                 else:
                     f_data = data
                     f_idx = f_data.get("file_index")
-                    item.setCheckState(0, Qt.CheckState.Checked if priority_val > 0 else Qt.CheckState.Unchecked)
                     combo = self._tree_files.itemWidget(item, 3)
                     if isinstance(combo, QComboBox):
                         combo.blockSignals(True)
@@ -2831,7 +2873,14 @@ class DetailsPanel(QWidget):
             return
         item = self._live_file_item(row)
         if item is not None:
-            item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            # The write below fires itemChanged, and the handler is called
+            # explicitly right after it - so the tree's own signal is suppressed
+            # here, or the uncheck flow (confirmation dialog included) runs twice.
+            self._tree_files.blockSignals(True)
+            try:
+                item.setCheckState(0, Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            finally:
+                self._tree_files.blockSignals(False)
             self._on_tree_item_changed(item, 0)
 
     def _on_row_priority_changed(self, row: int):
