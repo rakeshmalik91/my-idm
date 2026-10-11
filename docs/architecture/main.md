@@ -72,13 +72,17 @@ my_idm/
 ├── network_dialog.py    # Network & VPN configuration dialog
 ├── security.py          # Antivirus scanners, URL inspection, quarantine
 ├── security_dialog.py   # Antivirus & malware security settings dialog
-├── settings_dialog.py   # Unified Preferences dialog (General, Network, Security)
+├── settings_dialog.py   # Unified Preferences dialog (14 pages, searchable)
 ├── manager.py           # Central orchestrator (QObject with signals)
 ├── main_window.py       # QMainWindow with toolbar, menus, table, splitter
-├── details_panel.py     # Bottom panel (Overview, Files, Peers, Trackers, Segments)
-├── download_model.py    # QAbstractTableModel (13 columns)
-├── delegates.py         # DownloadNameDelegate and ProgressBarDelegate for QTableView
+├── details_panel.py     # Bottom panel (Details, Queues, Console, Stats side tabs)
+├── download_model.py    # QAbstractTableModel (18 columns)
+├── delegates.py         # DownloadName, ProgressBar, SavePath, QueueColumn, SectionHeader delegates
 ├── dialogs.py           # AddDownloadDialog, MoveDialog, DeleteDialog
+├── hotkey.py            # System-wide capture hotkeys (RegisterHotKey + native event filter)
+├── clipboard_monitor.py # Clipboard capture with resolve-before-capture probing
+├── stats_dialog.py      # StatisticsView (Volumes / Current Speed / Totals) + chart widgets
+├── notifications.py     # Toast notifications through the tray
 ├── single_instance.py   # Single-instance enforcement via QLocalServer / QLocalSocket IPC
 └── styles.py            # Dark theme QSS stylesheet, color palette
 ```
@@ -443,6 +447,26 @@ The segmented download falls back to single-stream when:
 - Any segment receives HTTP 403 (Forbidden)
 - Server returns 200 instead of 206 on a range request (segment index > 0)
 
+### Request Header Sanitization
+
+Every request the engine makes is built by `HTTPEngine._build_headers` (`http_engine.py`), which
+**drops** rather than forwards:
+
+- **pseudo-headers** — a config-level denylist (`_NON_HTTP_HEADER_KEYS`) of internal metadata keys
+  (`anime_url`, `anime_title`, `added_by`, `original_name`, `explicit_filename`, `use_curl_cffi`,
+  `next_retry_at`, `retry_delay`) that are not HTTP headers. AnimePahe writes `anime_url=` /
+  `anime_title=` as trailing backlog columns, which used to reach the wire verbatim;
+- **non-ASCII keys or values** — anything that cannot `.encode("ascii")`, since the `curl_cffi`
+  transport encodes keys as ASCII and values as latin-1 and would otherwise raise
+  `UnicodeEncodeError` mid-transfer, and a strict CDN answers a junk header with a bare 400;
+- **blank keys** after stripping, and non-`str` values are coerced with `str()` first.
+
+The filter is fail-closed and applies to all five request sites (`_probe_url`, both segment
+downloaders, both single-stream downloaders). `add_download` and `load_backlog` strip the same
+keys before persisting them into `metadata["headers"]`, so the junk is dropped at the boundary as
+well as at the point of use. Note it is *not* a CRLF/control-character injection guard — that is
+aiohttp's own job.
+
 ### Pause/Resume Mechanism
 
 **Pause:**
@@ -514,6 +538,8 @@ My-IDM supports unattended bulk download ingestion via text-based backlog queues
 - **Multi-Location Auto-Discovery**: Periodically scans project and user directories for `backlog.txt` files.
 - **Flexible Directive Syntax**: Supports pipe-delimited paths, custom filenames, referer headers, and directory directives.
 - **Auto-Clearing Lifecycle**: Processed lines are atomically cleared on success while failed lines are preserved for manual inspection.
+- **Header Filtering**: Only real HTTP headers are persisted into `metadata["headers"]` — internal keys such as AnimePahe's `anime_url=` / `anime_title=` columns are stripped at the boundary (see [Request Header Sanitization](#request-header-sanitization)).
+- **Deduplicated Backups**: `backlog.backup.txt` is prepended with the newest batch, but a line whose **URL** is already recorded anywhere in the file (or twice in the same batch) is dropped, so the backup stays a compact record of what was consumed instead of growing a duplicate per retry.
 
 > [!NOTE]
 > For backlog file syntax, multi-directory polling, and line-level persistence rules, refer to the dedicated [**Backlog Processing Architecture**](backlog.md).
@@ -551,17 +577,25 @@ When a download is added without an explicit save path:
   - **📁 Downloads & Retries**: Default folder picker, "Open Folder" shortcut, segment bounds, max retries, retry backoff configuration, and reset-to-defaults button.
   - **🖥️ Application & Tray**: Auto-start at login, minimize/close to tray, completion notification behavior.
   - **📋 Clipboard Capture**: Automatic clipboard monitoring, URL regex patterns, min/max capture sizing.
-  - **👁️ Views & Columns**: Visible column pickers, status segregation toggles, segregated group order settings.
-  - **🧲 BitTorrent**: DHT/PEX switches, seeding ratios, listen ports, fastresume directory.
-  - **🌐 Browser Integration**: Extension native messaging host, local loopback REST port (127.0.0.1:19582), intercept thresholds.
-  - **🛡️ VPN & Proxy**: Network adapter binding, kill switch, SOCKS5/HTTP proxies.
-  - **🧅 Tor**: Tor SOCKS5 routing toggle, executable discovery, proxy port.
-  - **🛡️ Antivirus & Security**: Pre-download safety inspection, Defender/custom CLI engine scanning, quarantine directory.
-  - **🌐 AnimePahe Scraper**: Scraper binary discovery, automatic queue assignment, download automation options.
-  - **▶️ YouTube (yt-dlp)**: yt-dlp / ffmpeg binary validation, format preferences, cookie sources.
-  - **⚙️ Queues**: Dedicated Queue Manager for named queue creation, coloring, priority reordering, and concurrency caps.
-  - **📊 Bandwidth Limit**: Periodic daily/weekly/monthly quotas per queue and globally, warning percentage badges.
-  - **⏱️ Scheduler**: Off-peak download window scheduling, active days of week, automatic pause on window end.
+   - **👁️ Views & Columns**: Visible column pickers, segregation enable plus the four grouping modes (Status / Date / File Type / Name).
+   - **🧲 BitTorrent**: DHT/PEX switches, seeding ratios, listen ports, fastresume directory.
+   - **🌐 Browser Integration**: Extension native messaging host, local loopback REST port (127.0.0.1:19582), intercept thresholds, and the download-capture hotkey row.
+   - **🛡️ VPN & Proxy**: Network adapter binding, kill switch, SOCKS5/HTTP proxies.
+   - **🧅 Tor**: Tor SOCKS5 routing toggle, executable discovery, proxy port.
+   - **🛡️ Antivirus & Security**: Pre-download safety inspection, Defender/custom CLI engine scanning, quarantine directory.
+   - **🌐 AnimePahe Scraper**: Scraper binary discovery, automatic queue assignment, download automation options.
+   - **▶️ YouTube (yt-dlp)**: yt-dlp / ffmpeg binary validation, format preferences, cookie sources.
+   - **⚙️ Queues**: Dedicated Queue Manager for named queue creation, coloring, priority reordering, and concurrency caps.
+   - **📊 Bandwidth Limit**: Periodic daily/weekly/monthly quotas per queue and globally, warning percentage badges.
+   - **⏱️ Scheduler**: Off-peak download window scheduling, active days of week, automatic pause on window end.
+- **Search**: a `QLineEdit` at the top of the sidebar (`preferencesSearchInput`) indexes every
+  page's title, internal name and all of its child widgets' labels, tooltips, combo items and
+  spin-box prefixes/suffixes (`_build_search_index`), then filters the sidebar to the pages that
+  match and highlights the matching widgets with a light-yellow tint. <kbd>Ctrl</kbd>+<kbd>F</kbd>
+  focuses it, <kbd>Esc</kbd> clears it, matching is case-insensitive and whitespace-collapsed
+  with **all** terms required (AND across words), and the first matching page is selected with the
+  best-matching widget scrolled into view. The index is built once at construction, so a widget
+  added to a page afterwards is not searched until the next open.
 - Navigation shortcuts: `Tools → Preferences…` (<kbd>Ctrl</kbd>+<kbd>,</kbd>) or dedicated status bar badges open Settings directly to the corresponding tab.
 
 ### Logging Architecture & Rotation
@@ -592,7 +626,41 @@ Downloads often start with generic or hashed URLs (e.g. `/download?id=12345` or 
 
 - **SQLite WAL Mode**: State is continually flushed to `~/.my-idm/downloads.db`.
 - **Per-Segment Offset Tracking**: Incomplete HTTP downloads store byte progress per segment.
-- **Startup Recovery**: When `auto_resume_startup` is enabled in `GeneralConfig`, `DownloadManager.start()` queries SQLite for any downloads left in `"downloading"` or `"checking"` states and automatically resumes them without losing downloaded chunks.
+- **Startup Recovery**: When `auto_resume_startup` is enabled in `GeneralConfig`,
+  `DownloadManager.start()` queries SQLite for any downloads left in an active state —
+  `downloading`, `checking`, `fetching_metadata` or `stalled` — and automatically resumes them
+  without losing downloaded chunks.
+
+Recovery is a **reconciliation, not a re-dispatch** (`DownloadManager._recover_downloads_on_startup`).
+The rows are first written back to `queued` (or to `paused` when `auto_resume_startup` is off) in
+SQLite, and only then resumed in `(queue_order, added_at)` order. Writing first is the whole fix
+for the bug this replaced: `resume_download`'s guard treats an already-active status as "already
+running" and returns early, so re-dispatching directly left the rows looking active forever —
+and because active accounting reads the **database** status, those phantom rows consumed the
+queue budgets and genuinely queued downloads never started. Rewriting the row clears the phantom
+count and gives the resume a real state to move from. `seeding` rows are handed to
+`TorrentEngine.add_torrent` separately, since there is nothing to start.
+
+### Integrity Verification (SHA-256)
+
+Single-file downloads (HTTP and yt-dlp Mode B; torrents use their native piece hashes) get a
+SHA-256 checksum on completion:
+
+- **Computed off the Qt thread.** `DownloadManager._compute_and_save_checksum()` spawns a
+  `hash-<id>` daemon thread and streams the file in 1 MiB chunks (`utils.compute_file_sha256`),
+  then persists to the `downloads.content_hash` column and emits `checksum_computed`. It runs
+  after any post-completion antivirus scan resolves, so a scan and a hash never race over the
+  same file. Failures are swallowed at `debug`: a missing file yields no checksum rather than an
+  error state.
+- **Verified on recheck.** `recheck_download` compares a recorded checksum against the file when
+  the payload is fully written. **A mismatch is `error`** with
+  `"Checksum verification failed: file corrupted or modified on disk"` — no automatic re-download,
+  because silently re-fetching would hide disk corruption from the user. A recheck of a full file
+  with no recorded checksum back-fills one, which is the only path that computes a hash
+  synchronously on the calling thread.
+- **Surfaced** in the Overview tab's `Content Hash / Infohash` row (falling back to the info-hash
+  for torrents, then the ETag), as a tooltip on the Files tab row, and via
+  `Copy SHA-256 Checksum` on the Files-tab context menu.
 
 ---
 
@@ -605,13 +673,14 @@ QMainWindow (MainWindow)
   ├── QMenuBar
   │     ├── File (Add Download, Add Torrent, Load Backlog, Exit)
   │     ├── Edit (Resume, Pause, Copy URL, Rename, Move, Open File, Open Folder, Delete, Recheck, Queues, Move to Queue)
-  │     ├── View (📋 Details Panel [F4], Select All, Sort By)
+  │     ├── View (View Control Strip, 📋 Details Panel [F4], Segregated View, Select All, Sort By)
   │     ├── Tools (Preferences, Statistics, Export Selected as CSV…, VPN & Network Settings, Antivirus & Security Settings)
   │     └── Help (About)
-    ├── QToolBar
-    │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [🧅 Tor] | [🔍 Search downloads…] [⚙️ Preferences]
-    │             (the search box is the strip's only Expanding item, so it takes whatever
-    │              width is left and Preferences stays pinned to the right end)
+  ├── QToolBar
+  │     └── [➕ Add Download] | [▶ Play][⏸ Pause] | [🗑 Delete][📂 Move][🔄 Recheck] | [🧅 Tor] | [🔍 Search downloads…] [⚙️ Preferences] [View Control Strip]
+  │             (the search box is the strip's only Expanding item, so it takes whatever
+  │              width is left and Preferences stays pinned to the right end)
+  ├── Grouping control strip (View Control Strip) — Collapse All / Expand All + None / Status / Date / File Type / Name
   ├── QSplitter (central widget, vertical orientation)
   │     ├── QTableView (top pane)
   │     │     ├── Model: DownloadTableModel
@@ -619,16 +688,19 @@ QMainWindow (MainWindow)
   │     │     ├── Source Domain column (cyan URL hostname)
   │     │     └── Delegate: ProgressBarDelegate (Progress column)
   │     └── DetailsPanel (bottom pane, collapsible)
+  │           ├── Side tabs: 📋 Details | 🗂️ Queues | 📄 Console | 📊 Stats
   │           ├── Header (Icon, Title, Transfer Type Badge, Open Folder, Close)
-  │           └── QTabWidget
+  │           └── QTabWidget (Details mode)
   │                 ├── Tab 0: 📋 Overview (Metrics grid: Status, Sizes, Speeds, ETA, Swarm/Segments, Path, Hash, Malware scan)
   │                 ├── Tab 1: 📁 Files (QTableWidget: #, Path, Size, Progress Bar, Priority QComboBox [High/Normal/Low/Skip], Status)
   │                 ├── Tab 2: 👥 Peers & Swarm (QTableWidget: IP:Port, Client, Progress %, Down Speed, Up Speed, Flags)
   │                 ├── Tab 3: 📡 Trackers (QTableWidget: Tier, URL, Status, Send Stats)
   │                 └── Tab 4: 🧩 Segments (QTableWidget: Segment #, Byte Range, Downloaded, Progress Bar, Status)
+  │           └── Stats mode: Volumes / Current Speed / Totals subtabs (see statistics.md)
   └── QStatusBar
         ├── Status label
         ├── VPN / Network badge (clickable)
+        ├── Details-panel toggle icon (left edge, icon-only)
         ├── Speed label
         └── Count label
 ```
@@ -639,8 +711,13 @@ The bottom details panel provides real-time, in-depth telemetry for the download
 
 1. **Splitter & Resizing**:
    - `MainWindow` hosts `self._splitter = QSplitter(Qt.Orientation.Vertical)`.
-   - The splitter position and panel visibility are preserved in `QSettings("MyIDM", "My-IDM")` via `splitter_state` and `details_visible`.
-   - Users can toggle the panel with <kbd>F4</kbd>, the toolbar button, the `View` menu, or the panel's close button.
+   - The splitter position and panel visibility are persisted in the SQLite `window_state` blob
+     (`details_visible`, `details_state` — the active side-tab mode and the Stats subtab), with a
+     legacy `QSettings` mirror kept only for profiles written before the move. Authority is the
+     database, so a restore cannot disagree with the rest of `ui_state`.
+   - Users can toggle the panel with <kbd>F4</kbd>, the footer **status-bar icon button** (left
+     edge; icon-only, blue when the panel is on and muted when off, with the ON/OFF state carried
+     in the tooltip rather than in a text label), the `View` menu, or the panel's close button.
 
 2. **Telemetry & Query Delegation**:
    - `DownloadManager` exposes inspection endpoints:
@@ -771,13 +848,15 @@ DownloadManager signals:
 
 My-IDM implements a modular, high-performance table view subsystem for displaying downloads:
 
-1. **Dual Grouping Modes (`DownloadTableModel`)**:
+1. **Four Grouping Modes (`DownloadTableModel`)**:
    - **Status-Based**: Partitions downloads into `Active`, `Seeding`, and `Inactive` sections.
    - **Date-Based**: Partitions downloads into `Today`, `Yesterday`, `Last 7 Days`, `Last 30 Days`, and `Older` based on the latest of `added_at`, `completed_at`, and `last_tried_at`.
-2. **Collapsible Section Spans**: Section header rows span across all 13 columns via `MainWindow._apply_table_spans()` and support single-click or double-click expand/collapse toggling (`▼` / `▶`).
-3. **Contextual Section Controls**: Header right-click context menu provides options to expand/collapse the selected section, expand/collapse all sections, and quickly switch grouping modes.
-4. **State Persistence**: The active segregation mode (`status` vs `date`), enabled flag (`segregated_view_enabled`), and each section's collapsed state (`segregated_{sec_id}_collapsed`) are persisted in SQLite and restored automatically on next launch.
-5. **Details Panel Auxiliary Views**: Four dedicated tables in the bottom details panel render multi-file torrent priorities, swarm peer diagnostics, tracker statuses, and HTTP multi-segment chunks.
+   - **File-Type-Based**: Partitions downloads into `Video`, `Audio`, `Archives`, `Documents`, `Photos`, `Executables`, and `General` — with a multi-file torrent folder classified by its payload bytes when its own name carries no extension.
+   - **Name-Based**: Partitions downloads by show / series, using `anime_title` (AnimePahe), a `strip_keywords.txt` release-junk pattern, common-prefix grouping and a 10% edit-distance match.
+2. **Collapsible Section Spans**: Section header rows span across all `Col.COUNT` columns via `MainWindow._apply_table_spans()` and support single-click or double-click expand/collapse toggling (`▼` / `▶`).
+3. **Contextual Section Controls**: Header right-click context menu provides options to expand/collapse the selected section, expand/collapse all sections, and quickly switch grouping modes. The same controls are first-class widgets on the **grouping control strip** above the table, which stays visible in flat view with **None** as the checked button and can itself be hidden via the View Control Strip toggle.
+4. **State Persistence**: The active segregation mode (`status` / `date` / `type` / `name`), enabled flag (`segregated_view_enabled`), and each section's collapsed state (`segregated_{sec_id}_collapsed`, dynamic per-group keys in `name` mode) are persisted in SQLite and restored automatically on next launch.
+5. **Details Panel Auxiliary Views**: Four side tabs on the bottom details panel — Details (four per-download tables: torrent files, peers, trackers, HTTP segments), Queues (aggregate queue control), Console (embedded tool output) and Stats (bandwidth statistics).
 
 ---
 
@@ -818,7 +897,7 @@ My-IDM allows integration with companion scrapers and download tools (e.g., Anim
 1. **Process Management**:
    - `ExternalToolsManager` launches CLI scrapers as subprocesses, streaming logs directly into real-time buffers.
 2. **Embedded Console & Browser Subtabs**:
-   - The bottom panel features an embedded real-time Console tab to view live stdout/stderr.
+   - The bottom panel features an embedded real-time Console tab to view live stdout/stderr, with a **🎬 Open GUI** button beside the start-scraper control that launches the AnimePahe desktop GUI (or, when the repository folder is not configured, offers to open Preferences on the AnimePahe page instead of failing silently).
    - Web-based tools or automation views can be docked inside an embedded browser subtab.
 3. **Status Bar Indicators**:
    - A dedicated footer badge indicates tool status, allows toggling background execution, and triggers quick log inspection.

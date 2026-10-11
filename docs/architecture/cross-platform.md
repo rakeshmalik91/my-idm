@@ -80,13 +80,13 @@ All seven now route through the two helpers in `external_tools.py`, which were a
 
 | Site | Was | Now |
 | :--- | :--- | :--- |
-| `details_panel.py:1629` | `os.startfile(full_path)` | `open_file_in_default_app(full_path, create_if_missing=False)` |
-| `details_panel.py:2024` | `explorer` / `os.startfile(repo)` | `show_in_folder(repo)` |
-| `details_panel.py:2036` | `explorer /select,` split token / `os.startfile` | `show_in_folder(file_path)` |
-| `details_panel.py:2038` | `os.startfile(folder)` | `show_in_folder(folder)` |
-| `main_window.py:2096` | `os.startfile(entry.file_path)` | `open_file_in_default_app(..., create_if_missing=False)` |
-| `main_window.py:2257` | `explorer /select,` split token / `os.startfile` | `show_in_folder(file_path)` |
-| `main_window.py:2259` | `os.startfile(folder)` | `show_in_folder(folder)` |
+| `details_panel.py:2649` | `os.startfile(full_path)` | `open_file_in_default_app(full_path, create_if_missing=False)` |
+| `details_panel.py:3056` | `explorer` / `os.startfile(repo)` | `show_in_folder(repo)` |
+| `details_panel.py:3068` | `explorer /select,` split token / `os.startfile` | `show_in_folder(file_path)` |
+| `details_panel.py:3070` | `os.startfile(folder)` | `show_in_folder(folder)` |
+| `main_window.py:2918` | `os.startfile(entry.file_path)` | `open_file_in_default_app(..., create_if_missing=False)` |
+| `main_window.py:3267` | `explorer /select,` split token / `os.startfile` | `show_in_folder(file_path)` |
+| `main_window.py:3269` | `os.startfile(folder)` | `show_in_folder(folder)` |
 
 `create_if_missing=False` is load-bearing at both "open file" sites. The helper defaults to
 creating an empty placeholder for a missing file; the callers have already checked existence, so
@@ -94,17 +94,37 @@ the default would fabricate a zero-byte file if the download vanished between ch
 
 Three latent bugs were fixed by the same consolidation:
 
-- **The split `/select,` token.** `explorer` requires one argument, `f"/select,{path}"`. The old
-  code passed `["explorer", "/select,", path]` as two elements, which only worked because Explorer
-  tolerates it. `external_tools.py:335` already had the correct form.
+- ~~**The split `/select,` token.**~~ *Superseded on 2026-10-10 by commit `368479f` — see below.*
 - **Platforms disagreed.** Windows highlighted the file; the non-Windows branch opened the
   containing folder. Both now highlight, via `show_in_folder(file_path)`.
 - **`subprocess` was orphaned** in both modules by the change, and `os` was never imported in
   `utils.py` — see §2.5.
 
-The reference implementation is unchanged at `external_tools.py:320` (`show_in_folder`) and
-`external_tools.py:285,313,337` (`open_file_in_default_app`), each `os.startfile` still correctly
+The reference implementation is unchanged at `external_tools.py:343` (`show_in_folder`) and
+`external_tools.py:297` (`open_file_in_default_app`), each `os.startfile` still correctly
 inside an `if sys.platform == "win32":` block. No third implementation was added.
+
+#### 2.1.1 The `/select,` split token is the *correct* form (2026-10-10)
+
+The bullet above was **wrong**, and the mistake shipped a user-visible bug: *Open Folder* opened
+the user's **Documents** folder instead of the download's folder whenever the path contained a
+space.
+
+`subprocess.list2cmdline` quotes an argument that contains whitespace, so the single-element form
+`["explorer", f"/select,{p}"]` reaches Explorer as `"/select,C:\path with spaces\file.ext"` —
+one quoted token. Explorer does not recognise a **quoted** `/select` switch and silently falls
+back to opening Documents. Passing `/select,` and the path as **two** argv elements leaves the
+switch unquoted (`explorer /select, "C:\path with spaces\file.ext"`), which Explorer accepts:
+
+```python
+# external_tools.py — show_in_folder, Windows branch
+subprocess.Popen(["explorer", "/select,", str(p)])
+```
+
+Two call sites also learned the same fallback (`details_panel.py`, `main_window.py`): resolve
+`folder / filename` when `entry.file_path` is blank, so a single-file download with no explicit
+file path still selects its file instead of opening an arbitrary parent. The folder branch
+(`os.startfile`) is the last resort.
 
 ### 2.2 The test suite could not start off Windows (row 2) — **Resolved**
 
@@ -745,8 +765,12 @@ marked with how they were verified, since none of them can be fully verified fro
 
 - [x] **No unguarded `os.startfile`.** Verified: `grep -rn "os\.startfile" my_idm/` returns only
       the three reference-implementation call sites, each inside `if sys.platform == "win32":`.
-- [x] **`explorer` receives one `/select,` token.** No `["explorer", "/select,", path]` two-element
-      form remains; the only `explorer` call left is `external_tools.py:335`.
+- [x] **`explorer` receives `/select,` and the path as two argv elements** — *not* one
+      `f"/select,{path}"` argument. A single quoted `/select,` token makes Explorer open
+      Documents on any path containing a space (`subprocess.list2cmdline` quotes it); the
+      two-element form leaves the switch bare. Pinned by `tests/test_external_tools.py::
+      test_show_in_folder`, which asserts the argv shape for both a plain and a space-containing
+      path. The only `explorer` call left is the `Popen` in `external_tools.py:366`.
 - [x] **Suite collects and runs where `os.startfile` is absent.** Verified by deleting the
       attribute via a pytest plugin and running the full suite: 2715 passed. **Caveat:** `sys.platform`
       stayed `win32` in that run, so platform-conditional branches in tests were not all exercised.

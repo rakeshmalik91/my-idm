@@ -258,6 +258,36 @@ Tracks aggregated transferred bytes (download and upload) per queue, period type
 
 A unique constraint on `(queue_id, period_start, period_type)` enables upserts via `INSERT ... ON CONFLICT DO UPDATE`.
 
+### 6. Bandwidth History (`bandwidth_history`)
+
+5-minute transfer log backing the statistics panel ([`statistics.md`](statistics.md)). Unlike
+`bandwidth_usage`, which rolls up per calendar period for quota enforcement, this table is the
+time series the volume chart is drawn from — one row per queue per 5-minute interval, never
+deleted, so history survives the user deleting the downloads that produced it.
+
+| Column | Type | Nullable? | Default | Description |
+| :--- | :--- | :---: | :--- | :--- |
+| `id` | `INTEGER` | **NO** | `PRIMARY KEY AUTOINCREMENT` | Unique record identifier. |
+| `queue_id` | `TEXT` | **NO** | `''` | Queue ID accounting for this interval; blank resolves to `default` on write. |
+| `period_start` | `TEXT` | **NO** | `''` | **Local** interval start, truncated to 5 minutes (`YYYY-MM-DD HH:MM`). |
+| `downloaded_bytes` | `INTEGER` | **NO** | `0` | Bytes downloaded in the interval, accumulated across upserts. |
+| `uploaded_bytes` | `INTEGER` | **NO** | `0` | Bytes uploaded in the interval, accumulated across upserts. |
+
+`UNIQUE(queue_id, period_start)` with `ON CONFLICT DO UPDATE SET … = … + excluded.…` makes every
+write an **addition**, so a repeated progress callback cannot erase an interval. The bytes are the
+per-event **delta** computed by `DownloadManager.record_bandwidth_usage()`
+(`manager.py:3463`), not the cumulative total, which is what makes the series a rate history
+rather than a final-size history.
+
+Written by the same `Database.record_bandwidth()` call that maintains `bandwidth_usage`
+(`manager.py` → `record_bandwidth_usage` → `_on_http_progress` / `_on_torrent_progress`), so
+statistics cost no extra write path. Seeded once on `open()` by
+`_backfill_bandwidth_history_if_empty()` from existing `downloads` rows — **only while the table
+is empty**, so a fresh history never competes with a backfilled one — and read by
+`Database.get_download_stats()`, which prefers it over the `downloads` aggregation whenever any
+row exists and merges the two by bucket (`count` from `downloads`, `downloaded` / `uploaded`
+from here).
+
 ---
 
 ## ⚡ Indexing Strategy
@@ -280,6 +310,9 @@ CREATE INDEX IF NOT EXISTS idx_downloads_queue_order ON downloads(queue_order);
 -- Per-queue active-count aggregation for the dispatch gate. Without this the manager's
 -- grouped COUNT(*) scans the whole table on every queue tick.
 CREATE INDEX IF NOT EXISTS idx_downloads_queue ON downloads(queue_id);
+
+-- 5-minute interval lookup for the statistics volume chart (§ "Bandwidth History")
+CREATE INDEX IF NOT EXISTS idx_bandwidth_history_period ON bandwidth_history(period_start);
 ```
 
 ---

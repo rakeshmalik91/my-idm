@@ -23,7 +23,8 @@ My-IDM employs a decoupled Qt Model-View architecture powered by PySide6:
 │  │  │    ├── ProgressBarDelegate (Col.PROGRESS)                     │  │
 │  │  │    ├── DownloadNameDelegate (Col.NAME)                        │  │
 │  │  │    ├── SavePathDelegate (Col.SAVE_PATH)                       │  │
-│  │  │    └── QueueColumnDelegate (Col.QUEUE_NAME)                   │  │
+│  │  │    ├── QueueColumnDelegate (Col.QUEUE_NAME)                   │  │
+│  │  │    └── SectionHeaderDelegate (full-row group headers)         │  │
 │  │  └── Spanning: Full-row section headers via setSpan()           │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
@@ -126,7 +127,7 @@ In addition to standard flat-list display, My-IDM provides **Segregated Views**,
 
 ### 1. View Modes
 
-My-IDM supports three distinct segregation modes configured under **View → 🗂️ Segregated View**:
+My-IDM supports four distinct segregation modes configured under **View → 🗂️ Segregated View**:
 
 ```mermaid
 graph TD
@@ -134,6 +135,7 @@ graph TD
     B -->|Status Grouping| C[Status Mode]
     B -->|Date Grouping| D[Date Mode]
     B -->|File Type Grouping| E[File Type Mode]
+    B -->|Name Grouping| F[Name Mode]
 
     C --> C1["Active (Downloading, Queued, Metadata, Paused, Stalled, Error)"]
     C --> C2["Seeding (BitTorrent Swarm Seeding)"]
@@ -150,31 +152,58 @@ graph TD
     E --> E3["Archives"]
     E --> E4["Documents"]
     E --> E5["Photos"]
-    E --> E6["General"]
+    E --> E6["Executables"]
+    E --> E7["General"]
+
+    F --> F1["One section per show / series"]
+    F --> F2["Uncategorized (singletons with no title)"]
 ```
 
-The mode key set is `SEGREGATED_MODES = ("status", "date", "type")`, with
+The mode key set is `SEGREGATED_MODES = ("status", "date", "type", "name")`, with
 `DEFAULT_SEGREGATED_MODE = "status"`; both are validated on read, so a stale persisted mode
 degrades to the default rather than rendering an undefined grouping.
 
 #### Mode Availability Follows the Enable Flag
 
-The three modes only mean something while the table is actually partitioned, so both surfaces that
+The four modes only mean something while the table is actually partitioned, so both surfaces that
 expose them grey them out together when segregation is off:
 
 | Surface | Widget | Kept in step by |
 | :--- | :--- | :--- |
-| View menu | `_act_seg_by_status` / `_act_seg_by_date` / `_act_seg_by_type` | `MainWindow._sync_segregation_mode_actions`, called from `_setup_menubar` and `_on_toggle_segregated_view` |
+| View menu | `_act_seg_by_status` / `_act_seg_by_date` / `_act_seg_by_type` / `_act_seg_by_name` | `MainWindow._sync_segregation_mode_actions`, called from `_setup_menubar` and `_on_toggle_segregated_view` |
 | Preferences → 👁️ Views & Columns | `_seg_mode_combo` | `SettingsDialog._sync_seg_controls`, wired to `_seg_enabled_cb.toggled` and called from `_populate_views_tab` |
 
 Two consequences worth knowing:
 
 - **A disabled action keeps its checkmark.** The checkmark is the *remembered* mode, restored when
   segregation is switched back on; clearing it would regroup by Status for a user who had chosen
-  File Type. Only `setEnabled` is touched, never `setChecked`.
+  File Type or Name. Only `setEnabled` is touched, never `setChecked`.
 - **The "picking a mode turns segregation on" shortcut is no longer reachable from the View menu**,
   because the action to pick is disabled. `_set_segregation_mode` still performs the promotion for
   programmatic callers that invoke it directly.
+
+#### The grouping control strip
+
+Between the toolbar and the table sits `_seg_control_strip` (`main_window.py:922`, 30 px tall),
+holding the grouping controls as first-class widgets rather than menu-only commands:
+
+- **Collapse All / Expand All**, icon-only, at the left edge — **disabled in flat view**, because
+  there are no sections to fold;
+- a `Group by:` label, then the mode buttons **None / Status / Date / File Type / Name** at the
+  right edge, in an exclusive `QButtonGroup` so exactly one is ever checked.
+
+Three rules make it behave like a control rather than a status display:
+
+- **Visibility is independent of grouping.** It used to be hidden whenever segregation was off, so
+  the flat view offered no visible way back into a grouped one. Since 2026-10-10 the strip is shown
+  whenever `seg_strip_visible` is set, and **`None` is the checked button in flat view** — the flat
+  table is a choice on the same switch as the grouped ones, not the absence of a choice.
+- **The File Type tooltip is read, not retyped.** It is built from `TYPE_SECTION_TITLES`
+  (`download_model`), so declaring a new file-type section updates the strip, the View-menu action
+  and the tests in one place instead of three copies of a list that drift.
+- **It can be hidden.** `_act_toggle_view_toolbar` — labelled **View Control Strip** (renamed from
+  "View Toolbar") — is a checkable action in the View menu *and* an icon-only button on the
+  toolbar's right end; toggling it persists `seg_strip_visible` and shows or hides the strip.
 
 #### A. Status-Based Segregation (`status`)
 Partitions downloads according to operational lifecycle state:
@@ -248,6 +277,70 @@ about before a download starts.
    reports a size (`torrent` lists built before any byte moved) files are counted instead. Exactly
    95% is *not* enough — a genuinely mixed folder is meant to stay in General.
 
+#### D. Name-Based Segregation (`name`)
+
+Added 2026-10-10. Groups downloads by the **show or series** they belong to, so a season folder
+and a straggler episode land in the same section instead of two unrelated rows. It answers the
+question the other three modes cannot: *File Type* says "12 videos", `name` says "Frieren — 12".
+
+A group's **title** is chosen by `_group_entries_by_name()` (`download_model.py`) in a fixed
+order:
+
+1. an explicit `show_title` / `series_title` / `series_name` / **`anime_title`** from
+   `metadata_json`, cleaned through the strip-keyword pattern below. AnimePahe writes
+   `anime_title=` as a trailing backlog column, which is how a scraped series groups without any
+   name parsing at all;
+2. for a single-item group with no explicit title, the entry's own display name;
+3. for a multi-item group, `_find_common_prefix()` of the members' display names — word-boundary
+   aware, minimum 3 characters — falling back to the shortest name;
+4. `Group N` when nothing recognisable survives, `Ungrouped …` for leftovers, and a final pass that
+   merges groups whose normalised keys collide, preferring the more upper-cased spelling.
+
+**Single items without an explicit title are merged into `Uncategorized`** rather than each
+becoming its own section — a list of one-off downloads would otherwise produce as many sections as
+rows, which is the same information with more clicks.
+
+Two mechanics make the grouping survive real filenames:
+
+- **Keyword stripping** — `assets/strip_keywords.txt`, 178 lines of release junk (quality
+  `1080p` … `hdr10plus`, codecs, `web-dl` / `bluray` / `webrip`, scene tags, release groups
+  `animepahe` / `subsplease` / `yts` / `rarbg`, store and crack tags, `www.UIndex.org`). It is
+  loaded lazily by `_get_strip_keywords_pattern()`, deduplicated, sorted by **descending length**
+  so longer keywords win, and compiled into one word-boundary `\b(?:…)\b` case-insensitive regex.
+  A missing or unreadable file falls back to a 30-keyword hardcoded pattern, so grouping degrades
+  rather than disappears. The same pattern serves `_extract_show_name`, metadata-title cleaning,
+  group-key cleanup and the section fallback.
+- **Name extraction** — `_extract_show_name()` drops the extension, takes an AnimePahe fast path
+  (`AnimePahe <title> - <ep>`), then strips structural patterns (`S01E01`, `Episode N`, `1x01`,
+  `- ep N`, `(2024)`, `[…]`, `(…)`), the strip keywords, a trailing release-group token, and
+  finally normalises separators to spaces.
+
+**Matching** is fuzzy, not exact: `_names_are_similar()` accepts identical normalised names or a
+Levenshtein distance within **10% of the longer name**, so `Frieren - 01` and `Frieren - 02`
+group while `Frieren` and `Fairy Tail` do not. The normalisation
+(`_normalize_name_for_grouping`) maps every non-alphanumeric character to a space and lowercases,
+so punctuation never splits a group.
+
+Cost is bounded by a cache: `_cached_name_groups` plus the reverse map
+`_name_section_map` (download id → section id) are rebuilt together and invalidated together.
+The reverse map is **authoritative** for `_entry_section_id()`, rather than recomputing the
+grouping per row: a recompute could disagree with the edit-distance placement a row was actually
+filed under, and point progress updates at the wrong header. Only entries added after the last
+rebuild recompute from metadata or from `_extract_show_name`.
+
+Two behaviours specific to this mode:
+
+- **Name sections start collapsed** on the first build that has entries
+  (`_name_sections_auto_collapsed`), because a grouped view of 40 series that spans forty expanded
+  rows is worse than a flat list; the flag resets on the next rebuild and clears on a manual
+  expand, so the auto-collapse happens once rather than on every refresh.
+- Collapse state persists as **dynamic** `ui_state` keys, `segregated_name_<key>_collapsed`
+  (`main_window.py`), one per group, since the section set is not knowable in advance.
+
+Header colours: cyan for name groups, purple for `Uncategorized`
+(`download_model.py`, section foreground). Renaming a download or resolving a filename forces a
+regroup, so a corrected title moves the row immediately.
+
 #### Midnight Rollover
 
 The buckets are relative to the current day, so the grouping is only correct for the day it was
@@ -293,6 +386,19 @@ for them and the poll costs one `date()` comparison per second.
     - Last 30 Days: Soft Blue (`#64b5f6`)
     - Inactive / Older: Muted Blue-Gray (`#8fa0b5`)
 - **Toggling**: Clicking or double-clicking any header row triggers `model.toggle_section_collapsed(row)`, which toggles the section ID in `_collapsed_sections`, triggers `_reapply_filter()`, and immediately updates table spans.
+- **Count text, drawn by `SectionHeaderDelegate`** rather than carried in the `DisplayRole`
+  (which the model still serves as `▼ TITLE (n)` for tests and tooling). The delegate paints
+  `N Active` / `N Seeding` / `N Total`, and the **separator is conditional**: `" / "` between
+  Active and Seeding is emitted only when the Active count is non-zero, so a section that is only
+  seeding reads `1 Seeding / 3 Total` instead of the old `/ 1 Seeding`, with a leading slash and
+  nothing before it. `" / N Total"` keeps its slash whenever either count exists.
+- **Group progress bar**: the same delegate draws a 12 px bar beside the count text when the
+  section has active entries with progress (`section_active_progress` — summed active bytes). It
+  is drawn **only** when there is real progress to show, so an Active section of paused rows shows
+  text and no empty bar. Two geometry details are pinned by tests: it sits 10 px after the count
+  text, and it is centred on the **glyph cap height** — `font_top + ascent - capHeight/2` — not on
+  the row rect, because a row is taller than its text and rect-centering leaves the bar visibly
+  low against the label. Width is `min(150, available)`.
 - **Select All / Clear Selection button**: Painted at the right edge of every non-empty header row
   (`get_section_select_all_btn_rect`, `SectionHeaderDelegate.paint`), and decided on release from
   `MainWindow._on_table_clicked()`: `_on_select_all_in_section()` when the section is not fully
@@ -310,7 +416,7 @@ Right-clicking any section header opens a contextual management menu:
 - **Expand / Collapse '[Title]' Section**: Toggles the targeted section.
 - **Expand All Sections**: Expands all sections in the active view mode.
 - **Collapse All Sections**: Collapses all sections in the active view mode.
-- **Switch Grouping Mode**: Toggles between all three segregation modes. This submenu is built inside
+- **Switch Grouping Mode**: Toggles between all four segregation modes. This submenu is built inside
   the `is_section_header_row` branch of `_show_context_menu`, so it only exists once sections do —
   no separate enable/disable coupling is needed on this third surface.
 
@@ -323,7 +429,7 @@ All table view configuration and segregation states are persisted in the SQLite 
 | Key | Type | Description |
 | :--- | :---: | :--- |
 | `segregated_view_enabled` | `bool` | Whether segregated view partitioning is enabled (`True`) or flat list is active (`False`). |
-| `segregated_view_mode` | `str` | Active grouping mode: `"status"`, `"date"` or `"type"`. Validated against `SEGREGATED_MODES` on read; anything else degrades to `DEFAULT_SEGREGATED_MODE`. |
+| `segregated_view_mode` | `str` | Active grouping mode: `"status"`, `"date"`, `"type"` or `"name"`. Validated against `SEGREGATED_MODES` on read; anything else degrades to `DEFAULT_SEGREGATED_MODE`. |
 | `segregated_active_collapsed` | `bool` | Status mode: Active section collapsed state. |
 | `segregated_seeding_collapsed` | `bool` | Status mode: Seeding section collapsed state. |
 | `segregated_inactive_collapsed` | `bool` | Status mode: Inactive section collapsed state. |
@@ -332,12 +438,15 @@ All table view configuration and segregation states are persisted in the SQLite 
 | `segregated_date_last_7_days_collapsed` | `bool` | Date mode: Last 7 Days section collapsed state. |
 | `segregated_date_last_30_days_collapsed` | `bool` | Date mode: Last 30 Days section collapsed state. |
 | `segregated_date_older_collapsed` | `bool` | Date mode: Older section collapsed state. |
+| `segregated_name_<key>_collapsed` | `bool` | Name mode: one key **per group**, written dynamically — the group set is not knowable in advance. |
+| `seg_strip_visible` | `bool` | The grouping control strip between the toolbar and the table is shown (see below). |
 | `column_widths` | `dict` | JSON mapping of column indices to interactive pixel widths. |
 | `column_visibility` | `dict` | JSON mapping of column indices to visibility booleans. |
 
 On application launch:
 1. `MainWindow` queries `segregated_view_enabled` and `segregated_view_mode`.
-2. Restores collapsed status for all status and date section keys.
+2. Restores collapsed status for all status and date section keys, and for any persisted
+   `segregated_name_<key>_collapsed` keys once the name groups are built.
 3. Configures `DownloadTableModel.set_segregated_view(enabled, mode=mode)`.
 4. Invokes `_apply_table_spans()` to paint section headers immediately.
 
@@ -345,7 +454,10 @@ On application launch:
 > mode was added, `MainWindow.__init__` kept its own `("status", "date")` check, so
 > choosing File Type and restarting silently grouped the table by Status again — and
 > because the menu entry's checked state is derived from that same value,
-> `_act_seg_by_type` came back unticked and nothing looked wrong.
+> `_act_seg_by_type` came back unticked and nothing looked wrong. The same trap applies to
+> `"name"`: any second copy of the tuple has to be updated in the same commit, which is why
+> `SEGREGATED_MODE_LABELS` and `TYPE_SECTION_TITLES` exist as single sources for the labels
+> the strip button tooltip and the View-menu action both read.
 >
 > `_on_toggle_segregated_view()` also syncs `_act_segregated_view`'s checkmark (under
 > `blockSignals`, to avoid re-entry). Without that, the View-menu checkmark and the table
@@ -476,7 +588,7 @@ header column. See [`queues.md`](queues.md) for the feature itself.
 
 ## 📋 Details Panel Auxiliary Table Views
 
-When any download row is selected, `DetailsPanel` (`my_idm/details_panel.py`) populates diagnostic telemetry across four auxiliary table views:
+When any download row is selected, `DetailsPanel` (`my_idm/details_panel.py`) populates diagnostic telemetry across a left-hand side-tab strip with four modes — **📋 Details**, **🗂️ Queues**, **📄 Console** and **📊 Stats** — of which the first holds the per-download tabs below. The aggregate tabs are documented elsewhere: the Queues table in [`queues.md`](queues.md#details-panel-queues-tab), the embedded tool console in [`main.md`](../architecture/main.md), and the Statistics view in [`statistics.md`](statistics.md).
 
 ### 1. Files Table (`FilesTableWidget`)
 - Used for multi-file BitTorrent downloads.
@@ -500,7 +612,25 @@ When any download row is selected, `DetailsPanel` (`my_idm/details_panel.py`) po
 - Displays individual segment worker threads, range offsets, and chunk progress bars.
 
 ### 5. Details Panel Overview Copy Buttons
-In the **Overview** inspector tab, long metadata fields (URL, Target Save Path, Referrer, Anime Series Page URL) feature dedicated inline `📋 Copy` buttons that instantly copy the corresponding value to the system clipboard without requiring text highlighting.
+In the **Overview** inspector tab, long metadata fields (URL, Target Save Path, Referrer, Anime Series Page URL, SHA-256 checksum) feature dedicated inline `📋 Copy` buttons that instantly copy the corresponding value to the system clipboard without requiring text highlighting. The whole copy group is **hidden when no download is selected** — an enabled *Copy* button with nothing to copy is a control that lies about the state of the selection.
+
+### 6. Rows pending a batch deletion
+
+A paced batch delete (`StatusJobPool`, 10 ms per row) leaves the selected rows alive in the table
+for as long as the queue takes to drain, so the model carries an explicit "on its way out" state
+rather than leaving them looking live:
+
+- `DownloadTableModel._deleting_ids` holds the ids, with `mark_deleting(ids)` /
+  `unmark_deleting(id)` / `is_deleting(id)` / `is_deleting_row(row)`. Marking emits
+  `dataChanged` across the whole row for `DisplayRole`, `ForegroundRole` and `ToolTipRole` —
+  the three roles the row's presentation actually depends on.
+- The delegates treat it as a **distinct state from disabled**, not as an alias: a pending row is
+  drawn at reduced opacity with `Colors.TEXT_DISABLED` foreground, and the status text reads
+  `Deleting...`. Searching for a *new* status value is deliberate — a row is neither downloading
+  nor deleted, and reusing `disabled` would have made the state invisible to the model's own
+  queries.
+- `MainWindow` calls `mark_deleting` for the selection when the batch starts and `unmark_deleting`
+  per row as each one is removed, so a failed row returns to normal on its own.
 
 ---
 

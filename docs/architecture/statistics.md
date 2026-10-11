@@ -1,14 +1,27 @@
 # Bandwidth Statistics — Architecture & Implementation Design
 
-**Status: implemented.** `my_idm/stats_dialog.py` and
-`Database.get_download_stats()` in `my_idm/database.py`. Covered by
+**Status: implemented.** `my_idm/stats_dialog.py` (`StatisticsView`) embedded as the **📊 Stats**
+tab of the bottom details panel (`my_idm/details_panel.py`), and
+`Database.get_download_stats()` / `Database.record_bandwidth()` in `my_idm/database.py`. Covered by
 `tests/test_statistics.py`. This document is the design; where the implementation had to
 diverge from it, the divergence is called out below.
 
 The reference implementation's claim is one line — *"Live status bar with
 daily/monthly/yearly/lifetime download totals"* — and the reason it is worth doing here is
-that **the data is already in the database**. This is a `GROUP BY` and a small dialog, not a
+that **the data is already in the database**. This is a `GROUP BY` and a small panel, not a
 schema migration.
+
+> **Divergence 1 — it is a details-panel tab, not a popup.** The original design shipped
+> `StatisticsPopup(QDialog)`; since 2026-10-09 the live widget is `StatisticsView`, docked as the
+> **📊 Stats** side tab of the bottom panel beside Queues and Console, with three subtabs
+> (**Volumes / Current Speed / Totals**). The class survives as a thin legacy wrapper and is no
+> longer instantiated anywhere. See §5.
+>
+> **Divergence 2 — a real history table replaced derivation from `downloads`.** Since 2026-10-10
+> the volumes are read from the `bandwidth_history` table (§2.4), written on every progress
+> delta, instead of being derived from `added_at`. The `downloads` aggregation is still there as
+> the fallback for a fresh install that has moved no bytes yet, and still supplies the *counts*.
+> This retires design limit 9.2 ("no time series").
 
 ---
 
@@ -16,21 +29,22 @@ schema migration.
 
 In scope:
 
-- A read-only aggregation over the existing `downloads` table.
+- A read-only aggregation over the existing `downloads` table, and over the
+  **`bandwidth_history`** 5-minute transfer log (§2.4) once it exists.
 - Totals for **today / this week / this month / this year / lifetime**, split into
   *downloaded* and *uploaded*, plus a completed-file count.
 - **Graphs** — see §4. Three tiers: a daily-volume chart that the existing table already
-  supports, and a live speed chart sampled while the popup is open.
-- A **Statistics** entry in **Tools**, grouped with **Preferences**, opening a popup.
+  supports, and a live speed chart sampled while the panel tab is open.
+- A **Statistics** entry in **Tools**, grouped with **Preferences**, opening the bottom panel on
+  the Stats tab.
 
 Out of scope (deliberately, and why):
 
 | Excluded | Reason |
 | --- | --- |
-| Persisted history rows | Totals are derived, so a rollup table would need invalidation on every edit. Premature until the row count hurts. |
 | Per-host / per-extension breakdowns | Cheap to add later on top of the same query shape; excluded to keep the first cut small. |
-| Cross-session speed history | Needs a new events table; §4.4 explains what it would take. |
-| Any write path | The whole feature is read-only by design — a statistics view that can corrupt download state is a bad trade. |
+| Cross-session speed *samples* | The 5-minute `bandwidth_history` table (§2.4) now records volumes, not instantaneous rates — a true speed series is still out of scope. |
+| Any write path from the UI | The whole feature is read-only by design — a statistics view that can corrupt download state is a bad trade. The one writer is the progress callback that already writes bandwidth usage (§2.4). |
 
 ---
 
@@ -90,6 +104,64 @@ completed download that is correct. For an *in-flight* one it is a lower bound t
 Summing it is therefore "bytes known to be on disk", which is the right number for a
 progress total and the wrong number for a throughput graph - see §2.3.
 
+### 2.4 The 5-minute transfer log (`bandwidth_history`)
+
+Added 2026-10-10 (`ed09b99`, `feb6114`, `665dffe`). A second table, written by the writers rather
+than derived from the rows:
+
+```sql
+CREATE TABLE IF NOT EXISTS bandwidth_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_id        TEXT NOT NULL DEFAULT '',
+    period_start    TEXT NOT NULL,  -- 'YYYY-MM-DD HH:MM' in local time (5-min bucket)
+    downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+    uploaded_bytes   INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(queue_id, period_start)
+);
+CREATE INDEX IF NOT EXISTS idx_bandwidth_history_period ON bandwidth_history(period_start);
+```
+
+**The write path already existed.** `DownloadManager.record_bandwidth_usage()`
+(`manager.py:3463`) is called from both progress callbacks — `_on_http_progress`
+(`manager.py:4265`) with the byte **delta** per progress event, and `_on_torrent_progress`
+(`manager.py:4308`) with the download and upload deltas — where the delta is the difference
+against `_last_progress_bytes`, not the cumulative total. It feeds `Database.record_bandwidth`,
+which has always written the daily/weekly/monthly quota rollups; the same call now also writes
+the 5-minute bucket (`database.py`, in `record_bandwidth`). So the statistics table costs **no new
+write path and no new call sites** — it is a second insert inside the one place that already
+counts bytes.
+
+Three properties make it usable as a time series:
+
+- **The bucket key is local time**, truncated to 5 minutes (`Database._get_5min_bucket`), so a
+  host in any timezone still buckets on the user's own clock — the same rule §3 established for
+  the day buckets, moved into the write path.
+- **`ON CONFLICT … DO UPDATE … downloaded_bytes = downloaded_bytes + excluded.downloaded_bytes`**
+  makes the write idempotent per interval: a progress event is added, never overwritten, so a
+  repeated callback cannot erase an interval.
+- **It is backfilled once.** `_backfill_bandwidth_history_if_empty()` seeds the table from
+  `downloads` on `open()` — downloaded bytes (falling back to `total_size` for complete rows),
+  bucketed at `completed_at or added_at` — but **only when the table is empty**, so a fresh
+  history never competes with a backfilled one.
+
+`get_download_stats` prefers it when it has any rows at all, for both the fixed summary buckets
+and the chart series, and falls back to the `downloads` aggregation on a fresh install. The
+fallback matters: the first launch after upgrading has an empty history and must not show zeros
+for a year of downloading.
+
+| Field | Series source | Count source |
+| :--- | :--- | :--- |
+| `downloaded` / `uploaded` | `bandwidth_history` (transferred bytes) | — |
+| `count` / `completed` | `downloads` (`added_at` buckets) | `downloads` |
+
+For the chart series the two are **unioned by bucket** (`all_buckets = sorted(set(bw) | set(dl))`):
+an interval that moved bytes but added no download still draws, and one that added a download
+without moving bytes still counts. Merging them into one row per bucket is what lets a range be
+wide *and* fine-grained at once — §4.2.
+
+`bandwidth_history` is documented in [`database.md`](database.md); the write path is part of the
+bandwidth-quota feature in [`queues.md`](queues.md).
+
 ---
 
 ## 3. Aggregation layer
@@ -129,7 +201,7 @@ New read-only methods on `Database` (`database.py`). They follow the existing pa
 >    `NULL >= x` is `NULL`, i.e. false, so those rows already dropped out on their own.
 
 ```sql
--- lifetime / all-time
+-- lifetime / all-time — the fallback aggregation, used when bandwidth_history is empty
 SELECT COUNT(*), COALESCE(SUM(total_size), 0), COALESCE(SUM(uploaded_size), 0)
 FROM downloads;
 
@@ -159,7 +231,7 @@ test asserts directly that `_STATS_LOCAL_DAY` contains `localtime` — a whitebo
 bug still fails the suite on a machine that happens to sit on UTC+00:00 where it would
 otherwise be invisible.
 
-Proposed shape — one call, all buckets, so the popup needs a single round trip:
+Shipped shape — one call, all buckets, so the panel needs a single round trip:
 
 ```python
 @dataclass(frozen=True)
@@ -179,13 +251,13 @@ class StatsSnapshot:
     daily: list[tuple[str, DownloadStats]]   # ascending, for a sparkline later
 ```
 
-`Database.get_download_stats(today: date) -> StatsSnapshot`, with `today` **injected** rather
-than read from the clock. Every other aggregation-shaped API in the codebase takes its clock
-input as a parameter, and it is what makes the tests below possible.
+`Database.get_download_stats(today: date, since=..., bucket=..., fill_gaps=True) -> StatsSnapshot`,
+with `today` **injected** rather than read from the clock. Every other aggregation-shaped API in
+the codebase takes its clock input as a parameter, and it is what makes the tests below possible.
 
-Cost: one `GROUP BY` over the `downloads` table. At the ~1k rows a heavy user accumulates
-over a year this is sub-millisecond, so it can run inline on the Qt thread. §8 covers when
-that stops being true.
+Cost: one `GROUP BY` over `bandwidth_history` plus one over `downloads`. At the ~1k rows a heavy
+user accumulates over a year this is sub-millisecond, so it can run inline on the Qt thread. §8
+covers when that stops being true.
 
 ---
 
@@ -193,14 +265,13 @@ that stops being true.
 
 RDM ships a live status-bar chart, so this is not optional for parity. What it ships is
 one graph; the honest position here is that **two of the three useful graphs can be built
-from data we already have**, and the third needs a schema change that is out of scope for
-the first cut.
+from data we already have**, and the third needs per-sample records that still do not exist.
 
 | Graph | Data source | Verdict |
 | --- | --- | --- |
-| Daily volume (down / up) | `GROUP BY` on the local day (§3) — already there | **Build now** |
-| Live speed while open | in-memory samples from the manager's speed label | **Build now** |
-| Speed / volume across past sessions | not recorded anywhere | Needs a new table — §4.4 |
+| Volume over any range, any granularity | `bandwidth_history` (§2.4) — 5-minute transferred bytes | **Shipped** |
+| Live speed while the tab is open | in-memory samples from the manager's speed label | **Shipped** |
+| Speed across past *sessions* | not recorded anywhere — `bandwidth_history` stores volume per interval, not rate samples | Not built — §4.4 |
 
 ### 4.1 Drawing it: no new dependency
 
@@ -224,7 +295,8 @@ change and a deliberate one, not something to discover at runtime.
 Data comes from a `GROUP BY` on the **local** 5-minute interval (`_STATS_LOCAL_5MIN`), hour
 (`_STATS_LOCAL_HOUR`), day (`_STATS_LOCAL_DAY`), or month (`_STATS_LOCAL_MONTH`) — see §3
 for why the stored UTC stamp has to be converted first. Two independent pickers drive it —
-**Range** (Today / last 7 days / 30 days / 12 months / all time) and **Group by**
+**Range** (14 entries: Today, this/last week, last 7 days, this/last month, last 30 days,
+this/last quarter, last 90 days, this/last year, last 12 months, all time) and **Group by**
 (per 5 minutes / per hour / per day / per month) — because they are independent questions:
 “the last 7 days” and “per hour” have to be combinable, or the chart is useless at both extremes.
 `Database.get_download_stats(today, since=..., bucket=..., fill_gaps=True)` takes both explicitly,
@@ -246,10 +318,12 @@ zero values (`fill_series_gaps`) rather than skipped: dropping them compresses t
 and makes sparse activity look identical across different granularities. Instead, intervals
 occupy their true proportional slots along the timeline.
 
-Detail worth pinning: `added_at` is when the download was *added*, so a large file added
-on the 1st and finished on the 5th appears entirely in the 1st's column. The chart is a
-record of *when things were queued*, not when bytes moved. Labelling it "Downloads per day"
-is accurate; labelling it "Traffic per day" would not be.
+Detail worth pinning: **the volumes are transferred bytes, the counts are `added_at`.** A large
+file added on the 1st and finished on the 5th had its progress deltas counted on the days the
+bytes actually moved, so the *volume* belongs to those days — while the *count* of downloads
+still belongs to the 1st, because a count is a property of the row. Labelling the chart
+"Traffic per day" is accurate for the volumes; the Totals tab's completed-files figure is the
+one that answers "what was queued".
 
 #### The bars ⇄ line toggle
 
@@ -272,14 +346,22 @@ comparable, so switching is a viewing change and not a data change:
 `_paint_lines`, with the empty-data and single-bucket cases kept: one bucket has no line to
 draw, so it renders a dot rather than nothing.
 
+#### Cumulative
+
+The **📈 Cumulative** toggle (`StatisticsView._cumulative_btn`) re-draws the same series as
+running totals — the chart's own `set_cumulative` accumulates down the series — and is
+persisted beside the chart kind in the same UI state, so the chosen view survives a restart.
+It is a viewing change too: the underlying series is untouched, which is what lets the two
+views be compared without re-querying.
+
 ### 4.3 Tier 2 — live speed chart
 
-While the popup is open, a `QTimer` at 1 Hz samples the manager's aggregate rate and
+While the Stats tab is open, a `QTimer` at 1 Hz samples the manager's aggregate rate and
 appends to an in-memory `deque(maxlen=120)` (two minutes of history). Drawn as a filled
 sparkline with a peak label.
 
 **In-memory only, on purpose.** Nothing is written to the database, so there is no
-invalidation problem and no schema change; closing the popup discards the samples. The
+invalidation problem and no schema change; switching tabs discards the samples. The
 alternative — persisting samples — is what §4.4 is about.
 
 The sample must be read from the same value the status bar shows, so the chart and the
@@ -304,7 +386,9 @@ CREATE INDEX idx_events_ts ON download_events(ts);
 
 That is a schema migration, an insert on every completion and every seeding stop, and a
 retention policy (samples older than N days deleted on startup) — a real project, not a
-patch. It is listed here so it is a known next step rather than an oversight.
+patch. It is listed here so it is a known next step rather than an oversight. Note that
+`bandwidth_history` (§2.4) covers the *volume* half of this table already; what remains
+missing is the per-sample rate, which is the part a sparkline across sessions would need.
 
 ---
 
@@ -328,78 +412,88 @@ No shortcut: this is a read-only view, not an action, and <kbd>Ctrl</kbd>, is al
 
 It was a **toolbar** button until 2026-10-02, sitting immediately before Preferences. The
 toolbar is now a row of transport and file commands, and two things about the button argued
-against it there: a strip button reads as an action *on the selection* when the popup reports
+against it there: a strip button reads as an action *on the selection* when the view reports
 on the whole history, and the abbreviated label it had to wear (`Stats…`, see
 [`.agents/workflows/qt-ui.md`](file:///d:/Projects/my-idm/.agents/workflows/qt-ui.md)) read as a
 different feature from the Tools entry of the same name. Preferences keeps its toolbar button,
 because it opens a window about the selected download's *settings*; the abbreviation is the
 only concession that strip makes.
 
-### 5.2 The popup
+### 5.2 It is a details-panel tab, not a popup
 
-A `QDialog` in the style of the existing `RenameDialog` / `FirefoxInstallGuideDialog`
-(`dialogs.py`, `settings_dialog.py`): frameless-ish, dark theme from `styles.Colors`,
-`Qt.WA_DeleteOnClose`, constructed parentless and given the main window as `parent` so it
-centres on it.
+Since 2026-10-09 (`722a176`) the widget lives in the **bottom details panel** as the **📊 Stats**
+side tab, beside Queues and Console. `MainWindow._on_show_statistics()` un-hides the panel if
+needed, checks `_act_toggle_details`, and calls `DetailsPanel.show_stats()`; the side tab itself
+switches mode directly.
 
-Layout — a single `QGridLayout` of label/value pairs, one row per bucket:
+Refresh discipline is split, deliberately:
 
-```
-┌─────────────────────────────────────────┐
-│  📊  Statistics                          │
-├──────────────────┬──────────────────────┤
-│  Today           │  1.2 GB down · 340 MB up │
-│  This week       │  8.7 GB down · 2.1 GB up │
-│  This month      │  31 GB down · 9 GB up   │
-│  This year       │  402 GB down · 118 GB up │
-│  All time        │  1.4 TB down · 390 GB up │
-├──────────────────┴──────────────────────┤
-│  1,204 files completed                    │
-│                          [ Refresh ] [ ✕ ] │
-└─────────────────────────────────────────┘
-```
+- **Volumes and Totals** re-query when the tab is entered — `show_stats()`, `_on_mode_tab_changed`
+  and the panel's `showEvent` all call `StatisticsView.refresh()`. They do **not** re-query on a
+  timer: the volumes move slowly, and a 1 Hz query on a hidden page is pure cost.
+- **Current Speed** samples at 1 Hz (`StatisticsView.start_speed_timer`, fed by
+  `DetailsPanel._get_speed_sample`), and is started and stopped by the panel on mode change and
+  on `hideEvent` / `showEvent`, so the timer runs only while the page is actually visible.
 
-`sizes shown as "1.2 GB / 340 MB" with a tooltip carrying the exact byte count, so the
-user is never told "1.2 GB" when it means 1,204,182,912. `humanize.naturalsize` is already a
-dependency and is the right formatter; add `humanize.naturalsize(..., binary=True)` to match
-what the details panel shows.
+Both rules come from the old popup's failure modes: a dialog had to be closed on shutdown or its
+timer fired against a torn-down model, and a modeless dialog could be opened twice. A panel page
+has neither problem by construction — which is why the class-based fix was deleted rather than
+ported.
 
-`Refresh` re-runs the query. The popup does **not** live-refresh: an open dialog that
-re-queries on a timer would need to be closed on shutdown to avoid touching a deleted
-`Database`, and the numbers move slowly enough not to need it.
+`StatisticsView` (`stats_dialog.py:393`) hosts three subtabs:
 
-#### 5.2.1 Ownership — one popup at a time
+| Subtab | Content |
+| :--- | :--- |
+| **Volumes** | The chart plus its **Range** (14 entries), **Group by**, **Cumulative** and **bars ⇄ line** controls |
+| **Current Speed** | The live 1 Hz sparkline (§4.3) |
+| **Totals** | The label/value grid for the fixed summary buckets |
 
-`MainWindow._on_show_statistics()` is the only creator, and the popup is modeless
-(`show()`, not `exec()`). Two consequences that had to be handled explicitly:
+`StatisticsPopup(QDialog)` still exists as a thin legacy wrapper that embeds a
+`StatisticsView`, and is **no longer instantiated anywhere** — `grep` for it in `my_idm/` finds
+only the class definition. Its `showEvent` / `closeEvent` / `reject` still start and stop the
+speed timer, which is why the wrapper is harmless rather than dead weight: it is the shape the
+timer lifecycle was written against. Several rules in this section survive from that form and are why the
+panel form works:
 
-* **The reference must be held.** The `QAction.triggered` connection discards the
-  handler's return value, so a popup whose only reference is a local variable is
-  collectable — and its 1 Hz `QTimer` with it. `_stats_dialog` holds it for the window's
-  lifetime, and `MainWindow.closeEvent` closes it before the manager stops, so the timer can
-  never fire against a torn-down model.
-* **A second click must raise, not duplicate.** Nothing deleted the dialog on close, so
-  every toolbar click used to leave another live `QDialog` — widgets and a timer each — on
-  screen for the rest of the session, and re-opening showed a *second* window rather than
-  the existing one. The popup is now marked `WA_DeleteOnClose` and `_stats_dialog` is
-  cleared from `finished`, so the next click starts clean. A `RuntimeError` from an
-  already-destroyed C++ object is treated as "build a fresh one" rather than propagated.
+- **The reference must be held.** The old `_stats_dialog` attribute existed because a popup whose
+  only reference is a local variable is collectable — and its 1 Hz `QTimer` with it. A panel tab
+  has no such problem, but the 1 Hz speed timer must still stop when the tab is hidden, or it
+  keeps sampling against a torn-down model — which is exactly what
+  `_start_stats_timer` / `_stop_stats_timer` on mode change and `hideEvent` guarantee.
+- **A second click must raise, not duplicate.** The old `WA_DeleteOnClose` dance existed because
+  nothing deleted the dialog on close. A tab is a page in an existing widget, so the class of bug
+  is gone by construction.
+- **Failure is logged, never silent.** `refresh()` catches everything around
+  `get_download_stats()` and renders an em-dash in each cell, because a statistics view must not
+  be able to take the app down. It **logs at `warning` with `exc_info=True`** — swallowing it
+  silently leaves the user with an empty panel and nothing for a bug report to work from, and the
+  unused `except ... as exc` binding was the only sign that logging had been intended. A failed
+  speed sample logs at `debug` and reads as `0 B/s`; a transient failure recovers on the next
+  `refresh()`.
 
-#### 5.2.2 Failure is logged, never silent
+`StatisticsView` **does** live-refresh, unlike the old popup: an open dialog that re-queried on a
+timer would have needed to be closed on shutdown to avoid touching a deleted `Database`, but the
+panel is owned by the window, so the question does not arise.
 
-`refresh()` catches everything around `get_download_stats()` and renders an em-dash in each
-cell, because a statistics view must not be able to take the app down. It **logs at
-`warning` with `exc_info=True`** — swallowing it silently leaves the user with an empty
-dialog and nothing for a bug report to work from, and the unused `except ... as exc` binding
-was the only sign that logging had been intended. A failed speed sample logs at `debug` and
-reads as `0 B/s`; a transient failure recovers on the next `refresh()`.
+Sizes are shown as `"1.2 GB / 340 MB"` with a tooltip carrying the exact byte count, so the user
+is never told "1.2 GB" when it means 1,204,182,912. `humanize.naturalsize` is already a
+dependency and is the right formatter, with `binary=True` to match the details panel.
 
-### 5.3 Status bar (optional, cheap)
+### 5.3 Persistence
+
+Two different keys, because they are two different lifetimes:
+
+| State | Key | Notes |
+| :--- | :--- | :--- |
+| Active panel mode + Stats subtab | `window_state` DB blob → `details_state.current_mode` / `stats_subtab` | `DetailsPanel.get_state` / `restore_state`; default subtab `"Volumes"` |
+| Cumulative, chart kind (bars/line) | UI state `statistics_dialog_size` | `StatisticsView._restore_cumulative_preference` / `_restore_chart_kind_preference` |
+
+### 5.4 Status bar (optional, cheap)
 
 The status bar already has a speed label (`_status_label`, `main_window.py:947`). Adding a
 permanent `Today: 1.2 GB` chip is a two-line change to `_update_count_label` and delivers
 the "live status bar" half of the reference feature without any of §5.2. Worth doing
-alongside, not instead — the popup is for the breakdown, the chip is for ambient awareness.
+alongside, not instead — the panel is for the breakdown, the chip is for ambient awareness.
 
 ---
 
@@ -422,33 +516,26 @@ microseconds. If the table ever grows past ~50k rows, move the call to a
 All hermetic, in the style of `tests/test_database.py`. `tmp_path`-equivalent temp DB,
 `today` injected, no clock reads, no sleeping.
 
-| Test | Asserts |
-| --- | --- |
-| `test_empty_database_reports_all_zeroes` | A fresh install shows zeros, not `None` or a crash |
-| `test_lifetime_totals_sum_every_row` | One row, exact byte counts |
-| `test_today_excludes_yesterday` | The cut-off is inclusive of today only |
-| `test_a_file_added_at_local_midnight_is_today` | The boundary case the UTC bug lived on |
-| `test_sqlite_and_python_agree_on_the_converted_day` | SQLite `localtime` ≡ Python `astimezone()` |
-| `test_the_day_expression_converts_to_local_time` | Whitebox pin: catches the bug on a UTC host too |
-| `test_a_row_with_no_added_at_is_excluded` | `''` must not bucket into the epoch |
-| `test_a_corrupt_timestamp_never_lands_in_a_dated_bucket` | Skipped, not crash-prone |
-| `test_a_corrupt_timestamp_still_counts_towards_lifetime` | An undatable row is still the user's download |
-| `test_a_corrupt_timestamp_never_produces_a_none_bucket_on_the_chart` | The `IS NOT NULL` guard, on the All-time range |
-| `test_the_today_headline_agrees_with_the_table_today_section` | The popup and the table cannot disagree |
-| `test_month_and_year_buckets_span_the_right_range` | Off-by-one on the cutoffs |
-| `test_completed_counts_seeding_rows` | Seeding is a completed payload that is still uploading |
-| `test_null_sums_become_zero` | A row with `NULL` size cannot produce `None` in the UI |
-| `test_unicode_and_very_long_filenames_do_not_affect_totals` | Only byte columns are summed |
-| `test_stats_popup_renders_every_bucket` | Widget test: five rows, correct text |
-| `test_a_broken_query_is_logged_at_warning` | Degrades to dashes *and* stays diagnosable |
-| `test_a_second_click_reuses_the_open_popup` | Modeless + no deletion used to stack dialogs |
-| `test_the_popup_is_marked_for_deletion_on_close` | Otherwise the C++ dialog outlives every click |
-| `test_the_grid_is_defined_exactly_once` | `_populate_grid` was defined twice; the first was dead |
-| `test_it_lives_in_the_tools_menu_and_not_the_toolbar` | The placement is a real requirement, both ways |
+| Test class | Asserts |
+| --- | :--- |
+| `TestStatsBuckets` | Empty DB reports zeroes not `None`; the today/week/month/year windows nest outwards; byte-exact totals; seeding counts as completed; an in-flight download is not completed; `NULL` sizes cannot produce `None` |
+| `TestStatsBucketByLocalDay` | The UTC-stamp-vs-local-cutoff bug, from every angle: the boundary at local midnight, SQLite `localtime` ≡ Python `astimezone()`, and **whitebox pins** that `_STATS_LOCAL_DAY` / `_MONTH` / `_HOUR` / `_5MIN` still contain `localtime` — so the bug fails the suite on a UTC+00:00 host too, where it is otherwise invisible |
+| `TestStatsRejectsUnbucketableTimestamps` | A corrupt `added_at` never lands in a dated bucket (the string-comparison trap), still counts towards lifetime, and never produces a bucket literally labelled `None` |
+| `TestCompletedAtIsNotRestamped` | The §2.2 fix: the first completion wins, and a seeding session ending cannot move the date |
+| `TestStatsValueObjects` | `DownloadStats` / `StatsSnapshot` round-trips through `to_dict` / `from_dict` |
+| `TestStatsChart` / `TestSparkline` | Every shape paints: empty, all-zero, single bucket, upload-only, very large values, zero width; the sparkline's bounded history, oldest-dropped order, clamping and peak |
+| `TestStatisticsPopup` / `TestStatisticsPopupFailureHandling` | The panel renders every bucket; a broken query **degrades to dashes and logs at `warning`**; a broken speed provider samples `0 B/s` and stays diagnosable; a transient failure recovers on the next `refresh()` |
+| `TestToolbarAction` + panel tests | The entry lives in the Tools menu (full label, no shortcut, not the toolbar); opening it **activates the Stats tab on the bottom panel**; the subtabs exist; switching away, hiding the panel and shutting the window all stop the speed timer |
+| `TestChartSelectors` | The 14 ranges and 4 granularities, the 30-day/day default, range narrowing, all-time having no lower bound, and per-bucket merging |
+| `TestStatsGapFilling` | `fill_series_gaps` fills every interval of the range, including 5-minute granularity over seven days |
+| `TestTransferredBytesStatistics` | The `bandwidth_history` path: a download queued in the past tracks bytes **transferred today**; 5-minute and hourly bucketing; the legacy backfill from `downloads` |
+| `TestCumulativeStats` | The Cumulative toggle accumulates the series, persists in UI state and paints |
+| `TestChartKindToggle` | Bars are the default, an unknown kind falls back, the two views are independent of Cumulative, and the choice survives a restart |
 
 The placement matters more than it looks — a strip button reads as an action on the selection
-when the popup reports on the whole history — and without a test the next toolbar or menu edit
-silently moves it.
+when the view reports on the whole history — and without a test the next toolbar or menu edit
+silently moves it. The panel wiring has the same property: `test_opening_it_activates_stats_tab_on_bottom_panel`
+is what stops the Tools entry from silently reopening a window that no longer exists.
 
 Timezone note: the conversion reads the host clock, so these fixtures are built as **UTC
 instants that resolve to a chosen local moment** (local noon → `.astimezone(utc)`), and
@@ -464,41 +551,55 @@ author's.
 
 Re-measure when any of these becomes true:
 
-- `downloads` rows > ~50k (a heavy user over several years), or
-- the popup is opened more than a few times an hour, or
+- `bandwidth_history` rows > ~50k (5-minute buckets × queues — about 288 rows per queue per day,
+  so roughly six months of one queue), or
+- the Stats tab is opened more than a few times an hour, or
 - `get_download_stats` exceeds ~50 ms in a profile.
 
-At that point: add a covering index on `added_at`, or a `stats_daily` rollup table
-refreshed lazily (one row per day per bucket, invalidated by the newest `added_at`).
+At that point: `idx_bandwidth_history_period` already exists on `period_start`; extend it to a
+covering index `(queue_id, period_start)` and add a `stats_daily` rollup refreshed lazily (one row
+per day per bucket, invalidated by the newest `period_start`). The `bandwidth_history` table is
+itself append-only apart from the upsert, so a retention policy (delete rows older than N months
+on startup) is the other lever — and unlike a rollup it cannot drift.
 
 ---
 
 ## 9. Known limits of this design
 
 1. **`completed_at` is unreliable** until §2.2 is fixed. The design routes around it by
-   bucketing on `added_at`; it does not fix it.
-2. **No time series.** `added_at` gives when a download was *added*, not a running total per
-   day. A speed graph needs a different table entirely — a `download_events` row written on
-   every completion and on every seeding-stop — and that is a schema change, not a query.
-3. **Bytes are counted at completion time, in hindsight.** A long download that started
-   before the window and finished inside it counts entirely in the window.
-4. **`downloaded_size` is a floor while in flight** (§2.3), so a "downloaded so far this
-   month" figure moves as downloads progress. Acceptable for a retrospective total; wrong
-   for anything live.
-5. **Deleted downloads are gone.** `Database.delete_download` removes the row, so the
-   history shrinks when the user tidies up. If permanent history is wanted, that is a
-   `deleted_at` column and a policy decision, not a query change.
+   bucketing counts on `added_at`; it does not fix it.
+2. **No *rate* time series.** `bandwidth_history` (§2.4) records transferred bytes per 5-minute
+   interval, not a sample of the instantaneous rate, so a speed graph across sessions still needs
+   a different table — a `download_events` row written per sample — with a retention policy. What
+   §2.4 does retire is the narrower claim this section used to make, that *no* history existed.
+3. **Bytes are counted when they move, not when a download is added.** A long download that
+   spanned a window boundary has its volume split across the days the bytes actually arrived,
+   which is the intended behaviour for traffic and the reason the volume and count columns must
+   be read as answering different questions (§4.2).
+4. **`downloaded_size` is a floor while in flight** (§2.3), so the *fallback* aggregation — used
+   only until the first history row exists — under-reports an in-flight total. Once
+   `bandwidth_history` has rows this no longer applies.
+5. **Deleted downloads are gone.** `Database.delete_download` removes the row, so the count
+   columns shrink when the user tidies up; `bandwidth_history` keeps the volume, because it is
+   keyed by interval and queue rather than by download id. If permanent history is wanted, that
+   is a `deleted_at` column and a policy decision, not a query change.
 
 ---
 
 ## 10. Implementation order
 
+Historical — the order the feature was actually built in, kept because several of the steps
+exist only because of the one before them:
+
 1. Fix `completed_at` re-stamping (§2.2) — small, and it unblocks everything else.
 2. `DownloadStats` / `StatsSnapshot` dataclasses.
 3. `Database.get_download_stats(today)` + the data-layer tests from §7.
 4. `StatsChartWidget` — the bar chart first (§4.2), since its data already exists.
-5. `StatisticsPopup` with the totals grid and the chart, plus the widget tests.
+5. The totals grid plus the chart in a popup, plus the widget tests.
 6. `_act_tools_stats` in `_setup_menubar`, grouped with Preferences, plus the placement test.
 7. The live speed sparkline (§4.3), reading the same aggregate as the status bar.
-8. Optional: the status-bar chip (§5.3).
+8. Optional: the status-bar chip (§5.4).
 9. Update `docs/architecture/main.md` and the README documentation index.
+10. **Since the original doc:** the range/granularity pickers, `bandwidth_history` and the
+    transferred-byte series, gap filling, cumulative and the bars⇄line toggle — and finally the
+    move from the popup into the bottom details panel as the 📊 Stats tab (§5.2).

@@ -179,19 +179,28 @@ My-IDM integrates deeply with the native Windows Action Center and notification 
 
 To simplify settings discovery and reduce tab clutter, preferences pages are registered in
 `settings_dialog.py` as **named** constants. `TAB_ORDER` *is* the insertion order, and
-`TAB_TITLES` holds the sidebar captions:
+`TAB_TITLES` holds the sidebar captions — 14 pages:
 
 | `TAB_*` name | Index | Title | Contents |
 | :--- | :---: | :--- | :--- |
-| `TAB_GENERAL` | **0** | 📁 General & Downloads | Default save path, segments, segment start stagger, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, free-disk-space gate, system tray behavior, and backlog auto-processing locations. |
-| `TAB_VIEWS` | **1** | 👁️ Views & Columns | Segregated-view mode (Status / Date / File Type) with its enable checkbox, plus column select and ordering for the downloads table. |
-| `TAB_TORRENT` | **2** | 🧲 BitTorrent | Post-download seeding switches, seeding time & ratio ceilings, upload speed throttling, torrent-to-HTTP ratio, and DHT/tracker timeout. |
-| `TAB_BROWSER` | **3** | 🌐 Browser Integration | Loopback REST server (127.0.0.1:19582), minimum file size threshold (KB), bypassed file extensions, Chromium (Chrome/Edge/Brave) unpacked loader, and Mozilla Firefox `.xpi` packaging & guide. |
-| `TAB_VPN` | **4** | 🛡️ VPN & Proxy | Network interface adapter binding, instant VPN Kill Switch loop, and HTTP/SOCKS5 proxy settings. |
-| `TAB_TOR` | **5** | 🧅 Tor | Tor Onion Routing: daemon lifecycle, traffic routing switches, and executable discovery. |
-| `TAB_SECURITY` | **6** | 🛡️ Antivirus & Security | Pre-download URL extension inspection, double-extension heuristic detection, post-download Windows Defender / custom AV command execution, and quarantine. |
-| `TAB_EXTERNAL_TOOLS` | **7** | 🌐 AnimePahe Scraper | AnimePahe scraper integration (CLI & GUI paths, repository root, video quality, audio language), default video player assignment, and command preview. |
-| `TAB_YOUTUBE` | **8** | ▶️ YouTube (yt-dlp) | yt-dlp integration, playlist limits, and preferred video quality. |
+| `TAB_GENERAL` | **0** | 📁 Downloads & Retries | Default save path, segments, segment start stagger, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, free-disk-space gate, and backlog auto-processing locations. |
+| `TAB_APP` | **1** | 🖥️ Application & Tray | Auto-start at login, minimize/close to tray, start minimized, completion notification behavior. |
+| `TAB_CLIPBOARD` | **2** | 📋 Clipboard Capture | Clipboard monitor opt-in, per-copy URL ceiling, minimum capture size, ignored extensions, and the clipboard-capture hotkey row. |
+| `TAB_VIEWS` | **3** | 👁️ Views & Columns | Segregation enable plus the four grouping modes (Status / Date / File Type / Name), column select and ordering for the downloads table. |
+| `TAB_TORRENT` | **4** | 🧲 BitTorrent | Post-download seeding switches, seeding time & ratio ceilings, upload speed throttling, torrent-to-HTTP ratio, and DHT/tracker timeout. |
+| `TAB_BROWSER` | **5** | 🌐 Browser Integration | Loopback REST server (127.0.0.1:19582), minimum file size threshold (KB), bypassed file extensions, the download-capture hotkey row, Chromium (Chrome/Edge/Brave) unpacked loader, and Mozilla Firefox `.xpi` packaging & guide. |
+| `TAB_VPN` | **6** | 🛡️ VPN & Proxy | Network interface adapter binding, instant VPN Kill Switch loop, and HTTP/SOCKS5 proxy settings. |
+| `TAB_TOR` | **7** | 🧅 Tor | Tor Onion Routing: daemon lifecycle, traffic routing switches, and executable discovery. |
+| `TAB_SECURITY` | **8** | 🛡️ Antivirus & Security | Pre-download URL extension inspection, double-extension heuristic detection, post-download Windows Defender / custom AV command execution, and quarantine. |
+| `TAB_EXTERNAL_TOOLS` | **9** | 🌐 AnimePahe Scraper | AnimePahe scraper integration (CLI & GUI paths, repository root, video quality, audio language), default video player assignment, and command preview. |
+| `TAB_YOUTUBE` | **10** | ▶️ YouTube (yt-dlp) | yt-dlp integration, playlist limits, and preferred video quality. |
+| `TAB_QUEUES` | **11** | ⚙️ Queues | Full queue CRUD — names, colour swatches, concurrency budgets and per-queue download/upload ceilings. |
+| `TAB_BANDWIDTH` | **12** | 📊 Bandwidth Limit | Periodic daily/weekly/monthly quotas per queue and globally, with warning percentages. |
+| `TAB_SCHEDULER` | **13** | ⏱️ Scheduler | Off-peak download window scheduling, active days of week, and automatic pause on window end. |
+
+Every page is also reachable from the sidebar's **search box** (<kbd>Ctrl</kbd>+<kbd>F</kbd>),
+which filters the page list and highlights the matching controls — see
+[main.md](main.md#preferences--configuration-architecture).
 
 ### 6.1 Callers pass a name, never an index
 

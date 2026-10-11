@@ -41,7 +41,7 @@ While HTTP and BitTorrent transfers share a common representation in the GUI (`D
 | :--- | :--- | :--- |
 | **Transport Model** | Client-to-server (TCP/TLS) | Decentralized peer-to-peer swarm (TCP/uTP/UDP) |
 | **Concurrency Unit** | Fixed parallel segment chunks (default: 8) | Dynamic peer connections across swarm |
-| **Integrity Model** | Optional Content-Length / Range validation | SHA-1 / SHA-256 cryptographic piece hashing |
+| **Integrity Model** | Optional Content-Length / Range validation, plus a **SHA-256 checksum computed on completion and verified on recheck** | SHA-1 / SHA-256 cryptographic piece hashing |
 | **Pre-Allocation** | File sparse truncated before parallel write | Piece map allocation via storage allocation mode |
 | **Post-Download** | Terminal state reached (`completed`) | Uploads payload to swarm peers (`seeding`) |
 | **Startup Discovery** | Direct HTTP HEAD/GET probe | DHT, PEX, LSD, and multi-tier tracker announces |
@@ -159,8 +159,10 @@ stateDiagram-v2
     stopped --> queued: User Resumes (assigned next queue order)
     
     downloading --> checking: Force Recheck (verifies on-disk file size)
-    checking --> downloading: Incomplete Bytes Found
+    checking --> downloading: Incomplete Bytes Found (automatic resume)
+    checking --> paused: Incomplete Bytes Found (user-invoked recheck)
     checking --> completed: 100% Bytes Verified on Disk
+    checking --> error: SHA-256 checksum mismatch
     
     downloading --> scanning: Download 100% Complete (Antivirus Active)
     downloading --> completed: Download 100% Complete (Antivirus Disabled)
@@ -211,6 +213,10 @@ stateDiagram-v2
 | `scanning` | `threat_detected`| Antivirus detects malware signature | None | Quarantines file, sets status `'threat_detected'`. |
 | `completed` | `file_not_found` | Target file missing on disk (verified at app start, periodically every 60s, or on file open) | None | Calls `mark_file_not_found()`, updates status to `'file_not_found'`. |
 | `file_not_found`| `checking` | User clicks Force Recheck | Consumes slot | Verifies disk path and existing byte boundaries. |
+| `checking` | `paused` | **User-invoked** recheck finds a partial file | Releases slot | Status settles `paused` with the real byte count — a recheck is an inspection, so a partial file must not silently resume downloading. An *automatic* recheck (e.g. after a torrent handle re-add) still returns to `downloading`. |
+| `checking` | `paused` | **User-invoked** recheck finds no file on disk | Releases slot | Same settle, with reason "File not found" — not `queued`, so the 1 Hz tick cannot restart it before the user acts. |
+| `checking` | `completed` | Recheck finds 100% on disk and the recorded SHA-256 matches | Releases slot | Marks completed; back-fills a missing checksum. |
+| `checking` | `error` | Recheck finds 100% on disk but the SHA-256 **differs** | Releases slot | Records `"Checksum verification failed: file corrupted or modified on disk"`. No automatic re-download — silently re-fetching would hide disk corruption. |
 | `file_not_found`| `queued` | User clicks Resume | None | Resets retries, assigns queue order, marks `'queued'`. |
 
 ### HTTP Retry & Backoff Mechanics
@@ -344,7 +350,8 @@ stateDiagram-v2
 | `downloading` | `stalled` | Speed = 0 & Seeds = 0 for > 45 seconds | Slot maintained | Emits status `'stalled'`; keeps searching DHT/trackers. |
 | `stalled` | `downloading` | Speed > 0 or seeds connect | Slot maintained | Emits status `'downloading'`. |
 | `downloading` | `checking` | User triggers Force Recheck | Slot maintained | Calls `handle.force_recheck()`, begins piece hashing. |
-| `checking` | `downloading` | Piece checking completes (< 100%) | Slot maintained | Resumes piece downloading from incomplete offsets. |
+| `checking` | `downloading` | Piece checking completes (< 100%) on an **automatic** recheck | Slot maintained | Resumes piece downloading from incomplete offsets. |
+| `checking` | `paused` | Piece checking completes (< 100%) on a **user-invoked** recheck | Releases slot | `TorrentEngine` unsets `auto_managed`, pauses the handle and settles `paused` — a recheck the user asked for is an inspection, so a partial payload must not silently resume. The two are distinguished by an explicit recheck set the engine registers on request and discards on completion. |
 | `downloading` | `scanning` | 100% pieces verified & AV enabled | Releases slot | Triggers async antivirus scanner thread. |
 | `downloading` | `seeding` | 100% pieces verified & seeding enabled | Releases slot | Updates status to `'seeding'`, applies upload rate limits. |
 | `downloading` | `completed` | 100% pieces verified & seeding disabled | Releases slot | Unsets handle or pauses, marks `'completed'`. |
@@ -383,6 +390,7 @@ User adds magnet:?xt=urn:btih:<hash>
   │     └── Transitions to "checking"
   │           ├── 100% verified on disk ──> "seeding" (or "completed")
   │           └── < 100% verified ────────> "downloading"
+  │              (a user-invoked recheck settles "paused" instead — see the matrix above)
   │
   └── No peers provide metadata for > metadata_fetch_timeout_days (default: 1 day):
         ├── Transitions to "suspended"

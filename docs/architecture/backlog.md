@@ -99,20 +99,29 @@ Any download line can override the active destination folder, specify an explici
 ### 3.2.1 AnimePahe Metadata Columns
 
 `animepahe-downloader/modules/my_idm.py` appends two trailing `key=value` columns so the
-details panel can show the anime's title and page URL. They are read into
-`entry.metadata` by `parse_backlog_entry` and surfaced by `details_panel.py`:
+details panel can show the anime's title and page URL. `parse_backlog_entry` reads them into the
+entry's **headers**, and `load_backlog` moves them into `entry.metadata` on the way to
+`add_download` (`manager.py`), where `details_panel.py` surfaces them:
 
 ```text
 https://vault-123.owocdn.top/stream/anime_ep1.mp4 | D:\Anime\Series | Ep01.mp4 | anime_url=https://animepahe.pw/anime/123 | anime_title=Frieren: Beyond Journey's End | queue=AnimePahe
 ```
 
 - `anime_url=` — the AnimePahe series page URL, shown under **Show URL** in the Overview tab.
-- `anime_title=` — the anime title, shown under **Show Title**.
+- `anime_title=` — the anime title, shown under **Show Title** — and the primary key
+  [name-based segregation](table-views.md#d-name-based-segregation-name) groups a series on.
 
 Both are trailing columns (after `queue=`) and are never mistaken for a save path or
 filename, because the pipe parser only treats `dir/save_path/path/folder`,
 `filename/file/out/name`, `queue`, `referer/referrer`, `header*`, `anime_url` and
 `anime_title` as recognized keys — anything else is silently dropped.
+
+They are also **never sent as HTTP request headers**. `add_download` and `load_backlog` strip
+them from the caller's `headers` dict before it is persisted into `metadata["headers"]`, and
+`HTTPEngine._build_headers` drops them (and any non-ASCII header) at the point of use — a
+non-ASCII `anime_title` used to reach the wire as a real header, which the `curl_cffi`
+transport these hosts require cannot encode. See
+[Request Header Sanitization](main.md#request-header-sanitization).
 
 ### 3.3 Queue Assignment
 
@@ -208,8 +217,13 @@ To prevent backlog items from being repeatedly downloaded on every application r
   Whenever non-zero downloads are ingested from a backlog file, My-IDM triggers an application toast/tray notification:
   `"Picked up N downloads from Backlog"` (or `"Picked up 1 download from Backlog"`), providing immediate visual feedback during background polling or CLI handoff.
 - **Batch Processing & Backup Deduplication**:
-  Ingestion writes are batched to avoid locking issues, and processed items are deduplicated before updating persistent backup logs.
 
+  Ingestion writes are batched to avoid locking issues. Each consumed batch is prepended to
+  `backlog.backup.txt` under a `# Backed up <timestamp>` header, but the URL of every line
+  already present anywhere in the file — and every duplicate inside the incoming batch itself —
+  is dropped first; comments and blank lines are always kept. So the backup is a record of what
+  was *consumed*, keyed by URL, rather than a log that grows a second copy of a line every time
+  it is retried. A batch with nothing new left writes nothing at all.
 ---
 
 ## 6. GUI Configuration & Manual Actions
