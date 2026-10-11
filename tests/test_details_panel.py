@@ -1220,6 +1220,72 @@ class TestDetailsPanel(unittest.TestCase):
         panel.set_download_id("test-fn-ov-1")
         self.assertEqual(panel._ov_filename.text(), "my_custom_name.zip")
 
+    def test_a_selected_download_shows_only_the_copy_buttons_it_can_fill(self):
+        """A copy button belongs to a value: no value, no button."""
+        self._build(DownloadEntry(
+            id="test-copy-partial-1",
+            url="https://example.com/file.bin",
+            filename="file.bin",
+            save_path="C:/Downloads",
+            status="completed",
+        ))
+        panel = self.win._details_panel
+        panel.set_download_id("test-copy-partial-1")
+
+        # name, save directory and url have values.
+        self.assertFalse(panel._ov_filename_copy_btn.isHidden())
+        self.assertFalse(panel._ov_save_path_copy_btn.isHidden())
+        self.assertFalse(panel._ov_url_copy_btn.isHidden())
+        # hash, referrer and the anime fields do not (this is a plain HTTP download).
+        self.assertTrue(panel._ov_hash_copy_btn.isHidden())
+        self.assertTrue(panel._ov_referrer_copy_btn.isHidden())
+        self.assertTrue(panel._ov_anime_title_copy_btn.isHidden())
+        self.assertTrue(panel._ov_anime_url_copy_btn.isHidden())
+
+    def test_clearing_the_inspected_download_hides_every_copy_button(self):
+        """Deselecting must retreat the copy buttons as well as the values.
+
+        ``_clear_view()`` used to reset every value label to "—" while leaving the
+        buttons visible, so after a deselect the Overview tab showed a row of buttons
+        that each copied a dash. ``isHidden()`` rather than ``isVisible()``: this suite
+        never shows the window, and an unshown widget is not "visible" regardless.
+        """
+        self._build(DownloadEntry(
+            id="test-copy-clear-1",
+            url="https://example.com/movie.iso",
+            filename="movie.iso",
+            save_path="C:/Downloads",
+            content_hash="a" * 40,
+            status="completed",
+        ))
+        panel = self.win._details_panel
+        panel.set_download_id("test-copy-clear-1")
+        shown = [label.text() for label, button in panel._overview_copy_rows() if not button.isHidden()]
+        self.assertEqual(
+            sorted(shown),
+            sorted(["movie.iso", "C:/Downloads", "https://example.com/movie.iso", "a" * 40]),
+            "the shown rows are exactly the ones with a value",
+        )
+
+        panel.set_download_id(None)
+        for label, button in panel._overview_copy_rows():
+            self.assertEqual(label.text(), "—")
+            self.assertTrue(
+                button.isHidden(),
+                f"{label.text()!r} has no value, yet its copy button is still showing",
+            )
+
+        # An id that no longer resolves leaves through the same path.
+        panel.set_download_id("test-copy-vanished-1")
+        for _label, button in panel._overview_copy_rows():
+            self.assertTrue(button.isHidden())
+
+        # And selecting again brings the right buttons back.
+        panel.set_download_id("test-copy-clear-1")
+        self.assertFalse(panel._ov_filename_copy_btn.isHidden())
+        self.assertFalse(panel._ov_hash_copy_btn.isHidden())
+        self.assertTrue(panel._ov_referrer_copy_btn.isHidden())
+
     def test_details_panel_overview_displays_seeded_bytes_and_ratio(self):
         """DetailsPanel Overview tab displays total seeded bytes and upload/download ratio."""
         entry = DownloadEntry(

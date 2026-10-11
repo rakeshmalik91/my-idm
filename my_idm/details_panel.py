@@ -1906,6 +1906,7 @@ class DetailsPanel(QWidget):
         self._ov_url.setText("—")
         self._ov_anime_url.setText("—")
         self._ov_referrer.setText("—")
+        self._hide_overview_copy_buttons()
 
         self._table_files.setRowCount(0)
         self._table_peers.setRowCount(0)
@@ -1948,6 +1949,37 @@ class DetailsPanel(QWidget):
         self._status_label.setText("Copied to clipboard")
         self._status_label.setVisible(True)
         QTimer.singleShot(2000, lambda: self._status_label.setVisible(False))
+
+    def _overview_copy_rows(self) -> list:
+        """The Overview rows that carry a copy button, as ``(value_label, button)`` pairs.
+
+        One list, because the two paths that decide button visibility - filling the panel
+        from an entry, and clearing it - must agree. `_clear_view()` used to reset the
+        values to "—" without touching the buttons, so after deselecting a download the
+        panel showed a row of buttons that all copied a dash.
+        """
+        return [
+            (self._ov_filename, self._ov_filename_copy_btn),
+            (self._ov_anime_title, self._ov_anime_title_copy_btn),
+            (self._ov_save_path, self._ov_save_path_copy_btn),
+            (self._ov_hash, self._ov_hash_copy_btn),
+            (self._ov_url, self._ov_url_copy_btn),
+            (self._ov_anime_url, self._ov_anime_url_copy_btn),
+            (self._ov_referrer, self._ov_referrer_copy_btn),
+        ]
+
+    def _refresh_overview_copy_buttons(self) -> None:
+        """Reveal a row's copy button only when that row has something to copy."""
+        for value, button in self._overview_copy_rows():
+            if button is None:
+                continue
+            text = value.text()
+            button.setVisible(bool(text) and text != "—")
+
+    def _hide_overview_copy_buttons(self) -> None:
+        for _value, button in self._overview_copy_rows():
+            if button is not None:
+                button.setVisible(False)
 
     def _update_overview(self, entry: DownloadEntry):
         # Status with color
@@ -2100,13 +2132,7 @@ class DetailsPanel(QWidget):
             self._ov_referrer.setText("—")
 
         # Show/hide copy buttons based on whether value is not "—"
-        self._ov_filename_copy_btn.setVisible(self._ov_filename.text() != "—")
-        self._ov_anime_title_copy_btn.setVisible(self._ov_anime_title.text() != "—")
-        self._ov_save_path_copy_btn.setVisible(self._ov_save_path.text() != "—")
-        self._ov_hash_copy_btn.setVisible(self._ov_hash.text() != "—")
-        self._ov_url_copy_btn.setVisible(self._ov_url.text() != "—")
-        self._ov_anime_url_copy_btn.setVisible(self._ov_anime_url.text() != "—")
-        self._ov_referrer_copy_btn.setVisible(self._ov_referrer.text() != "—")
+        self._refresh_overview_copy_buttons()
 
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id, entry=entry)
