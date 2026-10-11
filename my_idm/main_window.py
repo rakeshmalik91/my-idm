@@ -637,6 +637,42 @@ class _RightClickGuard(QObject):
         return super().eventFilter(watched, event)
 
 
+class DownloadsTableView(QTableView):
+    """The downloads table, with presses on section header rows kept out of the selection.
+
+    Qt asks the view what a press *did* to the selection through ``selectionCommand``,
+    and its answer for a row that carries no ``ItemIsSelectable`` flag - which is every
+    grouped-view section header row - starts with ``Clear``. So the simple act of pressing
+    a group header wiped the current selection before the ``clicked`` handler could read
+    it, and that handler asks the header's *Select All* / *Clear Selection* button exactly
+    one question: "is everything in this section selected?".
+
+    Two things went wrong from that single answer:
+
+    * clicking **Clear Selection** on a fully selected section found the selection already
+      empty, so it took the Select All branch and re-selected the rows it was meant to
+      clear - the click looked like it did nothing;
+    * right-clicking a header row cleared the selection likewise, so the section menu always
+      offered **Select All** even when everything in the section was already selected.
+
+    Answering ``NoUpdate`` for a header row leaves the selection exactly as the user left it
+    and changes nothing else: the press still records the current index, ``clicked`` and
+    ``doubleClicked`` still fire, and ordinary download rows keep the default
+    ``SelectRows`` / ``ExtendedSelection`` behaviour.
+    """
+
+    def selectionCommand(self, index, event=None):
+        model = self.model()
+        if (
+            index is not None
+            and index.isValid()
+            and model is not None
+            and getattr(model, "is_section_header_row", lambda r: False)(index.row())
+        ):
+            return QItemSelectionModel.SelectionFlag.NoUpdate
+        return super().selectionCommand(index, event)
+
+
 class MainWindow(QMainWindow):
     """The main My-IDM window."""
 
@@ -716,7 +752,7 @@ class MainWindow(QMainWindow):
 
     def _setup_ui(self):
         # Table view
-        self._table = QTableView()
+        self._table = DownloadsTableView()
         self._table.setModel(self._model)
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
@@ -3000,7 +3036,7 @@ class MainWindow(QMainWindow):
             "•&nbsp; Gemini 3.8 Flash, Claude 4.6 Opus "
             "<span style='color: #6e7681;'>(via Antigravity IDE)</span></p>"
             "<p style='color: #8fa0b5; margin-top: 3px; margin-bottom: 0px; margin-left: 8px;'>"
-            "•&nbsp; Nvidia Nemotron 3 Ultra, Space Bunny Alpha, Poolside Laguna S 2.1 "
+            "•&nbsp; Space Bunny Alpha, Nvidia Nemotron 3 Ultra, Poolside Laguna S 2.1, Setpfun Setp 5 "
             "<span style='color: #6e7681;'>(via Kilo Code plugin for Antigravity IDE)</span></p>"
         )
         dlg.setStandardButtons(QMessageBox.StandardButton.Ok)
@@ -3127,6 +3163,9 @@ class MainWindow(QMainWindow):
                 sec_menu.addAction(act_collapse_all)
 
                 sec_menu.addSeparator()
+                # The model is the source of truth: MainWindow keeps its own copy only for
+                # the menu checkmarks, and the two can drift after a Preferences save.
+                current_mode = self._model.segregated_mode
                 mode_menu = sec_menu.addMenu("Switch Grouping Mode")
                 for m_key in SEGREGATED_MODES:
                     m_label = SEGREGATED_MODE_LABELS.get(m_key, m_key.capitalize())

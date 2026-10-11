@@ -144,7 +144,7 @@ machine while they run.
 This project is actively developed with AI:
 - **Models & Assistants:** 
   - Gemini 3.8 Flash, Claude 4.6 Opus (via Antigravity IDE)
-  - Nvidia Nemotron 3 Ultra, Space Bunny Alpha, Poolside Laguna S 2.1 (via Kilo Code plugin for Antigravity IDE)
+  - Spece Bunny Alpha, Nvidia Nemotron 3 Ultra, Poolside Laguna S 2.1, Stepfun Step 5 (via Kilo Code plugin for Antigravity IDE)
 
 ---
 

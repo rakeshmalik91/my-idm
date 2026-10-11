@@ -13,7 +13,7 @@ Two tiers. **Use basic sanity by default** — it is safe to leave running in th
 | Tier | Command | Scope | Time |
 | :--- | :--- | :--- | :--- |
 | **Basic sanity** | `run_all_tests.bat basic` | ~1980 tests. No window, no tray, no real clipboard. | **~60 s** |
-| **Full** | `run_all_tests.bat` | All ~3075 tests, including UI. | ~7 min |
+| **Full** | `run_all_tests.bat` | All ~3078 tests, including UI. | ~7 min |
 
 All three measured on 2026-10-02 via the wrapper. The tiers are **not** proportional: the 959
 `ui` tests alone take ~2 min 20 s, because each builds and tears down real Qt widget trees —
@@ -37,7 +37,7 @@ venv, switches to its own directory, and prints the result. Prefer it over calli
 directly. There is no `sync.bat`, no `webapp/` and no Android project — ignore runbooks that
 mention them. The suite is pure Python + PySide6 and needs no build step.
 
-**Current state: full `3064 passed, 11 skipped`; basic `1837 passed, 10 skipped, 1228 deselected`.** The 8 extra skips are the `DownloadManager.start()` tests that trigger the idm-async thread teardown race (§6); 3 skips are AV integration tests flaky on CI (§2); `TestSingleInstance` (10 tests), `TestStopResumeDrain` (5 tests), `TestTorrentDragAndDrop` (10 tests), and `test_splash.py` tests creating real windows are skipped on headless Windows CI. The three baseline skips are the opt-in real Windows Defender scan (`MYIDM_RUN_AV_TESTS=1`) and the `ui`-tier tray/clipboard tests that need a desktop session. UI/dialog tests in queues, statistics, tor, and model tests moved to the `ui` tier to avoid creating windows in basic sanity. Update these numbers when you add or remove tests, and treat a *sudden* drop as a signal that a module failed to import.
+**Current state: full `3067 passed, 11 skipped`; basic `1837 passed, 10 skipped, 1228 deselected`.** The 8 extra skips are the `DownloadManager.start()` tests that trigger the idm-async thread teardown race (§6); 3 skips are AV integration tests flaky on CI (§2); `TestSingleInstance` (10 tests), `TestStopResumeDrain` (5 tests), `TestTorrentDragAndDrop` (10 tests), and `test_splash.py` tests creating real windows are skipped on headless Windows CI. The three baseline skips are the opt-in real Windows Defender scan (`MYIDM_RUN_AV_TESTS=1`) and the `ui`-tier tray/clipboard tests that need a desktop session. UI/dialog tests in queues, statistics, tor, and model tests moved to the `ui` tier to avoid creating windows in basic sanity. Update these numbers when you add or remove tests, and treat a *sudden* drop as a signal that a module failed to import.
 
 ### A test must not depend on the host it runs on
 
@@ -311,6 +311,21 @@ still destroyed at interpreter exit.
 
 When a full run hangs or crashes with no test failure, check this table before investigating
 your own change — and if it does turn out to be yours, say so rather than re-running until green.
+
+### Whole-suite runs abort at random points on a live desktop (2026-10-11)
+
+A full `run_all_tests.bat` (and any multi-file run) died with `Windows fatal exception: access
+violation` at four unrelated points on a developer desktop: `torrent_engine.stop`,
+`SettingsDialog` teardown in `test_browser_integration.py::_on_copy_chrome_url`, the dialog
+worker in `test_youtube_ui.py`, and `test_views_tab.py` at 88%. **All four reproduce identically
+on a clean tree at `HEAD`** (verified by stashing the working-tree change), so a crash is not
+evidence that your change broke something — but it does hide everything after the crash point.
+The aborted run reports no failure, only `Tests FAILED!`.
+
+Mitigations that worked: run the suite **per file** (each file passes alone — `test_views_tab.py`
+alone is 327 passed), or per small file group. Keep the per-file result lines so the total is
+still auditable. `test_dialogs.py::test_settings_dialog_tabs_are_scrollable` also fails on a
+clean tree at `HEAD`, i.e. it is a real red test, not a flake.
 
 ---
 

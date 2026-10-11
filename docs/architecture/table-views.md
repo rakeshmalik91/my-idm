@@ -274,6 +274,16 @@ for them and the poll costs one `date()` comparison per second.
     - Last 30 Days: Soft Blue (`#64b5f6`)
     - Inactive / Older: Muted Blue-Gray (`#8fa0b5`)
 - **Toggling**: Clicking or double-clicking any header row triggers `model.toggle_section_collapsed(row)`, which toggles the section ID in `_collapsed_sections`, triggers `_reapply_filter()`, and immediately updates table spans.
+- **Select All / Clear Selection button**: Painted at the right edge of every non-empty header row
+  (`get_section_select_all_btn_rect`, `SectionHeaderDelegate.paint`), and decided on release from
+  `MainWindow._on_table_clicked()`: `_on_select_all_in_section()` when the section is not fully
+  selected, `_on_clear_selection_in_section()` when it is.
+  **A press on a header row may never change the selection.** `DownloadsTableView.selectionCommand()`
+  answers `NoUpdate` for a section header row because Qt's default answer for a non-selectable
+  row starts with `Clear`, which wiped a full selection mid-click and left the button handler
+  reading "nothing selected" — so *Clear Selection* immediately re-selected the very rows it was
+  asked to clear, and the right-click menu likewise still offered *Select All*. The same stale
+  read is why the header context menu entry is titled at menu-build time, not at trigger time.
 
 ### 3. Header Context Menu
 

@@ -20,13 +20,14 @@ from PySide6.QtCore import (
     Qt,
     QUrl,
 )
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QMouseEvent
 from PySide6.QtTest import QSignalSpy, QTest
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QHeaderView,
     QLabel,
+    QMenu,
     QSizePolicy,
     QToolBar,
     QToolButton,
@@ -2873,10 +2874,11 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.assertIn("Co-authored with", info)
         for credit in (
             "Gemini 3.8 Flash",
+            "Space Bunny Alpha",
             "Claude 4.6 Opus",
             "Nvidia Nemotron 3 Ultra",
-            "Space Bunny Alpha",
             "Poolside Laguna S 2.1",
+            "Setpfun Step 5",
             "Antigravity IDE",
             "Kilo Code plugin for Antigravity IDE",
         ):
@@ -4099,6 +4101,136 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         # Section should now be expanded
         self.assertFalse(self.win._model.is_section_collapsed("active"))
         self.assertEqual(self.win._selected_ids(), ["a1"])
+
+    def test_press_on_header_row_does_not_clear_selection(self):
+        """A press on a section header row must leave the selection alone.
+
+        ``QAbstractItemView`` answers a press on a non-selectable row - which is every
+        section header row - with ``Clear``, so pressing the header row's *Clear Selection*
+        button wiped the selection before the button's own handler ran. That handler then
+        asked "is everything in this section selected?", got "no", and took the Select All
+        branch: the click appeared to unselect everything and immediately select it back.
+        """
+        from my_idm.delegates import get_section_select_all_btn_rect
+
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        e2 = DownloadEntry(id="a2", url="http://e.com/2", filename="2.zip", status="queued")
+        for e in (e1, e2):
+            self.db.add_download(e)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+        self.win._on_select_all_in_section(0)
+        self.assertTrue(self.win._is_section_all_selected(0))
+
+        idx = self.win._model.index(0, 0)
+        cell_rect = self.win._table.visualRect(idx)
+        btn_rect = get_section_select_all_btn_rect(cell_rect, self.win._table.viewport().width())
+
+        # The press alone must not touch the selection...
+        QTest.mousePress(
+            self.win._table.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            btn_rect.center(),
+        )
+        QApplication.processEvents()
+        self.assertTrue(
+            self.win._is_section_all_selected(0),
+            "pressing the header row cleared the selection the button is meant to clear",
+        )
+
+        # ...so the release handler - `clicked` carries only the index, so it normally falls
+        # back to the cursor, which for a real click is exactly where the press landed -
+        # still sees everything selected and takes the Clear Selection branch.
+        self.win._on_table_clicked(idx, click_pos=btn_rect.center())
+        self.assertFalse(self.win._is_section_all_selected(0))
+        self.assertEqual(sorted(self.win._selected_ids()), [])
+
+        QTest.mouseRelease(
+            self.win._table.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            btn_rect.center(),
+        )
+        QApplication.processEvents()
+        self.assertFalse(self.win._is_section_all_selected(0))
+        self.assertEqual(sorted(self.win._selected_ids()), [])
+
+    def test_selection_command_is_no_update_for_a_section_header_row(self):
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        self.db.add_download(e1)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+
+        header_index = self.win._model.index(0, 0)
+        self.assertTrue(self.win._model.is_section_header_row(0))
+        self.assertEqual(
+            self.win._table.selectionCommand(header_index),
+            QItemSelectionModel.SelectionFlag.NoUpdate,
+        )
+
+        # An ordinary download row must keep the default SelectRows behaviour.
+        row = self.win._model.row_for_id("a1")
+        download_index = self.win._model.index(row, 0)
+        flags = self.win._table.selectionCommand(download_index)
+        self.assertNotEqual(flags, QItemSelectionModel.SelectionFlag.NoUpdate)
+
+    def test_context_menu_offers_clear_selection_after_right_click_on_header(self):
+        """The right-click press also wiped the selection, so the menu always said Select All."""
+        e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
+        e2 = DownloadEntry(id="a2", url="http://e.com/2", filename="2.zip", status="queued")
+        for e in (e1, e2):
+            self.db.add_download(e)
+        self.win._load_history()
+        self.win._act_segregated_view.setChecked(True)
+        self.win._on_select_all_in_section(0)
+
+        cell_rect = self.win._table.visualRect(self.win._model.index(0, 0))
+        # Right-click the title area of the header row, not the button.
+        pos = QPoint(cell_rect.left() + 30, cell_rect.center().y())
+        # Press only: the release is what would open the (modal) menu for real, and the
+        # press is what used to wipe the selection before the menu was built.
+        QTest.mousePress(
+            self.win._table.viewport(), Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier, pos
+        )
+        QApplication.processEvents()
+
+        self.assertTrue(
+            self.win._is_section_all_selected(0),
+            "right-clicking the header row cleared the selection before the menu was built",
+        )
+
+        captured: list[str] = []
+        menus: list[QMenu] = []
+        real_add_action = QMenu.addAction
+        real_init = QMenu.__init__
+
+        def _recording_init(self, *args, **kwargs):
+            real_init(self, *args, **kwargs)
+            # Stub exec on the *instance*: QMenu.exec is a Shiboken builtin, so patching
+            # the class does not intercept it and the menu would open a modal loop that
+            # this test could never dismiss.
+            self.exec = lambda *a, **k: None
+            menus.append(self)
+
+        def _recording_add_action(self, *args, **kwargs):
+            # The section menu adds prepared QActions; the mode sub-menu adds labels.
+            if args and isinstance(args[0], QAction):
+                captured.append(args[0].text())
+            elif args and isinstance(args[0], str):
+                captured.append(args[0])
+            return real_add_action(self, *args, **kwargs)
+
+        with patch.object(QMenu, "__init__", _recording_init), patch.object(
+            QMenu, "addAction", _recording_add_action
+        ):
+            self.win._show_context_menu(pos)
+
+        self.assertTrue(menus, "the section header context menu was never built")
+        self.assertTrue(
+            any(t.startswith("Clear Selection in '") for t in captured),
+            f"expected a Clear Selection entry, got {captured}",
+        )
 
     def test_table_click_on_select_all_button_does_not_toggle_collapse(self):
         from my_idm.delegates import get_section_select_all_btn_rect
