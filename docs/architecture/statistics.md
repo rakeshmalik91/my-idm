@@ -210,7 +210,8 @@ would work on the author's machine and fail for anyone who installs from the req
 file. Everything else in this codebase draws its own widgets with `QPainter` (see the
 progress and speed delegates), so the charts follow suit:
 
-- `StatsChartWidget(QWidget)` — `paintEvent` only, no layout, no axes objects.
+- `StatsChartWidget(QWidget)` — `paintEvent` only, no layout, no axes objects. The volume
+  chart draws either stacked bars or two lines from one shared axis (§4.2).
 - ~150 lines for a bar chart, ~90 for a sparkline.
 - Colours from `styles.Colors` (`ACCENT`, `BG_SECONDARY`, `TEXT_MUTED`, …) so the charts
   match the app in both themes rather than shipping matplotlib's own style.
@@ -249,6 +250,27 @@ Detail worth pinning: `added_at` is when the download was *added*, so a large fi
 on the 1st and finished on the 5th appears entirely in the 1st's column. The chart is a
 record of *when things were queued*, not when bytes moved. Labelling it "Downloads per day"
 is accurate; labelling it "Traffic per day" would not be.
+
+#### The bars ⇄ line toggle
+
+The Volumes tab also carries a **bars / line** toggle (`StatisticsView._chart_kind_btn`,
+`StatsChartWidget.set_chart_kind()`), persisted in the same `statistics_dialog_size` UI
+state as the cumulative choice. Bars are the default; the button is checkable with checked
+meaning *line*, and its label names the view currently shown, mirroring **Cumulative**.
+
+The reason it exists: a long range flattens bars into a comb — ninety 4 px wide bars cannot
+be read, while the shape of the trend still can. Two invariants keep the two views
+comparable, so switching is a viewing change and not a data change:
+
+- **shared axis.** Gridlines, value labels and peak are computed once and used by both
+  (`_paint_grid`), so the y scale never rescales on toggle and the tick labels stay honest;
+- **two independent series, not a stacked area.** Drawing uploaded on top of downloaded
+  would hide whichever is smaller — always uploads here. The legend already labels both
+  halves of the pair.
+
+`paintEvent` is therefore split into `_paint_grid` / `_paint_labels` plus `_paint_bars` /
+`_paint_lines`, with the empty-data and single-bucket cases kept: one bucket has no line to
+draw, so it renders a dot rather than nothing.
 
 ### 4.3 Tier 2 — live speed chart
 

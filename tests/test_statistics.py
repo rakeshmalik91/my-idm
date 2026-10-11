@@ -1831,6 +1831,147 @@ class TestCumulativeStats(PopupTestCase):
         self.assertTrue(popup._chart.cumulative())
 
 
+# ===========================================================================
+# The volume chart view toggle (bars <-> line)
+# ===========================================================================
+
+class TestChartKindToggle(PopupTestCase):
+    def test_bars_are_the_default_view(self):
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        self.assertEqual(chart.chart_kind(), "bar")
+        self.assertIn("bar", StatsChartWidget.CHART_KINDS)
+        self.assertIn("line", StatsChartWidget.CHART_KINDS)
+        self.assertEqual(StatsChartWidget.DEFAULT_CHART_KIND, "bar")
+
+    def test_an_unknown_kind_falls_back_to_bars(self):
+        """A stale ui_state value must not silently blank the chart."""
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        chart.set_chart_kind("scatter")
+        self.assertEqual(chart.chart_kind(), "bar")
+
+        view = StatisticsView(self.db, chart_kind="pie")
+        self.addCleanup(view.deleteLater)
+        self.assertEqual(view.chart_kind(), "bar")
+
+    def test_the_kind_reaches_the_tooltip(self):
+        """The tooltip is the only place the chart says which view is active."""
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        chart.set_days([("2026-09-30", DownloadStats(1, 10 * MB, 0, 1))])
+        self.assertIn("Bars", chart.toolTip())
+        self.assertIn("added", chart.toolTip(), "the cumulative wording must survive too")
+        chart.set_chart_kind("line")
+        self.assertIn("Lines", chart.toolTip())
+
+    def test_both_views_paint(self):
+        days = [
+            ("2026-09-28", DownloadStats(count=1, downloaded=100 * MB, uploaded=20 * MB, completed=1)),
+            ("2026-09-29", DownloadStats(count=2, downloaded=50 * MB, uploaded=10 * MB, completed=1)),
+            ("2026-09-30", DownloadStats(count=1, downloaded=200 * MB, uploaded=30 * MB, completed=1)),
+        ]
+        for kind in StatsChartWidget.CHART_KINDS:
+            for cumulative in (False, True):
+                with self.subTest(kind=kind, cumulative=cumulative):
+                    chart = StatsChartWidget()
+                    self.addCleanup(chart.deleteLater)
+                    chart.resize(520, 200)
+                    chart.set_days(days)
+                    chart.set_cumulative(cumulative)
+                    chart.set_chart_kind(kind)
+                    self.assertFalse(paint(chart).isNull())
+
+    def test_the_line_view_paints_a_single_bucket(self):
+        """One bucket has no line to draw; it must still not vanish from the chart."""
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        chart.resize(520, 200)
+        chart.set_days([("2026-09-30 14:35", DownloadStats(1, 42 * MB, 1 * MB, 1))], bucket="5min")
+        chart.set_chart_kind("line")
+        self.assertFalse(paint(chart).isNull())
+
+    def test_the_line_view_paints_when_empty(self):
+        chart = StatsChartWidget()
+        self.addCleanup(chart.deleteLater)
+        chart.resize(520, 200)
+        chart.set_chart_kind("line")
+        self.assertFalse(paint(chart).isNull())
+
+    def test_the_volumes_tab_has_the_toggle(self):
+        popup = self.popup()
+        button = popup._chart_kind_btn
+        self.assertTrue(button.isCheckable())
+        self.assertFalse(button.isChecked(), "bars are the default, so it starts unchecked")
+        self.assertEqual(popup.chart_kind(), "bar")
+        self.assertEqual(popup._chart.chart_kind(), "bar")
+
+        button.click()
+        self.assertTrue(button.isChecked())
+        self.assertEqual(popup.chart_kind(), "line")
+        self.assertEqual(popup._chart.chart_kind(), "line")
+
+        button.click()
+        self.assertFalse(button.isChecked())
+        self.assertEqual(popup.chart_kind(), "bar")
+
+    def test_the_button_labels_the_view_now_shown(self):
+        """Cumulative names what it turned on; the toggle names what is on screen."""
+        popup = self.popup()
+        self.assertIn("Bars", popup._chart_kind_btn.text())
+        popup._chart_kind_btn.click()
+        self.assertIn("Line", popup._chart_kind_btn.text())
+
+    def test_the_chosen_view_survives_a_restart(self):
+        self.add("dl1", 1, total=200 * MB)
+        popup = self.popup()
+        popup._chart_kind_btn.click()
+        self.assertEqual(popup.chart_kind(), "line")
+        popup.close()
+
+        state = self.db.get_ui_state(StatisticsPopup.UI_STATE_KEY)
+        self.assertEqual(state.get("chart_kind"), "line")
+
+        reopened = self.popup()
+        self.assertEqual(reopened.chart_kind(), "line")
+        self.assertTrue(reopened._chart_kind_btn.isChecked())
+        self.assertEqual(reopened._chart.chart_kind(), "line")
+
+    def test_a_stale_stored_kind_is_ignored(self):
+        self.db.set_ui_state(
+            StatisticsPopup.UI_STATE_KEY, {"width": 700, "height": 500, "chart_kind": "pie"}
+        )
+        popup = self.popup()
+        self.assertEqual(popup.chart_kind(), "bar")
+        self.assertFalse(popup._chart_kind_btn.isChecked())
+
+    def test_setting_the_kind_updates_the_button(self):
+        """set_chart_kind() is called on restore, so the label must follow it."""
+        popup = self.popup()
+        popup.set_chart_kind("line")
+        self.assertTrue(popup._chart_kind_btn.isChecked())
+        self.assertIn("Line", popup._chart_kind_btn.text())
+        self.assertEqual(popup._chart.chart_kind(), "line")
+
+    def test_chart_kind_and_cumulative_are_independent(self):
+        """Both write the same ui_state blob, so one must not clobber the other."""
+        self.add("dl1", 1, total=200 * MB)
+        popup = self.popup()
+        popup._chart_kind_btn.click()
+        popup._cumulative_btn.click()
+        self.assertEqual(popup.chart_kind(), "line")
+        self.assertTrue(popup.is_cumulative())
+        popup.close()
+
+        state = self.db.get_ui_state(StatisticsPopup.UI_STATE_KEY)
+        self.assertEqual(state.get("chart_kind"), "line")
+        self.assertEqual(state.get("cumulative"), True)
+
+        reopened = self.popup()
+        self.assertEqual(reopened.chart_kind(), "line")
+        self.assertTrue(reopened.is_cumulative())
+
+
 if __name__ == "__main__":
     unittest.main()
 

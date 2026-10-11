@@ -49,10 +49,14 @@ def _fmt_rate(bytes_per_second: int) -> str:
 
 
 class StatsChartWidget(QWidget):
-    """Stacked per-day downloaded/uploaded bars.
+    """Stacked per-day downloaded/uploaded bars, or the same two series as lines.
 
     Days with no activity are drawn at zero width rather than skipped: dropping them
     compresses the time axis and makes a quiet week look like a busy one.
+
+    The line view exists because a long range flattens bars into a comb - ninety 4 px
+    wide bars cannot be read, while the shape of the trend still can. Both views share
+    the axis, so switching between them does not rescale the data.
     """
 
     AXIS_LEFT = 78
@@ -60,11 +64,16 @@ class StatsChartWidget(QWidget):
     AXIS_TOP = 8
     AXIS_RIGHT = 8
 
+    #: The two volume views the Volumes tab toggles between, in menu order.
+    CHART_KINDS = ("bar", "line")
+    DEFAULT_CHART_KIND = "bar"
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._days: tuple[tuple[str, DownloadStats], ...] = ()
         self._bucket = "day"
         self._cumulative = False
+        self._chart_kind = self.DEFAULT_CHART_KIND
         self.setMinimumHeight(190)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._update_tooltip()
@@ -79,6 +88,16 @@ class StatsChartWidget(QWidget):
     def cumulative(self) -> bool:
         return self._cumulative
 
+    def set_chart_kind(self, kind: str) -> None:
+        kind = kind if kind in self.CHART_KINDS else self.DEFAULT_CHART_KIND
+        if self._chart_kind != kind:
+            self._chart_kind = kind
+            self._update_tooltip()
+            self.update()
+
+    def chart_kind(self) -> str:
+        return self._chart_kind
+
     def _update_tooltip(self) -> None:
         if self._bucket == "5min":
             unit = "5 minutes"
@@ -91,8 +110,9 @@ class StatsChartWidget(QWidget):
         else:
             unit = "day of month"
         mode = "Cumulative volume" if self._cumulative else "Grouped"
+        shape = "Lines" if self._chart_kind == "line" else "Bars"
         self.setToolTip(
-            f"{mode} by {unit}. Tracks actual bytes transferred during each interval "
+            f"{shape} · {mode} by {unit}. Tracks actual bytes transferred during each interval "
             "(instead of only when downloads were added)."
         )
 
@@ -180,7 +200,17 @@ class StatsChartWidget(QWidget):
         if peak <= 0:
             peak = 1
 
-        # Gridlines plus their labels.
+        self._paint_grid(painter, plot, peak)
+        self._paint_labels(painter, plot, display_days)
+        if self._chart_kind == "line":
+            self._paint_lines(painter, plot, display_days, peak)
+        else:
+            self._paint_bars(painter, plot, display_days, peak)
+
+        painter.end()
+
+    def _paint_grid(self, painter: QPainter, plot: QRectF, peak: int) -> None:
+        """Gridlines plus their value labels. Shared by both views, hence shared scale."""
         step = self._tick_step(peak)
         painter.setPen(QPen(QColor(Colors.BORDER), 1, Qt.PenStyle.DotLine))
         value = 0
@@ -196,31 +226,13 @@ class StatsChartWidget(QWidget):
             painter.setPen(QPen(QColor(Colors.BORDER), 1, Qt.PenStyle.DotLine))
             value += step
 
-        slot = plot.width() / len(display_days)
-        bar_width = max(1.0, slot * 0.68)
-        # Sparse ticks: label roughly six dates regardless of the range.
+    def _paint_labels(self, painter: QPainter, plot: QRectF, display_days) -> None:
+        """Sparse date ticks: roughly six labels regardless of the range."""
         label_every = max(1, len(display_days) // 6)
         same_day = len(display_days) > 0 and (display_days[0][0][:10] == display_days[-1][0][:10])
+        slot = plot.width() / len(display_days)
 
-        downloaded_brush = QColor(Colors.ACCENT)
-        uploaded_brush = QColor(Colors.GREEN)
-
-        for index, (day, stats) in enumerate(display_days):
-            x = plot.left() + index * slot + (slot - bar_width) / 2.0
-            total = stats.downloaded + stats.uploaded
-            if total > 0:
-                height = (total / peak) * plot.height()
-                up_height = (stats.uploaded / total) * height if total else 0.0
-                if stats.downloaded > 0:
-                    painter.fillRect(
-                        QRectF(x, plot.bottom() - height, bar_width, height - up_height),
-                        downloaded_brush,
-                    )
-                if stats.uploaded > 0:
-                    painter.fillRect(
-                        QRectF(x, plot.bottom() - up_height, bar_width, up_height),
-                        uploaded_brush,
-                    )
+        for index, (day, _stats) in enumerate(display_days):
             if index % label_every == 0:
                 painter.setPen(QColor(Colors.TEXT_MUTED))
                 if self._bucket == "month":
@@ -242,7 +254,60 @@ class StatsChartWidget(QWidget):
                     Qt.AlignmentFlag.AlignCenter, label,
                 )
 
-        painter.end()
+    def _paint_bars(self, painter: QPainter, plot: QRectF, display_days, peak: int) -> None:
+        """Stacked per-bucket downloaded/uploaded bars."""
+        slot = plot.width() / len(display_days)
+        bar_width = max(1.0, slot * 0.68)
+
+        downloaded_brush = QColor(Colors.ACCENT)
+        uploaded_brush = QColor(Colors.GREEN)
+
+        for index, (day, stats) in enumerate(display_days):
+            x = plot.left() + index * slot + (slot - bar_width) / 2.0
+            total = stats.downloaded + stats.uploaded
+            if total > 0:
+                height = (total / peak) * plot.height()
+                up_height = (stats.uploaded / total) * height if total else 0.0
+                if stats.downloaded > 0:
+                    painter.fillRect(
+                        QRectF(x, plot.bottom() - height, bar_width, height - up_height),
+                        downloaded_brush,
+                    )
+                if stats.uploaded > 0:
+                    painter.fillRect(
+                        QRectF(x, plot.bottom() - up_height, bar_width, up_height),
+                        uploaded_brush,
+                    )
+
+    def _paint_lines(self, painter: QPainter, plot: QRectF, display_days, peak: int) -> None:
+        """One line per series, on the shared scale, so no half of the pair disappears.
+
+        A stacked area would draw one series on top of the other and hide whichever is
+        smaller - always uploads, here - so the two are plotted independently instead.
+        """
+        step_x = plot.width() / max(1, len(display_days) - 1)
+        series = (
+            (lambda stats: stats.uploaded, QColor(Colors.GREEN)),
+            (lambda stats: stats.downloaded, QColor(Colors.ACCENT)),
+        )
+        for value_of, colour in series:
+            pen = QPen(colour, 1.8)
+            painter.setPen(pen)
+            points = []
+            for index, (_day, stats) in enumerate(display_days):
+                value = value_of(stats)
+                points.append(
+                    QPointF(
+                        plot.left() + index * step_x,
+                        plot.bottom() - (value / peak) * plot.height(),
+                    )
+                )
+            if len(points) == 1:
+                # A single bucket has no line to draw; a dot keeps it visible.
+                painter.setBrush(colour)
+                painter.drawEllipse(points[0], 3.0, 3.0)
+                continue
+            painter.drawPolyline(points)
 
 
 class SparklineWidget(QWidget):
@@ -365,6 +430,7 @@ class StatisticsView(QWidget):
         range_index: int = DEFAULT_RANGE_INDEX,
         bucket: str = "day",
         cumulative: bool = False,
+        chart_kind: str = StatsChartWidget.DEFAULT_CHART_KIND,
     ):
         super().__init__(parent)
         self._db = db
@@ -374,6 +440,8 @@ class StatisticsView(QWidget):
         self._timer: Optional[QTimer] = None
         self._range_index = range_index
         self._cumulative = bool(cumulative)
+        valid_kinds = StatsChartWidget.CHART_KINDS
+        self._chart_kind = chart_kind if chart_kind in valid_kinds else StatsChartWidget.DEFAULT_CHART_KIND
         valid_buckets = dict(self.BUCKETS).values()
         if bucket == "minute":
             self._bucket = "5min"
@@ -384,6 +452,7 @@ class StatisticsView(QWidget):
 
         self._build_ui()
         self._restore_cumulative_preference()
+        self._restore_chart_kind_preference()
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -443,6 +512,13 @@ class StatisticsView(QWidget):
         self._cumulative_btn.toggled.connect(self._on_cumulative_toggled)
         controls.addWidget(self._cumulative_btn)
 
+        self._chart_kind_btn = QPushButton(self._chart_kind_label(self._chart_kind))
+        self._chart_kind_btn.setCheckable(True)
+        self._chart_kind_btn.setChecked(self._chart_kind == "line")
+        self._chart_kind_btn.setToolTip("Switch the volume chart between bars and a line")
+        self._chart_kind_btn.toggled.connect(self._on_chart_kind_toggled)
+        controls.addWidget(self._chart_kind_btn)
+
         self._volumes_refresh_btn = QPushButton("🔄  Refresh")
         self._volumes_refresh_btn.setToolTip("Refresh statistics")
         self._volumes_refresh_btn.clicked.connect(self.refresh)
@@ -453,6 +529,7 @@ class StatisticsView(QWidget):
 
         self._chart = StatsChartWidget()
         self._chart.set_cumulative(self._cumulative)
+        self._chart.set_chart_kind(self._chart_kind)
         layout.addWidget(self._chart, 1)
 
         legend = QLabel(
@@ -618,6 +695,27 @@ class StatisticsView(QWidget):
         self.set_cumulative(checked)
         self._save_cumulative_preference()
 
+    def chart_kind(self) -> str:
+        return self._chart_kind
+
+    @staticmethod
+    def _chart_kind_label(kind: str) -> str:
+        """The button names the view currently shown, the way Cumulative does."""
+        return "📈  Line" if kind == "line" else "📊  Bars"
+
+    def set_chart_kind(self, kind: str) -> None:
+        kind = kind if kind in StatsChartWidget.CHART_KINDS else StatsChartWidget.DEFAULT_CHART_KIND
+        self._chart_kind = kind
+        if hasattr(self, "_chart_kind_btn"):
+            self._chart_kind_btn.setChecked(kind == "line")
+            self._chart_kind_btn.setText(self._chart_kind_label(kind))
+        if hasattr(self, "_chart"):
+            self._chart.set_chart_kind(kind)
+
+    def _on_chart_kind_toggled(self, checked: bool) -> None:
+        self.set_chart_kind("line" if checked else "bar")
+        self._save_chart_kind_preference()
+
     def _resolve_today(self) -> date:
         return self._today or datetime.now().date()
 
@@ -638,6 +736,7 @@ class StatisticsView(QWidget):
         self._snapshot = snap
         self._populate_grid()
         self._chart.set_cumulative(self._cumulative)
+        self._chart.set_chart_kind(self._chart_kind)
         self._chart.set_days(snap.series if snap else (), bucket=bucket)
         self._sample_speed()
 
@@ -748,6 +847,29 @@ class StatisticsView(QWidget):
         except Exception:
             pass
 
+    def _restore_chart_kind_preference(self) -> None:
+        """The chosen volume view survives a restart, the way Cumulative does."""
+        if not self._db:
+            return
+        try:
+            state = self._db.get_ui_state(self.UI_STATE_KEY, None)
+            if isinstance(state, dict) and "chart_kind" in state:
+                self.set_chart_kind(str(state.get("chart_kind")))
+        except Exception:
+            pass
+
+    def _save_chart_kind_preference(self) -> None:
+        if not self._db:
+            return
+        try:
+            state = self._db.get_ui_state(self.UI_STATE_KEY, {}) or {}
+            if not isinstance(state, dict):
+                state = {}
+            state["chart_kind"] = self._chart_kind
+            self._db.set_ui_state(self.UI_STATE_KEY, state)
+        except Exception:
+            pass
+
 
 class StatisticsPopup(QDialog):
     """Totals for today / week / month / year / all time, plus the two charts.
@@ -769,6 +891,7 @@ class StatisticsPopup(QDialog):
         range_index: int = DEFAULT_RANGE_INDEX,
         bucket: str = "day",
         cumulative: bool = False,
+        chart_kind: str = StatsChartWidget.DEFAULT_CHART_KIND,
     ):
         super().__init__(parent)
         self.setWindowTitle("📊  Statistics")
@@ -786,6 +909,7 @@ class StatisticsPopup(QDialog):
             range_index=range_index,
             bucket=bucket,
             cumulative=cumulative,
+            chart_kind=chart_kind,
         )
         layout.addWidget(self._view, 1)
 
@@ -890,6 +1014,10 @@ class StatisticsPopup(QDialog):
         return self._view._cumulative_btn
 
     @property
+    def _chart_kind_btn(self):
+        return self._view._chart_kind_btn
+
+    @property
     def _volume_header(self):
         return self._view._volume_header
 
@@ -944,6 +1072,8 @@ class StatisticsPopup(QDialog):
                 self.resize(680, 560)
             if "cumulative" in state:
                 self.set_cumulative(bool(state.get("cumulative")))
+            if "chart_kind" in state:
+                self.set_chart_kind(str(state.get("chart_kind")))
             return
         self.resize(680, 560)
 
@@ -957,6 +1087,7 @@ class StatisticsPopup(QDialog):
                     "width": self.width(),
                     "height": self.height(),
                     "cumulative": self._cumulative,
+                    "chart_kind": self.chart_kind(),
                 },
             )
         except Exception:
