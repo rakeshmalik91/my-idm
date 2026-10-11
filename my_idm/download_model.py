@@ -371,11 +371,87 @@ def split_extension(name: str) -> tuple[str, str]:
     return base[:idx], base[idx:].lower()
 
 
+def category_for_name(name: str) -> str:
+    """Map a file *name* to its type category, or "" when it is unrecognised.
+
+    Takes the leaf, so a path like ``Show/Season 1/ep.mkv`` is ``SECTION_TYPE_VIDEO``.
+    """
+    _stem, ext = split_extension(name)
+    if not ext:
+        return ""
+    return TYPE_CATEGORY_EXTENSIONS.get(ext.lstrip("."), "")
+
+
+#: A multi-file torrent folder is filed by its payload when one category holds more than
+#: this share of the bytes. A season folder is 99.99% video - or audio, or photos - plus a
+#: handful of ``.nfo`` / ``.jpg`` / ``.txt`` extras, and the folder itself carries no
+#: extension, so the name lookup above fell through to General and hid the whole series
+#: from the Video / Audio / Photos sections. The bar is deliberately high: a genuinely
+#: mixed folder is meant to stay in General.
+TYPE_CATEGORY_PAYLOAD_SHARE = 0.95
+
+
+def _payload_type_category(entry: DownloadEntry) -> str:
+    """Return the category owning *entry*'s multi-file payload, or "" when inconclusive.
+
+    Multi-file torrents carry their file list in ``metadata["files"]``: a list of dicts as
+    produced by `TorrentEngine.get_torrent_files()` (``path`` / ``name`` / ``size``), lists
+    of plain paths also accepted. Bytes are the weight so a single large episode outweighs
+    any number of thumbnails; when no file reports a size, files are counted instead.
+    """
+    try:
+        meta = entry.metadata
+    except Exception:
+        return ""
+    if not meta:
+        return ""
+    files = meta.get("files")
+    if not isinstance(files, list) or not files:
+        return ""
+
+    byte_totals: dict[str, int] = {}
+    counts: dict[str, int] = {}
+    total_bytes = 0
+    for f in files:
+        if isinstance(f, dict):
+            name = str(f.get("path") or f.get("name") or "")
+            raw_size = f.get("size")
+        else:
+            name, raw_size = str(f or ""), 0
+        if not name.strip():
+            continue
+        category = category_for_name(name)
+        counts[category] = counts.get(category, 0) + 1
+        try:
+            size = int(raw_size or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > 0:
+            byte_totals[category] = byte_totals.get(category, 0) + size
+            total_bytes += size
+
+    if not counts:
+        return ""
+    if total_bytes > 0:
+        totals, weight = byte_totals, total_bytes
+    else:
+        totals, weight = counts, sum(counts.values())
+    if weight <= 0:
+        return ""
+    dominant = max(totals.items(), key=lambda kv: kv[1])[0]
+    if totals[dominant] / weight > TYPE_CATEGORY_PAYLOAD_SHARE:
+        return dominant
+    return ""
+
+
 def get_entry_type_category(entry: DownloadEntry) -> str:
     """Classify a download into Video / Audio / Archive / Documents / Photo / General.
 
     The extension is taken from ``filename``, falling back to the leaf of ``file_path`` so
     a torrent whose root folder carries the extension still lands in the right section.
+    When neither name recognises an extension, a multi-file torrent is filed by what its
+    payload *is*: if one category holds more than ``TYPE_CATEGORY_PAYLOAD_SHARE`` of the
+    bytes, that section gets it (a season folder is Video, a discography folder is Audio).
     Anything unrecognised - including a download with no name yet - is ``General``, which
     is the catch-all section and therefore never empty-by-accident.
     """
@@ -398,11 +474,13 @@ def get_entry_type_category(entry: DownloadEntry) -> str:
         return override
 
     for candidate in candidates:
-        _stem, ext = split_extension(candidate)
-        if ext:
-            category = TYPE_CATEGORY_EXTENSIONS.get(ext.lstrip("."))
-            if category:
-                return category
+        category = category_for_name(candidate)
+        if category:
+            return category
+
+    payload_category = _payload_type_category(entry)
+    if payload_category:
+        return payload_category
     return SECTION_TYPE_GENERAL
 
 DATE_SECTION_DEFS = [

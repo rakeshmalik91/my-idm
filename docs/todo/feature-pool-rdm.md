@@ -149,24 +149,30 @@ Was recorded here as MISSING. That verdict was **stale**: the feature shipped, a
 exact shape this entry proposed to build — a `category_for_filename()` helper plus a
 segregation mode, mirroring `get_entry_date_category()`. Re-checked 2026-10-01 and 2026-10-07.
 
-- `TYPE_CATEGORY_EXTENSIONS` (`download_model.py:286-325`) maps ~95 lower-case extensions into
-  six buckets. `get_entry_type_category()` (`:367-399`) reads `filename`, falls back to the
+- `TYPE_CATEGORY_EXTENSIONS` (`download_model.py:294-333`) maps ~95 lower-case extensions into
+  six buckets. `get_entry_type_category()` (`:447`) reads `filename`, falls back to the
   leaf of `file_path` so a torrent whose *root folder* carries the extension still classifies,
-  and honours a per-entry `metadata["type_category"]` override.
-- `"type"` is one of the three segregation modes (`SEGREGATED_MODES`, `:338`), so it is
+  honours a per-entry `metadata["type_category"]` override, and — when no name recognises an
+  extension — files a multi-file torrent by its payload (see the residual note below).
+- `"type"` is one of the four segregation modes (`SEGREGATED_MODES`, `:346`), so it is
   reachable from **View → Segregated View** and **Preferences → Views**, and composes with the
   header filter chips. Covered by `tests/test_views_tab.py`.
 
 The trap that made this look absent: there are **two unrelated "type" notions** in the model.
-The filter chip is `TYPE_FILTER_LABELS` (`:211`) and is keyed on *engine*
+The filter chip is `TYPE_FILTER_LABELS` (`:214`) and is keyed on *engine*
 (`http` / `torrent`), not on file extension. The extension-derived one is the
 `SECTION_TYPE_*` family. Do not read the first and conclude the second is missing.
 
 Residual, none of which is "implement the feature":
 
-- **Multi-file torrents are never categorised.** A torrent is one `downloads` row; its file
-  list lives inside `metadata_json["files"]`. One torrent therefore lands in exactly one
-  section. Closing this needs a schema decision (a `files` table), not a helper.
+- **A multi-file torrent still has no per-file rows.** A torrent is one `downloads` row; its file
+  list lives inside `metadata_json["files"]`, so one torrent lands in exactly one section and the
+  Files tab still needs its own table. What *is* closed as of 2026-10-11 is the half that
+  mattered in the table: `type` mode now files a torrent folder that carries no extension by its
+  payload — one category holding more than `TYPE_CATEGORY_PAYLOAD_SHARE` (`:391`, 95%) of the
+  bytes wins, so a season folder lands in Video, a discography in Audio and a camera roll in
+  Photos instead of all three falling into General. Anything below that share stays mixed, i.e.
+  General. A `files` table would still be needed for per-file sectioning, not for this.
 - **The `type_category` override has no UI writer** — only the read and the tests. A
   mis-detected item can be filed by hand only through `metadata_json`.
 
@@ -443,9 +449,10 @@ Found while auditing, and worth fixing in our own docs:
   section — the feature is implemented and the doc's own cited anchor pointed *into* the
   extension table that implements it.
 - **Stale line references throughout this file**, re-audited and updated **2026-10-07** against the
-  tree. These are point-in-time; `my_idm/` moves, so re-check before citing any of them:
+  tree, and again on **2026-10-11** for the rows the `DownloadsTableView` and payload-classification
+  changes moved. These are point-in-time; `my_idm/` moves, so re-check before citing any of them:
 
-  | Symbol / Reference | 2026-10-01 Citation | Current Location (2026-10-07) |
+  | Symbol / Reference | 2026-10-01 Citation | Current Location (2026-10-11) |
   | --- | --- | --- |
   | `queue_order` DDL & dataclass | `database.py:543`, `:475`, `:353` | `database.py:454` (dataclass), `:580` (`_DOWNLOAD_DB_COLUMNS`), `:648` (DDL), `:700` (migration) |
   | `StatsSnapshot` | `database.py:67` | `database.py:72` |
@@ -455,16 +462,18 @@ Found while auditing, and worth fixing in our own docs:
   | `_process_queue()` | `manager.py:1787-1827` | `manager.py:2115-2175` |
   | `_retry_timer` / `_process_retry_queue` | `manager.py:410-412` | `manager.py:497` (`_retry_timer`), `:3785` (`_process_retry_queue`) |
   | `move_queue_up` / `move_queue_down` | `manager.py:2608-2638` | `manager.py:3005-3023` |
-  | `get_entry_date_category()` | `download_model.py:417` | `download_model.py:431-455` |
-  | `get_entry_type_category()` | `download_model.py:353-385` | `download_model.py:367-399` |
-  | `TYPE_CATEGORY_EXTENSIONS` | `download_model.py:272-311` | `download_model.py:286-325` |
-  | `TYPE_FILTER_LABELS` (engine) | `download_model.py:197-200` | `download_model.py:211` |
+  | `get_entry_date_category()` | `download_model.py:417` | `download_model.py:516` |
+  | `get_entry_type_category()` | `download_model.py:353-385` | `download_model.py:447-484` |
+  | `TYPE_CATEGORY_EXTENSIONS` | `download_model.py:272-311` | `download_model.py:294-333` |
+  | `TYPE_FILTER_LABELS` (engine) | `download_model.py:197-200` | `download_model.py:214` |
+  | `category_for_name()` / `_payload_type_category()` | — | `download_model.py:374` / `:394-444` (new 2026-10-11, folder payload rule) |
+  | `TYPE_CATEGORY_PAYLOAD_SHARE` | — | `download_model.py:391` (new 2026-10-11) |
   | Bandwidth allocation fraction table | `http_engine.py:80-86` | `utils.py:163-167` (`BANDWIDTH_ALLOCATION_FRACTIONS`), resolved in `utils.effective_rate_limit` (`:170-194`) |
   | Chunk pacers (4 sites) | `http_engine.py:868`, `:983`, `:1122`, `:1267` | `http_engine.py:961`, `:1090`, `:1232`, `:1377` |
   | HTTP segment probe & `Accept-Ranges` | `http_engine.py:686-741`, `:707` | `http_engine.py:764-825` (`Accept-Ranges` at `:787`, `:807`, `:820`) |
   | Segment task creation & gather | `http_engine.py:857-861`, `:963` | `http_engine.py:893-896` (launch), `:899` (gather) |
   | File pre-allocation `truncate` / `seek` | `http_engine.py:778`, `:860`, `:975` | `http_engine.py:858` (`truncate`), `:953`, `:1082` (`seek`) |
-  | `_on_pause()` in UI | `main_window.py:1726` | `main_window.py:2108` |
+  | `_on_pause()` in UI | `main_window.py:1726` | `main_window.py:2559` (after the 2026-10-11 `DownloadsTableView` change) |
   | CLI `parse_args` and GUI exec | `main.py:49-80`, `:99`, `:212` | `main.py:53-89` (`parse_args`), `:108` (`QApplication`), `:240` (`app.exec`) |
 
 - **Cross-platform verdict reversal:** §17 was originally marked "MISSING by decision". It was

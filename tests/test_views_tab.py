@@ -56,6 +56,21 @@ def entry(name="", url="u", eid="x", **kw) -> DownloadEntry:
     return DownloadEntry(id=eid, url=url, filename=name, save_path="C:/t", **kw)
 
 
+def payload_entry(name="Show S01", files=(), eid="t1") -> DownloadEntry:
+    """A torrent entry carrying the file list ``TorrentEngine.get_torrent_files()`` builds.
+
+    The folder name deliberately has no extension, which is the whole point: it is the
+    payload, not the name, that says what the download is.
+    """
+    e = entry(name, url="magnet:?xt=urn:btih:aaaa", eid=eid, download_type="torrent")
+    e.file_path = ""
+    e.metadata["files"] = list(files)
+    return e
+
+
+MB = 1024 * 1024
+
+
 # ===========================================================================
 # The classifier
 # ===========================================================================
@@ -148,6 +163,126 @@ class TestTypeCategory(unittest.TestCase):
                 self.assertIn(category, declared)
                 self.assertEqual(ext, ext.lower().lstrip("."))
 
+    # -- multi-file torrent folders are filed by their payload -----------------
+
+    def test_a_torrent_folder_is_filed_by_what_it_contains(self):
+        """A season folder has no extension of its own; it is what it contains.
+
+        The file list is the shape `TorrentEngine.get_torrent_files()` persists in
+        ``metadata["files"]``, so this is exactly what the classifier sees in production.
+        """
+        cases = {
+            "a season folder": (
+                SECTION_TYPE_VIDEO,
+                [
+                    {"path": "Show S01/1x01.mkv", "size": 900 * MB},
+                    {"path": "Show S01/1x02.mkv", "size": 900 * MB},
+                    {"path": "Show S01/readme.nfo", "size": 2048},
+                ],
+            ),
+            "a discography folder": (
+                SECTION_TYPE_AUDIO,
+                [
+                    {"path": "Album/01 - Track.flac", "size": 80 * MB},
+                    {"path": "Album/02 - Track.flac", "size": 80 * MB},
+                    {"path": "Album/cover.jpg", "size": 64 * 1024},
+                ],
+            ),
+            "a camera roll folder": (
+                SECTION_TYPE_PHOTO,
+                [
+                    {"path": "Trip/IMG_0001.jpg", "size": 5 * MB},
+                    {"path": "Trip/IMG_0002.png", "size": 5 * MB},
+                    {"path": "Trip/list.txt", "size": 512},
+                ],
+            ),
+            "an archive pack folder": (
+                SECTION_TYPE_ARCHIVE,
+                [
+                    {"path": "Pack/a.zip", "size": 300 * MB},
+                    {"path": "Pack/b.zip", "size": 300 * MB},
+                    {"path": "Pack/hash.txt", "size": 256},
+                ],
+            ),
+        }
+        for label, (expected, files) in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(
+                    get_entry_type_category(payload_entry(files=files)),
+                    expected,
+                )
+
+    def test_a_ninety_nine_percent_folder_is_filed_by_its_payload(self):
+        """A single extra file must not tip a folder out of its own section."""
+        files = [{"path": f"Show/S01E{i:02}.mkv", "size": 400 * MB} for i in range(12)]
+        files.append({"path": "Show/sample.mkv", "size": 4 * MB})
+        files.append({"path": "Show/readme.nfo", "size": 1024})
+        self.assertEqual(
+            get_entry_type_category(payload_entry(files=files)),
+            SECTION_TYPE_VIDEO,
+        )
+
+    def test_a_genuinely_mixed_folder_stays_in_general(self):
+        """A folder that is 92% video is a mixed folder, not a video folder."""
+        files = [
+            {"path": "Mix/movie.mkv", "size": 92 * MB},
+            {"path": "Mix/notes.pdf", "size": 4 * MB},
+            {"path": "Mix/photo.jpg", "size": 4 * MB},
+        ]
+        self.assertEqual(
+            get_entry_type_category(payload_entry(files=files)),
+            SECTION_TYPE_GENERAL,
+        )
+
+    def test_ninety_five_percent_exactly_is_not_enough(self):
+        """The rule is *more than* 95%, so a 95.0% folder is still a mixed folder."""
+        files = [
+            {"path": "Mix/a.mkv", "size": 95 * MB},
+            {"path": "Mix/b.mkv", "size": 95 * MB},
+            {"path": "Mix/c.mp3", "size": 5 * MB},
+            {"path": "Mix/d.jpg", "size": 5 * MB},
+        ]
+        # 190 / 200 = exactly 0.95.
+        self.assertEqual(
+            get_entry_type_category(payload_entry(files=files)),
+            SECTION_TYPE_GENERAL,
+        )
+
+    def test_file_count_decides_when_no_file_reports_a_size(self):
+        """A `.torrent` parsed before any byte moved can leave sizes at zero."""
+        files = [{"path": f"Show/S01E{i:02}.mkv"} for i in range(20)]
+        files.append({"path": "Show/readme.nfo"})
+        self.assertEqual(
+            get_entry_type_category(payload_entry(files=files)),
+            SECTION_TYPE_VIDEO,
+        )
+
+    def test_plain_path_strings_are_accepted_as_files(self):
+        """Some producers persist the file list as bare paths rather than dicts."""
+        files = ["Album/01 Track.flac", "Album/02 Track.flac"]
+        self.assertEqual(
+            get_entry_type_category(payload_entry(files=files)),
+            SECTION_TYPE_AUDIO,
+        )
+
+    def test_a_torrent_with_no_file_list_yet_is_general(self):
+        self.assertEqual(get_entry_type_category(entry("Show S01", download_type="torrent")), SECTION_TYPE_GENERAL)
+        e = payload_entry(files=[])
+        self.assertEqual(get_entry_type_category(e), SECTION_TYPE_GENERAL)
+
+    def test_the_folder_name_still_wins_over_the_payload(self):
+        """A recognised name is the user's own label for the item, so keep trusting it."""
+        e = payload_entry(
+            "Movie.mkv",
+            files=[{"path": "Movie.mkv/01.mp3", "size": 10 * MB}],
+        )
+        self.assertEqual(get_entry_type_category(e), SECTION_TYPE_VIDEO)
+
+    def test_the_override_still_beats_the_payload(self):
+        e = payload_entry(files=[{"path": "Show S01/1x01.mkv", "size": 10 ** 9}])
+        e.metadata["type_category"] = SECTION_TYPE_DOCUMENTS
+        self.assertEqual(get_entry_type_category(e), SECTION_TYPE_DOCUMENTS)
+
     def test_the_section_order_is_the_display_order(self):
         self.assertEqual(
             [cat for cat, _t, _s in TYPE_SECTION_DEFS],
@@ -211,6 +346,30 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
             self._sections(),
             ["Video", "Audio", "Archives", "Documents", "Photos", "General"],
         )
+
+    def test_a_torrent_folder_lands_in_the_section_of_its_payload(self):
+        """``metadata["files"]`` decides the section for a multi-file torrent folder.
+
+        The folder name carries no extension, so before the payload rule existed this
+        download filed under General and the season was invisible in Video.
+        """
+        folder = entry("Show S01", eid="t1", download_type="torrent")
+        folder.file_path = ""
+        folder.metadata["files"] = [
+            {"path": "Show S01/1x01.mkv", "size": 700 * MB},
+            {"path": "Show S01/1x02.mkv", "size": 700 * MB},
+            {"path": "Show S01/readme.nfo", "size": 1024},
+        ]
+        self.model.load_entries(self.entries + [folder])
+        self.model.set_segregated_view(True, "type")
+        self.assertEqual(self._section_of("t1"), "Video")
+
+    def test_a_torrent_folder_with_no_file_list_stays_in_general(self):
+        folder = entry("Show S01", eid="t2", download_type="torrent")
+        folder.file_path = ""
+        self.model.load_entries(self.entries + [folder])
+        self.model.set_segregated_view(True, "type")
+        self.assertEqual(self._section_of("t2"), "General")
 
     def test_the_status_mode_still_works(self):
         self.model.set_segregated_view(True, "status")
