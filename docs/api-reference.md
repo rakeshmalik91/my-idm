@@ -459,8 +459,8 @@ Table model backed by a list of `DownloadEntry` objects. The `SOURCE_DOMAIN` col
 | `refresh_entry` | `(download_id, entry) → None` | Full row refresh |
 | `set_segregated_view` | `(enabled: bool, mode: str | None = None) → None` | Toggle segregated view and optionally switch grouping mode |
 | `is_segregated_view` | `() → bool` | Returns True if segregated view is enabled |
-| `set_segregated_mode` | `(mode: str) → None` | Set active segregation grouping mode (`"status"` or `"date"`) |
-| `segregated_mode` | `() → str` | Returns currently active grouping mode (`"status"` or `"date"`) |
+| `set_segregated_mode` | `(mode: str) → None` | Set active segregation grouping mode (`"status"`, `"date"`, `"type"` or `"name"`; an unknown value falls back to `"status"`) |
+| `segregated_mode` | `() → str` | Returns currently active grouping mode |
 | `set_section_collapsed` | `(section_id: str, collapsed: bool) → None` | Set collapsed state for a section ID |
 | `is_section_collapsed` | `(section_id: str) → bool` | Returns True if specified section ID is collapsed |
 | `is_section_header_row` | `(row: int) → bool` | Returns True if the specified row is a section header |

@@ -1593,6 +1593,217 @@ class TestNameSegregatedSorting(unittest.TestCase):
         self.assertEqual(set(row_ids), {"25", "26"})
 
 
+class TestNameGroupingInternals(unittest.TestCase):
+    """The pure helpers behind name segregation, and the invariants they carry."""
+
+    def setUp(self):
+        self.model = DownloadTableModel()
+
+    def test_show_title_keys_win_in_a_fixed_order_and_generic_titles_do_not(self):
+        """show_title > series_title > series_name > anime_title; title/name never group."""
+        from my_idm.download_model import _group_entries_by_name
+
+        e = _make_entry("1", "whatever-filename-01.mkv")
+        e.metadata = {
+            "name": "Generic Name",
+            "title": "Generic Title",
+            "anime_title": "Anime Title",
+            "series_name": "Series Name",
+            "series_title": "Series Title",
+            "show_title": "Show Title",
+        }
+        # The chain is walked in order, so removing the highest key promotes the next.
+        for expected, key in (("Show Title", "show_title"), ("Series Title", "series_title"),
+                              ("Series Name", "series_name"), ("Anime Title", "anime_title")):
+            self.assertEqual(list(_group_entries_by_name([e]).keys()), [expected])
+            e.metadata.pop(key)
+
+        # title and name are deliberately NOT group keys: a lone entry that only
+        # has them is merged into Uncategorized rather than keeping its own section.
+        groups = _group_entries_by_name([e])
+        self.assertEqual([k.upper() for k in groups], ["UNCATEGORIZED"])
+        self.assertNotIn("Generic Title", groups)
+        self.assertNotIn("Generic Name", groups)
+
+    def test_a_singleton_with_a_show_title_keeps_its_own_group(self):
+        """A lone entry with an explicit title is a group, not an Uncategorized row."""
+        from my_idm.download_model import _group_entries_by_name
+
+        e = _make_entry("1", "one-off-file.mkv")
+        e.metadata = {"anime_title": "Solo Show"}
+        groups = _group_entries_by_name([e])
+        self.assertEqual(list(groups.keys()), ["Solo Show"])
+
+        # A singleton whose normalised key collides with an existing multi-entry
+        # group merges into that group instead of forming its own.
+        e2 = _make_entry("2", "Solo Show - 01.mkv")
+        e3 = _make_entry("3", "Solo Show - 02.mkv")
+        groups = _group_entries_by_name([e2, e3, e])
+        self.assertEqual(list(groups.keys()), ["Solo Show"])
+        self.assertEqual(len(groups["Solo Show"]), 3)
+
+    def test_edit_distance_threshold_is_inclusive_at_ten_percent(self):
+        """distance <= max_len * 0.1 is the rule, so exactly 10% still groups."""
+        from my_idm.download_model import _levenshtein_distance, _names_are_similar
+
+        self.assertEqual(_levenshtein_distance("abcd", "abce"), 1)
+        self.assertEqual(_levenshtein_distance("", "abc"), 3)
+        self.assertEqual(_levenshtein_distance("same", "same"), 0)
+
+        # 1 substitution in 10 characters is exactly the threshold.
+        self.assertTrue(_names_are_similar("abcdefghij", "abcdefghix"))
+        # 3 substitutions in 17 characters is ~17.6% — over it.
+        self.assertFalse(_names_are_similar("abcdefghijklmnopq", "xbcdxfghijklmnxpq"))
+        self.assertFalse(_names_are_similar("", "abc"))
+        self.assertFalse(_names_are_similar("abc", ""))
+
+    def test_the_just_outside_case_stays_two_sections(self):
+        """The boundary above is enforced at group level, not only in the helper."""
+        from my_idm.download_model import _group_entries_by_name
+
+        # One substitution in 17 characters is ~5.9% — inside the threshold.
+        inside = [_make_entry("1", "abcdefghijklmnopq - 01.mkv"),
+                  _make_entry("2", "abcdefghixklmnopq - 02.mkv")]
+        inside_groups = _group_entries_by_name(inside)
+        self.assertEqual(list(inside_groups), ["abcdefghijklmnopq"])
+
+        # Three substitutions in 17 characters is ~17.6% — outside it, so the
+        # pair does not form its own section and both singletons fall through to
+        # Uncategorized while the similar pair keeps its named group.
+        entries = inside + [_make_entry("3", "xbcdxfghijklmnxpq - 03.mkv")]
+        groups = _group_entries_by_name(entries)
+        self.assertEqual(list(groups), ["abcdefghijklmnopq", "Uncategorized"])
+        self.assertEqual([e.id for e in groups["abcdefghijklmnopq"]], ["1", "2"])
+        self.assertEqual([e.id for e in groups["Uncategorized"]], ["3"])
+
+    def test_strip_keywords_falls_back_when_the_assets_file_is_unusable(self):
+        """A missing/unreadable strip-keywords file degrades to the builtin list."""
+        import my_idm.download_model as dm
+
+        with patch.object(dm.Path, "exists", return_value=False):
+            dm._COMPILED_STRIP_REGEX = None
+            try:
+                pattern = dm._get_strip_keywords_pattern()
+                stripped = pattern.sub("", "My Show S01 1080p x264 WEB-DL ENG.mkv")
+                self.assertNotIn("1080p", stripped)
+                self.assertNotIn("x264", stripped)
+                self.assertNotIn("WEB-DL", stripped.upper())
+                self.assertIn("My Show", stripped)
+            finally:
+                dm._COMPILED_STRIP_REGEX = None
+
+    def test_strip_keywords_skips_comments_and_blank_lines(self):
+        """A '#keyword' line is a comment, not a keyword to strip."""
+        import tempfile
+        import my_idm.download_model as dm
+
+        with tempfile.TemporaryDirectory() as tmp:
+            assets = Path(tmp) / "assets" / "strip_keywords.txt"
+            assets.parent.mkdir(parents=True)
+            assets.write_text(
+                "# 1080p is commented out\n\nzzuniquejunk\nweb-dl\n", encoding="utf-8"
+            )
+            # The loader resolves the assets path from its own module file, so
+            # pointing __file__ at a temp package exercises the real file branch.
+            dm._COMPILED_STRIP_REGEX = None
+            with patch.object(dm, "__file__", str(Path(tmp) / "my_idm" / "download_model.py")):
+                pattern = dm._get_strip_keywords_pattern()
+                # "1080p" is commented out, so it is NOT a keyword here.
+                self.assertIsNone(pattern.search("1080p"))
+                self.assertIsNotNone(pattern.search("zzuniquejunk"))
+                self.assertIsNotNone(pattern.search("WEB-DL"))
+            dm._COMPILED_STRIP_REGEX = None
+
+    def test_longer_keywords_win_over_their_own_prefixes(self):
+        """'dts-hd' must strip as one token, leaving no '-HD' residue."""
+        import my_idm.download_model as dm
+
+        dm._COMPILED_STRIP_REGEX = None
+        try:
+            pattern = dm._get_strip_keywords_pattern()
+            stripped = pattern.sub("", "My Show S01 DTS-HD MA 1080p.mkv")
+            self.assertNotRegex(stripped, r"(?i)dts")
+            self.assertNotRegex(stripped, r"(?i)\bhd\b")
+            self.assertNotRegex(stripped, r"-+\s*$")
+            self.assertIn("My Show", stripped)
+        finally:
+            dm._COMPILED_STRIP_REGEX = None
+
+    def test_extract_show_name_fast_path_and_structural_patterns(self):
+        from my_idm.download_model import _extract_show_name
+
+        self.assertEqual(
+            _extract_show_name("AnimePahe_Detective_Conan_-_1214_720p_SubsPlease.mp4"),
+            "Detective Conan",
+        )
+        self.assertEqual(
+            _extract_show_name("animepahe ranma 1 2 - 07 1080p.mkv"),
+            "ranma 1 2",
+        )
+        # Structural fallback when the AnimePahe marker is absent
+        name = _extract_show_name("Frieren S01E01 [1080p][Multiple Subtitle].mkv")
+        self.assertIn("Frieren", name)
+        self.assertNotIn("1080p", name)
+        name = _extract_show_name("Some Show - Episode 12 - WEB-DL.mkv")
+        self.assertIn("Some Show", name)
+        self.assertNotIn("Episode", name)
+        self.assertEqual(_extract_show_name(""), "")
+        # A release-group tail is dropped, not kept as part of the title
+        name = _extract_show_name("Some Show 01 1080p -GROUP.mkv")
+        self.assertIn("Some Show", name)
+        self.assertNotIn("GROUP", name)
+
+    def test_renaming_a_file_regroups_the_name_section(self):
+        """Filename resolution must move the row, not just relabel it.
+
+        Name sections start collapsed, so the renamed row is normally *not* in
+        _id_to_row: a regroup gated on the visible row never ran at all, and the
+        table kept showing the pre-rename grouping until the next full reset.
+        """
+        e1 = _make_entry("1", "Alpha Show - 01.mkv", size=100)
+        e2 = _make_entry("2", "Alpha Show - 02.mkv", size=100)
+        e3 = _make_entry("3", "Beta Show - 01.mkv", size=100)
+        e4 = _make_entry("4", "Beta Show - 02.mkv", size=100)
+        self.model.load_entries([e1, e2, e3, e4])
+        self.model.set_segregated_view(True, "name")
+
+        def headers():
+            return {self.model._entries[r].section_title: self.model._entries[r].section_count
+                    for r in self.model.get_section_header_row_indices()}
+
+        # Sections are collapsed by default, so the payload rows are not in the
+        # index — this is the state the regression happened in.
+        self.assertEqual(headers(), {"Alpha Show": 2, "Beta Show": 2})
+
+        self.model.update_filename("3", "Alpha Show - 03.mkv")
+        self.assertEqual(headers(), {"Alpha Show": 3, "Uncategorized": 1})
+        row = self.model._id_to_row.get("3")
+        self.assertIsNone(row, "the moved file is inside a collapsed section")
+        for entry in (e1, e2, e3):
+            self.assertEqual(
+                self.model._entry_section_id(entry), "name_Alpha Show")
+
+        # A user rename follows the same path, and a still-collapsed section
+        # must regroup too: the renamed file joins Beta, leaving two pairs.
+        self.model.rename_entry("1", "Beta Show - 03.mkv")
+        self.assertEqual(headers(), {"Alpha Show": 2, "Beta Show": 2})
+
+    def test_the_reverse_map_is_authoritative_over_a_recomputation(self):
+        """A progress update must land on the header the row was actually filed under."""
+        e1 = _make_entry("1", "abcdefghij - 01.mkv", size=100)
+        e2 = _make_entry("2", "abcdefghix - 02.mkv", size=100)
+        self.model.load_entries([e1, e2])
+        self.model.set_segregated_view(True, "name")
+        header_rows = self.model.get_section_header_row_indices()
+        self.assertEqual(len(header_rows), 1, "the two files are one edit-distance group")
+        section_id = self.model._entries[header_rows[0]].section_id
+
+        for entry in (e1, e2):
+            # A naive recomputation from the filename would key each file itself;
+            # the reverse map must report the group the model actually assigned.
+            self.assertEqual(self.model._entry_section_id(entry), section_id)
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -1026,6 +1026,120 @@ class TestSettingsDialog(ConfigIsolationMixin, unittest.TestCase):
         self.assertNotIn("234, 179, 8", restored_style)
         self.assertNotIn("250, 204, 21", restored_style)
 
+    def test_settings_dialog_search_shortcut_and_escape_on_an_empty_input(self):
+        """Ctrl+F is wired to focus the search; Esc on an empty box is left alone."""
+        from PySide6.QtCore import Qt, QEvent
+        from PySide6.QtGui import QKeyEvent
+
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        dlg._search_input.setText("target text")
+        with unittest.mock.patch.object(dlg, "_focus_search") as focus_spy:
+            dlg._search_shortcut.activated.emit()
+            focus_spy.assert_called_once()
+        # The slot itself only has to ask for focus; whether the window manager
+        # grants it is not something a headless test can assert.
+        dlg._focus_search()
+        self.assertEqual(dlg._search_input.selectedText(), "target text")
+
+        # An empty search must not swallow Escape - the dialog needs it to close.
+        dlg._search_input.setText("")
+        esc = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        self.assertFalse(dlg.eventFilter(dlg._search_input, esc))
+
+    def test_search_requires_every_term(self):
+        """Two words that live on different pages must not match either one."""
+        from my_idm.settings_dialog import TAB_GENERAL, TAB_TOR, tab_index
+
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        total = dlg._tab_sidebar.count()
+        # "segments" is a Downloads setting, "onion" is a Tor setting.
+        dlg._search_input.setText("segments onion")
+        visible = [i for i in range(total) if not dlg._tab_sidebar.item(i).isHidden()]
+        self.assertEqual(visible, [], "AND across words, so a split phrase matches nothing")
+        self.assertTrue(dlg._tab_sidebar.isHidden())
+        self.assertFalse(dlg._no_results_label.isHidden())
+
+        # Each term alone still finds its own page.
+        dlg._search_input.setText("segments")
+        self.assertIn(tab_index(TAB_GENERAL),
+                      [i for i in range(total) if not dlg._tab_sidebar.item(i).isHidden()])
+        dlg._search_input.setText("onion")
+        self.assertIn(tab_index(TAB_TOR),
+                      [i for i in range(total) if not dlg._tab_sidebar.item(i).isHidden()])
+
+    def test_search_is_case_insensitive_and_ignores_rich_text_markup(self):
+        """The sidebar labels are rich text; the index has to strip the tags."""
+        from my_idm.settings_dialog import TAB_VPN, tab_index
+
+        # Case folding, tag removal and whitespace collapsing. The `&` of an
+        # entity is dropped rather than decoded, which leaves the "amp;" text -
+        # pinned here so the loss is visible rather than discovered later.
+        self.assertEqual(SettingsDialog._clean_search_text("Kill &amp; Switch"), "kill amp; switch")
+        self.assertEqual(SettingsDialog._clean_search_text("  VPN   <b>Kill</b> "), "vpn kill")
+
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+        total = dlg._tab_sidebar.count()
+
+        dlg._search_input.setText("KILL SWITCH")
+        self.assertIn(tab_index(TAB_VPN),
+                      [i for i in range(total) if not dlg._tab_sidebar.item(i).isHidden()])
+        # A label that ships with markup is searchable by its plain text.
+        dlg._search_input.setText("xpinstall.signatures.required")
+        self.assertIn(tab_index(TAB_BROWSER),
+                      [i for i in range(total) if not dlg._tab_sidebar.item(i).isHidden()])
+
+    def test_search_highlights_are_restored_when_the_dialog_closes(self):
+        """The tint must not outlive the dialog that applied it."""
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        dlg._search_input.setText("kill switch")
+        samples = list(dlg._highlighted_widgets)
+        self.assertTrue(samples)
+
+        dlg.done(0)
+        self.assertEqual(dlg._highlighted_widgets, {})
+        for widget in samples:
+            self.assertNotIn("250, 204, 21", widget.styleSheet())
+
+    def test_the_search_index_is_built_once_at_construction(self):
+        """A widget added to a page afterwards is invisible until the next open."""
+        from PySide6.QtWidgets import QLabel
+
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        page = dlg._tabs.widget(0)
+        page = page.widget() if hasattr(page, "widget") else page
+        marker = QLabel("zzuniquemarkerlabel", page)
+        marker.show()
+
+        dlg._search_input.setText("zzuniquemarkerlabel")
+        self.assertTrue(dlg._tab_sidebar.isHidden(),
+                        "a widget the index never saw cannot be searched")
+        self.assertFalse(dlg._no_results_label.isHidden())
+        self.assertEqual(dlg._highlighted_widgets, {})
+
+    def test_search_moves_the_view_to_the_best_matching_widget(self):
+        """The matched page is scrolled to the deepest match, not left at the top."""
+        dlg = SettingsDialog()
+        self.addCleanup(dlg.close)
+
+        with unittest.mock.patch.object(dlg, "_scroll_to_matching_widget") as spy:
+            dlg._search_input.setText("segments")
+            self.assertTrue(spy.called)
+            # One call per matched page, carrying that page's index.
+            self.assertEqual(spy.call_count, 1)
+
+        # A query that matches a page but none of its widgets still resets the scroll.
+        dlg._search_input.setText("zzz_no_widget_has_this")
+        self.assertTrue(dlg._tab_sidebar.isHidden())
+
 
 class TestPreferencesPageRegistry(unittest.TestCase):
     """``TAB_ORDER`` / ``TAB_TITLES`` are the single source of truth for page identity.

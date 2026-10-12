@@ -35,7 +35,7 @@ from my_idm.database import (
 #: source_key -> queue id, for the two seeded source queues. Built from the table so the ids
 #: cannot drift between the seeder and the router.
 _SOURCE_QUEUE_BY_KEY = {key: queue_id for queue_id, _name, key in SOURCE_QUEUES}
-from my_idm.http_engine import HTTPEngine
+from my_idm.http_engine import HTTPEngine, _NON_HTTP_HEADER_KEYS
 from my_idm.config import (
     GeneralConfig,
     TorConfig,
@@ -2102,9 +2102,14 @@ class DownloadManager(QObject):
         if risk_level != "clean":
             entry_metadata["security_warning"] = sec_details
         if headers:
+            # The same denylist the engine applies at request time, so a header
+            # that would be dropped on the wire is never persisted in the first
+            # place. Keeping only the AnimePahe pair here let every other internal
+            # key - added_by, original_name, explicit_filename, ... - land in
+            # metadata["headers"], from where it had to be filtered again.
             filtered_headers = {
                 k: v for k, v in headers.items()
-                if isinstance(k, str) and k.lower() not in ("anime_url", "anime_title")
+                if isinstance(k, str) and k.lower() not in _NON_HTTP_HEADER_KEYS
             }
             if filtered_headers:
                 entry_metadata["headers"] = filtered_headers
@@ -4041,7 +4046,7 @@ class DownloadManager(QObject):
                 else:
                     clean_entry_headers = {
                         k: v for k, v in entry_headers.items()
-                        if isinstance(k, str) and k.lower() not in ("anime_url", "anime_title")
+                        if isinstance(k, str) and k.lower() not in _NON_HTTP_HEADER_KEYS
                     }
                     res = self.add_download(
                         url,

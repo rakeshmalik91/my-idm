@@ -13,6 +13,7 @@ Welcome to **My-IDM** — a full-featured download manager with a dark-themed GU
 - [Managing Downloads](#managing-downloads)
   - [Named Queues & Concurrency Budgets](#named-queues--concurrency-budgets)
 - [Bottom Details Panel](#bottom-details-panel)
+- [Statistics](#statistics)
 - [Preferences & Settings](#preferences--settings)
 - [Browser Integration (Chrome / Brave / Edge / Firefox)](#browser-integration-chrome--brave--edge--firefox)
 - [Dedicated Feature Guides](#dedicated-feature-guides)
@@ -208,11 +209,18 @@ Moving works without breaking active downloads:
 
 Rechecking verifies existing files:
 - **Torrents**: Runs `force_recheck()` — libtorrent verifies every piece against its hash
-- **HTTP**: Compares file size on disk vs. the expected total size. If the file is fully downloaded, it's marked as completed. If the file is missing, progress is reset.
+- **HTTP**: Compares file size on disk vs. the expected total size. A single-file download that
+  already has a recorded SHA-256 checksum is hashed again and compared, so on-disk corruption is
+  caught even when the size is right (a mismatch marks the download `Error ⚠` and it must be
+  resumed by hand — My-IDM will not silently re-download over a file it cannot trust).
 
 **Automatic Verification of Completed Files**: My-IDM verifies all completed downloads on disk both at application startup and periodically in the background (every 60 seconds). If a file was moved, renamed, or deleted outside of My-IDM, its status automatically transitions to `File not found ⚠`. It is also verified whenever you attempt to open the file.
 
-**Recheck is the way back from "File not found".** Unlike the other file actions (Open File, Open Folder, Move, Rename, Delete File, Malware Scan), which are greyed out for a `File not found` row because there is no file to act on, **Recheck stays enabled** — it is the one action that looks *at* the disk. Restore or move the file back and click Recheck: if it is complete the row returns to `Completed`, if it is partial it goes to `Paused` with the real byte count, and if it really is still gone the row resets to `Queued` with the reason shown. You can also click **Resume** to redownload missing files from their source.
+**Recheck is the way back from "File not found".** Unlike the other file actions (Open File, Open Folder, Move, Rename, Delete File, Malware Scan), which are greyed out for a `File not found` row because there is no file to act on, **Recheck stays enabled** — it is the one action that looks *at* the disk. Restore or move the file back and click Recheck: if it is complete the row returns to `Completed`, if it is partial it goes to `Paused` with the real byte count, and if it really is still gone the row goes to `Paused` with a "File not found" reason. A recheck never starts downloading on its own — it inspects. You can also click **Resume** to redownload missing files from their source.
+
+**Delete File** removes the file from disk but keeps the row, then performs a recheck: the
+download is stopped, the file is sent to the Trash, partial segments are cleared, and the row
+settles at 0% **paused** — ready to be resumed whenever you want it again.
 
 ### Open File / Open Folder
 
@@ -230,7 +238,7 @@ Rechecking verifies existing files:
 ### Segregated View & Collapsible Sections
 
 1. Toggle **View → 🗂️ Segregated View → On** from the menu bar to enable or disable sectioned partitioning.
-2. Select the grouping strategy directly under **View → 🗂️ Segregated View**. The three strategy
+2. Select the grouping strategy directly under **View → 🗂️ Segregated View**. The four strategy
    entries are greyed out while segregation is **Off**, in both this menu and
    **Preferences → 👁️ Views & Columns**, because a flat table has nothing to group by. Turn
    segregation on first to choose one. Your choice is remembered while it is off and restored when
@@ -245,24 +253,32 @@ Rechecking verifies existing files:
      - **Last 7 Days**: Active or completed within the last 7 days.
      - **Last 30 Days**: Active or completed within the last 30 days.
      - **Older**: Older downloads or downloads without timestamps.
-    - **File Type Grouping**: Groups by what the file is rather than when it was added, into 7 collapsible
-      sections:
-      - **Video**, **Audio**, **Archives**, **Documents**, **Photos**, **Executables**, and
-        **General** for anything else.
-      - **Executables** holds programs and installers (`.exe`, `.msi`, `.apk`, `.deb`, `.rpm`,
-        `.appimage`, `.dmg`, `.pkg`, and friends) — kept out of Archives because an archive is inert
-        until unpacked while these are the files worth a look before they run.
-      - A download whose name carries no extension is filed by the files it actually contains when
-        they are overwhelmingly one kind: an installer folder full of `.exe` files lands in
-        **Executables**, a season folder in **Video**. A genuinely mixed folder stays in **General**.
- 3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
- 4. The **View Control Strip** — the row of grouping controls just under the toolbar — can be shown or
-    hidden with **View → View Control Strip**, and the choice is remembered for the next launch.
- 5. Right-click any section header to expand/collapse all sections, or switch between any of the three
-    grouping modes. This menu appears only once sections exist.
- 6. The active segregation mode (`status`, `date` or `type`), enabled state, and individual collapsed
-    section states are persisted in SQLite and restored automatically on next launch.
- 7. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
+  - **File Type Grouping**: Groups by what the file is rather than when it was added, into 7 collapsible
+    sections:
+    - **Video**, **Audio**, **Archives**, **Documents**, **Photos**, **Executables**, and
+      **General** for anything else.
+    - **Executables** holds programs and installers (`.exe`, `.msi`, `.apk`, `.deb`, `.rpm`,
+      `.appimage`, `.dmg`, `.pkg`, and friends) — kept out of Archives because an archive is inert
+      until unpacked while these are the files worth a look before they run.
+    - A download whose name carries no extension is filed by the files it actually contains when
+      they are overwhelmingly one kind: an installer folder full of `.exe` files lands in
+      **Executables**, a season folder in **Video**. A genuinely mixed folder stays in **General**.
+  - **Name Grouping**: Groups by the show or series a download belongs to, so a season folder and
+    a straggler episode share one section. Titles come from the AnimePahe `anime_title` when
+    present, otherwise from the longest common name in the group with release junk (`1080p`,
+    `WEB-DL`, `SUBSPLEASE`, …) stripped. One-off files with no series title land together in
+    **Uncategorized** rather than each getting its own section, and name sections start collapsed
+    on the first grouped view so you are not met by forty expanded rows.
+3. Click or double-click any section header row in the table to collapse or expand it (`▼` / `▶`).
+4. The **View Control Strip** — the row of grouping controls just under the toolbar — can be shown or
+   hidden with **View → View Control Strip**, and the choice is remembered for the next launch. It
+   stays visible even when grouping is off, with **None** checked, so a flat table is a choice on
+   the same switch rather than the absence of one.
+5. Right-click any section header to expand/collapse all sections, or switch between any of the four
+   grouping modes. This menu appears only once sections exist.
+6. The active segregation mode (`status`, `date`, `type` or `name`), enabled state, and individual
+   collapsed section states are persisted in SQLite and restored automatically on next launch.
+7. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
 
 ### Context Menu
 
@@ -294,13 +310,20 @@ My-IDM includes a rich, collapsible bottom details panel separated from the main
 ### Opening and Toggling the Panel
 
 - Press **F4** to toggle the panel on or off.
-- Click **📋 Details Panel** on the toolbar or select **View → 📋 Details Panel** from the menu.
+- Click the **details-panel icon** at the left edge of the status bar (it is highlighted while the
+  panel is open and muted while it is closed).
+- Select **View → 📋 Details Panel** from the menu.
 - Click **✕** in the top-right corner of the panel to close it.
 - Your splitter sizes and open/closed visibility state are automatically remembered between app sessions.
 
 ### Tab Breakdown
 
-When any download is selected in the main table, the panel updates dynamically across six dedicated tabs:
+The panel's left edge selects one of four modes; the per-download tabs below live in **Details** mode:
+
+- **📋 Details** — the tabs for the selected download.
+- **🗂️ Queues** — the aggregate queues table, described below.
+- **📄 Console** — live stdout/stderr of the AnimePahe scraper, with a **🎬 Open GUI** button.
+- **📊 Stats** — [bandwidth statistics](#statistics) with **Volumes**, **Current Speed** and **Totals** subtabs.
 
 1. **📋 Overview**:
    - **Status & Progress**: Color-coded download state with error details and completion percentage.
@@ -309,7 +332,7 @@ When any download is selected in the main table, the panel updates dynamically a
    - **Live Speeds**: Real-time download speed and upload speed indicators.
    - **ETA & Time Elapsed**: Precise remaining time calculation.
    - **Swarm & Transfer Breakdown**: Number of connected seeds and swarm peers (for torrents) or active parallel segments (for HTTP).
-   - **Directory & Hash**: File path with an **Open Folder** shortcut, content hash, or torrent info-hash.
+   - **Directory & Hash**: File path with an **Open Folder** shortcut, the SHA-256 checksum (single-file downloads, computed when the download completes), or the torrent info-hash. Long fields carry an inline **📋 Copy** button.
    - **Malware & Security Status**: Results of pre-download safety inspection or post-download antivirus scan.
 
 2. **📁 Files**:
@@ -320,6 +343,10 @@ When any download is selected in the main table, the panel updates dynamically a
      - **Normal** (priority 4) — Standard download priority
      - **Low** (priority 1) — Lower transfer priority
      - **Don't Download** (priority 0) — Skips downloading this file entirely
+   - Unticking a file's checkbox is the same operation, and covers every affected file in one prompt.
+     A file that has already been downloaded is moved to the Trash behind that prompt, and its
+     progress bar is greyed out rather than sitting at a stalled 0%.
+   - Right-click a file row to copy its SHA-256 checksum.
 
 3. **👥 Peers & Swarm**:
    - Live peer list for BitTorrent transfers.
@@ -339,6 +366,31 @@ When any download is selected in the main table, the panel updates dynamically a
    - **Editable Limits**: Concurrency ("Max at Once") and bandwidth limits are directly editable via embedded spinboxes in each row, updating SQLite and active limiters immediately.
    - **Separate Pause & Resume**: Individual `⏸ Pause` and `▶ Resume` buttons allow pausing and resuming each queue independently without affecting others.
    - **Scope Filter**: Double-clicking any queue row filters the main downloads list to that queue.
+
+---
+
+## Statistics
+
+Open the panel's **📊 Stats** tab from **Tools → 📊 Statistics…**, or by clicking the **📊 Stats**
+side tab of the bottom panel. The panel is revealed automatically if it was hidden.
+
+Three subtabs:
+
+1. **Volumes** — a bar or line chart of transferred volume per interval. Two independent pickers
+   drive it: **Range** (Today, this/last week, last 7 days, this/last month, last 30 days,
+   this/last quarter, last 90 days, this/last year, last 12 months, all time) and **Group by**
+   (per 5 minutes / per hour / per day / per month), so "the last 7 days, per hour" is as
+   available as "today, per 5 minutes". **📈 Cumulative** redraws the same series as running
+   totals, and the **bars ⇄ line** toggle switches the chart between stacked bars and two lines
+   without changing the data. Both choices are remembered between launches.
+2. **Current Speed** — a live sparkline of the aggregate speed, sampled once a second while the
+   tab is visible, with the peak labelled. Nothing is recorded; closing the tab discards it.
+3. **Totals** — the fixed headline figures (today, this week, this month, this year, all time)
+   plus the completed-file count, split into downloaded and uploaded bytes.
+
+Volumes are counted from the bytes that actually moved in each interval, so a download that
+spanned several days has its volume split across them; the completed-files count is the figure
+that answers "what was added when".
 
 ---
 
@@ -377,14 +429,11 @@ Open the comprehensive preferences dialog anytime via:
 - Menu: **Tools → ⚙️ Preferences…**
 - Shortcut: **Ctrl+,**
 
-## Preferences & Settings
+Inside the dialog, the search box above the page list (<kbd>Ctrl</kbd>+<kbd>F</kbd>,
+<kbd>Esc</kbd> to clear) filters the pages to those containing what you type and highlights the
+matching controls, so a setting can be found without knowing which page it lives on.
 
-Open the comprehensive preferences dialog anytime via:
-- Toolbar: **⚙️ Preferences** button
-- Menu: **Tools → ⚙️ Preferences…**
-- Shortcut: **Ctrl+,**
-
-The settings dialog is organized into ten dedicated tabs:
+The settings dialog is organized into fourteen dedicated tabs:
 
 ### 1. General & Downloads Tab
 
@@ -437,7 +486,7 @@ The settings dialog is organized into ten dedicated tabs:
 
 - **Theme Selection**: Choose from curated high-contrast dark themes: **Dark (Default)**, **Dracula**, **Nord**, **GitHub Dark**, **Slate**, **Monokai**, and **Solarized Dark**.
 - **Column Visibility & Ordering**: Toggle column visibility and reorder table columns with an interactive list manager.
-- **Segregated View Mode**: Configure default section grouping (**Status**, **Date**, or **File Type**) and persistence.
+- **Segregated View Mode**: Configure default section grouping (**Status**, **Date**, **File Type**, or **Name**) and persistence. The mode choices are greyed out while segregated view itself is off — turn it on first to pick one.
 
 ### 5. BitTorrent Tab
 
@@ -785,6 +834,7 @@ Duplicate URLs are automatically skipped or resumed. See [backlog.txt.example](.
 | **Ctrl+O** | Open containing folder |
 | **Ctrl+L** | Load backlog file |
 | **Ctrl+,** | Open Preferences / Settings |
+| **Ctrl+F** | Search inside Preferences (Esc clears the search) |
 | **Ctrl+A** | Select all downloads |
 | **Ctrl+Q** | Quit the application |
 

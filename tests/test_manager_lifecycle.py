@@ -933,6 +933,32 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertEqual(entry.metadata.get("anime_url"), "https://animepahe.pw/anime/123")
         self.assertEqual(entry.metadata.get("anime_title"), "Frieren: Beyond Journey's End")
 
+        # The AnimePahe columns are metadata, never request headers: they would
+        # otherwise reach the wire verbatim, which the hosts that require
+        # curl_cffi cannot encode. See main.md "Request Header Sanitization".
+        persisted = entry.metadata.get("headers", {})
+        self.assertNotIn("anime_url", persisted)
+        self.assertNotIn("anime_title", persisted)
+
+    def test_add_download_strips_internal_keys_from_the_persisted_headers(self):
+        """A caller that passes them anyway must not have them written to the DB."""
+        eid = self.manager.add_download(
+            url="https://example.com/strip.bin",
+            save_path=str(self.tmp_dir.name),
+            headers={
+                "Referer": "https://example.com/",
+                "anime_url": "https://animepahe.pw/anime/9",
+                "anime_title": "Solo Leveling",
+                "added_by": "test",
+                "explicit_filename": "not-a-header.bin",
+            },
+        )
+        entry = self.db.get_download(eid)
+        persisted = (entry.metadata or {}).get("headers", {})
+        self.assertEqual(persisted, {"Referer": "https://example.com/"},
+                         "only real HTTP headers may be persisted - the engine's own "
+                         "denylist is the single source of truth")
+
     def test_load_backlog_with_custom_download_locations(self):
         from my_idm.utils import normalize_path
         dest1 = normalize_path(Path(self.tmp_dir.name) / "folder1")

@@ -2332,6 +2332,14 @@ class DownloadTableModel(QAbstractTableModel):
                     e.file_path = str(Path(e.save_path) / filename)
                 break
 
+        # Name segregation groups *by filename*, so a rename has to regroup the
+        # table even when the row is not currently visible - and name sections
+        # start collapsed, so the id is usually absent from _id_to_row. Reading
+        # the row first would silently skip the regroup in exactly that state.
+        if self._segregated_view and self._segregated_mode == "name":
+            self._reapply_filter()
+            return
+
         row = self._id_to_row.get(download_id)
         if row is None:
             return
@@ -2339,10 +2347,6 @@ class DownloadTableModel(QAbstractTableModel):
         entry.filename = filename
         if entry.save_path:
             entry.file_path = str(Path(entry.save_path) / filename)
-
-        if self._segregated_view and self._segregated_mode == "name":
-            self._reapply_filter()
-            return
 
         left = self.index(row, Col.NAME)
         right = self.index(row, Col.COUNT - 1)
@@ -2368,6 +2372,12 @@ class DownloadTableModel(QAbstractTableModel):
                     e.file_path = str(Path(e.file_path).parent / filename)
                 break
 
+        # Name mode regroups on rename, and name sections start collapsed, so
+        # the regroup must not be gated on the row being visible.
+        if self._segregated_view and self._segregated_mode == "name":
+            self._reapply_filter()
+            return
+
         row = self._id_to_row.get(download_id)
         if row is None:
             return
@@ -2383,10 +2393,6 @@ class DownloadTableModel(QAbstractTableModel):
             entry.file_path = str(Path(entry.save_path) / filename)
         elif entry.file_path:
             entry.file_path = str(Path(entry.file_path).parent / filename)
-
-        if self._segregated_view and self._segregated_mode == "name":
-            self._reapply_filter()
-            return
 
         left = self.index(row, 0)
         right = self.index(row, Col.COUNT - 1)

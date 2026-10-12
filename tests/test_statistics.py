@@ -1757,6 +1757,139 @@ class TestTransferredBytesStatistics(StatsTestCase):
         finally:
             os.unlink(db_file.name)
 
+
+class TestBandwidthHistoryTable(StatsTestCase):
+    """The 5-minute transfer log: its fallback role, one-shot backfill, and upsert."""
+
+    def _history_rows(self):
+        return [tuple(r) for r in self.db._conn.execute(
+            "SELECT period_start, downloaded_bytes, uploaded_bytes FROM bandwidth_history"
+        ).fetchall()]
+
+    def test_a_fresh_install_falls_back_to_the_downloads_aggregation(self):
+        """No bytes moved yet, so history is empty and the totals come from downloads."""
+        self.add("h1", added_days_back=0, total=2 * GB, uploaded=100 * MB)
+        self.assertEqual(self._history_rows(), [],
+                         "a download that has not transferred anything writes no history")
+
+        snap = self.stats()
+        self.assertEqual(snap.lifetime.downloaded, 2 * GB)
+        self.assertEqual(snap.lifetime.uploaded, 100 * MB)
+        self.assertEqual(snap.today.downloaded, 2 * GB)
+
+    def test_history_wins_over_the_fallback_once_it_exists(self):
+        """The preferred source is the transfer log, and the fallback must not add to it."""
+        self.add("h1", added_days_back=0, total=5 * GB)
+        self.db.record_bandwidth("default", downloaded_bytes=1 * GB,
+                                 uploaded_bytes=10 * MB, now=datetime.combine(TODAY, time(9, 0)))
+
+        snap = self.stats()
+        self.assertEqual(snap.today.downloaded, 1 * GB,
+                         "the bytes that moved, not the payload size of the row")
+        self.assertEqual(snap.today.uploaded, 10 * MB)
+        self.assertEqual(snap.lifetime.downloaded, 1 * GB)
+
+    def test_a_backfilled_database_is_not_backfilled_twice(self):
+        """A second open must not seed the table again, or the totals double."""
+        db_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        db_file.close()
+        try:
+            db1 = Database(db_file.name)
+            db1.open()
+            db1.add_download(DownloadEntry(
+                id="leg1", url="https://example.com/leg1.bin", filename="leg1.bin",
+                save_path="C:/t", total_size=1 * GB, downloaded_size=1 * GB,
+                status="completed", added_at=iso(2),
+            ))
+            db1.close()
+
+            db2 = Database(db_file.name)
+            db2.open()
+            try:
+                # One real transfer recorded after the backfill.
+                db2.record_bandwidth("default", downloaded_bytes=3 * GB,
+                                     now=datetime.combine(TODAY, time(8, 0)))
+                before = [tuple(r) for r in db2._conn.execute(
+                    "SELECT period_start, downloaded_bytes, uploaded_bytes FROM bandwidth_history"
+                ).fetchall()]
+            finally:
+                db2.close()
+
+            db3 = Database(db_file.name)
+            db3.open()
+            try:
+                after = db3._conn.execute(
+                    "SELECT period_start, downloaded_bytes, uploaded_bytes FROM bandwidth_history"
+                ).fetchall()
+                self.assertEqual([tuple(r) for r in after], before,
+                                 "re-opening a populated history must not re-seed it")
+                self.assertEqual(db3.get_download_stats(TODAY).lifetime.downloaded,
+                                 (1 + 3) * GB,
+                                 "backfill plus the transfer that followed it, counted once")
+            finally:
+                db3.close()
+        finally:
+            os.unlink(db_file.name)
+
+    def test_repeated_writes_in_one_interval_are_added_not_overwritten(self):
+        """Two progress events in the same 5-minute bucket accumulate."""
+        first = datetime.combine(TODAY, time(10, 0))
+        second = datetime.combine(TODAY, time(10, 3))
+        self.db.record_bandwidth("default", downloaded_bytes=100, uploaded_bytes=5, now=first)
+        self.db.record_bandwidth("default", downloaded_bytes=250, uploaded_bytes=5, now=second)
+
+        rows = self.db._conn.execute(
+            "SELECT period_start, downloaded_bytes, uploaded_bytes FROM bandwidth_history"
+        ).fetchall()
+        self.assertEqual(len(rows), 1, "same bucket, one row")
+        self.assertEqual(rows[0][0], f"{TODAY.isoformat()} 10:00")
+        self.assertEqual(rows[0][1], 350)
+        self.assertEqual(rows[0][2], 10)
+
+    def test_a_zero_byte_record_writes_no_history_row(self):
+        """The quota rollup is not the same as the series: 0/0 must not create a bucket."""
+        self.db.record_bandwidth("default", downloaded_bytes=0, uploaded_bytes=0,
+                                 now=datetime.combine(TODAY, time(10, 0)))
+        self.assertEqual(self._history_rows(), [])
+
+        snap = self.stats()
+        self.assertEqual(snap.today.downloaded, 0)
+
+    def test_global_history_sums_across_queues(self):
+        """The aggregate query sums over queues, like the quota rollup."""
+        now = datetime.combine(TODAY, time(10, 0))
+        self.db.record_bandwidth("q1", downloaded_bytes=100, uploaded_bytes=10, now=now)
+        self.db.record_bandwidth("q2", downloaded_bytes=200, uploaded_bytes=20, now=now)
+
+        bucket = self.db._get_5min_bucket(now)
+        row = self.db.get_bandwidth_history(bucket)
+        self.assertEqual(row["downloaded_bytes"], 300)
+        self.assertEqual(row["uploaded_bytes"], 30)
+        # A single queue reads back only its own bytes.
+        only_q1 = self.db.get_bandwidth_history(bucket, queue_id="q1")
+        self.assertEqual(only_q1["downloaded_bytes"], 100)
+
+    def test_a_bucket_with_bytes_but_no_download_still_draws(self):
+        """The union: an interval that moved bytes and an interval that added a row."""
+        self.db.record_bandwidth("default", downloaded_bytes=42, uploaded_bytes=0,
+                                 now=datetime.combine(TODAY, time(11, 0)))
+        self.add("h2", added_days_back=0, total=0, status="queued", hour=11, minute=1)
+
+        snap = self.stats(since=TODAY, bucket="5min")
+        series = {b: s for b, s in snap.series}
+        moved = f"{TODAY.isoformat()} 11:00"
+        self.assertIn(moved, series)
+        self.assertEqual(series[moved].downloaded, 42)
+        self.assertEqual(series[moved].count, 1, "the queued row shares that bucket")
+
+        # An interval that only added a download, with no bytes moved, is still a point.
+        self.add("h3", added_days_back=0, total=0, status="queued", hour=15, minute=30)
+        series = {b: s for b, s in self.stats(since=TODAY, bucket="5min").series}
+        added_only = f"{TODAY.isoformat()} 15:30"
+        self.assertIn(added_only, series)
+        self.assertEqual(series[added_only].count, 1)
+        self.assertEqual(series[added_only].downloaded, 0)
+
 class TestCumulativeStats(PopupTestCase):
     def test_chart_cumulative_toggle_and_display_days(self):
         chart = StatsChartWidget()

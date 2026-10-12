@@ -3306,7 +3306,7 @@ class MainWindow(QMainWindow):
             "•&nbsp; Gemini 3.8 Flash, Claude 4.6 Opus "
             "<span style='color: #6e7681;'>(via Antigravity IDE)</span></p>"
             "<p style='color: #8fa0b5; margin-top: 3px; margin-bottom: 0px; margin-left: 8px;'>"
-            "•&nbsp; Space Bunny Alpha, Nvidia Nemotron 3 Ultra, Poolside Laguna S 2.1, Setpfun Setp 5 "
+            "•&nbsp; Space Bunny Alpha, Nvidia Nemotron 3 Ultra, Poolside Laguna S 2.1, Setpfun Step 5 "
             "<span style='color: #6e7681;'>(via Kilo Code plugin for Antigravity IDE)</span></p>"
         )
         dlg.setStandardButtons(QMessageBox.StandardButton.Ok)

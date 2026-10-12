@@ -12,10 +12,15 @@ Two tiers. **Use basic sanity by default** — it is safe to leave running in th
 
 | Tier | Command | Scope | Time |
 | :--- | :--- | :--- | :--- |
-| **Basic sanity** | `run_all_tests.bat basic` | ~1980 tests. No window, no tray, no real clipboard. | **~60 s** |
-| **Full** | `run_all_tests.bat` | All ~3078 tests, including UI. | ~7 min |
+| **Basic sanity** | `run_all_tests.bat basic` | ~2011 tests. No window, no tray, no real clipboard. | **~60 s** |
+| **Full** | `run_all_tests.bat` | All ~3114 tests, including UI. | ~7 min |
 
-All three measured on 2026-10-02 via the wrapper. The tiers are **not** proportional: the 959
+Counted 2026-10-02 via the wrapper, then +36 on 2026-10-12 (30 basic-tier tests in
+`test_download_model`, `test_checksum`, `test_statistics` and `test_manager_lifecycle`, plus 6
+`ui`-marked ones in `test_settings`). The full tier could not be re-measured end to end on this
+desktop because of the abort in §6, so its figure is the previous measurement plus the delta.
+
+The tiers are **not** proportional: the 959
 `ui` tests alone take ~2 min 20 s, because each builds and tears down real Qt widget trees —
 roughly 10x the per-test cost of everything else. A full run's slowest single test is
 `TestThemeSelector` at ~1 s in isolation but ~14 s in a full run, which points at cross-file

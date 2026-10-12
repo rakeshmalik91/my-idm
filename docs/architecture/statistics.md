@@ -529,6 +529,7 @@ All hermetic, in the style of `tests/test_database.py`. `tmp_path`-equivalent te
 | `TestChartSelectors` | The 14 ranges and 4 granularities, the 30-day/day default, range narrowing, all-time having no lower bound, and per-bucket merging |
 | `TestStatsGapFilling` | `fill_series_gaps` fills every interval of the range, including 5-minute granularity over seven days |
 | `TestTransferredBytesStatistics` | The `bandwidth_history` path: a download queued in the past tracks bytes **transferred today**; 5-minute and hourly bucketing; the legacy backfill from `downloads` |
+| `TestBandwidthHistoryTable` | The transfer log's contract: the fresh-install **fallback** to the `downloads` aggregation while history is empty, history taking over once it exists, a backfilled database **never re-seeded** on reopen, upserts that *add* within one bucket, a `0/0` record writing no row, the global sum across queues, and the union that draws a bucket which moved bytes with no download added |
 | `TestCumulativeStats` | The Cumulative toggle accumulates the series, persists in UI state and paints |
 | `TestChartKindToggle` | Bars are the default, an unknown kind falls back, the two views are independent of Cumulative, and the choice survives a restart |
 

@@ -334,6 +334,11 @@ Two behaviours specific to this mode:
   (`_name_sections_auto_collapsed`), because a grouped view of 40 series that spans forty expanded
   rows is worse than a flat list; the flag resets on the next rebuild and clears on a manual
   expand, so the auto-collapse happens once rather than on every refresh.
+- **A rename regroups even while the section is collapsed.** `update_filename` and `rename_entry`
+  route through `_reapply_filter()` *before* consulting `_id_to_row`, because name sections start
+  collapsed and a regroup gated on the visible row never ran in exactly that state — the table kept
+  the pre-rename grouping until the next full reset, so a resolved filename left its row under the
+  wrong series. (Regression: `tests/test_download_model.py::TestNameGroupingInternals`.)
 - Collapse state persists as **dynamic** `ui_state` keys, `segregated_name_<key>_collapsed`
   (`main_window.py`), one per group, since the section set is not knowable in advance.
 
