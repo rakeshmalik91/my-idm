@@ -2,7 +2,7 @@
 # My-IDM Filename Stripping Keywords
 # =====================================================================
 # These keywords are stripped from filenames when detecting show/series
-# names for name-based segregated views.
+# names for name-based grouped views.
 # Lines starting with '#' and empty lines are ignored.
 # Keywords are matched case-insensitively at word boundaries.
 

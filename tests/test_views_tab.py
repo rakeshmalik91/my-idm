@@ -1,8 +1,8 @@
-"""Tests for the Views tab and the file-type segregated view.
+"""Tests for the Views tab and the file-type grouped view.
 
 Two features, one file, because they share a tab and a mode string:
 
-* a third segregated mode grouping by **file type** (Video / Audio / Archives /
+* a third grouped mode grouping by **file type** (Video / Audio / Archives /
   Documents / Photos / General), selectable from the View menu as well as the new
   **Views** tab in Preferences;
 * the Views tab's **column select and ordering** controls, which are a UI over the
@@ -32,9 +32,9 @@ from my_idm.database import Database, DownloadEntry
 from my_idm.settings_dialog import TAB_VIEWS
 from my_idm.styles import STYLESHEETS, _PALETTES
 from my_idm.download_model import (
-    DEFAULT_SEGREGATED_MODE,
-    SEGREGATED_MODES,
-    SEGREGATED_MODE_LABELS,
+    DEFAULT_GROUPED_MODE,
+    GROUPED_MODES,
+    GROUPED_MODE_LABELS,
     SECTION_TYPE_ARCHIVE,
     SECTION_TYPE_AUDIO,
     SECTION_TYPE_DOCUMENTS,
@@ -323,7 +323,7 @@ class TestTypeCategory(unittest.TestCase):
 
     def test_the_mode_label_names_every_section(self):
         """One string drives the View menu, the strip tooltip and the combo tooltip."""
-        label = SEGREGATED_MODE_LABELS["type"]
+        label = GROUPED_MODE_LABELS["type"]
         self.assertEqual(label, f"File Type ({' / '.join(TYPE_SECTION_TITLES)})")
         for title in TYPE_SECTION_TITLES:
             with self.subTest(title=title):
@@ -345,7 +345,7 @@ class TestTypeCategory(unittest.TestCase):
 # The model
 # ===========================================================================
 
-class TestFileTypeSegregatedModel(unittest.TestCase):
+class TestFileTypeGroupedModel(unittest.TestCase):
     def setUp(self):
         self.model = DownloadTableModel()
         self.entries = [
@@ -378,7 +378,7 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
         return None
 
     def test_each_file_lands_in_its_own_section(self):
-        self.model.set_segregated_view(True, "type")
+        self.model.set_grouped_view(True, "type")
         self.assertEqual(self._section_of("v1"), "Video")
         self.assertEqual(self._section_of("a1"), "Audio")
         self.assertEqual(self._section_of("r1"), "Archives")
@@ -389,7 +389,7 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
     def test_every_section_appears_even_when_empty(self):
         """An empty section is how the user discovers the mode exists at all."""
         self.model.load_entries([entry("movie.mkv", eid="v1")])
-        self.model.set_segregated_view(True, "type")
+        self.model.set_grouped_view(True, "type")
         self.assertEqual(self._sections(), list(TYPE_SECTION_TITLES))
 
     def test_a_torrent_folder_lands_in_the_section_of_its_payload(self):
@@ -406,14 +406,14 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
             {"path": "Show S01/readme.nfo", "size": 1024},
         ]
         self.model.load_entries(self.entries + [folder])
-        self.model.set_segregated_view(True, "type")
+        self.model.set_grouped_view(True, "type")
         self.assertEqual(self._section_of("t1"), "Video")
 
     def test_a_torrent_folder_with_no_file_list_stays_in_general(self):
         folder = entry("Show S01", eid="t2", download_type="torrent")
         folder.file_path = ""
         self.model.load_entries(self.entries + [folder])
-        self.model.set_segregated_view(True, "type")
+        self.model.set_grouped_view(True, "type")
         self.assertEqual(self._section_of("t2"), "General")
 
     def test_an_executable_download_lands_in_the_executables_section(self):
@@ -427,7 +427,7 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
         ]
         exe = entry("portable.exe", eid="ex2")
         self.model.load_entries(self.entries + [setup, exe])
-        self.model.set_segregated_view(True, "type")
+        self.model.set_grouped_view(True, "type")
 
         self.assertEqual(self._section_of("ex1"), "Executables")
         self.assertEqual(self._section_of("ex2"), "Executables")
@@ -439,40 +439,40 @@ class TestFileTypeSegregatedModel(unittest.TestCase):
         self.assertIn("Executables", titles)
 
     def test_the_status_mode_still_works(self):
-        self.model.set_segregated_view(True, "status")
+        self.model.set_grouped_view(True, "status")
         self.assertEqual(self._sections(), ["Active", "Seeding", "Inactive"])
 
     def test_the_date_mode_still_works(self):
-        self.model.set_segregated_view(True, "date")
+        self.model.set_grouped_view(True, "date")
         self.assertEqual(len(self._sections()), 5)
 
     def test_switching_modes_rebuilds_the_sections(self):
-        self.model.set_segregated_view(True, "status")
+        self.model.set_grouped_view(True, "status")
         self.assertEqual(self._sections(), ["Active", "Seeding", "Inactive"])
-        self.model.set_segregated_mode("type")
+        self.model.set_grouped_mode("type")
         self.assertEqual(self._sections()[0], "Video")
-        self.model.set_segregated_mode("date")
+        self.model.set_grouped_mode("date")
         self.assertNotIn("Video", self._sections())
 
     def test_type_is_a_recognised_mode(self):
-        self.assertIn("type", SEGREGATED_MODES)
-        self.assertEqual(SEGREGATED_MODE_LABELS["type"], SEGREGATED_MODE_LABELS["type"])
-        for mode in SEGREGATED_MODES:
+        self.assertIn("type", GROUPED_MODES)
+        self.assertEqual(GROUPED_MODE_LABELS["type"], GROUPED_MODE_LABELS["type"])
+        for mode in GROUPED_MODES:
             with self.subTest(mode=mode):
-                self.assertIn(mode, SEGREGATED_MODE_LABELS)
+                self.assertIn(mode, GROUPED_MODE_LABELS)
 
     def test_an_unknown_mode_falls_back_to_the_default(self):
-        self.model.set_segregated_mode("type")
-        self.model.set_segregated_mode("colour")
-        self.assertEqual(self.model.segregated_mode(), DEFAULT_SEGREGATED_MODE)
+        self.model.set_grouped_mode("type")
+        self.model.set_grouped_mode("colour")
+        self.assertEqual(self.model.grouped_mode(), DEFAULT_GROUPED_MODE)
 
     def test_an_unknown_mode_in_the_constructor_is_ignored(self):
-        self.model.set_segregated_view(True, "colour")
-        self.assertEqual(self.model.segregated_mode(), DEFAULT_SEGREGATED_MODE)
+        self.model.set_grouped_view(True, "colour")
+        self.assertEqual(self.model.grouped_mode(), DEFAULT_GROUPED_MODE)
 
-    def test_turning_segregation_off_restores_a_flat_list(self):
-        self.model.set_segregated_view(True, "type")
-        self.model.set_segregated_view(False)
+    def test_turning_grouping_off_restores_a_flat_list(self):
+        self.model.set_grouped_view(True, "type")
+        self.model.set_grouped_view(False)
         self.assertEqual(self._sections(), [])
         self.assertEqual(self.model.rowCount(), len(self.entries))
 
@@ -562,26 +562,26 @@ class ViewsTabTestCase(unittest.TestCase):
         )
         self.assertIsInstance(SettingsDialog, type)
 
-    def test_the_segregated_controls_reflect_stored_state(self):
-        self.db.set_ui_state("segregated_view_enabled", True)
-        self.db.set_ui_state("segregated_view_mode", "type")
+    def test_the_grouped_controls_reflect_stored_state(self):
+        self.db.set_ui_state("grouped_view_enabled", True)
+        self.db.set_ui_state("grouped_view_mode", "type")
         dialog = self.make_dialog()
-        self.assertIsInstance(dialog._seg_enabled_cb, QCheckBox)
-        self.assertTrue(dialog._seg_enabled_cb.isChecked())
-        self.assertEqual(dialog._seg_mode_combo.currentData(), "type")
+        self.assertIsInstance(dialog._group_enabled_cb, QCheckBox)
+        self.assertTrue(dialog._group_enabled_cb.isChecked())
+        self.assertEqual(dialog._group_mode_combo.currentData(), "type")
 
-    def test_turning_segregation_off_disables_the_mode_picker(self):
-        self.db.set_ui_state("segregated_view_enabled", False)
+    def test_turning_grouping_off_disables_the_mode_picker(self):
+        self.db.set_ui_state("grouped_view_enabled", False)
         dialog = self.make_dialog()
-        self.assertFalse(dialog._seg_mode_combo.isEnabled())
-        dialog._seg_enabled_cb.setChecked(True)
-        self.assertTrue(dialog._seg_mode_combo.isEnabled())
+        self.assertFalse(dialog._group_mode_combo.isEnabled())
+        dialog._group_enabled_cb.setChecked(True)
+        self.assertTrue(dialog._group_mode_combo.isEnabled())
 
     def test_a_stale_persisted_mode_does_not_break_the_picker(self):
-        self.db.set_ui_state("segregated_view_mode", "colour")
+        self.db.set_ui_state("grouped_view_mode", "colour")
         dialog = self.make_dialog()
         self.assertEqual(
-            dialog._seg_mode_combo.currentData(), DEFAULT_SEGREGATED_MODE
+            dialog._group_mode_combo.currentData(), DEFAULT_GROUPED_MODE
         )
 
     def test_the_column_list_shows_every_column(self):
@@ -705,38 +705,38 @@ class ViewsTabTestCase(unittest.TestCase):
         finally:
             self.window._on_reset_view()
 
-    def test_saving_persists_the_segregation_mode(self):
+    def test_saving_persists_the_grouping_mode(self):
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(True)
-        dialog._seg_mode_combo.setCurrentIndex(
-            dialog._seg_mode_combo.findData("type")
+        dialog._group_enabled_cb.setChecked(True)
+        dialog._group_mode_combo.setCurrentIndex(
+            dialog._group_mode_combo.findData("type")
         )
         dialog._apply_views_tab()
-        self.assertTrue(self.db.get_ui_state("segregated_view_enabled"))
-        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "type")
-        self.assertEqual(self.window._segregated_view_mode, "type")
+        self.assertTrue(self.db.get_ui_state("grouped_view_enabled"))
+        self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "type")
+        self.assertEqual(self.window._grouped_view_mode, "type")
 
     def test_saving_applies_the_mode_to_the_table(self):
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(True)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._group_enabled_cb.setChecked(True)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("type"))
         dialog._apply_views_tab()
         try:
-            self.assertTrue(self.window._model.is_segregated_view())
-            self.assertEqual(self.window._model.segregated_mode(), "type")
+            self.assertTrue(self.window._model.is_grouped_view())
+            self.assertEqual(self.window._model.grouped_mode(), "type")
         finally:
-            self.window._set_segregation_mode("status")
+            self.window._set_grouping_mode("status")
 
     def test_the_whole_save_path_applies_the_views_tab(self):
         """Save Settings must reach the Views tab, not just _apply_views_tab in isolation."""
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(True)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._group_enabled_cb.setChecked(True)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("type"))
         dialog._on_save()
         try:
-            self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "type")
+            self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "type")
         finally:
-            self.window._set_segregation_mode("status")
+            self.window._set_grouping_mode("status")
 
     def test_a_standalone_dialog_with_no_table_still_saves_the_mode(self):
         """SettingsDialog is constructed headless in tests; it must degrade, not crash."""
@@ -747,10 +747,10 @@ class ViewsTabTestCase(unittest.TestCase):
         self.addCleanup(dialog.deleteLater)
         QApplication.processEvents()
         self.assertIsNone(dialog._table_view())
-        dialog._seg_enabled_cb.setChecked(True)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._group_enabled_cb.setChecked(True)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("type"))
         dialog._apply_views_tab()  # must not raise
-        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "type")
+        self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "type")
         dialog._reset_columns_to_defaults()  # must not raise
         dialog._move_selected_column(-1)  # must not raise
 
@@ -758,27 +758,27 @@ class ViewsTabTestCase(unittest.TestCase):
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
 class TestViewMenuOffersTheTypeMode(ViewsTabTestCase):
     def test_the_menu_has_a_type_entry_in_the_exclusive_group(self):
-        self.assertTrue(hasattr(self.window, "_act_seg_by_type"))
-        self.assertIn(self.window._act_seg_by_type, self.window._seg_mode_group.actions())
-        self.assertTrue(self.window._act_seg_by_type.isCheckable())
-        self.assertIn("File Type", self.window._act_seg_by_type.text())
+        self.assertTrue(hasattr(self.window, "_act_group_by_type"))
+        self.assertIn(self.window._act_group_by_type, self.window._group_mode_action_group.actions())
+        self.assertTrue(self.window._act_group_by_type.isCheckable())
+        self.assertIn("File Type", self.window._act_group_by_type.text())
 
     def test_all_three_modes_are_in_the_group(self):
-        labels = [a.text() for a in self.window._seg_mode_group.actions()]
-        self.assertEqual(len(labels), len(SEGREGATED_MODES))
+        labels = [a.text() for a in self.window._group_mode_action_group.actions()]
+        self.assertEqual(len(labels), len(GROUPED_MODES))
         self.assertTrue(any("Status" in t for t in labels))
         self.assertTrue(any("Date" in t for t in labels))
         self.assertTrue(any("File Type" in t for t in labels))
 
     def test_choosing_the_type_mode_checks_only_the_type_entry(self):
         try:
-            self.window._set_segregation_mode("type")
-            self.assertTrue(self.window._act_seg_by_type.isChecked())
-            self.assertFalse(self.window._act_seg_by_status.isChecked())
-            self.assertFalse(self.window._act_seg_by_date.isChecked())
+            self.window._set_grouping_mode("type")
+            self.assertTrue(self.window._act_group_by_type.isChecked())
+            self.assertFalse(self.window._act_group_by_status.isChecked())
+            self.assertFalse(self.window._act_group_by_date.isChecked())
         finally:
-            self.window._set_segregation_mode("status")
-        self.assertTrue(self.window._act_seg_by_status.isChecked())
+            self.window._set_grouping_mode("status")
+        self.assertTrue(self.window._act_group_by_status.isChecked())
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
@@ -1246,107 +1246,107 @@ class TestAmpersandRendering(ViewsTabTestCase):
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
-class TestSegregationEnableCheckboxIsApplied(ViewsTabTestCase):
+class TestGroupingEnableCheckboxIsApplied(ViewsTabTestCase):
     """The "group downloads into sections" box must actually reach the table.
 
-    It did not. ``_apply_views_tab`` called ``_set_segregation_mode()`` first, which
-    force-*enables* segregation when it is currently off, and only reached the branch that
+    It did not. ``_apply_views_tab`` called ``_set_grouping_mode()`` first, which
+    force-*enables* grouping when it is currently off, and only reached the branch that
     applied the checkbox behind an ``elif`` that could never run. Two consequences, both
     silent:
 
-    * saving with the box **unticked** turned segregation back on and overwrote the
+    * saving with the box **unticked** turned grouping back on and overwrote the
       ``False`` the dialog had just written to the database;
     * unticking it while a live view was on did nothing at all until the next restart.
     """
 
     def setUp(self):
-        self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
-        self.window._on_toggle_segregated_view(False)
+        self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
+        self.window._on_toggle_grouped_view(False)
 
-    def test_saving_with_the_box_unticked_does_not_enable_segregation(self):
+    def test_saving_with_the_box_unticked_does_not_enable_grouping(self):
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(False)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._group_enabled_cb.setChecked(False)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("type"))
         dialog._apply_views_tab()
         try:
             self.assertFalse(
-                self.window._model.is_segregated_view(),
+                self.window._model.is_grouped_view(),
                 "an unticked 'group downloads into sections' must stay unticked",
             )
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_saving_with_the_box_unticked_persists_false(self):
         """The clobber: the force-enable overwrote the ``False`` just written."""
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(False)
+        dialog._group_enabled_cb.setChecked(False)
         dialog._apply_views_tab()
         try:
             self.assertIs(
-                self.db.get_ui_state("segregated_view_enabled"), False,
+                self.db.get_ui_state("grouped_view_enabled"), False,
                 "the database must record the user's unticked choice, not the model's",
             )
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_unticking_the_box_turns_a_live_view_off(self):
         dialog = self.make_dialog()
-        self.window._set_segregation_mode("type")
-        self.assertTrue(self.window._model.is_segregated_view())
-        dialog._seg_enabled_cb.setChecked(False)
+        self.window._set_grouping_mode("type")
+        self.assertTrue(self.window._model.is_grouped_view())
+        dialog._group_enabled_cb.setChecked(False)
         dialog._apply_views_tab()
         try:
-            self.assertFalse(self.window._model.is_segregated_view())
+            self.assertFalse(self.window._model.is_grouped_view())
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_unticking_the_box_updates_the_view_menu_checkmark(self):
         dialog = self.make_dialog()
-        self.window._set_segregation_mode("type")
-        dialog._seg_enabled_cb.setChecked(False)
+        self.window._set_grouping_mode("type")
+        dialog._group_enabled_cb.setChecked(False)
         dialog._apply_views_tab()
         try:
             self.assertFalse(
-                self.window._act_segregated_view.isChecked(),
+                self.window._act_grouped_view.isChecked(),
                 "the View-menu checkmark must agree with the table",
             )
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_the_mode_is_still_persisted_while_the_box_is_unticked(self):
         """Hiding the sections must not throw away which mode they were grouped by."""
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(False)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._group_enabled_cb.setChecked(False)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("type"))
         dialog._apply_views_tab()
         try:
-            self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "type")
+            self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "type")
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_ticking_the_box_still_applies_the_mode(self):
         """The fix must not have broken the original happy path."""
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(True)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("type"))
+        dialog._group_enabled_cb.setChecked(True)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("type"))
         dialog._apply_views_tab()
         try:
-            self.assertTrue(self.window._model.is_segregated_view())
-            self.assertEqual(self.window._model.segregated_mode(), "type")
-            self.assertIs(self.db.get_ui_state("segregated_view_enabled"), True)
+            self.assertTrue(self.window._model.is_grouped_view())
+            self.assertEqual(self.window._model.grouped_mode(), "type")
+            self.assertIs(self.db.get_ui_state("grouped_view_enabled"), True)
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_the_whole_save_path_respects_an_unticked_box(self):
         """Go through ``_on_save``, not just ``_apply_views_tab`` in isolation."""
         dialog = self.make_dialog()
-        dialog._seg_enabled_cb.setChecked(False)
+        dialog._group_enabled_cb.setChecked(False)
         dialog._on_save()
         try:
-            self.assertFalse(self.window._model.is_segregated_view())
-            self.assertIs(self.db.get_ui_state("segregated_view_enabled"), False)
+            self.assertFalse(self.window._model.is_grouped_view())
+            self.assertIs(self.db.get_ui_state("grouped_view_enabled"), False)
         finally:
-            self.window._set_segregation_mode(DEFAULT_SEGREGATED_MODE)
+            self.window._set_grouping_mode(DEFAULT_GROUPED_MODE)
 
     def test_saving_from_a_standalone_dialog_still_writes_the_flag(self):
         """No parent to apply anything live, so the database write is all there is."""
@@ -1357,11 +1357,11 @@ class TestSegregationEnableCheckboxIsApplied(ViewsTabTestCase):
         self.addCleanup(dialog.deleteLater)
         QApplication.processEvents()
         self.assertIsNone(dialog._table_view())
-        dialog._seg_enabled_cb.setChecked(False)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("date"))
+        dialog._group_enabled_cb.setChecked(False)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("date"))
         dialog._apply_views_tab()
-        self.assertIs(self.db.get_ui_state("segregated_view_enabled"), False)
-        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "date")
+        self.assertIs(self.db.get_ui_state("grouped_view_enabled"), False)
+        self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "date")
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
@@ -1485,7 +1485,7 @@ class TestThemeSelector(ViewsTabTestCase):
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
-class TestSegregationModeSurvivesRestart(ViewsTabTestCase):
+class TestGroupingModeSurvivesRestart(ViewsTabTestCase):
     """A persisted mode has to come back.
 
     ``MainWindow.__init__`` kept the pre-``type`` two-value whitelist when the third mode
@@ -1497,56 +1497,56 @@ class TestSegregationModeSurvivesRestart(ViewsTabTestCase):
     def window_with_mode(self, mode):
         from my_idm.main_window import MainWindow
 
-        self.db.set_ui_state("segregated_view_mode", mode)
-        self.db.set_ui_state("segregated_view_enabled", True)
+        self.db.set_ui_state("grouped_view_mode", mode)
+        self.db.set_ui_state("grouped_view_enabled", True)
         window = MainWindow(self.manager)
         self.addCleanup(self._dispose, window)
         return window
 
     def test_a_persisted_type_mode_is_kept(self):
-        self.assertEqual(self.window_with_mode("type")._segregated_view_mode, "type")
+        self.assertEqual(self.window_with_mode("type")._grouped_view_mode, "type")
 
     def test_the_type_menu_entry_is_checked_on_startup(self):
         window = self.window_with_mode("type")
-        self.assertTrue(window._act_seg_by_type.isChecked())
-        self.assertFalse(window._act_seg_by_status.isChecked())
-        self.assertFalse(window._act_seg_by_date.isChecked())
+        self.assertTrue(window._act_group_by_type.isChecked())
+        self.assertFalse(window._act_group_by_status.isChecked())
+        self.assertFalse(window._act_group_by_date.isChecked())
 
     def test_the_model_is_in_type_mode_on_startup(self):
         self.assertEqual(
-            self.window_with_mode("type")._model.segregated_mode(), "type"
+            self.window_with_mode("type")._model.grouped_mode(), "type"
         )
 
     def test_every_registered_mode_survives_a_restart(self):
         """Not just 'type': no mode may be silently dropped on the way back in."""
-        for mode in SEGREGATED_MODES:
+        for mode in GROUPED_MODES:
             with self.subTest(mode=mode):
                 self.assertEqual(
-                    self.window_with_mode(mode)._segregated_view_mode, mode
+                    self.window_with_mode(mode)._grouped_view_mode, mode
                 )
 
     def test_a_date_mode_still_survives(self):
-        self.assertEqual(self.window_with_mode("date")._segregated_view_mode, "date")
+        self.assertEqual(self.window_with_mode("date")._grouped_view_mode, "date")
 
     def test_an_unknown_persisted_mode_degrades_to_the_default(self):
         self.assertEqual(
-            self.window_with_mode("colour")._segregated_view_mode,
-            DEFAULT_SEGREGATED_MODE,
+            self.window_with_mode("colour")._grouped_view_mode,
+            DEFAULT_GROUPED_MODE,
         )
 
     def test_a_non_string_persisted_mode_degrades_to_the_default(self):
         """``str()`` of a number is not a mode; it must not become the mode."""
-        self.db.set_ui_state("segregated_view_mode", 7)
-        self.db.set_ui_state("segregated_view_enabled", True)
+        self.db.set_ui_state("grouped_view_mode", 7)
+        self.db.set_ui_state("grouped_view_enabled", True)
         from my_idm.main_window import MainWindow
 
         window = MainWindow(self.manager)
         self.addCleanup(self._dispose, window)
-        self.assertEqual(window._segregated_view_mode, DEFAULT_SEGREGATED_MODE)
+        self.assertEqual(window._grouped_view_mode, DEFAULT_GROUPED_MODE)
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
-class TestSegregationModeLabels(ViewsTabTestCase):
+class TestGroupingModeLabels(ViewsTabTestCase):
     """The status bar names the mode; it used to say "Date" for everything but "status".
 
     The View-menu handler and the Preferences tab drive the same state through two
@@ -1554,69 +1554,69 @@ class TestSegregationModeLabels(ViewsTabTestCase):
     """
 
     def setUp(self):
-        self.addCleanup(self.window._set_segregation_mode, DEFAULT_SEGREGATED_MODE)
-        self.addCleanup(self.window._on_toggle_segregated_view, False)
+        self.addCleanup(self.window._set_grouping_mode, DEFAULT_GROUPED_MODE)
+        self.addCleanup(self.window._on_toggle_grouped_view, False)
 
     def test_every_mode_has_a_distinct_label(self):
-        labels = [self.window._segregation_mode_label(m) for m in SEGREGATED_MODES]
+        labels = [self.window._grouping_mode_label(m) for m in GROUPED_MODES]
         self.assertEqual(
             len(set(labels)), len(labels), f"two modes share the label {labels!r}"
         )
 
     def test_no_label_is_empty(self):
-        for mode in SEGREGATED_MODES:
+        for mode in GROUPED_MODES:
             with self.subTest(mode=mode):
-                self.assertTrue(self.window._segregation_mode_label(mode).strip())
+                self.assertTrue(self.window._grouping_mode_label(mode).strip())
 
     def test_the_type_mode_is_labelled_file_type(self):
-        self.assertEqual(self.window._segregation_mode_label("type"), "File Type")
+        self.assertEqual(self.window._grouping_mode_label("type"), "File Type")
 
     def test_an_unknown_mode_falls_back_rather_than_crashing(self):
-        self.assertTrue(self.window._segregation_mode_label("colour"))
+        self.assertTrue(self.window._grouping_mode_label("colour"))
 
     def test_toggling_on_names_the_current_mode(self):
-        for mode in SEGREGATED_MODES:
+        for mode in GROUPED_MODES:
             with self.subTest(mode=mode):
-                self.window._set_segregation_mode(mode)
-                self.window._on_toggle_segregated_view(True)
+                self.window._set_grouping_mode(mode)
+                self.window._on_toggle_grouped_view(True)
                 self.assertIn(
-                    self.window._segregation_mode_label(mode),
+                    self.window._grouping_mode_label(mode),
                     self.window._status_label.text(),
                 )
 
     def test_the_type_mode_is_not_reported_as_date(self):
         """The literal symptom: mode 'type' announced as 'Date'."""
-        self.window._set_segregation_mode("type")
-        self.window._on_toggle_segregated_view(True)
+        self.window._set_grouping_mode("type")
+        self.window._on_toggle_grouped_view(True)
         text = self.window._status_label.text()
         self.assertNotIn("Date", text)
         self.assertIn("File Type", text)
 
-    def test_choosing_a_mode_while_disabled_still_enables_segregation(self):
+    def test_choosing_a_mode_while_disabled_still_enables_grouping(self):
         """The programmatic path still promotes a mode choice into an enable.
 
         No longer reachable from the View menu - the three mode actions are disabled while
-        segregation is off, precisely so a dead-end choice cannot be made there - but
-        ``_set_segregation_mode`` keeps doing it for callers that invoke it directly.
+        grouping is off, precisely so a dead-end choice cannot be made there - but
+        ``_set_grouping_mode`` keeps doing it for callers that invoke it directly.
 
-        This also covers the View-menu checkmark sync: ``_set_segregation_mode`` enables segregation
+        This also covers the View-menu checkmark sync: ``_set_grouping_mode`` enables grouping
         by checking the action, which emits nothing when it is already checked, so without the sync
         the enable silently did not happen.
         """
-        self.window._on_toggle_segregated_view(False)
-        self.window._set_segregation_mode("type")
-        self.assertTrue(self.window._model.is_segregated_view())
+        self.window._on_toggle_grouped_view(False)
+        self.window._set_grouping_mode("type")
+        self.assertTrue(self.window._model.is_grouped_view())
 
     def test_the_menu_checkmark_follows_a_programmatic_toggle(self):
-        self.window._on_toggle_segregated_view(True)
-        self.assertTrue(self.window._act_segregated_view.isChecked())
-        self.window._on_toggle_segregated_view(False)
-        self.assertFalse(self.window._act_segregated_view.isChecked())
+        self.window._on_toggle_grouped_view(True)
+        self.assertTrue(self.window._act_grouped_view.isChecked())
+        self.window._on_toggle_grouped_view(False)
+        self.assertFalse(self.window._act_grouped_view.isChecked())
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
-class TestSegregationModeAvailability(ViewsTabTestCase):
-    """The three mode choices are only meaningful while segregation is on.
+class TestGroupingModeAvailability(ViewsTabTestCase):
+    """The three mode choices are only meaningful while grouping is on.
 
     While the table is a flat list there is nothing to group by, so a live mode picker invites a
     change that silently does nothing. Both surfaces that expose the modes therefore grey them out
@@ -1625,30 +1625,30 @@ class TestSegregationModeAvailability(ViewsTabTestCase):
 
     def setUp(self):
         super().setUp()
-        self.addCleanup(self.window._set_segregation_mode, DEFAULT_SEGREGATED_MODE)
-        self.addCleanup(self.window._on_toggle_segregated_view, False)
+        self.addCleanup(self.window._set_grouping_mode, DEFAULT_GROUPED_MODE)
+        self.addCleanup(self.window._on_toggle_grouped_view, False)
 
     @property
     def mode_actions(self):
-        return self.window._seg_mode_actions
+        return self.window._group_mode_actions
 
     def test_the_menu_exposes_one_action_per_mode(self):
         self.assertEqual(
-            sorted(self.mode_actions), sorted(SEGREGATED_MODES),
+            sorted(self.mode_actions), sorted(GROUPED_MODES),
             "every mode needs a menu action, and every action needs a mode",
         )
 
-    def test_all_three_are_disabled_while_segregation_is_off(self):
-        self.window._on_toggle_segregated_view(False)
+    def test_all_three_are_disabled_while_grouping_is_off(self):
+        self.window._on_toggle_grouped_view(False)
         for mode, action in self.mode_actions.items():
             with self.subTest(mode=mode):
                 self.assertFalse(
                     action.isEnabled(),
-                    f"{mode} must not be selectable while the table is not segregated",
+                    f"{mode} must not be selectable while the table is not grouped",
                 )
 
-    def test_all_three_are_enabled_once_segregation_is_on(self):
-        self.window._on_toggle_segregated_view(True)
+    def test_all_three_are_enabled_once_grouping_is_on(self):
+        self.window._on_toggle_grouped_view(True)
         for mode, action in self.mode_actions.items():
             with self.subTest(mode=mode):
                 self.assertTrue(
@@ -1658,40 +1658,40 @@ class TestSegregationModeAvailability(ViewsTabTestCase):
 
     def test_the_view_menu_toggle_greys_and_restores_them(self):
         """Driven through the real action, so this covers the signal wiring too."""
-        self.window._act_segregated_view.setChecked(False)
+        self.window._act_grouped_view.setChecked(False)
         self.assertFalse(self.mode_actions["date"].isEnabled())
-        self.window._act_segregated_view.setChecked(True)
+        self.window._act_grouped_view.setChecked(True)
         self.assertTrue(self.mode_actions["date"].isEnabled())
-        self.window._act_segregated_view.setChecked(False)
+        self.window._act_grouped_view.setChecked(False)
         self.assertFalse(self.mode_actions["date"].isEnabled())
 
     def test_the_remembered_mode_survives_being_switched_off(self):
         """The checkmark records what to restore.
 
         Clearing it would make the picker show "Status" for a user who had chosen File Type, and
-        turning segregation back on would regroup by the wrong thing - a silent change of the
+        turning grouping back on would regroup by the wrong thing - a silent change of the
         user's setting, caused by them briefly toggling something else.
         """
-        self.window._on_toggle_segregated_view(True)
-        self.window._set_segregation_mode("type")
-        self.window._on_toggle_segregated_view(False)
+        self.window._on_toggle_grouped_view(True)
+        self.window._set_grouping_mode("type")
+        self.window._on_toggle_grouped_view(False)
         self.assertTrue(
             self.mode_actions["type"].isChecked(),
             "a disabled action still shows its checkmark; that is the stored mode",
         )
-        self.window._on_toggle_segregated_view(True)
+        self.window._on_toggle_grouped_view(True)
         self.assertTrue(self.mode_actions["type"].isChecked())
-        self.assertEqual(self.window._segregated_view_mode, "type")
+        self.assertEqual(self.window._grouped_view_mode, "type")
 
     def test_the_preferences_combo_follows_the_same_rule(self):
-        self.db.set_ui_state("segregated_view_enabled", False)
+        self.db.set_ui_state("grouped_view_enabled", False)
         dialog = self.make_dialog()
         try:
-            self.assertFalse(dialog._seg_mode_combo.isEnabled())
-            dialog._seg_enabled_cb.setChecked(True)
-            self.assertTrue(dialog._seg_mode_combo.isEnabled())
-            dialog._seg_enabled_cb.setChecked(False)
-            self.assertFalse(dialog._seg_mode_combo.isEnabled())
+            self.assertFalse(dialog._group_mode_combo.isEnabled())
+            dialog._group_enabled_cb.setChecked(True)
+            self.assertTrue(dialog._group_mode_combo.isEnabled())
+            dialog._group_enabled_cb.setChecked(False)
+            self.assertFalse(dialog._group_mode_combo.isEnabled())
         finally:
             self._dispose(dialog)
 
@@ -1703,21 +1703,21 @@ class TestSegregationModeAvailability(ViewsTabTestCase):
         """
         dialog = self.make_dialog()
         try:
-            dialog._seg_enabled_cb.setChecked(False)
+            dialog._group_enabled_cb.setChecked(False)
             dialog._apply_views_tab()
-            self.assertFalse(self.window._act_segregated_view.isChecked())
+            self.assertFalse(self.window._act_grouped_view.isChecked())
             for mode, action in self.mode_actions.items():
                 with self.subTest(mode=mode):
                     self.assertFalse(action.isEnabled())
-                    self.assertFalse(dialog._seg_mode_combo.isEnabled())
+                    self.assertFalse(dialog._group_mode_combo.isEnabled())
 
-            dialog._seg_enabled_cb.setChecked(True)
+            dialog._group_enabled_cb.setChecked(True)
             dialog._apply_views_tab()
-            self.assertTrue(self.window._act_segregated_view.isChecked())
+            self.assertTrue(self.window._act_grouped_view.isChecked())
             for mode, action in self.mode_actions.items():
                 with self.subTest(mode=mode):
                     self.assertTrue(action.isEnabled())
-                    self.assertTrue(dialog._seg_mode_combo.isEnabled())
+                    self.assertTrue(dialog._group_mode_combo.isEnabled())
         finally:
             self._dispose(dialog)
 
@@ -1733,17 +1733,17 @@ class TestViewsTabStandalonePopulation(ViewsTabTestCase):
     affected; the standalone path is what tests and any headless caller use.
     """
 
-    def test_a_dialog_without_a_db_argument_still_loads_the_segregation_state(self):
+    def test_a_dialog_without_a_db_argument_still_loads_the_grouping_state(self):
         from my_idm.settings_dialog import SettingsDialog
 
-        self.db.set_ui_state("segregated_view_enabled", True)
-        self.db.set_ui_state("segregated_view_mode", "type")
+        self.db.set_ui_state("grouped_view_enabled", True)
+        self.db.set_ui_state("grouped_view_mode", "type")
         dialog = SettingsDialog(parent=self.window)
         self.addCleanup(self._dispose, dialog)
-        self.assertTrue(dialog._seg_enabled_cb.isChecked())
-        self.assertEqual(dialog._seg_mode_combo.currentData(), "type")
+        self.assertTrue(dialog._group_enabled_cb.isChecked())
+        self.assertEqual(dialog._group_mode_combo.currentData(), "type")
         self.assertTrue(
-            dialog._seg_mode_combo.isEnabled(),
+            dialog._group_mode_combo.isEnabled(),
             "a saved 'on' must enable the picker, or the page contradicts itself on open",
         )
 
@@ -1752,17 +1752,17 @@ class TestViewsTabStandalonePopulation(ViewsTabTestCase):
 
         Asserting only "it is disabled" would pass even if the load were skipped entirely, because
         the default is off - which is why this also checks the mode round-trips. A user who turns
-        segregation back on should get the mode they had chosen, not the default.
+        grouping back on should get the mode they had chosen, not the default.
         """
         from my_idm.settings_dialog import SettingsDialog
 
-        self.db.set_ui_state("segregated_view_enabled", False)
-        self.db.set_ui_state("segregated_view_mode", "type")
+        self.db.set_ui_state("grouped_view_enabled", False)
+        self.db.set_ui_state("grouped_view_mode", "type")
         dialog = SettingsDialog(parent=self.window)
         self.addCleanup(self._dispose, dialog)
-        self.assertFalse(dialog._seg_enabled_cb.isChecked())
-        self.assertFalse(dialog._seg_mode_combo.isEnabled())
-        self.assertEqual(dialog._seg_mode_combo.currentData(), "type")
+        self.assertFalse(dialog._group_enabled_cb.isChecked())
+        self.assertFalse(dialog._group_mode_combo.isEnabled())
+        self.assertEqual(dialog._group_mode_combo.currentData(), "type")
 
     def test_applying_from_a_standalone_dialog_still_persists(self):
         """Guards that a Save from a standalone dialog reaches the database.
@@ -1774,11 +1774,11 @@ class TestViewsTabStandalonePopulation(ViewsTabTestCase):
 
         dialog = SettingsDialog(parent=self.window)
         self.addCleanup(self._dispose, dialog)
-        dialog._seg_enabled_cb.setChecked(True)
-        dialog._seg_mode_combo.setCurrentIndex(dialog._seg_mode_combo.findData("date"))
+        dialog._group_enabled_cb.setChecked(True)
+        dialog._group_mode_combo.setCurrentIndex(dialog._group_mode_combo.findData("date"))
         dialog._apply_views_tab()
-        self.assertEqual(self.db.get_ui_state("segregated_view_enabled"), True)
-        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "date")
+        self.assertEqual(self.db.get_ui_state("grouped_view_enabled"), True)
+        self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "date")
 
 
 class TestDisabledStyling(unittest.TestCase):
@@ -1820,8 +1820,8 @@ class TestDisabledStyling(unittest.TestCase):
                 self.assertIn("QMenu::item:disabled:selected", sheet)
 
 
-class TestNameSegregatedView(unittest.TestCase):
-    """Tests for name-based (show/series) segregation mode and bulk collapse/expand."""
+class TestNameGroupedView(unittest.TestCase):
+    """Tests for name-based (show/series) grouping mode and bulk collapse/expand."""
 
     def setUp(self):
         self.model = DownloadTableModel()
@@ -1833,7 +1833,7 @@ class TestNameSegregatedView(unittest.TestCase):
         e4 = DownloadEntry(id="4", filename="Random Single Movie (2024).mp4", url="http://x/4")
 
         self.model.load_entries([e1, e2, e3, e4])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         # Must have Frieren header and Uncategorized header
         header_titles = [
@@ -1851,7 +1851,7 @@ class TestNameSegregatedView(unittest.TestCase):
         e4 = DownloadEntry(id="4", filename="Show B Episode 2.mkv", url="http://x/4")
 
         self.model.load_entries([e1, e2, e3, e4])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         # Name-based sections are auto-collapsed by default -> only 2 headers visible initially
         self.assertEqual(self.model.rowCount(), 2)
@@ -1876,7 +1876,7 @@ class TestNameSegregatedView(unittest.TestCase):
                            status="seeding", total_size=1000, downloaded_size=1000)
 
         self.model.load_entries([e1, e2, e3])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         # Header at row 0
         hdr = self.model._entries[0]
@@ -1895,7 +1895,7 @@ class TestNameSegregatedView(unittest.TestCase):
         e2 = DownloadEntry(id="2", filename=name2, url="http://x/2")
 
         self.model.load_entries([e1, e2])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         headers = [e for e in self.model._entries if e.is_section_header]
         self.assertEqual(len(headers), 1)
@@ -1903,7 +1903,7 @@ class TestNameSegregatedView(unittest.TestCase):
 
 
 @unittest.skipIf(IS_HEADLESS_WIN_CI, "headless Windows CI cannot create real MainWindow / SettingsDialog")
-class TestSegregatedControlStrip(ViewsTabTestCase):
+class TestGroupedControlStrip(ViewsTabTestCase):
     def test_collapse_and_expand_buttons_have_vector_icons(self):
         self.assertFalse(self.window._btn_collapse_all.icon().isNull())
         self.assertFalse(self.window._btn_expand_all.icon().isNull())
@@ -1912,16 +1912,16 @@ class TestSegregatedControlStrip(ViewsTabTestCase):
 
     def test_mode_buttons_highlight_active_mode(self):
         for mode in ("status", "date", "type", "name"):
-            self.window._set_segregation_mode(mode)
-            self.assertTrue(self.window._seg_mode_buttons[mode].isChecked())
-            for other_mode, btn in self.window._seg_mode_buttons.items():
+            self.window._set_grouping_mode(mode)
+            self.assertTrue(self.window._group_mode_buttons[mode].isChecked())
+            for other_mode, btn in self.window._group_mode_buttons.items():
                 if other_mode != mode:
                     self.assertFalse(btn.isChecked())
 
     def test_clicking_mode_button_switches_mode(self):
-        self.window._seg_mode_buttons["name"].click()
-        self.assertEqual(self.window._segregated_view_mode, "name")
-        self.assertTrue(self.window._seg_mode_buttons["name"].isChecked())
+        self.window._group_mode_buttons["name"].click()
+        self.assertEqual(self.window._grouped_view_mode, "name")
+        self.assertTrue(self.window._group_mode_buttons["name"].isChecked())
 
     def test_collapse_and_expand_all_buttons_trigger_handlers(self):
         from unittest.mock import patch
@@ -1932,8 +1932,8 @@ class TestSegregatedControlStrip(ViewsTabTestCase):
             self.window._btn_expand_all.click()
             mock_exp.assert_called_once()
 
-    def test_refresh_seg_strip_theme_updates_styles(self):
-        self.window._refresh_seg_strip_theme()
+    def test_refresh_group_strip_theme_updates_styles(self):
+        self.window._refresh_group_strip_theme()
         self.assertFalse(self.window._btn_collapse_all.icon().isNull())
         self.assertFalse(self.window._btn_expand_all.icon().isNull())
 

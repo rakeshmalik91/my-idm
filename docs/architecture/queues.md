@@ -324,7 +324,7 @@ Two bugs found while writing this, both now pinned by tests:
 ## View scoping
 
 A queue scope is a **filter, not a tab bar**. It has to compose with search, the header filter
-chips and segregated view simultaneously, which is `_matches_filter`'s job:
+chips and grouped view simultaneously, which is `_matches_filter`'s job:
 
 ```python
 # download_model.py:563
@@ -700,5 +700,5 @@ Designed in this document's original form, still to be built:
 
 - [Architecture Guide](main.md) — `Concurrency & Queue Prioritization`.
 - [Database & Persistence](database.md) — schema and the migration mechanism.
-- [Table Views & Segregation](table-views.md) — the filter machinery the scope composes with.
+- [Table Views & Grouping](table-views.md) — the filter machinery the scope composes with.
 - [Window Lifecycle & System Tray](window-system-tray.md) — `ui_state` persistence.

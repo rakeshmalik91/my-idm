@@ -26,7 +26,7 @@ Technical documentation for developers working on the My-IDM codebase.
 - [Preferences & Configuration Architecture](#preferences--configuration-architecture)
 - [Dynamic Filename Resolution & Crash Resilience](#dynamic-filename-resolution--crash-resilience)
 - [GUI Architecture](#gui-architecture)
-- [Table Views & Segregation Subsystem](#table-views--segregation-subsystem)
+- [Table Views & Grouping Subsystem](#table-views--grouping-subsystem)
 - [Key Design Decisions](#key-design-decisions)
 - [Adding New Features](#adding-new-features)
 
@@ -577,7 +577,7 @@ When a download is added without an explicit save path:
   - **📁 Downloads & Retries**: Default folder picker, "Open Folder" shortcut, segment bounds, max retries, retry backoff configuration, and reset-to-defaults button.
   - **🖥️ Application & Tray**: Auto-start at login, minimize/close to tray, completion notification behavior.
   - **📋 Clipboard Capture**: Automatic clipboard monitoring, URL regex patterns, min/max capture sizing.
-   - **👁️ Views & Columns**: Visible column pickers, segregation enable plus the four grouping modes (Status / Date / File Type / Name).
+   - **👁️ Views & Columns**: Visible column pickers, grouping enable plus the four grouping modes (Status / Date / File Type / Name).
    - **🧲 BitTorrent**: DHT/PEX switches, seeding ratios, listen ports, fastresume directory.
    - **🌐 Browser Integration**: Extension native messaging host, local loopback REST port (127.0.0.1:19582), intercept thresholds, and the download-capture hotkey row.
    - **🛡️ VPN & Proxy**: Network adapter binding, kill switch, SOCKS5/HTTP proxies.
@@ -673,7 +673,7 @@ QMainWindow (MainWindow)
   ├── QMenuBar
   │     ├── File (Add Download, Add Torrent, Load Backlog, Exit)
   │     ├── Edit (Resume, Pause, Copy URL, Rename, Move, Open File, Open Folder, Delete, Recheck, Queues, Move to Queue)
-  │     ├── View (View Control Strip, 📋 Details Panel [F4], Segregated View, Select All, Sort By)
+  │     ├── View (View Control Strip, 📋 Details Panel [F4], Grouped View, Select All, Sort By)
   │     ├── Tools (Preferences, Statistics, Export Selected as CSV…, VPN & Network Settings, Antivirus & Security Settings)
   │     └── Help (About)
   ├── QToolBar
@@ -842,7 +842,7 @@ DownloadManager signals:
 
 ---
 
-## Table Views & Segregation Subsystem
+## Table Views & Grouping Subsystem
 
 > **Canonical Architecture Document:** For detailed information on delegates, column rendering, section spanning, status/date algorithms, and auxiliary telemetry tables, see [`docs/architecture/table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md).
 
@@ -855,7 +855,7 @@ My-IDM implements a modular, high-performance table view subsystem for displayin
    - **Name-Based**: Partitions downloads by show / series, using `anime_title` (AnimePahe), a `strip_keywords.txt` release-junk pattern, common-prefix grouping and a 10% edit-distance match.
 2. **Collapsible Section Spans**: Section header rows span across all `Col.COUNT` columns via `MainWindow._apply_table_spans()` and support single-click or double-click expand/collapse toggling (`▼` / `▶`).
 3. **Contextual Section Controls**: Header right-click context menu provides options to expand/collapse the selected section, expand/collapse all sections, and quickly switch grouping modes. The same controls are first-class widgets on the **grouping control strip** above the table, which stays visible in flat view with **None** as the checked button and can itself be hidden via the View Control Strip toggle.
-4. **State Persistence**: The active segregation mode (`status` / `date` / `type` / `name`), enabled flag (`segregated_view_enabled`), and each section's collapsed state (`segregated_{sec_id}_collapsed`, dynamic per-group keys in `name` mode) are persisted in SQLite and restored automatically on next launch.
+4. **State Persistence**: The active grouping mode (`status` / `date` / `type` / `name`), enabled flag (`grouped_view_enabled`), and each section's collapsed state (`grouped_{sec_id}_collapsed`, dynamic per-group keys in `name` mode) are persisted in SQLite and restored automatically on next launch.
 5. **Details Panel Auxiliary Views**: Four side tabs on the bottom details panel — Details (four per-download tables: torrent files, peers, trackers, HTTP segments), Queues (aggregate queue control), Console (embedded tool output) and Stats (bandwidth statistics).
 
 ---

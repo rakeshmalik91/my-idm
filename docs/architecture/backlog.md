@@ -109,7 +109,7 @@ https://vault-123.owocdn.top/stream/anime_ep1.mp4 | D:\Anime\Series | Ep01.mp4 |
 
 - `anime_url=` — the AnimePahe series page URL, shown under **Show URL** in the Overview tab.
 - `anime_title=` — the anime title, shown under **Show Title** — and the primary key
-  [name-based segregation](table-views.md#d-name-based-segregation-name) groups a series on.
+  [name-based grouping](table-views.md#d-name-based-grouping-name) groups a series on.
 
 Both are trailing columns (after `queue=`) and are never mistaken for a save path or
 filename, because the pipe parser only treats `dir/save_path/path/folder`,

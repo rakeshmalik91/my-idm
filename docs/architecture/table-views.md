@@ -1,6 +1,6 @@
-# Table Views & Segregation Architecture
+# Table Views & Grouping Architecture
 
-This document provides a comprehensive technical guide to the primary and auxiliary table views in My-IDM, covering model-view architecture, custom delegates, interactive sorting, header spanning, status and date segregation engines, and persistent state lifecycle.
+This document provides a comprehensive technical guide to the primary and auxiliary table views in My-IDM, covering model-view architecture, custom delegates, interactive sorting, header spanning, status and date grouping engines, and persistent state lifecycle.
 
 ---
 
@@ -18,7 +18,7 @@ My-IDM employs a decoupled Qt Model-View architecture powered by PySide6:
 │  │  ├── Model: DownloadTableModel (QAbstractTableModel)            │  │
 │  │  │    ├── Filtering: Status filters, Type filters                │  │
 │  │  │    ├── Sorting: Type-aware comparator logic                   │  │
-│  │  │    └── Segregation Engine: Status-based OR Date-based         │  │
+│  │  │    └── Grouping Engine: Status-based OR Date-based         │  │
 │  │  ├── Delegates:                                                  │  │
 │  │  │    ├── ProgressBarDelegate (Col.PROGRESS)                     │  │
 │  │  │    ├── DownloadNameDelegate (Col.NAME)                        │  │
@@ -121,17 +121,17 @@ advertises `Chrome/`.
 
 ---
 
-## 🗂️ Segregated Views & Grouping Models
+## 🗂️ Grouped Views & Grouping Models
 
-In addition to standard flat-list display, My-IDM provides **Segregated Views**, dividing the download table into collapsible, full-row-spanning sections.
+In addition to standard flat-list display, My-IDM provides **Grouped Views**, dividing the download table into collapsible, full-row-spanning sections.
 
 ### 1. View Modes
 
-My-IDM supports four distinct segregation modes configured under **View → 🗂️ Segregated View**:
+My-IDM supports four distinct grouping modes configured under **View → 🗂️ Grouped View**:
 
 ```mermaid
 graph TD
-    A["View Menu: Segregated View → On"] -->|Enabled| B{Segregation Mode}
+    A["View Menu: Grouped View → On"] -->|Enabled| B{Grouping Mode}
     B -->|Status Grouping| C[Status Mode]
     B -->|Date Grouping| D[Date Mode]
     B -->|File Type Grouping| E[File Type Mode]
@@ -159,32 +159,32 @@ graph TD
     F --> F2["Uncategorized (singletons with no title)"]
 ```
 
-The mode key set is `SEGREGATED_MODES = ("status", "date", "type", "name")`, with
-`DEFAULT_SEGREGATED_MODE = "status"`; both are validated on read, so a stale persisted mode
+The mode key set is `GROUPED_MODES = ("status", "date", "type", "name")`, with
+`DEFAULT_GROUPED_MODE = "status"`; both are validated on read, so a stale persisted mode
 degrades to the default rather than rendering an undefined grouping.
 
 #### Mode Availability Follows the Enable Flag
 
 The four modes only mean something while the table is actually partitioned, so both surfaces that
-expose them grey them out together when segregation is off:
+expose them grey them out together when grouping is off:
 
 | Surface | Widget | Kept in step by |
 | :--- | :--- | :--- |
-| View menu | `_act_seg_by_status` / `_act_seg_by_date` / `_act_seg_by_type` / `_act_seg_by_name` | `MainWindow._sync_segregation_mode_actions`, called from `_setup_menubar` and `_on_toggle_segregated_view` |
-| Preferences → 👁️ Views & Columns | `_seg_mode_combo` | `SettingsDialog._sync_seg_controls`, wired to `_seg_enabled_cb.toggled` and called from `_populate_views_tab` |
+| View menu | `_act_group_by_status` / `_act_group_by_date` / `_act_group_by_type` / `_act_group_by_name` | `MainWindow._sync_grouping_mode_actions`, called from `_setup_menubar` and `_on_toggle_grouped_view` |
+| Preferences → 👁️ Views & Columns | `_group_mode_combo` | `SettingsDialog._sync_group_controls`, wired to `_group_enabled_cb.toggled` and called from `_populate_views_tab` |
 
 Two consequences worth knowing:
 
 - **A disabled action keeps its checkmark.** The checkmark is the *remembered* mode, restored when
-  segregation is switched back on; clearing it would regroup by Status for a user who had chosen
+  grouping is switched back on; clearing it would regroup by Status for a user who had chosen
   File Type or Name. Only `setEnabled` is touched, never `setChecked`.
-- **The "picking a mode turns segregation on" shortcut is no longer reachable from the View menu**,
-  because the action to pick is disabled. `_set_segregation_mode` still performs the promotion for
+- **The "picking a mode turns grouping on" shortcut is no longer reachable from the View menu**,
+  because the action to pick is disabled. `_set_grouping_mode` still performs the promotion for
   programmatic callers that invoke it directly.
 
 #### The grouping control strip
 
-Between the toolbar and the table sits `_seg_control_strip` (`main_window.py:922`, 30 px tall),
+Between the toolbar and the table sits `_group_control_strip` (`main_window.py:922`, 30 px tall),
 holding the grouping controls as first-class widgets rather than menu-only commands:
 
 - **Collapse All / Expand All**, icon-only, at the left edge — **disabled in flat view**, because
@@ -194,24 +194,24 @@ holding the grouping controls as first-class widgets rather than menu-only comma
 
 Three rules make it behave like a control rather than a status display:
 
-- **Visibility is independent of grouping.** It used to be hidden whenever segregation was off, so
+- **Visibility is independent of grouping.** It used to be hidden whenever grouping was off, so
   the flat view offered no visible way back into a grouped one. Since 2026-10-10 the strip is shown
-  whenever `seg_strip_visible` is set, and **`None` is the checked button in flat view** — the flat
+  whenever `group_strip_visible` is set, and **`None` is the checked button in flat view** — the flat
   table is a choice on the same switch as the grouped ones, not the absence of a choice.
 - **The File Type tooltip is read, not retyped.** It is built from `TYPE_SECTION_TITLES`
   (`download_model`), so declaring a new file-type section updates the strip, the View-menu action
   and the tests in one place instead of three copies of a list that drift.
 - **It can be hidden.** `_act_toggle_view_toolbar` — labelled **View Control Strip** (renamed from
   "View Toolbar") — is a checkable action in the View menu *and* an icon-only button on the
-  toolbar's right end; toggling it persists `seg_strip_visible` and shows or hides the strip.
+  toolbar's right end; toggling it persists `group_strip_visible` and shows or hides the strip.
 
-#### A. Status-Based Segregation (`status`)
+#### A. Status-Based Grouping (`status`)
 Partitions downloads according to operational lifecycle state:
 1. **Active**: Items in `fetching_metadata`, `queued`, `downloading`, `paused`, `stalled`, `checking`, `scanning`, `threat_detected`, or `error`.
 2. **Seeding**: Items actively seeding in the BitTorrent swarm (`seeding`).
 3. **Inactive**: Terminated items in `completed`, `stopped`, `file_not_found`, or `suspended`.
 
-#### B. Date-Based Segregation (`date`)
+#### B. Date-Based Grouping (`date`)
 Partitions downloads into relative temporal buckets determined by the **latest** available timestamp among:
 - `entry.added_at`
 - `entry.completed_at`
@@ -253,7 +253,7 @@ as `TODAY (0)` rather than disappearing.
 `_reapply_filter(now_dt=None)` thread it through so the same `now` drives the classification
 *and* the staleness bookkeeping below.
 
-#### C. File-Type Segregation (`type`)
+#### C. File-Type Grouping (`type`)
 Partitions downloads by what the payload *is* rather than when it was added, using the extension
 classification in `download_model`. Sections are Video, Audio, Archives, Documents, Photos,
 **Executables** and General, with `General` as the catch-all so no download is ever dropped from
@@ -277,7 +277,7 @@ about before a download starts.
    reports a size (`torrent` lists built before any byte moved) files are counted instead. Exactly
    95% is *not* enough — a genuinely mixed folder is meant to stay in General.
 
-#### D. Name-Based Segregation (`name`)
+#### D. Name-Based Grouping (`name`)
 
 Added 2026-10-10. Groups downloads by the **show or series** they belong to, so a season folder
 and a straggler episode land in the same section instead of two unrelated rows. It answers the
@@ -339,7 +339,7 @@ Two behaviours specific to this mode:
   collapsed and a regroup gated on the visible row never ran in exactly that state — the table kept
   the pre-rename grouping until the next full reset, so a resolved filename left its row under the
   wrong series. (Regression: `tests/test_download_model.py::TestNameGroupingInternals`.)
-- Collapse state persists as **dynamic** `ui_state` keys, `segregated_name_<key>_collapsed`
+- Collapse state persists as **dynamic** `ui_state` keys, `grouped_name_<key>_collapsed`
   (`main_window.py`), one per group, since the section set is not knowable in advance.
 
 Header colours: cyan for name groups, purple for `Uncategorized`
@@ -355,11 +355,11 @@ section full of yesterday's downloads — until some unrelated event (a status c
 sort) happened to reset the model.
 
 `DownloadTableModel` therefore records the local date each date-mode rebuild was built against
-(`_segregation_date`) and exposes two methods:
+(`_grouping_date`) and exposes two methods:
 
 | Method | Behaviour |
 | :--- | :--- |
-| `date_grouping_is_stale(now_dt=None)` | True only in `date` mode when the local day differs from `_segregation_date`. `None` (never built) counts as stale. |
+| `date_grouping_is_stale(now_dt=None)` | True only in `date` mode when the local day differs from `_grouping_date`. `None` (never built) counts as stale. |
 | `refresh_date_grouping(now_dt=None)` | Rebuilds via `_reapply_filter(now_dt)` if stale; returns whether it rebuilt. |
 
 `MainWindow._on_details_timer_tick` polls `date_grouping_is_stale()` on the existing 1 Hz
@@ -367,7 +367,7 @@ sort) happened to reset the model.
 and keeps ticking while the window is hidden to the tray, which is exactly when a rollover goes
 unnoticed. `MainWindow._regroup_for_new_day()` then captures the selected IDs **before** the
 rebuild, because a model reset drops the view's selection, and restores them through
-`_restore_selection` the same way `_on_toggle_segregated_view` does. `_collapsed_sections`
+`_restore_selection` the same way `_on_toggle_grouped_view` does. `_collapsed_sections`
 survives, so sections the user had folded stay folded across the rollover.
 
 `status` and `type` sections have no notion of today, so `date_grouping_is_stale()` returns False
@@ -421,7 +421,7 @@ Right-clicking any section header opens a contextual management menu:
 - **Expand / Collapse '[Title]' Section**: Toggles the targeted section.
 - **Expand All Sections**: Expands all sections in the active view mode.
 - **Collapse All Sections**: Collapses all sections in the active view mode.
-- **Switch Grouping Mode**: Toggles between all four segregation modes. This submenu is built inside
+- **Switch Grouping Mode**: Toggles between all four grouping modes. This submenu is built inside
   the `is_section_header_row` branch of `_show_context_menu`, so it only exists once sections do —
   no separate enable/disable coupling is needed on this third surface.
 
@@ -429,45 +429,45 @@ Right-clicking any section header opens a contextual management menu:
 
 ## 💾 State Persistence Lifecycle
 
-All table view configuration and segregation states are persisted in the SQLite `ui_state` table (`Database.set_ui_state` / `Database.get_ui_state`):
+All table view configuration and grouping states are persisted in the SQLite `ui_state` table (`Database.set_ui_state` / `Database.get_ui_state`):
 
 | Key | Type | Description |
 | :--- | :---: | :--- |
-| `segregated_view_enabled` | `bool` | Whether segregated view partitioning is enabled (`True`) or flat list is active (`False`). |
-| `segregated_view_mode` | `str` | Active grouping mode: `"status"`, `"date"`, `"type"` or `"name"`. Validated against `SEGREGATED_MODES` on read; anything else degrades to `DEFAULT_SEGREGATED_MODE`. |
-| `segregated_active_collapsed` | `bool` | Status mode: Active section collapsed state. |
-| `segregated_seeding_collapsed` | `bool` | Status mode: Seeding section collapsed state. |
-| `segregated_inactive_collapsed` | `bool` | Status mode: Inactive section collapsed state. |
-| `segregated_date_today_collapsed` | `bool` | Date mode: Today section collapsed state. |
-| `segregated_date_yesterday_collapsed` | `bool` | Date mode: Yesterday section collapsed state. |
-| `segregated_date_last_7_days_collapsed` | `bool` | Date mode: Last 7 Days section collapsed state. |
-| `segregated_date_last_30_days_collapsed` | `bool` | Date mode: Last 30 Days section collapsed state. |
-| `segregated_date_older_collapsed` | `bool` | Date mode: Older section collapsed state. |
-| `segregated_name_<key>_collapsed` | `bool` | Name mode: one key **per group**, written dynamically — the group set is not knowable in advance. |
-| `seg_strip_visible` | `bool` | The grouping control strip between the toolbar and the table is shown (see below). |
+| `grouped_view_enabled` | `bool` | Whether grouped view partitioning is enabled (`True`) or flat list is active (`False`). |
+| `grouped_view_mode` | `str` | Active grouping mode: `"status"`, `"date"`, `"type"` or `"name"`. Validated against `GROUPED_MODES` on read; anything else degrades to `DEFAULT_GROUPED_MODE`. |
+| `grouped_active_collapsed` | `bool` | Status mode: Active section collapsed state. |
+| `grouped_seeding_collapsed` | `bool` | Status mode: Seeding section collapsed state. |
+| `grouped_inactive_collapsed` | `bool` | Status mode: Inactive section collapsed state. |
+| `grouped_date_today_collapsed` | `bool` | Date mode: Today section collapsed state. |
+| `grouped_date_yesterday_collapsed` | `bool` | Date mode: Yesterday section collapsed state. |
+| `grouped_date_last_7_days_collapsed` | `bool` | Date mode: Last 7 Days section collapsed state. |
+| `grouped_date_last_30_days_collapsed` | `bool` | Date mode: Last 30 Days section collapsed state. |
+| `grouped_date_older_collapsed` | `bool` | Date mode: Older section collapsed state. |
+| `grouped_name_<key>_collapsed` | `bool` | Name mode: one key **per group**, written dynamically — the group set is not knowable in advance. |
+| `group_strip_visible` | `bool` | The grouping control strip between the toolbar and the table is shown (see below). |
 | `column_widths` | `dict` | JSON mapping of column indices to interactive pixel widths. |
 | `column_visibility` | `dict` | JSON mapping of column indices to visibility booleans. |
 
 On application launch:
-1. `MainWindow` queries `segregated_view_enabled` and `segregated_view_mode`.
+1. `MainWindow` queries `grouped_view_enabled` and `grouped_view_mode`.
 2. Restores collapsed status for all status and date section keys, and for any persisted
-   `segregated_name_<key>_collapsed` keys once the name groups are built.
-3. Configures `DownloadTableModel.set_segregated_view(enabled, mode=mode)`.
+   `grouped_name_<key>_collapsed` keys once the name groups are built.
+3. Configures `DownloadTableModel.set_grouped_view(enabled, mode=mode)`.
 4. Invokes `_apply_table_spans()` to paint section headers immediately.
 
-> **The mode whitelist must be `SEGREGATED_MODES`, not a local tuple.** When the `"type"`
+> **The mode whitelist must be `GROUPED_MODES`, not a local tuple.** When the `"type"`
 > mode was added, `MainWindow.__init__` kept its own `("status", "date")` check, so
 > choosing File Type and restarting silently grouped the table by Status again — and
 > because the menu entry's checked state is derived from that same value,
-> `_act_seg_by_type` came back unticked and nothing looked wrong. The same trap applies to
+> `_act_group_by_type` came back unticked and nothing looked wrong. The same trap applies to
 > `"name"`: any second copy of the tuple has to be updated in the same commit, which is why
-> `SEGREGATED_MODE_LABELS` and `TYPE_SECTION_TITLES` exist as single sources for the labels
+> `GROUPED_MODE_LABELS` and `TYPE_SECTION_TITLES` exist as single sources for the labels
 > the strip button tooltip and the View-menu action both read.
 >
-> `_on_toggle_segregated_view()` also syncs `_act_segregated_view`'s checkmark (under
+> `_on_toggle_grouped_view()` also syncs `_act_grouped_view`'s checkmark (under
 > `blockSignals`, to avoid re-entry). Without that, the View-menu checkmark and the table
 > drift apart, and it matters mechanically rather than cosmetically:
-> `_set_segregation_mode()` enables segregation by calling `setChecked(True)` on that
+> `_set_grouping_mode()` enables grouping by calling `setChecked(True)` on that
 > action, and `setChecked` emits nothing when the action is *already* checked — so a
 > desynchronised action made the enable silently do nothing.
 
@@ -477,14 +477,14 @@ The Views tab (`settings_dialog.py`) drives the same state through
 `_apply_views_tab()`, which applies the enable checkbox **before** the mode:
 
 ```python
-parent._on_toggle_segregated_view(enabled)          # canonical: applies + persists
+parent._on_toggle_grouped_view(enabled)          # canonical: applies + persists
 if enabled:
-    parent._set_segregation_mode(mode)             # only when it should stay on
+    parent._set_grouping_mode(mode)             # only when it should stay on
 ```
 
-The order is load-bearing. `_set_segregation_mode()` force-*enables* segregation when it is
+The order is load-bearing. `_set_grouping_mode()` force-*enables* grouping when it is
 currently off (choosing a mode from the View menu implies turning it on), so calling it
-first meant that saving with the checkbox **unticked** turned segregation back on and
+first meant that saving with the checkbox **unticked** turned grouping back on and
 overwrote the `False` the dialog had just written — while the branch that actually applied
 the checkbox sat behind an `elif` that could never run, so unticking it did nothing until
 the next restart.
@@ -577,7 +577,7 @@ blank (the startup default, and what a deleted queue falls back to), and is also
 header column. See [`queues.md`](queues.md) for the feature itself.
 
 - It is a **filter, not a tab bar**. A scope has to compose with the search box, the header
-  chips and segregated view at the same time, so it lives in the model rather than in a widget.
+  chips and grouped view at the same time, so it lives in the model rather than in a widget.
 - The gate is `DownloadTableModel._in_queue_scope(entry)`, its own method rather than a line
   inside `_matches_filter`, because `get_size_counts`, `get_status_counts` and `get_type_counts`
   each hand-roll their own filter chain over `_all_entries`. A scope applied in only one of them

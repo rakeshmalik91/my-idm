@@ -186,7 +186,7 @@ To simplify settings discovery and reduce tab clutter, preferences pages are reg
 | `TAB_GENERAL` | **0** | 📁 Downloads & Retries | Default save path, segments, segment start stagger, concurrent transfer limits, exponential retry backoff, auto-resume, completion notifications, free-disk-space gate, and backlog auto-processing locations. |
 | `TAB_APP` | **1** | 🖥️ Application & Tray | Auto-start at login, minimize/close to tray, start minimized, completion notification behavior. |
 | `TAB_CLIPBOARD` | **2** | 📋 Clipboard Capture | Clipboard monitor opt-in, per-copy URL ceiling, minimum capture size, ignored extensions, and the clipboard-capture hotkey row. |
-| `TAB_VIEWS` | **3** | 👁️ Views & Columns | Segregation enable plus the four grouping modes (Status / Date / File Type / Name), column select and ordering for the downloads table. |
+| `TAB_VIEWS` | **3** | 👁️ Views & Columns | Grouping enable plus the four grouping modes (Status / Date / File Type / Name), column select and ordering for the downloads table. |
 | `TAB_TORRENT` | **4** | 🧲 BitTorrent | Post-download seeding switches, seeding time & ratio ceilings, upload speed throttling, torrent-to-HTTP ratio, and DHT/tracker timeout. |
 | `TAB_BROWSER` | **5** | 🌐 Browser Integration | Loopback REST server (127.0.0.1:19582), minimum file size threshold (KB), bypassed file extensions, the download-capture hotkey row, Chromium (Chrome/Edge/Brave) unpacked loader, and Mozilla Firefox `.xpi` packaging & guide. |
 | `TAB_VPN` | **6** | 🛡️ VPN & Proxy | Network interface adapter binding, instant VPN Kill Switch loop, and HTTP/SOCKS5 proxy settings. |

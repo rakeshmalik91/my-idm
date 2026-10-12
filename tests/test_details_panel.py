@@ -99,7 +99,7 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertEqual(splitter.orientation(), Qt.Orientation.Vertical)
         self.assertEqual(splitter.count(), 2)
 
-        # Table is now wrapped in a container for the segregated view control strip
+        # Table is now wrapped in a container for the grouped view control strip
         table_container = splitter.widget(0)
         self.assertIsInstance(table_container, QWidget)
         # The table should be a child of the container

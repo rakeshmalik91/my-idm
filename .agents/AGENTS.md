@@ -23,7 +23,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
 | **Blob URL Handling** | [`blob-urls.md`](file:///d:/Projects/my-idm/docs/architecture/blob-urls.md) | Evaluation of browser `blob:` URLs, process-isolation limits, extension-assisted transfer, and native browser fallbacks. |
 | **Capture (Hotkey & Clipboard)** | [`capture.md`](file:///d:/Projects/my-idm/docs/architecture/capture.md) | System-wide `RegisterHotKey` via a native event filter, clipboard capture and its resolve-before-capture probe, the `intercept_all` toggle. |
 | **Window & System Tray** | [`window-system-tray.md`](file:///d:/Projects/my-idm/docs/architecture/window-system-tray.md) | Tray lifecycle, minimize/close-to-tray, completion toasts. |
-| **Table Views & Segregation** | [`table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md) | Table model, delegates, status/date/type segregation, section headers, context menus. |
+| **Table Views & Grouping** | [`table-views.md`](file:///d:/Projects/my-idm/docs/architecture/table-views.md) | Table model, delegates, status/date/type grouping, section headers, context menus. |
 | **YouTube Scraper** | [`youtube-scraper.md`](file:///d:/Projects/my-idm/docs/architecture/youtube-scraper.md) | `yt-dlp`, Mode A (direct CDN) vs Mode B (yt-dlp + ffmpeg), playlists, rate budgeting. |
 | **Bandwidth Statistics** | [`statistics.md`](file:///d:/Projects/my-idm/docs/architecture/statistics.md) | `get_download_stats()` local-day bucketing, totals grid, volume chart, sparkline. |
 | **Cross-Platform Architecture** | [`cross-platform.md`](file:///d:/Projects/my-idm/docs/architecture/cross-platform.md) | Linux (X11/Wayland) & macOS (Intel/ARM) porting specs. Records what shipped: `autostart.py` (launch at login), `proc.py` (detached spawns), the antivirus fail-closed fix, and the 3-OS CI matrix. |
@@ -130,7 +130,7 @@ The canonical architecture documentation is organized under [`docs/architecture/
     `~/.my-idm/logs/my-idm-YYYYMMDD-HHMMSS.log` with local time timestamps (`YYYY-MM-DD HH:MM:SS`).
     `_rotate_logs()` retains the last 10 runs on startup to keep disk usage bounded.
 19. **Preserve FIFO Queue Order on State Transitions**: Pausing, stopping, or resuming a download
-    retains its original `queue_order` rather than resetting to 0 or re-appending. In segregated
+    retains its original `queue_order` rather than resetting to 0 or re-appending. In grouped
     active view, queue order is a clean 1-indexed FIFO sequence. Resuming an already-active download
     must be a no-op that never resets state to `"queued"`.
 20. **Status Operations Must Route Through StatusJobPool**: Multi-row batch status changes

@@ -128,7 +128,7 @@ machine while they run.
 - [**Capture (Hotkey & Clipboard)**](docs/architecture/capture.md) — System-wide hotkey that toggles download capture, clipboard URL capture with an all-or-nothing gate and a resolve-before-capture probe, and the shared `intercept_all` switch.
 - [**Backlog Processing**](docs/architecture/backlog.md) — Batch queuing, multi-location discovery, custom locations & auto-clearing guidelines.
 - [**YouTube Scraper**](docs/architecture/youtube-scraper.md) — yt-dlp integration, Mode A (direct URL) vs Mode B (ffmpeg merge), dialog, and rate-limit budgeting.
-- [**Table Views & Segregation**](docs/architecture/table-views.md) — Column definitions and ordering, delegates, date-segregation algorithms, and the size/status/type header filters.
+- [**Table Views & Grouping**](docs/architecture/table-views.md) — Column definitions and ordering, delegates, date-grouping algorithms, and the size/status/type header filters.
 - [**Window Lifecycle & System Tray**](docs/architecture/window-system-tray.md) — Window geometry persistence, close-to-tray behaviour, and the tray context menu.
 - [**State Machines**](docs/architecture/state-machines.md) — HTTP and BitTorrent state diagrams, transition matrices, and retry mechanics.
 - [**Bandwidth Statistics**](docs/architecture/statistics.md) — Today / week / month / year / all-time totals from the existing `downloads` table, a `📊 Statistics` entry in **Tools** beside Preferences, a per-day volume chart and a live speed sparkline. Buckets are the user's **local** calendar days; rows are stamped in UTC and converted per row.

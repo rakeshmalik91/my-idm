@@ -161,7 +161,7 @@ class TestSectionHeaderDelegate(unittest.TestCase):
         table = QTableView()
         model = DownloadTableModel()
         table.setModel(model)
-        model.set_segregated_view(True)
+        model.set_grouped_view(True)
 
         e1 = DownloadEntry(id="d1", url="http://example.com/1.zip", filename="1.zip", status="downloading")
         e2 = DownloadEntry(id="d2", url="http://example.com/2.zip", filename="2.zip", status="downloading")

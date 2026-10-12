@@ -536,5 +536,85 @@ class TestDatabaseThreadSafety(_TempDbMixin, unittest.TestCase):
                         "a nested read inside a write on one thread deadlocked")
 
 
+class TestGroupedViewKeyMigration(_TempDbMixin, unittest.TestCase):
+    """``segregated_*`` ui_state keys become ``grouped_*`` on open.
+
+    The grouped-view feature was renamed, so an existing profile would otherwise hold
+    keys nothing reads: the user's grouping mode, per-section collapse state and the
+    control strip's visibility would all silently reset to their defaults.
+    """
+
+    def _seed_legacy_keys(self, db):
+        db.set_ui_state("segregated_view_enabled", True)
+        db.set_ui_state("segregated_view_mode", "date")
+        db.set_ui_state("segregated_date_today_collapsed", True)
+        db.set_ui_state("segregated_name_some_show_collapsed", True)
+        db.set_ui_state("seg_strip_visible", False)
+
+    def test_old_keys_are_renamed_and_the_old_spellings_disappear(self):
+        path = self.make_temp_db("migrate.db")
+        db = Database(path)
+        db.open()
+        self._seed_legacy_keys(db)
+        db.close()
+
+        db = Database(path)
+        db.open()
+        try:
+            self.assertTrue(db.get_ui_state("grouped_view_enabled", False))
+            self.assertEqual(db.get_ui_state("grouped_view_mode", None), "date")
+            self.assertTrue(db.get_ui_state("grouped_date_today_collapsed", False))
+            self.assertTrue(db.get_ui_state("grouped_name_some_show_collapsed", False))
+            self.assertFalse(db.get_ui_state("group_strip_visible", True))
+
+            leftovers = [r["key"] for r in db._conn.execute(
+                "SELECT key FROM ui_state WHERE key LIKE 'segregated_%' "
+                "OR key = 'seg_strip_visible'")]
+            self.assertEqual(leftovers, [], "the old spellings must be gone, not duplicated")
+        finally:
+            db.close()
+
+    def test_a_second_open_is_a_no_op(self):
+        """Idempotency: the migrated values must survive further opens unchanged."""
+        path = self.make_temp_db("migrate_twice.db")
+        db = Database(path)
+        db.open()
+        self._seed_legacy_keys(db)
+        db.close()
+
+        for _ in range(2):
+            db = Database(path)
+            db.open()
+            try:
+                self.assertEqual(db.get_ui_state("grouped_view_mode", None), "date")
+                self.assertFalse(db.get_ui_state("group_strip_visible", True))
+            finally:
+                db.close()
+
+    def test_a_key_the_user_has_already_set_wins(self):
+        """A newer grouped_* key must not be overwritten by its legacy twin."""
+        path = self.make_temp_db("migrate_conflict.db")
+        db = Database(path)
+        db.open()
+        self._seed_legacy_keys(db)
+        # The app has already written the new spelling before an old backup was restored.
+        db.set_ui_state("grouped_view_mode", "type")
+        db.close()
+
+        db = Database(path)
+        db.open()
+        try:
+            self.assertEqual(db.get_ui_state("grouped_view_mode", None), "type")
+        finally:
+            db.close()
+
+    def test_a_fresh_database_gets_defaults_not_migrated_rows(self):
+        """Nothing to migrate, and nothing written: the caller's defaults stand."""
+        db = self.open_db(self.make_temp_db("fresh.db"))
+        self.assertFalse(db.get_ui_state("grouped_view_enabled", False))
+        self.assertIsNone(db.get_ui_state("grouped_view_mode", None))
+        self.assertTrue(db.get_ui_state("group_strip_visible", True))
+
+
 if __name__ == "__main__":
     unittest.main()

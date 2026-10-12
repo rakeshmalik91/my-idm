@@ -74,9 +74,9 @@ from my_idm.dialogs import (
 )
 from my_idm.download_model import (
     DATE_SECTION_DEFS,
-    DEFAULT_SEGREGATED_MODE,
-    SEGREGATED_MODE_LABELS,
-    SEGREGATED_MODES,
+    DEFAULT_GROUPED_MODE,
+    GROUPED_MODE_LABELS,
+    GROUPED_MODES,
     TYPE_SECTION_DEFS,
     TYPE_SECTION_TITLES,
     Col,
@@ -849,13 +849,13 @@ class MainWindow(QMainWindow):
         self._model.layoutChanged.connect(self._apply_table_spans)
 
         # Grouped view: disabled by default, state and mode persisted in db
-        self._segregated_view_enabled = bool(self._manager.db.get_ui_state("segregated_view_enabled", False))
-        self._segregated_view_mode = str(self._manager.db.get_ui_state("segregated_view_mode", "status"))
+        self._grouped_view_enabled = bool(self._manager.db.get_ui_state("grouped_view_enabled", False))
+        self._grouped_view_mode = str(self._manager.db.get_ui_state("grouped_view_mode", "status"))
         # Use the shared mode list, not a local pair: the old two-value whitelist left here
         # when the "type" mode was added, so choosing File Type and restarting silently
         # grouped the table by Status instead.
-        if self._segregated_view_mode not in SEGREGATED_MODES:
-            self._segregated_view_mode = DEFAULT_SEGREGATED_MODE
+        if self._grouped_view_mode not in GROUPED_MODES:
+            self._grouped_view_mode = DEFAULT_GROUPED_MODE
 
         all_sec_ids = (
             "active", "seeding", "inactive",
@@ -867,7 +867,7 @@ class MainWindow(QMainWindow):
             # They will be handled when the model rebuilds
         )
         for sec_id in all_sec_ids:
-            if self._manager.db.get_ui_state(f"segregated_{sec_id}_collapsed", False):
+            if self._manager.db.get_ui_state(f"grouped_{sec_id}_collapsed", False):
                 canonical_sec_id = sec_id
                 if sec_id == "date_this_week":
                     canonical_sec_id = "date_last_7_days"
@@ -875,19 +875,19 @@ class MainWindow(QMainWindow):
                     canonical_sec_id = "date_last_30_days"
                 self._model.set_section_collapsed(canonical_sec_id, True)
         
-        self._model.set_segregated_view(self._segregated_view_enabled, mode=self._segregated_view_mode)
+        self._model.set_grouped_view(self._grouped_view_enabled, mode=self._grouped_view_mode)
         
         # Load persisted collapse state for name-based sections (dynamic IDs)
         # These have section IDs starting with "name_"
-        # Must be done AFTER set_segregated_view so auto-collapse flag is set correctly
+        # Must be done AFTER set_grouped_view so auto-collapse flag is set correctly
         try:
             db = self._manager.db
             # Iterate through all UI state keys to find name-based section states
-            for key in db._conn.execute("SELECT key FROM ui_state WHERE key LIKE 'segregated_name_%_collapsed'"):
+            for key in db._conn.execute("SELECT key FROM ui_state WHERE key LIKE 'grouped_name_%_collapsed'"):
                 key_name = key[0]
                 is_collapsed = db.get_ui_state(key_name, False)
-                # Extract section_id from key: "segregated_name_X_collapsed" -> "name_X"
-                sec_id = key_name.replace("segregated_", "").replace("_collapsed", "")
+                # Extract section_id from key: "grouped_name_X_collapsed" -> "name_X"
+                sec_id = key_name.replace("grouped_", "").replace("_collapsed", "")
                 self._model.set_section_collapsed(sec_id, is_collapsed)
         except Exception:
             pass
@@ -918,34 +918,34 @@ class MainWindow(QMainWindow):
         table_container_layout.setContentsMargins(0, 0, 0, 0)
         table_container_layout.setSpacing(0)
         
-        # Segregated view control strip (collapse/expand all buttons)
-        self._seg_control_strip = QWidget()
-        self._seg_control_strip.setFixedHeight(30)
-        self._seg_control_strip.setStyleSheet(
+        # Grouped view control strip (collapse/expand all buttons)
+        self._group_control_strip = QWidget()
+        self._group_control_strip.setFixedHeight(30)
+        self._group_control_strip.setStyleSheet(
             f"background-color: {Colors.BG_MID}; border-bottom: 1px solid {Colors.BORDER};"
         )
-        self._seg_control_strip.setVisible(self._strip_visible())
-        seg_strip_layout = QHBoxLayout(self._seg_control_strip)
-        seg_strip_layout.setContentsMargins(10, 2, 10, 2)
-        seg_strip_layout.setSpacing(8)
+        self._group_control_strip.setVisible(self._strip_visible())
+        group_strip_layout = QHBoxLayout(self._group_control_strip)
+        group_strip_layout.setContentsMargins(10, 2, 10, 2)
+        group_strip_layout.setSpacing(8)
         
         # Collapse/Expand buttons on LEFT edge
-        self._btn_collapse_all = QPushButton(self._seg_control_strip)
+        self._btn_collapse_all = QPushButton(self._group_control_strip)
         self._btn_collapse_all.setFixedSize(24, 22)
         self._btn_collapse_all.setIcon(_create_collapse_all_icon(20))
         self._btn_collapse_all.setIconSize(QSize(16, 16))
         self._btn_collapse_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_collapse_all.setToolTip("Collapse all sections in the grouped view")
-        self._btn_collapse_all.setEnabled(self._segregated_view_enabled)
+        self._btn_collapse_all.setEnabled(self._grouped_view_enabled)
         self._btn_collapse_all.clicked.connect(self._on_collapse_all_sections)
         
-        self._btn_expand_all = QPushButton(self._seg_control_strip)
+        self._btn_expand_all = QPushButton(self._group_control_strip)
         self._btn_expand_all.setFixedSize(24, 22)
         self._btn_expand_all.setIcon(_create_expand_all_icon(20))
         self._btn_expand_all.setIconSize(QSize(16, 16))
         self._btn_expand_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_expand_all.setToolTip("Expand all sections in the grouped view")
-        self._btn_expand_all.setEnabled(self._segregated_view_enabled)
+        self._btn_expand_all.setEnabled(self._grouped_view_enabled)
         self._btn_expand_all.clicked.connect(self._on_expand_all_sections)
         
         icon_btn_style = f"""
@@ -972,21 +972,21 @@ class MainWindow(QMainWindow):
         self._btn_collapse_all.setStyleSheet(icon_btn_style)
         self._btn_expand_all.setStyleSheet(icon_btn_style)
         
-        seg_strip_layout.addWidget(self._btn_collapse_all)
-        seg_strip_layout.addWidget(self._btn_expand_all)
-        seg_strip_layout.addStretch()
+        group_strip_layout.addWidget(self._btn_collapse_all)
+        group_strip_layout.addWidget(self._btn_expand_all)
+        group_strip_layout.addStretch()
         
         # Group by label
-        group_by_label = QLabel("Group by:", self._seg_control_strip)
+        group_by_label = QLabel("Group by:", self._group_control_strip)
         group_by_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; font-size: 11px; font-weight: bold; border: none; background: transparent; padding-right: 8px;"
         )
-        seg_strip_layout.addWidget(group_by_label)
+        group_strip_layout.addWidget(group_by_label)
         
         # Group by mode buttons on RIGHT edge
-        self._seg_mode_btn_group = QButtonGroup(self._seg_control_strip)
-        self._seg_mode_btn_group.setExclusive(True)
-        self._seg_mode_buttons = {}
+        self._group_mode_btn_group = QButtonGroup(self._group_control_strip)
+        self._group_mode_btn_group.setExclusive(True)
+        self._group_mode_buttons = {}
         mode_buttons_data = [
             ("None", "none", "No grouping / flat table view"),
             ("Status", "status", "Active / Seeding / Inactive"),
@@ -1035,23 +1035,23 @@ class MainWindow(QMainWindow):
         """
 
         for label, mode_key, tooltip in mode_buttons_data:
-            btn = QPushButton(label, self._seg_control_strip)
+            btn = QPushButton(label, self._group_control_strip)
             btn.setFixedHeight(22)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setToolTip("No grouping / flat table view" if mode_key == "none" else f"Group by {tooltip}")
             btn.setCheckable(True)
             if mode_key == "none":
-                is_checked = not self._segregated_view_enabled
+                is_checked = not self._grouped_view_enabled
             else:
-                is_checked = self._segregated_view_enabled and (mode_key == self._segregated_view_mode)
+                is_checked = self._grouped_view_enabled and (mode_key == self._grouped_view_mode)
             btn.setChecked(is_checked)
             btn.setStyleSheet(mode_btn_style)
-            btn.clicked.connect(lambda checked, mk=mode_key: self._on_seg_mode_button_clicked(mk))
-            self._seg_mode_buttons[mode_key] = btn
-            self._seg_mode_btn_group.addButton(btn)
-            seg_strip_layout.addWidget(btn)
+            btn.clicked.connect(lambda checked, mk=mode_key: self._on_group_mode_button_clicked(mk))
+            self._group_mode_buttons[mode_key] = btn
+            self._group_mode_btn_group.addButton(btn)
+            group_strip_layout.addWidget(btn)
         
-        table_container_layout.addWidget(self._seg_control_strip)
+        table_container_layout.addWidget(self._group_control_strip)
         table_container_layout.addWidget(self._table)
         
         self._splitter.addWidget(self._table_container)
@@ -1529,66 +1529,66 @@ class MainWindow(QMainWindow):
 
         # View menu
         view_menu = menubar.addMenu("&View")
-        self._menu_segregated_view = view_menu.addMenu(_create_emoji_icon("🗂️"), "Grouped View")
+        self._menu_grouped_view = view_menu.addMenu(_create_emoji_icon("🗂️"), "Grouped View")
 
-        self._act_segregated_view = QAction("Enabled", self)
-        self._act_segregated_view.setCheckable(True)
-        self._act_segregated_view.setChecked(self._segregated_view_enabled)
-        self._act_segregated_view.toggled.connect(self._on_toggle_segregated_view)
-        self._menu_segregated_view.addAction(self._act_segregated_view)
+        self._act_grouped_view = QAction("Enabled", self)
+        self._act_grouped_view.setCheckable(True)
+        self._act_grouped_view.setChecked(self._grouped_view_enabled)
+        self._act_grouped_view.toggled.connect(self._on_toggle_grouped_view)
+        self._menu_grouped_view.addAction(self._act_grouped_view)
 
-        self._menu_segregated_view.addSeparator()
+        self._menu_grouped_view.addSeparator()
 
-        self._seg_mode_group = QActionGroup(self)
-        self._seg_mode_group.setExclusive(True)
+        self._group_mode_action_group = QActionGroup(self)
+        self._group_mode_action_group.setExclusive(True)
 
-        self._act_seg_by_status = QAction("Status (Active / Seeding / Inactive)", self)
-        self._act_seg_by_status.setCheckable(True)
-        self._act_seg_by_status.setChecked(self._segregated_view_mode == "status")
-        self._act_seg_by_status.triggered.connect(lambda: self._set_segregation_mode("status"))
-        self._seg_mode_group.addAction(self._act_seg_by_status)
-        self._menu_segregated_view.addAction(self._act_seg_by_status)
+        self._act_group_by_status = QAction("Status (Active / Seeding / Inactive)", self)
+        self._act_group_by_status.setCheckable(True)
+        self._act_group_by_status.setChecked(self._grouped_view_mode == "status")
+        self._act_group_by_status.triggered.connect(lambda: self._set_grouping_mode("status"))
+        self._group_mode_action_group.addAction(self._act_group_by_status)
+        self._menu_grouped_view.addAction(self._act_group_by_status)
 
-        self._act_seg_by_date = QAction("Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)", self)
-        self._act_seg_by_date.setCheckable(True)
-        self._act_seg_by_date.setChecked(self._segregated_view_mode == "date")
-        self._act_seg_by_date.triggered.connect(lambda: self._set_segregation_mode("date"))
-        self._seg_mode_group.addAction(self._act_seg_by_date)
-        self._menu_segregated_view.addAction(self._act_seg_by_date)
+        self._act_group_by_date = QAction("Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)", self)
+        self._act_group_by_date.setCheckable(True)
+        self._act_group_by_date.setChecked(self._grouped_view_mode == "date")
+        self._act_group_by_date.triggered.connect(lambda: self._set_grouping_mode("date"))
+        self._group_mode_action_group.addAction(self._act_group_by_date)
+        self._menu_grouped_view.addAction(self._act_group_by_date)
 
-        self._act_seg_by_type = QAction(SEGREGATED_MODE_LABELS["type"], self)
-        self._act_seg_by_type.setCheckable(True)
-        self._act_seg_by_type.setChecked(self._segregated_view_mode == "type")
-        self._act_seg_by_type.triggered.connect(lambda: self._set_segregation_mode("type"))
-        self._seg_mode_group.addAction(self._act_seg_by_type)
-        self._menu_segregated_view.addAction(self._act_seg_by_type)
+        self._act_group_by_type = QAction(GROUPED_MODE_LABELS["type"], self)
+        self._act_group_by_type.setCheckable(True)
+        self._act_group_by_type.setChecked(self._grouped_view_mode == "type")
+        self._act_group_by_type.triggered.connect(lambda: self._set_grouping_mode("type"))
+        self._group_mode_action_group.addAction(self._act_group_by_type)
+        self._menu_grouped_view.addAction(self._act_group_by_type)
 
-        self._act_seg_by_name = QAction("Name (Smart Series / Show Grouping)", self)
-        self._act_seg_by_name.setCheckable(True)
-        self._act_seg_by_name.setChecked(self._segregated_view_mode == "name")
-        self._act_seg_by_name.triggered.connect(lambda: self._set_segregation_mode("name"))
-        self._seg_mode_group.addAction(self._act_seg_by_name)
-        self._menu_segregated_view.addAction(self._act_seg_by_name)
+        self._act_group_by_name = QAction("Name (Smart Series / Show Grouping)", self)
+        self._act_group_by_name.setCheckable(True)
+        self._act_group_by_name.setChecked(self._grouped_view_mode == "name")
+        self._act_group_by_name.triggered.connect(lambda: self._set_grouping_mode("name"))
+        self._group_mode_action_group.addAction(self._act_group_by_name)
+        self._menu_grouped_view.addAction(self._act_group_by_name)
 
-        # One mapping of mode key -> action, so the checkmark sync in `_set_segregation_mode` and
+        # One mapping of mode key -> action, so the checkmark sync in `_set_grouping_mode` and
         # the enable/disable sync here cannot drift apart as modes are added.
-        self._seg_mode_actions = {
-            "status": self._act_seg_by_status,
-            "date": self._act_seg_by_date,
-            "type": self._act_seg_by_type,
-            "name": self._act_seg_by_name,
+        self._group_mode_actions = {
+            "status": self._act_group_by_status,
+            "date": self._act_group_by_date,
+            "type": self._act_group_by_type,
+            "name": self._act_group_by_name,
         }
 
-        self._menu_segregated_view.addSeparator()
+        self._menu_grouped_view.addSeparator()
         self._act_collapse_all_sections = QAction(_create_collapse_all_icon(24), "Collapse All Sections", self)
         self._act_collapse_all_sections.triggered.connect(self._on_collapse_all_sections)
-        self._menu_segregated_view.addAction(self._act_collapse_all_sections)
+        self._menu_grouped_view.addAction(self._act_collapse_all_sections)
 
         self._act_expand_all_sections = QAction(_create_expand_all_icon(24), "Expand All Sections", self)
         self._act_expand_all_sections.triggered.connect(self._on_expand_all_sections)
-        self._menu_segregated_view.addAction(self._act_expand_all_sections)
+        self._menu_grouped_view.addAction(self._act_expand_all_sections)
 
-        self._sync_segregation_mode_actions()
+        self._sync_grouping_mode_actions()
 
         view_menu.addAction(self._act_toggle_view_toolbar)
         view_menu.addAction(self._act_toggle_details)
@@ -2921,7 +2921,7 @@ class MainWindow(QMainWindow):
 
     def _apply_table_spans(self):
         self._table.clearSpans()
-        if not self._model.is_segregated_view():
+        if not self._model.is_grouped_view():
             return
         for row in self._model.get_section_header_row_indices():
             self._table.setSpan(row, 0, 1, Col.COUNT)
@@ -2975,7 +2975,7 @@ class MainWindow(QMainWindow):
         # If collapsed, expand so its rows become visible in the table and selectable
         if hdr.section_collapsed:
             self._model.set_section_collapsed(sec_id, False)
-            self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", False)
+            self._manager.db.set_ui_state(f"grouped_{sec_id}_collapsed", False)
             self._apply_table_spans()
 
         download_rows = self._model.get_section_download_rows(sec_id)
@@ -3014,7 +3014,7 @@ class MainWindow(QMainWindow):
             res = self._model.toggle_section_collapsed(row)
             if res:
                 sec_id, is_col = res
-                self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
+                self._manager.db.set_ui_state(f"grouped_{sec_id}_collapsed", is_col)
             self._apply_table_spans()
 
     def _on_table_double_clicked(self, index, click_pos=None):
@@ -3028,17 +3028,17 @@ class MainWindow(QMainWindow):
             res = self._model.toggle_section_collapsed(index.row())
             if res:
                 sec_id, is_col = res
-                self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
+                self._manager.db.set_ui_state(f"grouped_{sec_id}_collapsed", is_col)
             self._apply_table_spans()
             return
         if self._model.is_deleting_row(index.row()):
             return
         self._on_open_file()
 
-    def _segregation_mode_label(self, mode: str) -> str:
-        """Short human name of a segregation mode, for the status bar.
+    def _grouping_mode_label(self, mode: str) -> str:
+        """Short human name of a grouping mode, for the status bar.
 
-        Shares one dict with ``_set_segregation_mode``'s label: the View-menu handler and the
+        Shares one dict with ``_set_grouping_mode``'s label: the View-menu handler and the
         Preferences tab both drive the same state, and they previously used two different
         lookups, so the "type" mode was announced as "Date".
         """
@@ -3046,71 +3046,71 @@ class MainWindow(QMainWindow):
             mode, "Status"
         )
 
-    def _sync_segregation_mode_actions(self, enabled: Optional[bool] = None):
-        """Enable the mode actions and section actions only while segregated view is on.
+    def _sync_grouping_mode_actions(self, enabled: Optional[bool] = None):
+        """Enable the mode actions and section actions only while grouped view is on.
 
-        The modes are meaningless while segregation is off - picking one has nothing to group by -
+        The modes are meaningless while grouping is off - picking one has nothing to group by -
         so offering them invites a change that appears to do nothing. Their *checkmark* is
-        deliberately left alone: it records the mode that will be restored when segregation is
+        deliberately left alone: it records the mode that will be restored when grouping is
         turned back on, and clearing it would silently lose the user's choice.
 
         Mirrors the Preferences Views tab, where the same coupling already exists between
-        `_seg_enabled_cb` and `_seg_mode_combo`.
+        `_group_enabled_cb` and `_group_mode_combo`.
         """
         if enabled is None:
-            enabled = self._segregated_view_enabled
-        for action in self._seg_mode_actions.values():
+            enabled = self._grouped_view_enabled
+        for action in self._group_mode_actions.values():
             action.setEnabled(enabled)
         if hasattr(self, "_act_collapse_all_sections"):
             self._act_collapse_all_sections.setEnabled(enabled)
         if hasattr(self, "_act_expand_all_sections"):
             self._act_expand_all_sections.setEnabled(enabled)
 
-    def _set_segregation_mode(self, mode: str):
-        if mode not in SEGREGATED_MODES:
-            mode = DEFAULT_SEGREGATED_MODE
-        self._segregated_view_mode = mode
-        self._manager.db.set_ui_state("segregated_view_mode", mode)
-        for value, action in self._seg_mode_actions.items():
+    def _set_grouping_mode(self, mode: str):
+        if mode not in GROUPED_MODES:
+            mode = DEFAULT_GROUPED_MODE
+        self._grouped_view_mode = mode
+        self._manager.db.set_ui_state("grouped_view_mode", mode)
+        for value, action in self._group_mode_actions.items():
             action.setChecked(mode == value)
         
         # Update the button strip mode buttons
-        if hasattr(self, "_seg_mode_buttons"):
-            for mk, btn in self._seg_mode_buttons.items():
+        if hasattr(self, "_group_mode_buttons"):
+            for mk, btn in self._group_mode_buttons.items():
                 btn.blockSignals(True)
                 btn.setChecked(mk == mode)
                 btn.blockSignals(False)
                 btn.update()
 
-        if not self._segregated_view_enabled:
-            # Turning a mode on implies turning segregation on.
-            self._on_toggle_segregated_view(True)
+        if not self._grouped_view_enabled:
+            # Turning a mode on implies turning grouping on.
+            self._on_toggle_grouped_view(True)
         else:
-            self._model.set_segregated_mode(mode)
+            self._model.set_grouped_mode(mode)
             self._apply_table_spans()
             self._apply_view_strip_visibility()
             self._status_label.setText(
-                f"Grouped view grouped by {self._segregation_mode_label(mode)}"
+                f"Grouped view grouped by {self._grouping_mode_label(mode)}"
             )
 
-    def _on_seg_mode_button_clicked(self, mode: str):
+    def _on_group_mode_button_clicked(self, mode: str):
         """Handle clicks on the mode buttons in the grouped view control strip."""
         if mode == "none":
-            if self._segregated_view_enabled:
-                self._on_toggle_segregated_view(False)
+            if self._grouped_view_enabled:
+                self._on_toggle_grouped_view(False)
             else:
-                if hasattr(self, "_seg_mode_buttons"):
-                    for mk, btn in self._seg_mode_buttons.items():
+                if hasattr(self, "_group_mode_buttons"):
+                    for mk, btn in self._group_mode_buttons.items():
                         btn.blockSignals(True)
                         btn.setChecked(mk == "none")
                         btn.blockSignals(False)
         else:
-            self._set_segregation_mode(mode)
+            self._set_grouping_mode(mode)
 
     def _strip_visible(self) -> bool:
         """Whether the view control strip shows - read from the one store that holds it.
 
-        ``seg_strip_visible`` is the authority. It used to be read *twice*, though: the
+        ``group_strip_visible`` is the authority. It used to be read *twice*, though: the
         window-state blob also had a copy that nothing ever wrote, so its restore path fell
         back to the default ``True`` and forced the strip visible over the stored answer.
         That is why hiding the strip never survived a restart, and why the first click on any
@@ -3120,7 +3120,7 @@ class MainWindow(QMainWindow):
         Every read of the state goes through here, so the two can never disagree again.
         """
         try:
-            return bool(self._manager.db.get_ui_state("seg_strip_visible", True))
+            return bool(self._manager.db.get_ui_state("group_strip_visible", True))
         except Exception as exc:
             log.warning("Could not read the view control strip state: %s", exc)
             return True
@@ -3132,8 +3132,8 @@ class MainWindow(QMainWindow):
         user cannot find again.
         """
         visible = self._strip_visible()
-        if hasattr(self, "_seg_control_strip"):
-            self._seg_control_strip.setVisible(visible)
+        if hasattr(self, "_group_control_strip"):
+            self._group_control_strip.setVisible(visible)
         if hasattr(self, "_act_toggle_view_toolbar"):
             if self._act_toggle_view_toolbar.isChecked() != visible:
                 self._act_toggle_view_toolbar.blockSignals(True)
@@ -3142,19 +3142,19 @@ class MainWindow(QMainWindow):
 
     def _on_toggle_view_toolbar(self, checked: bool):
         """Toggle visibility of the view strip under the toolbar."""
-        self._manager.db.set_ui_state("seg_strip_visible", bool(checked))
+        self._manager.db.set_ui_state("group_strip_visible", bool(checked))
         self._apply_view_strip_visibility()
 
-    def _on_toggle_segregated_view(self, checked: bool):
-        self._segregated_view_enabled = checked
-        self._manager.db.set_ui_state("segregated_view_enabled", checked)
+    def _on_toggle_grouped_view(self, checked: bool):
+        self._grouped_view_enabled = checked
+        self._manager.db.set_ui_state("grouped_view_enabled", checked)
         # Keep the View-menu checkmark in step. This handler is driven by the action's
         # own `toggled` signal *and* called programmatically (state restore, and the
         # Preferences checkbox), so without this the menu can disagree with the table - and
-        # a disagreement is worse than useless: `_set_segregation_mode` turns segregation
+        # a disagreement is worse than useless: `_set_grouping_mode` turns grouping
         # on by checking the action, which emits nothing when it is already checked, so
         # the enable silently did not happen. blockSignals keeps this from re-entering.
-        action = getattr(self, "_act_segregated_view", None)
+        action = getattr(self, "_act_grouped_view", None)
         if action is not None and action.isChecked() != checked:
             action.blockSignals(True)
             try:
@@ -3162,24 +3162,24 @@ class MainWindow(QMainWindow):
             finally:
                 action.blockSignals(False)
         selected = self._selected_ids()
-        self._model.set_segregated_view(checked, mode=self._segregated_view_mode)
+        self._model.set_grouped_view(checked, mode=self._grouped_view_mode)
         self._restore_selection(selected)
         self._apply_table_spans()
         # The mode actions follow the enable flag. Done here rather than in the action's own
         # handler so the Preferences checkbox and the View menu cannot disagree - both drive
         # this method, and only this method knows the resulting state.
-        self._sync_segregation_mode_actions(checked)
+        self._sync_grouping_mode_actions(checked)
         
         # Show/hide the view control strip from the stored state (remains visible even when
         # non-grouped). Read through one accessor, and applied to the strip and its menu item
         # together, so the two cannot drift while the grouping mode changes underneath.
         self._apply_view_strip_visibility()
         
-        if hasattr(self, "_seg_mode_buttons"):
-            for mk, btn in self._seg_mode_buttons.items():
+        if hasattr(self, "_group_mode_buttons"):
+            for mk, btn in self._group_mode_buttons.items():
                 btn.blockSignals(True)
                 if checked:
-                    btn.setChecked(mk == self._segregated_view_mode)
+                    btn.setChecked(mk == self._grouped_view_mode)
                 else:
                     btn.setChecked(mk == "none")
                 btn.blockSignals(False)
@@ -3191,25 +3191,25 @@ class MainWindow(QMainWindow):
             self._btn_expand_all.setEnabled(checked)
 
         if checked:
-            mode_str = self._segregation_mode_label(self._segregated_view_mode)
+            mode_str = self._grouping_mode_label(self._grouped_view_mode)
             self._status_label.setText(f"Grouped view enabled ({mode_str})")
         else:
             self._status_label.setText("Grouped view disabled")
 
     def _on_collapse_all_sections(self):
         """Collapse all sections in the grouped view."""
-        if self._model.is_segregated_view():
+        if self._model.is_grouped_view():
             self._model.collapse_all_sections()
             for sid in self._model._collapsed_sections:
-                self._manager.db.set_ui_state(f"segregated_{sid}_collapsed", True)
+                self._manager.db.set_ui_state(f"grouped_{sid}_collapsed", True)
             self._apply_table_spans()
             self._status_label.setText("All sections collapsed")
 
     def _on_expand_all_sections(self):
         """Expand all sections in the grouped view."""
-        if self._model.is_segregated_view():
+        if self._model.is_grouped_view():
             for sid in list(self._model._collapsed_sections):
-                self._manager.db.set_ui_state(f"segregated_{sid}_collapsed", False)
+                self._manager.db.set_ui_state(f"grouped_{sid}_collapsed", False)
             self._model.expand_all_sections()
             self._apply_table_spans()
             self._status_label.setText("All sections expanded")
@@ -3402,7 +3402,7 @@ class MainWindow(QMainWindow):
                     res = self._model.toggle_section_collapsed(idx.row())
                     if res:
                         sec_id, is_col = res
-                        self._manager.db.set_ui_state(f"segregated_{sec_id}_collapsed", is_col)
+                        self._manager.db.set_ui_state(f"grouped_{sec_id}_collapsed", is_col)
                     self._apply_table_spans()
                 act_this.triggered.connect(_toggle_this)
                 sec_menu.addAction(act_this)
@@ -3435,14 +3435,14 @@ class MainWindow(QMainWindow):
                 sec_menu.addSeparator()
                 # The model is the source of truth: MainWindow keeps its own copy only for
                 # the menu checkmarks, and the two can drift after a Preferences save.
-                current_mode = self._model.segregated_mode
+                current_mode = self._model.grouped_mode
                 mode_menu = sec_menu.addMenu("Switch Grouping Mode")
-                for m_key in SEGREGATED_MODES:
-                    m_label = SEGREGATED_MODE_LABELS.get(m_key, m_key.capitalize())
+                for m_key in GROUPED_MODES:
+                    m_label = GROUPED_MODE_LABELS.get(m_key, m_key.capitalize())
                     act_m = mode_menu.addAction(m_label)
                     act_m.setCheckable(True)
                     act_m.setChecked(current_mode == m_key)
-                    act_m.triggered.connect(lambda checked=False, m=m_key: self._set_segregation_mode(m))
+                    act_m.triggered.connect(lambda checked=False, m=m_key: self._set_grouping_mode(m))
 
                 sec_menu.exec(self._table.viewport().mapToGlobal(pos))
                 return
@@ -4167,13 +4167,13 @@ class MainWindow(QMainWindow):
         # A theme can change the font metrics the toolbar row is measured against.
         self._fit_min_width_to_toolbar()
         self._save_ui_state_to_db()
-        self._refresh_seg_strip_theme()
+        self._refresh_group_strip_theme()
 
-    def _refresh_seg_strip_theme(self) -> None:
-        """Refresh segregated view strip styling and vector icons with live palette colors."""
-        if not hasattr(self, "_seg_control_strip"):
+    def _refresh_group_strip_theme(self) -> None:
+        """Refresh grouped view strip styling and vector icons with live palette colors."""
+        if not hasattr(self, "_group_control_strip"):
             return
-        self._seg_control_strip.setStyleSheet(
+        self._group_control_strip.setStyleSheet(
             f"background-color: {Colors.BG_MID}; border-bottom: 1px solid {Colors.BORDER};"
         )
         if hasattr(self, "_btn_collapse_all"):
@@ -4220,7 +4220,7 @@ class MainWindow(QMainWindow):
             self._act_collapse_all_sections.setIcon(_create_collapse_all_icon(24))
         if hasattr(self, "_act_expand_all_sections"):
             self._act_expand_all_sections.setIcon(_create_expand_all_icon(24))
-        if hasattr(self, "_seg_mode_buttons"):
+        if hasattr(self, "_group_mode_buttons"):
             mode_btn_style = f"""
             QPushButton {{
                 background-color: {Colors.BG_LIGHT};
@@ -4257,7 +4257,7 @@ class MainWindow(QMainWindow):
                 background-color: {Colors.BG_LIGHT};
             }}
             """
-            for btn in self._seg_mode_buttons.values():
+            for btn in self._group_mode_buttons.values():
                 btn.setStyleSheet(mode_btn_style)
 
     def _on_show_statistics(self):
@@ -4861,7 +4861,7 @@ class MainWindow(QMainWindow):
         self._update_queue_status(entry)
         self._update_action_states()
         self._update_count_label()
-        if self._model.is_segregated_view():
+        if self._model.is_grouped_view():
             for r in self._model.get_section_header_row_indices():
                 rect = self._table.visualRect(self._model.index(r, 0))
                 if not rect.isEmpty():
@@ -4917,7 +4917,7 @@ class MainWindow(QMainWindow):
         Today/Yesterday/Last 7 Days are relative to the current day, so a window left open
         across midnight kept yesterday's grouping until some unrelated event happened to
         rebuild the model. The rebuild is a model reset, which drops the view's selection, so
-        the ids are captured first and reapplied exactly as _on_toggle_segregated_view does.
+        the ids are captured first and reapplied exactly as _on_toggle_grouped_view does.
         _apply_table_spans is already wired to modelReset; calling it here keeps this handler
         self-contained and consistent with every other caller that mutates the sections.
         """
@@ -4926,7 +4926,7 @@ class MainWindow(QMainWindow):
             return
         self._restore_selection(selected)
         self._apply_table_spans()
-        if self._segregated_view_enabled:
+        if self._grouped_view_enabled:
             self._status_label.setText("Day grouping updated")
 
     # -- UI State persistence in database ------------------------------------
@@ -5216,7 +5216,7 @@ class MainWindow(QMainWindow):
             self._sync_panel_buttons()
 
             # The view strip is deliberately *not* read from this blob.            # The view strip is deliberately *not* read from this blob.            # The view strip is deliberately *not* read from this blob. It was, once, from a
-            # ``seg_strip_visible`` key nothing ever wrote into the state dict above, so the
+            # ``group_strip_visible`` key nothing ever wrote into the state dict above, so the
             # lookup defaulted to True and forced the strip visible over the real stored
             # answer. The strip's state lives in its own ui_state key, which
             # `_strip_visible()` reads - see `_setup_ui` / `_setup_actions`, which already

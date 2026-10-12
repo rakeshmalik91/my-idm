@@ -50,7 +50,7 @@ Re-audited 2026-10-07 against 3075 tests.
 
 | Verdict | Count | Features |
 | --- | --- | --- |
-| **HAVE** | 5 | duplicate detection, history + search, exponential backoff, Firefox extension base, categories / file-type segregation (§4) |
+| **HAVE** | 5 | duplicate detection, history + search, exponential backoff, Firefox extension base, categories / file-type grouping (§4) |
 | **DONE** | 8 | **disk-space check** (§2), **bandwidth stats** (§3), **global hotkey [Win]** (§6), **clipboard monitoring** (§7), **named queues** (§1), **segment start staggering** (§12), **cross-platform core [Phases 0–3]** (§17), **URL editing / refresh expired link** (§18) |
 | **PARTIAL** | 5 | resume UI gating (§9), adaptive segment sizing (§13), CLI subcommands / headless (§14), per-download absolute limits (§8), Firefox extension `browser.*` fallback (§16) |
 | **MISSING** | 1 | **download scheduler (off-peak hours)** (§5) |
@@ -147,7 +147,7 @@ RDM: "Auto-sort downloads by file type (Videos, Archives, Documents, etc.)."
 
 Was recorded here as MISSING. That verdict was **stale**: the feature shipped, and it has the
 exact shape this entry proposed to build — a `category_for_filename()` helper plus a
-segregation mode, mirroring `get_entry_date_category()`. Re-checked 2026-10-01 and 2026-10-07.
+grouping mode, mirroring `get_entry_date_category()`. Re-checked 2026-10-01 and 2026-10-07.
 
 - `TYPE_CATEGORY_EXTENSIONS` (`download_model.py:295-345`) maps 96 lower-case extensions into
   seven buckets, the newest being **Executables** (2026-10-11: programs and installers, kept out
@@ -156,8 +156,8 @@ segregation mode, mirroring `get_entry_date_category()`. Re-checked 2026-10-01 a
   folder* carries the extension still classifies, honours a per-entry
   `metadata["type_category"]` override, and — when no name recognises an
   extension — files a multi-file torrent by its payload (see the residual note below).
-- `"type"` is one of the four segregation modes (`SEGREGATED_MODES`, `:365`), so it is
-  reachable from **View → Segregated View** and **Preferences → Views**, and composes with the
+- `"type"` is one of the four grouping modes (`GROUPED_MODES`, `:365`), so it is
+  reachable from **View → Grouped View** and **Preferences → Views**, and composes with the
   header filter chips. Covered by `tests/test_views_tab.py`.
 
 The trap that made this look absent: there are **two unrelated "type" notions** in the model.

@@ -272,8 +272,8 @@ ACTIVE_SECTION_STATUSES = {
 SEEDING_SECTION_STATUSES = {"seeding"}
 INACTIVE_SECTION_STATUSES = {"completed", "stopped", "file_not_found", "suspended"}
 
-# -- File-type segregation -------------------------------------------------
-# A third segregated mode, grouping by what the payload *is* rather than when it was added
+# -- File-type grouping -------------------------------------------------
+# A third grouped mode, grouping by what the payload *is* rather than when it was added
 # or whether it is still running. Users accumulate mixed libraries and the only way to find
 # "the PDFs" today is the Name column plus manual sorting.
 SECTION_TYPE_VIDEO = "type_video"
@@ -284,7 +284,7 @@ SECTION_TYPE_PHOTO = "type_photo"
 SECTION_TYPE_EXECUTABLE = "type_executable"
 SECTION_TYPE_GENERAL = "type_general"
 
-# -- Name-based segregation (series/grouping by show name) -----------------
+# -- Name-based grouping (series/grouping by show name) -----------------
 # Groups downloads by show/series name using normalized name matching with
 # edit distance threshold.
 SECTION_NAME_PREFIX = "name_"
@@ -356,18 +356,18 @@ TYPE_SECTION_DEFS = [
     (SECTION_TYPE_GENERAL, "General", "__section_type_general__"),
 ]
 
-#: The file-type section titles, in table order. `SEGREGATED_MODE_LABELS` below and the two
+#: The file-type section titles, in table order. `GROUPED_MODE_LABELS` below and the two
 #: hardcoded copies of this list in main_window (the strip button tooltip and the View-menu
 #: action) all read this, so adding a section cannot leave one of them listing the old set.
 TYPE_SECTION_TITLES = tuple(_title for _cat, _title, _sentinel in TYPE_SECTION_DEFS)
 
-#: The segregated modes the View menu offers, in menu order.
-SEGREGATED_MODES = ("status", "date", "type", "name")
-DEFAULT_SEGREGATED_MODE = "status"
+#: The grouped modes the View menu offers, in menu order.
+GROUPED_MODES = ("status", "date", "type", "name")
+DEFAULT_GROUPED_MODE = "status"
 
 #: Menu / UI labels for the modes, kept beside the modes so the View menu and the
 #: Preferences tab cannot drift apart.
-SEGREGATED_MODE_LABELS = {
+GROUPED_MODE_LABELS = {
     "status": "Status (Active / Seeding / Inactive)",
     "date": "Date (Today / Yesterday / Last 7 Days / Last 30 Days / Older)",
     "type": f"File Type ({' / '.join(TYPE_SECTION_TITLES)})",
@@ -947,16 +947,16 @@ class DownloadTableModel(QAbstractTableModel):
         self._status_filter: Optional[set[str]] = None
         self._type_filter: Optional[set[str]] = None
         self._size_filter: Optional[set[str]] = None
-        self._segregated_view: bool = False
-        self._segregated_mode: str = "status"
+        self._grouped_view: bool = False
+        self._grouped_mode: str = "status"
         self._collapsed_sections: set[str] = set()
         self._name_sections_auto_collapsed: bool = False
-        # Local calendar date the last "date" segregation was built against. The sections are
+        # Local calendar date the last "date" grouping was built against. The sections are
         # relative to today (Today / Yesterday / Last 7 Days), so the grouping silently goes
         # stale when the local day rolls over under a running app. None means "never built",
         # which refresh_date_grouping() treats as stale. Set only by the date branch of
         # _apply_sort, which is the single place that reads the clock for this purpose.
-        self._segregation_date: Optional[date] = None
+        self._grouping_date: Optional[date] = None
         # Which named queue the view is scoped to. ALL_QUEUES ("") means every queue, which is
         # the default and the startup state: history is the product, so downloads the user
         # already had must never go missing just because a queue is selected.
@@ -973,8 +973,8 @@ class DownloadTableModel(QAbstractTableModel):
         self._queue_filter: Optional[Set[str]] = None
         # Download IDs pending paced batch deletion. Rows in this set are dimmed and disabled.
         self._deleting_ids: set[str] = set()
-        # Cached groups for segregated view: list of (sec_id, title, group_entries, hdr_id)
-        self._cached_segregated_groups: Optional[list[tuple[str, str, list[DownloadEntry], str]]] = None
+        # Cached groups for grouped view: list of (sec_id, title, group_entries, hdr_id)
+        self._cached_grouped_groups: Optional[list[tuple[str, str, list[DownloadEntry], str]]] = None
         self._cached_name_groups: Optional[dict[str, list[DownloadEntry]]] = None
         # Reverse lookup: entry.id -> section_id for name mode. Built from the actual
         # grouping result so _entry_section_id does not need to recompute independently
@@ -984,8 +984,8 @@ class DownloadTableModel(QAbstractTableModel):
         self._expanded_sections: set[str] = set()
 
     def _invalidate_grouping_cache(self):
-        """Invalidate the cached segregated groups so they are recomputed on next state change."""
-        self._cached_segregated_groups = None
+        """Invalidate the cached grouped groups so they are recomputed on next state change."""
+        self._cached_grouped_groups = None
         self._cached_name_groups = None
         self._name_section_map = {}
 
@@ -1140,37 +1140,37 @@ class DownloadTableModel(QAbstractTableModel):
         self._rebuild_index()
         self.endResetModel()
 
-    def set_segregated_view(self, enabled: bool, mode: Optional[str] = None):
+    def set_grouped_view(self, enabled: bool, mode: Optional[str] = None):
         # An unknown mode is ignored rather than stored, so a stale persisted value from a
         # newer build (or a hand-edited ui_state) degrades to the default instead of
-        # silently disabling segregation.
-        if mode is not None and mode in SEGREGATED_MODES:
-            self._segregated_mode = mode
-        if self._segregated_mode not in SEGREGATED_MODES:
-            self._segregated_mode = DEFAULT_SEGREGATED_MODE
-        if self._segregated_view == enabled and mode is None:
+        # silently disabling grouping.
+        if mode is not None and mode in GROUPED_MODES:
+            self._grouped_mode = mode
+        if self._grouped_mode not in GROUPED_MODES:
+            self._grouped_mode = DEFAULT_GROUPED_MODE
+        if self._grouped_view == enabled and mode is None:
             return
-        self._segregated_view = enabled
-        # Reset auto-collapse flag when segregation is enabled
+        self._grouped_view = enabled
+        # Reset auto-collapse flag when grouping is enabled
         if enabled:
             self._name_sections_auto_collapsed = False
         self._reapply_filter()
 
-    def is_segregated_view(self) -> bool:
-        return self._segregated_view
+    def is_grouped_view(self) -> bool:
+        return self._grouped_view
 
-    def set_segregated_mode(self, mode: str):
-        if mode not in SEGREGATED_MODES:
-            mode = DEFAULT_SEGREGATED_MODE
-        if self._segregated_mode != mode:
-            self._segregated_mode = mode
+    def set_grouped_mode(self, mode: str):
+        if mode not in GROUPED_MODES:
+            mode = DEFAULT_GROUPED_MODE
+        if self._grouped_mode != mode:
+            self._grouped_mode = mode
             # Reset auto-collapse flag when mode changes
             self._name_sections_auto_collapsed = False
-            if self._segregated_view:
+            if self._grouped_view:
                 self._reapply_filter()
 
-    def segregated_mode(self) -> str:
-        return self._segregated_mode
+    def grouped_mode(self) -> str:
+        return self._grouped_mode
 
     def date_grouping_is_stale(self, now_dt: Optional[datetime] = None) -> bool:
         """True when the "date" sections were built against a different local day.
@@ -1179,12 +1179,12 @@ class DownloadTableModel(QAbstractTableModel):
         drops the selection) need to ask first and act second, so this is deliberately
         separate from refresh_date_grouping() rather than folded into its return value.
         """
-        if not self._segregated_view or self._segregated_mode != "date":
+        if not self._grouped_view or self._grouped_mode != "date":
             return False
         if now_dt is None:
             now_dt = datetime.now().astimezone()
         # None means the sections have never been built, which is as stale as a past day.
-        return self._segregation_date != now_dt.date()
+        return self._grouping_date != now_dt.date()
 
     def refresh_date_grouping(self, now_dt: Optional[datetime] = None) -> bool:
         """Rebuild the date sections if the local calendar day has rolled over.
@@ -1205,14 +1205,14 @@ class DownloadTableModel(QAbstractTableModel):
         return True
 
     def _build_entries_from_cached_groups(self):
-        """Build self._entries from self._cached_segregated_groups without recalculating grouping."""
-        if self._cached_segregated_groups is None:
+        """Build self._entries from self._cached_grouped_groups without recalculating grouping."""
+        if self._cached_grouped_groups is None:
             return
 
         entries_by_id = {e.id: e for e in self._all_entries}
 
         entries: list[DownloadEntry] = []
-        for sec_id, title, group_entries, hdr_id in self._cached_segregated_groups:
+        for sec_id, title, group_entries, hdr_id in self._cached_grouped_groups:
             # Sync group_entries with canonical entries in _all_entries so in-place status/progress
             # and fresh entry updates are reflected accurately when expanding/collapsing.
             for idx, e in enumerate(group_entries):
@@ -1259,7 +1259,7 @@ class DownloadTableModel(QAbstractTableModel):
             if section_id.startswith(SECTION_NAME_PREFIX):
                 self._name_sections_auto_collapsed = True
 
-        if self._cached_segregated_groups is not None:
+        if self._cached_grouped_groups is not None:
             # Fast path: rebuild the visible entry list from the cached groups without
             # recomputing grouping. The group entries are the same Python objects as in
             # _all_entries, so in-place status/progress updates are already reflected.
@@ -1268,12 +1268,12 @@ class DownloadTableModel(QAbstractTableModel):
             self._rebuild_index()
             self.endResetModel()
         else:
-            # Cache is None (should not happen in normal segregated view, but can if
+            # Cache is None (should not happen in normal grouped view, but can if
             # entries were added/removed since last rebuild). Rebuild the cache first,
             # then use the fast path to avoid a full regrouping which can reorder
             # entries within groups (active vs inactive split).
-            if self._segregated_view:
-                self._cached_segregated_groups = None
+            if self._grouped_view:
+                self._cached_grouped_groups = None
                 self._cached_name_groups = None
                 self._apply_sort()
                 self.beginResetModel()
@@ -1295,17 +1295,17 @@ class DownloadTableModel(QAbstractTableModel):
         return [i for i, e in enumerate(self._entries) if getattr(e, "is_section_header", False)]
 
     def collapse_all_sections(self):
-        """Collapse all sections in the current segregated view."""
-        if not self._segregated_view:
+        """Collapse all sections in the current grouped view."""
+        if not self._grouped_view:
             return
-        if self._cached_segregated_groups:
-            for sec_id, _, _, _ in self._cached_segregated_groups:
+        if self._cached_grouped_groups:
+            for sec_id, _, _, _ in self._cached_grouped_groups:
                 self._collapsed_sections.add(sec_id)
         for e in self._entries:
             if getattr(e, "is_section_header", False):
                 self._collapsed_sections.add(e.section_id)
 
-        if self._cached_segregated_groups is not None:
+        if self._cached_grouped_groups is not None:
             self.beginResetModel()
             self._build_entries_from_cached_groups()
             self._rebuild_index()
@@ -1314,12 +1314,12 @@ class DownloadTableModel(QAbstractTableModel):
             self._reapply_filter()
 
     def expand_all_sections(self):
-        """Expand all sections in the current segregated view."""
-        if not self._segregated_view:
+        """Expand all sections in the current grouped view."""
+        if not self._grouped_view:
             return
         self._collapsed_sections.clear()
 
-        if self._cached_segregated_groups is not None:
+        if self._cached_grouped_groups is not None:
             self.beginResetModel()
             self._build_entries_from_cached_groups()
             self._rebuild_index()
@@ -1612,7 +1612,7 @@ class DownloadTableModel(QAbstractTableModel):
             if not getattr(entry, "total_peers", 0) and "total_peers" in entry.metadata:
                 entry.total_peers = self._to_int(entry.metadata.get("total_peers", 0))
         self._all_entries.append(entry)
-        if self._segregated_view:
+        if self._grouped_view:
             self._reapply_filter()
             return
         if self._matches_filter(entry):
@@ -1625,7 +1625,7 @@ class DownloadTableModel(QAbstractTableModel):
     def remove_entry(self, download_id: str):
         self._deleting_ids.discard(download_id)
         self._all_entries = [e for e in self._all_entries if e.id != download_id]
-        if self._segregated_view:
+        if self._grouped_view:
             self._reapply_filter()
             return
         row = self._id_to_row.get(download_id)
@@ -1691,7 +1691,7 @@ class DownloadTableModel(QAbstractTableModel):
             order = Qt.SortOrder.DescendingOrder if column == Col.ADDED else Qt.SortOrder.AscendingOrder
         self._sort_column = column
         self._sort_order = order
-        self._cached_segregated_groups = None
+        self._cached_grouped_groups = None
         if not self._entries:
             return
 
@@ -1720,7 +1720,7 @@ class DownloadTableModel(QAbstractTableModel):
         )
         reverse = not ascending
 
-        if not self._segregated_view:
+        if not self._grouped_view:
             if self._sort_column is not None:
                 filtered.sort(
                     key=lambda e: self._entry_sort_key(e, self._sort_column, ascending),
@@ -1729,9 +1729,9 @@ class DownloadTableModel(QAbstractTableModel):
             self._entries = filtered
             return
 
-        if self._cached_segregated_groups is None:
+        if self._cached_grouped_groups is None:
             buckets: dict[str, list[DownloadEntry]]
-            if self._segregated_mode == "date":
+            if self._grouped_mode == "date":
                 # Grouped view: group by Today, Yesterday, Last 7 Days, Last 30 Days, Older.
                 # Buckets and section ids both come from DATE_SECTION_DEFS so the header rows and
                 # the classifier cannot drift apart; the literals used to be spelled twice.
@@ -1743,7 +1743,7 @@ class DownloadTableModel(QAbstractTableModel):
                     now_dt = datetime.now().astimezone()
                 # Remember the day this snapshot was built against so refresh_date_grouping() can
                 # tell a stale grouping from a current one without diffing the sections.
-                self._segregation_date = now_dt.date()
+                self._grouping_date = now_dt.date()
                 for e in filtered:
                     # get_entry_date_category only ever returns the five ids above (the old
                     # "date_this_week"/"date_this_month" spellings are aliased onto the canonical
@@ -1758,7 +1758,7 @@ class DownloadTableModel(QAbstractTableModel):
                 ]
             else:
                 # Grouped view: group by Active, Seeding, Inactive, or by file type, or by name.
-                if self._segregated_mode == "type":
+                if self._grouped_mode == "type":
                     buckets = {
                         cat: [] for cat, _t, _s in TYPE_SECTION_DEFS
                     }
@@ -1768,7 +1768,7 @@ class DownloadTableModel(QAbstractTableModel):
                         (cat, title, buckets[cat], sentinel)
                         for cat, title, sentinel in TYPE_SECTION_DEFS
                     ]
-                elif self._segregated_mode == "name":
+                elif self._grouped_mode == "name":
                     # Group by show/series name using normalized name matching
                     if self._cached_name_groups is None:
                         self._cached_name_groups = _group_entries_by_name(filtered)
@@ -1810,7 +1810,7 @@ class DownloadTableModel(QAbstractTableModel):
                         (SECTION_INACTIVE, "Inactive", inactive_entries, "__section_inactive__"),
                     ]
         else:
-            groups = self._cached_segregated_groups
+            groups = self._cached_grouped_groups
 
         if self._sort_column in (Col.ADDED, Col.QUEUE) or self._sort_column is None:
             for sec_id, _, group_entries, _ in groups:
@@ -1839,7 +1839,7 @@ class DownloadTableModel(QAbstractTableModel):
                     reverse=reverse,
                 )
 
-        if self._segregated_mode == "name":
+        if self._grouped_mode == "name":
             def _group_sort_key(grp: tuple[str, str, list[DownloadEntry], str]) -> Any:
                 _sec_id, title, group_entries, _hdr_id = grp
                 if not group_entries:
@@ -1860,7 +1860,7 @@ class DownloadTableModel(QAbstractTableModel):
             # sort order as every other group instead of being pinned at the bottom.
             groups.sort(key=_group_sort_key, reverse=reverse)
 
-        self._cached_segregated_groups = groups
+        self._cached_grouped_groups = groups
         self._build_entries_from_cached_groups()
 
     def _entry_sort_key(self, entry: DownloadEntry, col: int, ascending: bool) -> Any:
@@ -2122,8 +2122,8 @@ class DownloadTableModel(QAbstractTableModel):
         
         row = self._id_to_row.get(download_id)
         
-        # If in segregated view mode, update the section header's progress bar
-        if self._segregated_view and entry_obj:
+        # If in grouped view mode, update the section header's progress bar
+        if self._grouped_view and entry_obj:
             section_id = self._entry_section_id(entry_obj)
             if section_id:
                 hdr_row = self._find_section_header_row(section_id)
@@ -2172,11 +2172,11 @@ class DownloadTableModel(QAbstractTableModel):
     def _entry_section_id(self, entry: Optional[DownloadEntry]) -> Optional[str]:
         if not entry:
             return None
-        if self._segregated_mode == "date":
+        if self._grouped_mode == "date":
             return get_entry_date_category(entry)
-        elif self._segregated_mode == "type":
+        elif self._grouped_mode == "type":
             return get_entry_type_category(entry)
-        elif self._segregated_mode == "name":
+        elif self._grouped_mode == "name":
             # Use the reverse lookup built from the actual grouping result.
             # The old approach recomputed the section_id independently from the
             # entry's filename/show_title, but that could mismatch the group that
@@ -2222,7 +2222,7 @@ class DownloadTableModel(QAbstractTableModel):
         for e in self._all_entries:
             if e.id == download_id:
                 old_status = e.status
-                if self._segregated_view:
+                if self._grouped_view:
                     old_sec = self._entry_section_id(e)
                 e.status = status
                 e.error_message = error_msg
@@ -2233,8 +2233,8 @@ class DownloadTableModel(QAbstractTableModel):
                 break
 
         # Also update any instances in cached groups
-        if self._cached_segregated_groups:
-            for sec_id, title, group_entries, hdr_id in self._cached_segregated_groups:
+        if self._cached_grouped_groups:
+            for sec_id, title, group_entries, hdr_id in self._cached_grouped_groups:
                 for ge in group_entries:
                     if ge.id == download_id:
                         ge.status = status
@@ -2252,7 +2252,7 @@ class DownloadTableModel(QAbstractTableModel):
                             ge.speed = 0
                             ge.eta_seconds = 0
 
-        if self._segregated_view:
+        if self._grouped_view:
             new_sec = self._entry_section_id(entry_all) if entry_all else None
             was_active = old_status in ACTIVE_QUEUE_STATUSES
             now_active = status in ACTIVE_QUEUE_STATUSES
@@ -2332,11 +2332,11 @@ class DownloadTableModel(QAbstractTableModel):
                     e.file_path = str(Path(e.save_path) / filename)
                 break
 
-        # Name segregation groups *by filename*, so a rename has to regroup the
+        # Name grouping groups *by filename*, so a rename has to regroup the
         # table even when the row is not currently visible - and name sections
         # start collapsed, so the id is usually absent from _id_to_row. Reading
         # the row first would silently skip the regroup in exactly that state.
-        if self._segregated_view and self._segregated_mode == "name":
+        if self._grouped_view and self._grouped_mode == "name":
             self._reapply_filter()
             return
 
@@ -2374,7 +2374,7 @@ class DownloadTableModel(QAbstractTableModel):
 
         # Name mode regroups on rename, and name sections start collapsed, so
         # the regroup must not be gated on the row being visible.
-        if self._segregated_view and self._segregated_mode == "name":
+        if self._grouped_view and self._grouped_mode == "name":
             self._reapply_filter()
             return
 
@@ -2437,7 +2437,7 @@ class DownloadTableModel(QAbstractTableModel):
         old_sec: Optional[str] = None
         for i, e in enumerate(self._all_entries):
             if e.id == download_id:
-                if self._segregated_view:
+                if self._grouped_view:
                     old_sec = self._entry_section_id(e)
                 if entry.downloaded_size == 0 and e.downloaded_size > 0 and entry.status in ("paused", "stopped", "suspended"):
                     entry.downloaded_size = e.downloaded_size
@@ -2447,8 +2447,8 @@ class DownloadTableModel(QAbstractTableModel):
             self._all_entries.append(entry)
 
         # Keep cached group entries pointing to the refreshed entry object
-        if self._cached_segregated_groups:
-            for sec_id, title, group_entries, hdr_id in self._cached_segregated_groups:
+        if self._cached_grouped_groups:
+            for sec_id, title, group_entries, hdr_id in self._cached_grouped_groups:
                 for idx, ge in enumerate(group_entries):
                     if ge.id == download_id:
                         group_entries[idx] = entry
@@ -2458,7 +2458,7 @@ class DownloadTableModel(QAbstractTableModel):
                     if ge.id == download_id:
                         group_entries[idx] = entry
 
-        if self._segregated_view:
+        if self._grouped_view:
             new_sec = self._entry_section_id(entry)
             if old_sec is None or old_sec != new_sec:
                 self._reapply_filter()

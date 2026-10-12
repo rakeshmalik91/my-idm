@@ -996,7 +996,42 @@ CREATE TABLE IF NOT EXISTS segments (
         # Backfill bandwidth_history from downloads if empty
         self._backfill_bandwidth_history_if_empty()
 
+        self._migrate_grouped_view_keys()
+
         self._conn.commit()
+
+    def _migrate_grouped_view_keys(self):
+        """Rename the grouped-view ``ui_state`` keys from the old "segregated" spelling.
+
+        The feature was renamed to Grouped View across the UI, the code and these keys in one
+        pass, so an existing profile still holds ``segregated_*`` rows that nothing reads any
+        more — which would silently reset the user's grouping mode, per-section collapse state
+        and the visibility of the group control strip. This renames them in place instead.
+
+        Idempotent by construction: each UPDATE only matches the *old* prefix, and the NOT
+        EXISTS guard means a key that was already migrated — or one the user has since
+        toggled to its new name — is never overwritten. It runs on every open, so there is no
+        migration flag to get out of step.
+
+        The ``segregated_`` and ``seg_strip_visible`` literals below are deliberately spelled
+        the old way: they are the pre-rename spellings this migration matches on. Do not
+        "modernise" them.
+        """
+
+        # grouped_view_enabled, grouped_view_mode, grouped_<section>_collapsed and
+        # grouped_name_<title>_collapsed all live in one contiguous old prefix.
+        # substr() is 1-based and 'segregated_' is 11 characters, so the tail starts at 12.
+        self._conn.execute(
+            "UPDATE ui_state SET key = 'grouped_' || substr(key, 12) "
+            "WHERE key LIKE 'segregated_%' "
+            "  AND NOT EXISTS (SELECT 1 FROM ui_state AS n WHERE n.key = 'grouped_' || substr(ui_state.key, 12))"
+        )
+        # The control-strip visibility key kept the abbreviation.
+        self._conn.execute(
+            "UPDATE ui_state SET key = 'group_strip_visible' "
+            "WHERE key = 'seg_strip_visible' "
+            "  AND NOT EXISTS (SELECT 1 FROM ui_state WHERE key = 'group_strip_visible')"
+        )
 
     # -- queues ---------------------------------------------------------------
 

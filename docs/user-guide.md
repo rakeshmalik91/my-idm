@@ -235,19 +235,19 @@ settles at 0% **paused** — ready to be resumed whenever you want it again.
    - `Name`: Resolved/original download name.
    - `URL/Magnet`: Source direct URL or magnet URI.
 
-### Segregated View & Collapsible Sections
+### Grouped View & Collapsible Sections
 
-1. Toggle **View → 🗂️ Segregated View → On** from the menu bar to enable or disable sectioned partitioning.
-2. Select the grouping strategy directly under **View → 🗂️ Segregated View**. The four strategy
-   entries are greyed out while segregation is **Off**, in both this menu and
+1. Toggle **View → 🗂️ Grouped View → On** from the menu bar to enable or disable sectioned partitioning.
+2. Select the grouping strategy directly under **View → 🗂️ Grouped View**. The four strategy
+   entries are greyed out while grouping is **Off**, in both this menu and
    **Preferences → 👁️ Views & Columns**, because a flat table has nothing to group by. Turn
-   segregation on first to choose one. Your choice is remembered while it is off and restored when
+   grouping on first to choose one. Your choice is remembered while it is off and restored when
    you switch it back on:
-   - **Status Grouping**: Segregates downloads into 3 collapsible sections:
+   - **Status Grouping**: Groups downloads into 3 collapsible sections:
      - **Active**: Items in `fetching metadata`, `queued`, `downloading`, `paused`, `stalled`, or `error` states.
      - **Seeding**: Items actively seeding in the BitTorrent swarm.
      - **Inactive**: Items in `completed`, `stopped`, `file_not_found`, or `suspended` states.
-   - **Date Grouping**: Segregates downloads based on the latest of their `added_at`, `completed_at`, and `last_tried_at` timestamps into 5 collapsible sections:
+   - **Date Grouping**: Groups downloads based on the latest of their `added_at`, `completed_at`, and `last_tried_at` timestamps into 5 collapsible sections:
      - **Today**: Active or completed today.
      - **Yesterday**: Active or completed yesterday.
      - **Last 7 Days**: Active or completed within the last 7 days.
@@ -276,7 +276,7 @@ settles at 0% **paused** — ready to be resumed whenever you want it again.
    the same switch rather than the absence of one.
 5. Right-click any section header to expand/collapse all sections, or switch between any of the four
    grouping modes. This menu appears only once sections exist.
-6. The active segregation mode (`status`, `date`, `type` or `name`), enabled state, and individual
+6. The active grouping mode (`status`, `date`, `type` or `name`), enabled state, and individual
    collapsed section states are persisted in SQLite and restored automatically on next launch.
 7. Date Grouping follows the calendar day, so if you leave My-IDM running past midnight the sections regroup themselves within a second — the rows move from `Today` to `Yesterday`, `Yesterday` to `Last 7 Days`, and so on, without restarting. Your selection and any collapsed sections are kept.
 
@@ -486,7 +486,7 @@ The settings dialog is organized into fourteen dedicated tabs:
 
 - **Theme Selection**: Choose from curated high-contrast dark themes: **Dark (Default)**, **Dracula**, **Nord**, **GitHub Dark**, **Slate**, **Monokai**, and **Solarized Dark**.
 - **Column Visibility & Ordering**: Toggle column visibility and reorder table columns with an interactive list manager.
-- **Segregated View Mode**: Configure default section grouping (**Status**, **Date**, **File Type**, or **Name**) and persistence. The mode choices are greyed out while segregated view itself is off — turn it on first to pick one.
+- **Grouped View Mode**: Configure default section grouping (**Status**, **Date**, **File Type**, or **Name**) and persistence. The mode choices are greyed out while grouped view itself is off — turn it on first to pick one.
 
 ### 5. BitTorrent Tab
 

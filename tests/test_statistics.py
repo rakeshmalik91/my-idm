@@ -552,7 +552,7 @@ class TestStatsBucketByLocalDay(StatsTestCase):
         model = DownloadTableModel()
         try:
             model.load_entries(self.db.get_all_downloads())
-            model.set_segregated_view(True, "date")
+            model.set_grouped_view(True, "date")
             in_today, current = 0, None
             for row in range(model.rowCount()):
                 header = model.get_section_header(row)
@@ -917,7 +917,15 @@ class PopupTestCase(unittest.TestCase):
         for popup in self.popups:
             popup.close()
             popup.deleteLater()
-        QApplication.processEvents()
+        # No processEvents() here on purpose. Delivering the deferred deletes is
+        # exactly what aborts the interpreter on this desktop: whatever other test
+        # left queued gets processed in the same call, and a widget deleted behind
+        # its own pending events is the access violation this suite already knows
+        # (`.agents/workflows/testing.md` §3, §6). The popups are closed, so their
+        # timers are stopped by closeEvent; the C++ objects are reclaimed at
+        # interpreter shutdown, which is the lesser evil. See also
+        # tests/test_checksum.py::_wait_until, which waits on the database instead
+        # of pumping the event loop for the same reason.
 
     def add(self, eid, days_back=0, total=1 * GB, uploaded=0, status="completed",
             hour=12, minute=0):

@@ -2827,7 +2827,7 @@ class TestStatusJobPoolAndFIFOOrder(unittest.TestCase):
         """Active section entries are presented in FIFO insertion order regardless of identical timestamps."""
         from my_idm.download_model import DownloadTableModel, SECTION_ACTIVE
         model = DownloadTableModel()
-        model.set_segregated_view(True, mode="status")
+        model.set_grouped_view(True, mode="status")
         entries = []
         # Simulate 10 downloads added sequentially in the same second
         now = "2026-10-09T00:00:00.000000+00:00"

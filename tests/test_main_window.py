@@ -855,11 +855,11 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         self.db.add_download(e_inact)
         self.win._load_history()
 
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
         QApplication.processEvents()
 
         header_rows = self.win._model.get_section_header_row_indices()
-        self.assertTrue(header_rows, "segregated view must expose section header rows")
+        self.assertTrue(header_rows, "grouped view must expose section header rows")
         first_header = header_rows[0]
         self.assertTrue(self.win._model.is_section_header_row(first_header))
         self.assertEqual(set(self.win._model._collapsed_sections), set())
@@ -872,7 +872,7 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
             "active", self.win._model._collapsed_sections,
             "double clicking a section header must toggle the section",
         )
-        self.assertTrue(self.db.get_ui_state("segregated_active_collapsed"))
+        self.assertTrue(self.db.get_ui_state("grouped_active_collapsed"))
 
         # A second double click expands it again.
         with patch.object(self.win, "_on_open_file") as mock_open:
@@ -913,10 +913,10 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         ))
         self.win._load_history()
 
-        self.win._set_segregation_mode("date")
+        self.win._set_grouping_mode("date")
         QApplication.processEvents()
-        self.assertEqual(self.win._segregated_view_mode, "date")
-        self.assertTrue(self.win._model.is_segregated_view())
+        self.assertEqual(self.win._grouped_view_mode, "date")
+        self.assertTrue(self.win._model.is_grouped_view())
 
         row = self.win._model.row_for_id("roll-today")
         self.assertIsNotNone(row)
@@ -1655,7 +1655,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             )
             self.db.add_download(entry)
             ids.append(entry.id)
-        self.win._model.set_segregated_view(True, mode="status")
+        self.win._model.set_grouped_view(True, mode="status")
         self.win._load_history()
         QApplication.processEvents()
 
@@ -1718,10 +1718,10 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         )
         self.assertIn(entry.id, self.win._selected_ids())
 
-    def test_row_selection_survives_status_change_with_segregated_view(self):
+    def test_row_selection_survives_status_change_with_grouped_view(self):
         """Regression: any status change deselected the row under the cursor.
 
-        Segregated view rebuilds the model on every status change and a model
+        Grouped view rebuilds the model on every status change and a model
         reset drops the view's selection.
 
         The entry used to be harvested from the database and the test skipped
@@ -1740,12 +1740,12 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.db.add_download(entry)
         self.win._load_history()
 
-        self.win._model.set_segregated_view(True, mode="status")
+        self.win._model.set_grouped_view(True, mode="status")
         QApplication.processEvents()
 
         self.assertEqual(entry.status, "completed")
         row = self.win._model.row_for_id(entry.id)
-        self.assertIsNotNone(row, "the completed entry must be visible in segregated view")
+        self.assertIsNotNone(row, "the completed entry must be visible in grouped view")
         self.win._table.selectRow(row)
         QApplication.processEvents()
         self.assertIn(entry.id, self.win._selected_ids())
@@ -2564,8 +2564,8 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
             if Path(csv_path).exists():
                 Path(csv_path).unlink()
 
-    def test_segregated_view_toggle_and_collapsible_sections(self):
-        """Segregated view partitions items into Active, Seeding, Inactive sections and persists collapse state."""
+    def test_grouped_view_toggle_and_collapsible_sections(self):
+        """Grouped view partitions items into Active, Seeding, Inactive sections and persists collapse state."""
         e_active = DownloadEntry(
             id="sec-active-1",
             url="https://example.com/active.zip",
@@ -2590,18 +2590,18 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.win._load_history()
 
         # Menu structure verification
-        self.assertEqual(self.win._act_segregated_view.text(), "Enabled")
-        menu_actions = self.win._menu_segregated_view.actions()
-        self.assertIn(self.win._act_segregated_view, menu_actions)
-        self.assertIn(self.win._act_seg_by_status, menu_actions)
-        self.assertIn(self.win._act_seg_by_date, menu_actions)
+        self.assertEqual(self.win._act_grouped_view.text(), "Enabled")
+        menu_actions = self.win._menu_grouped_view.actions()
+        self.assertIn(self.win._act_grouped_view, menu_actions)
+        self.assertIn(self.win._act_group_by_status, menu_actions)
+        self.assertIn(self.win._act_group_by_date, menu_actions)
 
-        # Turn on segregated view
-        self.win._act_segregated_view.setChecked(True)
-        self.assertTrue(self.win._model.is_segregated_view())
-        self.assertTrue(self.db.get_ui_state("segregated_view_enabled"))
+        # Turn on grouped view
+        self.win._act_grouped_view.setChecked(True)
+        self.assertTrue(self.win._model.is_grouped_view())
+        self.assertTrue(self.db.get_ui_state("grouped_view_enabled"))
 
-        # In segregated view, we have 3 headers + 3 items = 6 rows
+        # In grouped view, we have 3 headers + 3 items = 6 rows
         self.assertEqual(self.win._model.rowCount(), 6)
         hdr_indices = self.win._model.get_section_header_row_indices()
         self.assertEqual(len(hdr_indices), 3)
@@ -2615,23 +2615,23 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.win._on_table_clicked(self.win._model.index(0, 0))
         self.assertTrue(self.win._model._collapsed_sections)
         self.assertIn("active", self.win._model._collapsed_sections)
-        self.assertTrue(self.db.get_ui_state("segregated_active_collapsed"))
+        self.assertTrue(self.db.get_ui_state("grouped_active_collapsed"))
         # With active collapsed, row count drops by 1
         self.assertEqual(self.win._model.rowCount(), 5)
 
         # Un-collapse Active section
         self.win._on_table_clicked(self.win._model.index(0, 0))
         self.assertNotIn("active", self.win._model._collapsed_sections)
-        self.assertFalse(self.db.get_ui_state("segregated_active_collapsed"))
+        self.assertFalse(self.db.get_ui_state("grouped_active_collapsed"))
         self.assertEqual(self.win._model.rowCount(), 6)
 
-        # Turn off segregated view -> back to flat list of 3 items
-        self.win._act_segregated_view.setChecked(False)
-        self.assertFalse(self.win._model.is_segregated_view())
+        # Turn off grouped view -> back to flat list of 3 items
+        self.win._act_grouped_view.setChecked(False)
+        self.assertFalse(self.win._model.is_grouped_view())
         self.assertEqual(self.win._model.rowCount(), 3)
 
-    def test_segregated_view_date_mode_and_persistence(self):
-        """Date-based segregated view groups by Today, Yesterday, Last 7 Days, Last 30 Days, Older and persists settings."""
+    def test_grouped_view_date_mode_and_persistence(self):
+        """Date-based grouped view groups by Today, Yesterday, Last 7 Days, Last 30 Days, Older and persists settings."""
         from datetime import datetime, timedelta
 
         now = datetime.now().astimezone()
@@ -2661,32 +2661,32 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         self.db.add_download(e_older)
         self.win._load_history()
 
-        # Segregation is switched on first, then the mode is chosen. The order matters: the three mode
-        # actions are disabled while the table is flat (MainWindow._sync_segregation_mode_actions),
+        # Grouping is switched on first, then the mode is chosen. The order matters: the three mode
+        # actions are disabled while the table is flat (MainWindow._sync_grouping_mode_actions),
         # because there is nothing to group by, so triggering one does nothing until "On" is set.
-        self.win._act_segregated_view.setChecked(True)
-        self.win._act_seg_by_date.trigger()
-        self.assertTrue(self.win._model.is_segregated_view())
-        self.assertEqual(self.win._model.segregated_mode(), "date")
-        self.assertEqual(self.db.get_ui_state("segregated_view_mode"), "date")
-        self.assertTrue(self.db.get_ui_state("segregated_view_enabled"))
+        self.win._act_grouped_view.setChecked(True)
+        self.win._act_group_by_date.trigger()
+        self.assertTrue(self.win._model.is_grouped_view())
+        self.assertEqual(self.win._model.grouped_mode(), "date")
+        self.assertEqual(self.db.get_ui_state("grouped_view_mode"), "date")
+        self.assertTrue(self.db.get_ui_state("grouped_view_enabled"))
 
         # 5 headers + 3 items = 8 rows
         self.assertEqual(self.win._model.rowCount(), 8)
 
         # Collapse "Last 7 Days" and "Older" sections
         self.win._model.set_section_collapsed("date_last_7_days", True)
-        self.db.set_ui_state("segregated_date_last_7_days_collapsed", True)
+        self.db.set_ui_state("grouped_date_last_7_days_collapsed", True)
         self.win._model.set_section_collapsed("date_older", True)
-        self.db.set_ui_state("segregated_date_older_collapsed", True)
+        self.db.set_ui_state("grouped_date_older_collapsed", True)
         self.assertEqual(self.win._model.rowCount(), 7)
 
         # Create a new MainWindow with same db to verify next launch persistence
         win2 = self.new_window(self.win._manager)
-        self.assertTrue(win2._segregated_view_enabled)
-        self.assertEqual(win2._segregated_view_mode, "date")
-        self.assertTrue(win2._model.is_segregated_view())
-        self.assertEqual(win2._model.segregated_mode(), "date")
+        self.assertTrue(win2._grouped_view_enabled)
+        self.assertEqual(win2._grouped_view_mode, "date")
+        self.assertTrue(win2._model.is_grouped_view())
+        self.assertEqual(win2._model.grouped_mode(), "date")
         self.assertTrue(win2._model.is_section_collapsed("date_last_7_days"))
         self.assertTrue(win2._model.is_section_collapsed("date_older"))
 
@@ -3962,8 +3962,8 @@ class TestActionStatesDynamicGating(_MainWindowTestCase):
             self.assertFalse(can_alloc, f"Bandwidth allocation should be disabled for {st}")
 
 
-class TestSegregatedSelectAll(_MainWindowTestCase):
-    """Tests for the 'Select All' button on segregated view groups."""
+class TestGroupedSelectAll(_MainWindowTestCase):
+    """Tests for the 'Select All' button on grouped view groups."""
 
     def test_select_all_button_geometry(self):
         from PySide6.QtCore import QRect
@@ -3985,8 +3985,8 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
             self.db.add_download(e)
         self.win._load_history()
 
-        self.win._act_segregated_view.setChecked(True)
-        self.assertTrue(self.win._model.is_segregated_view())
+        self.win._act_grouped_view.setChecked(True)
+        self.assertTrue(self.win._model.is_grouped_view())
 
         # Header 0 is Active
         self.assertTrue(self.win._model.is_section_header_row(0))
@@ -4020,7 +4020,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         for e in (e1, e2):
             self.db.add_download(e)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
 
         idx = self.win._model.index(0, 0)
         cell_rect = self.win._table.visualRect(idx)
@@ -4049,7 +4049,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         for e in (e1, e2):
             self.db.add_download(e)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
 
         idx = self.win._model.index(0, 0)
         cell_rect = self.win._table.visualRect(idx)
@@ -4071,7 +4071,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
         self.db.add_download(e1)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
 
         # Before selecting: not all selected
         self.assertFalse(self.win._is_section_all_selected(0))
@@ -4089,7 +4089,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
         self.db.add_download(e1)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
 
         # Collapse Active section
         self.win._model.set_section_collapsed("active", True)
@@ -4118,7 +4118,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         for e in (e1, e2):
             self.db.add_download(e)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
         self.win._on_select_all_in_section(0)
         self.assertTrue(self.win._is_section_all_selected(0))
 
@@ -4160,7 +4160,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
         self.db.add_download(e1)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
 
         header_index = self.win._model.index(0, 0)
         self.assertTrue(self.win._model.is_section_header_row(0))
@@ -4182,7 +4182,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         for e in (e1, e2):
             self.db.add_download(e)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
         self.win._on_select_all_in_section(0)
 
         cell_rect = self.win._table.visualRect(self.win._model.index(0, 0))
@@ -4238,7 +4238,7 @@ class TestSegregatedSelectAll(_MainWindowTestCase):
         e1 = DownloadEntry(id="a1", url="http://e.com/1", filename="1.zip", status="downloading")
         self.db.add_download(e1)
         self.win._load_history()
-        self.win._act_segregated_view.setChecked(True)
+        self.win._act_grouped_view.setChecked(True)
 
         idx = self.win._model.index(0, 0)
         cell_rect = self.win._table.visualRect(idx)
@@ -4263,39 +4263,39 @@ class TestViewControlStripAndGrouping(_MainWindowTestCase):
     """Tests for the View Control Strip toggle action, its buttons, and the grouping modes."""
 
     def test_view_strip_visible_when_non_grouped(self):
-        self.win._on_toggle_segregated_view(False)
-        self.assertFalse(self.win._segregated_view_enabled)
+        self.win._on_toggle_grouped_view(False)
+        self.assertFalse(self.win._grouped_view_enabled)
         # Strip remains visible (not hidden) even when grouping is disabled
-        self.assertFalse(self.win._seg_control_strip.isHidden())
-        self.assertTrue(self.win._seg_mode_buttons["none"].isChecked())
+        self.assertFalse(self.win._group_control_strip.isHidden())
+        self.assertTrue(self.win._group_mode_buttons["none"].isChecked())
         for mode in ("status", "date", "type", "name"):
-            self.assertFalse(self.win._seg_mode_buttons[mode].isChecked())
+            self.assertFalse(self.win._group_mode_buttons[mode].isChecked())
         # Collapse and expand all buttons disabled when non-grouped
         self.assertFalse(self.win._btn_collapse_all.isEnabled())
         self.assertFalse(self.win._btn_expand_all.isEnabled())
 
     def test_group_by_mode_button_enables_grouping(self):
-        self.win._on_toggle_segregated_view(False)
-        self.win._on_seg_mode_button_clicked("status")
-        self.assertTrue(self.win._segregated_view_enabled)
-        self.assertTrue(self.win._model.is_segregated_view())
-        self.assertEqual(self.win._segregated_view_mode, "status")
-        self.assertTrue(self.win._seg_mode_buttons["status"].isChecked())
-        self.assertFalse(self.win._seg_mode_buttons["none"].isChecked())
+        self.win._on_toggle_grouped_view(False)
+        self.win._on_group_mode_button_clicked("status")
+        self.assertTrue(self.win._grouped_view_enabled)
+        self.assertTrue(self.win._model.is_grouped_view())
+        self.assertEqual(self.win._grouped_view_mode, "status")
+        self.assertTrue(self.win._group_mode_buttons["status"].isChecked())
+        self.assertFalse(self.win._group_mode_buttons["none"].isChecked())
         self.assertTrue(self.win._btn_collapse_all.isEnabled())
         self.assertTrue(self.win._btn_expand_all.isEnabled())
 
     def test_group_by_none_button_disables_grouping(self):
-        self.win._set_segregation_mode("status")
-        self.assertTrue(self.win._segregated_view_enabled)
-        self.win._on_seg_mode_button_clicked("none")
-        self.assertFalse(self.win._segregated_view_enabled)
-        self.assertFalse(self.win._model.is_segregated_view())
-        self.assertTrue(self.win._seg_mode_buttons["none"].isChecked())
-        self.assertFalse(self.win._seg_mode_buttons["status"].isChecked())
+        self.win._set_grouping_mode("status")
+        self.assertTrue(self.win._grouped_view_enabled)
+        self.win._on_group_mode_button_clicked("none")
+        self.assertFalse(self.win._grouped_view_enabled)
+        self.assertFalse(self.win._model.is_grouped_view())
+        self.assertTrue(self.win._group_mode_buttons["none"].isChecked())
+        self.assertFalse(self.win._group_mode_buttons["status"].isChecked())
         self.assertFalse(self.win._btn_collapse_all.isEnabled())
         self.assertFalse(self.win._btn_expand_all.isEnabled())
-        self.assertFalse(self.win._seg_control_strip.isHidden())
+        self.assertFalse(self.win._group_control_strip.isHidden())
 
     def test_view_control_strip_toggle_action(self):
         self.assertTrue(hasattr(self.win, "_act_toggle_view_toolbar"))
@@ -4303,28 +4303,28 @@ class TestViewControlStripAndGrouping(_MainWindowTestCase):
         # controls under the toolbar, and calling it a toolbar made it unfindable.
         self.assertEqual(self.win._act_toggle_view_toolbar.text(), "View Control Strip")
         self.assertTrue(self.win._act_toggle_view_toolbar.isChecked())
-        self.assertFalse(self.win._seg_control_strip.isHidden())
+        self.assertFalse(self.win._group_control_strip.isHidden())
 
         # Toggle to hide
         self.win._act_toggle_view_toolbar.setChecked(False)
-        self.assertTrue(self.win._seg_control_strip.isHidden())
-        self.assertFalse(self.db.get_ui_state("seg_strip_visible"))
+        self.assertTrue(self.win._group_control_strip.isHidden())
+        self.assertFalse(self.db.get_ui_state("group_strip_visible"))
 
         # Toggle to show
         self.win._act_toggle_view_toolbar.setChecked(True)
-        self.assertFalse(self.win._seg_control_strip.isHidden())
-        self.assertTrue(self.db.get_ui_state("seg_strip_visible"))
+        self.assertFalse(self.win._group_control_strip.isHidden())
+        self.assertTrue(self.db.get_ui_state("group_strip_visible"))
 
     def test_hiding_the_strip_survives_a_restart(self):
         """The window-state blob used to override the stored answer with True.
 
-        It carried a ``seg_strip_visible`` field nothing ever wrote, so its restore path
+        It carried a ``group_strip_visible`` field nothing ever wrote, so its restore path
         fell back to True and re-showed the strip the moment the window was restored - which
         is why hiding it never survived a restart. `isVisibleTo` is the assertion that counts
         here: `isVisible()` is False for every child of a window this suite never shows.
         """
         self.win._act_toggle_view_toolbar.setChecked(False)
-        self.assertFalse(self.db.get_ui_state("seg_strip_visible"))
+        self.assertFalse(self.db.get_ui_state("group_strip_visible"))
         # The window-state blob has to exist for the restore path to reach the field the bug
         # lived in: with no blob, `_restore_ui_state_from_db` takes the fresh-profile branch.
         self.win._save_ui_state_to_db()
@@ -4334,7 +4334,7 @@ class TestViewControlStripAndGrouping(_MainWindowTestCase):
         # A second launch is a fresh window, so it has its own action and strip.
         self.assertFalse(reopened._act_toggle_view_toolbar.isChecked())
         self.assertFalse(
-            reopened._seg_control_strip.isVisibleTo(reopened),
+            reopened._group_control_strip.isVisibleTo(reopened),
             "the view control strip was re-shown from a state that says it should be hidden",
         )
 
@@ -4345,23 +4345,23 @@ class TestViewControlStripAndGrouping(_MainWindowTestCase):
         by the first click - the strip appeared to vanish on any click.
         """
         self.win._act_toggle_view_toolbar.setChecked(False)
-        self.assertTrue(self.win._seg_control_strip.isHidden())
+        self.assertTrue(self.win._group_control_strip.isHidden())
 
         for mode in ("status", "date", "type", "name", "none"):
             with self.subTest(mode=mode):
-                self.win._on_seg_mode_button_clicked(mode)
-                self.assertTrue(self.win._seg_control_strip.isHidden())
+                self.win._on_group_mode_button_clicked(mode)
+                self.assertTrue(self.win._group_control_strip.isHidden())
 
         self.win._on_collapse_all_sections()
         self.win._on_expand_all_sections()
-        self.assertTrue(self.win._seg_control_strip.isHidden())
+        self.assertTrue(self.win._group_control_strip.isHidden())
 
     def test_hiding_the_strip_keeps_the_menu_item_in_step(self):
         self.win._act_toggle_view_toolbar.setChecked(False)
-        self.win._on_toggle_segregated_view(True)
+        self.win._on_toggle_grouped_view(True)
         self.assertFalse(self.win._act_toggle_view_toolbar.isChecked())
         self.assertFalse(self.win._strip_visible())
-        self.assertTrue(self.win._seg_control_strip.isHidden())
+        self.assertTrue(self.win._group_control_strip.isHidden())
 
     def test_view_toolbar_right_edge_button_icon_only(self):
         from PySide6.QtWidgets import QToolBar, QToolButton

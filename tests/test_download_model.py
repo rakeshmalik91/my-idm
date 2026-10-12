@@ -234,15 +234,15 @@ class TestDownloadModel(unittest.TestCase):
         # Row 5: downloading -> "4" (continuous for downloading+queued+paused items)
         self.assertEqual(self.model.data(self.model.index(5, Col.QUEUE), Qt.ItemDataRole.DisplayRole), "4")
 
-    def test_segregated_view_order_starts_at_one(self):
-        """In segregated views, section headers are not counted so order starts at 1."""
+    def test_grouped_view_order_starts_at_one(self):
+        """In grouped views, section headers are not counted so order starts at 1."""
         now_str = datetime.now().astimezone().isoformat()
         items = [
             DownloadEntry(id="d1", filename="file1.mp4", status="paused", added_at=now_str),
             DownloadEntry(id="d2", filename="file2.mp4", status="paused", added_at=now_str),
             DownloadEntry(id="d3", filename="file3.mp4", status="completed", added_at=now_str),
         ]
-        self.model.set_segregated_view(True, mode="date")
+        self.model.set_grouped_view(True, mode="date")
         self.model.load_entries(items)
 
         # Row 0 is the "TODAY (3)" section header
@@ -259,8 +259,8 @@ class TestDownloadModel(unittest.TestCase):
         idx_sec_dl = self.model.index(2, Col.QUEUE)
         self.assertEqual(self.model.data(idx_sec_dl, Qt.ItemDataRole.DisplayRole), "2")
 
-    def test_segregated_view_order_across_all_modes(self):
-        """Order column always starts at 1 across all segregated modes (status, date, type)."""
+    def test_grouped_view_order_across_all_modes(self):
+        """Order column always starts at 1 across all grouped modes (status, date, type)."""
         now_str = datetime.now().astimezone().isoformat()
         items = [
             DownloadEntry(id="m1", filename="video.mp4", status="downloading", added_at=now_str),
@@ -270,7 +270,7 @@ class TestDownloadModel(unittest.TestCase):
         ]
         for mode in ("status", "date", "type"):
             with self.subTest(mode=mode):
-                self.model.set_segregated_view(True, mode=mode)
+                self.model.set_grouped_view(True, mode=mode)
                 self.model.load_entries(items)
 
                 # Ensure section header rows never have status in ACTIVE_QUEUE_STATUSES
@@ -294,7 +294,7 @@ class TestDownloadModel(unittest.TestCase):
                             self.assertEqual(val, "1", f"First active download in {mode} view must start at 1, got {val}")
                             found_first_active = True
 
-    def test_segregated_view_multi_section_queue_numbering(self):
+    def test_grouped_view_multi_section_queue_numbering(self):
         """Active entries across multiple sections are numbered 1, 2, 3... and never skip or shift due to headers."""
         from datetime import timedelta
         now = datetime.now().astimezone()
@@ -309,7 +309,7 @@ class TestDownloadModel(unittest.TestCase):
             DownloadEntry(id="y2", filename="yest2.mp4", status="completed", added_at=yesterday_str),
             DownloadEntry(id="o1", filename="old1.mp4", status="paused", added_at=older_str),
         ]
-        self.model.set_segregated_view(True, mode="date")
+        self.model.set_grouped_view(True, mode="date")
         self.model.load_entries(items)
 
         # Expected visible order of active items: 1, 2, 3, (skip completed), 4
@@ -332,7 +332,7 @@ class TestDownloadModel(unittest.TestCase):
             DownloadEntry(id="ip1", filename="file1.mp4", status="downloading", added_at=now_str),
             DownloadEntry(id="ip2", filename="file2.mp4", status="queued", added_at=now_str),
         ]
-        self.model.set_segregated_view(True, mode="date")
+        self.model.set_grouped_view(True, mode="date")
         self.model.load_entries(items)
 
         # Pause ip1: stays in TODAY section
@@ -1051,8 +1051,8 @@ class TestModelFiltering(unittest.TestCase):
         e_empty = DownloadEntry(id="t6", url="https://example.com/6")
         self.assertEqual(get_entry_date_category(e_empty, now_dt=now), SECTION_DATE_OLDER)
 
-    def test_segregated_view_date_mode_and_collapsing(self):
-        """Date-based segregated view groups entries into Today, Yesterday, Last 7 Days, Last 30 Days, Older."""
+    def test_grouped_view_date_mode_and_collapsing(self):
+        """Date-based grouped view groups entries into Today, Yesterday, Last 7 Days, Last 30 Days, Older."""
         from datetime import datetime, timedelta
         from my_idm.download_model import (
             SECTION_DATE_TODAY,
@@ -1071,10 +1071,10 @@ class TestModelFiltering(unittest.TestCase):
 
         self.model.load_entries([e_today, e_yesterday, e_week, e_month, e_older])
 
-        # Enable segregated view in date mode
-        self.model.set_segregated_view(True, mode="date")
-        self.assertTrue(self.model.is_segregated_view())
-        self.assertEqual(self.model.segregated_mode(), "date")
+        # Enable grouped view in date mode
+        self.model.set_grouped_view(True, mode="date")
+        self.assertTrue(self.model.is_grouped_view())
+        self.assertEqual(self.model.grouped_mode(), "date")
 
         # 5 section headers + 5 items = 10 rows
         self.assertEqual(self.model.rowCount(), 10)
@@ -1100,8 +1100,8 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(self.model.rowCount(), 10)
 
         # Switch back to status mode
-        self.model.set_segregated_mode("status")
-        self.assertEqual(self.model.segregated_mode(), "status")
+        self.model.set_grouped_mode("status")
+        self.assertEqual(self.model.grouped_mode(), "status")
         # 3 status headers (Active, Seeding, Inactive) + 5 items = 8 rows
         self.assertEqual(self.model.rowCount(), 8)
 
@@ -1124,7 +1124,7 @@ class TestModelFiltering(unittest.TestCase):
             added_at=(now - timedelta(days=1)).isoformat(),
         )
         self.model.load_entries([e_today, e_yesterday])
-        self.model.set_segregated_view(True, mode="date")
+        self.model.set_grouped_view(True, mode="date")
 
         sections = rows_by_section(self.model)
         self.assertEqual(sections["Today"], ["roll-today"])
@@ -1167,7 +1167,7 @@ class TestModelFiltering(unittest.TestCase):
             for i in range(3)
         ]
         self.model.load_entries(entries)
-        self.model.set_segregated_view(True, mode="date")
+        self.model.set_grouped_view(True, mode="date")
         self.model.set_section_collapsed(SECTION_DATE_OLDER, True)
         # Collapsed: the header survives, its rows do not.
         self.assertEqual(rows_by_section(self.model)["Older"], [])
@@ -1189,14 +1189,14 @@ class TestModelFiltering(unittest.TestCase):
         self.model.load_entries([_make_entry("1", "bravo.zip", added_at=now.isoformat())])
         far_future = now + timedelta(days=400)
 
-        # Segregation off entirely.
-        self.model.set_segregated_view(False, mode="date")
+        # Grouping off entirely.
+        self.model.set_grouped_view(False, mode="date")
         self.assertFalse(self.model.date_grouping_is_stale(now_dt=far_future))
         self.assertFalse(self.model.refresh_date_grouping(now_dt=far_future))
 
         for mode in ("status", "type"):
             with self.subTest(mode=mode):
-                self.model.set_segregated_view(True, mode=mode)
+                self.model.set_grouped_view(True, mode=mode)
                 self.assertFalse(
                     self.model.date_grouping_is_stale(now_dt=far_future),
                     f"{mode} sections do not depend on the current day",
@@ -1218,7 +1218,7 @@ class TestModelFiltering(unittest.TestCase):
         older_queued = DownloadEntry(id="ep08", filename="ep08.mp4", status="queued", added_at=t3, queue_order=3)
         completed_item = DownloadEntry(id="ep01", filename="ep01.mp4", status="completed", added_at=t_completed, queue_order=0)
 
-        self.model.set_segregated_view(True, mode="date")
+        self.model.set_grouped_view(True, mode="date")
         self.model.load_entries([older_active1, older_active2, older_queued, completed_item])
 
         # Active downloads start at row 1 (row 0 is TODAY header)
@@ -1385,11 +1385,11 @@ class TestModelFiltering(unittest.TestCase):
         self.assertEqual(self.model.rowCount(), 3)
 
 
-class TestNameSegregatedSorting(unittest.TestCase):
+class TestNameGroupedSorting(unittest.TestCase):
     def setUp(self):
         self.model = DownloadTableModel()
 
-    def test_name_segregated_natural_sort_and_group_sorting(self):
+    def test_name_grouped_natural_sort_and_group_sorting(self):
         # Anime series with episode numbers that would fail standard lexicographic sort (10 before 2)
         e1 = _make_entry("1", "[Subs] My Anime - 01 [1080p].mkv", size=100)
         e2 = _make_entry("2", "[Subs] My Anime - 02 [1080p].mkv", size=200)
@@ -1400,7 +1400,7 @@ class TestNameSegregatedSorting(unittest.TestCase):
         b2 = _make_entry("b2", "[Group] Another Series - 02.mkv", size=60)
 
         self.model.load_entries([e10, e1, b2, e2, b1])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
         
         # Expand sections for testing (name-based sections are collapsed by default)
         self.model.expand_all_sections()
@@ -1445,7 +1445,7 @@ class TestNameSegregatedSorting(unittest.TestCase):
         e2 = _make_entry("2", "Anime Show - 02.mkv", size=1000, status="queued")
 
         self.model.load_entries([e1, e2])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
         self.model.expand_all_sections()
 
         # Simulate download starting for e1
@@ -1531,9 +1531,9 @@ class TestNameSegregatedSorting(unittest.TestCase):
         self.assertEqual(len(re_zero_group), 3)
         self.assertEqual({e.id for e in re_zero_group}, {"4", "5", "6"})
 
-        # Now test within the DownloadTableModel in segregated view
+        # Now test within the DownloadTableModel in grouped view
         self.model.load_entries([e1, e2, e3])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         # By default sections are collapsed -> exactly 1 section header row
         self.assertEqual(self.model.rowCount(), 1)
@@ -1567,7 +1567,7 @@ class TestNameSegregatedSorting(unittest.TestCase):
         # Episode 25 alone with no anime_title metadata
         e25 = _make_entry("25", "AnimePahe_Ranma \u00bd (2024) Season 3_-_25_720p_EngDub.mp4")
         self.model.load_entries([e25])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         # Because it's alone without show_title metadata, it starts in Uncategorized
         header_rows = self.model.get_section_header_row_indices()
@@ -1594,7 +1594,7 @@ class TestNameSegregatedSorting(unittest.TestCase):
 
 
 class TestNameGroupingInternals(unittest.TestCase):
-    """The pure helpers behind name segregation, and the invariants they carry."""
+    """The pure helpers behind name grouping, and the invariants they carry."""
 
     def setUp(self):
         self.model = DownloadTableModel()
@@ -1765,7 +1765,7 @@ class TestNameGroupingInternals(unittest.TestCase):
         e3 = _make_entry("3", "Beta Show - 01.mkv", size=100)
         e4 = _make_entry("4", "Beta Show - 02.mkv", size=100)
         self.model.load_entries([e1, e2, e3, e4])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
 
         def headers():
             return {self.model._entries[r].section_title: self.model._entries[r].section_count
@@ -1793,7 +1793,7 @@ class TestNameGroupingInternals(unittest.TestCase):
         e1 = _make_entry("1", "abcdefghij - 01.mkv", size=100)
         e2 = _make_entry("2", "abcdefghix - 02.mkv", size=100)
         self.model.load_entries([e1, e2])
-        self.model.set_segregated_view(True, "name")
+        self.model.set_grouped_view(True, "name")
         header_rows = self.model.get_section_header_row_indices()
         self.assertEqual(len(header_rows), 1, "the two files are one edit-distance group")
         section_id = self.model._entries[header_rows[0]].section_id

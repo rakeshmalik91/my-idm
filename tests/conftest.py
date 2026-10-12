@@ -80,7 +80,7 @@ def rows_by_section(model) -> dict:
 
     A ``DownloadTableModel`` interleaves synthetic header rows with real entries in one flat
     ``_entries`` list, so "which downloads are in Today?" means walking that list and
-    tracking the header each entry follows. Tests covering segregation, collapsing and the
+    tracking the header each entry follows. Tests covering grouping, collapsing and the
     date rollover all need exactly that, and none of them care about row indices.
     """
     out: dict = {}

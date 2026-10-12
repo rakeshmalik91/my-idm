@@ -1070,7 +1070,7 @@ class SettingsDialog(QDialog):
         self._build_search_index()
 
     def _create_views_tab(self) -> QWidget:
-        """Segregated-view grouping plus which columns the downloads table shows, and in what order.
+        """Grouped-view grouping plus which columns the downloads table shows, and in what order.
 
         The column half is a UI over state the table already owns: visibility and order
         live in the QHeaderView's own state, which ``MainWindow._save_ui_state_to_db()``
@@ -1079,8 +1079,8 @@ class SettingsDialog(QDialog):
         back, and lets the existing save path persist it.
         """
         from my_idm.download_model import (
-            SEGREGATED_MODES,
-            SEGREGATED_MODE_LABELS,
+            GROUPED_MODES,
+            GROUPED_MODE_LABELS,
             TYPE_SECTION_TITLES,
         )
 
@@ -1113,36 +1113,36 @@ class SettingsDialog(QDialog):
         layout.addWidget(theme_group)
 
         # -- Grouped view ---------------------------------------------------
-        seg_group = QGroupBox("Grouped View")
-        seg_layout = QVBoxLayout(seg_group)
+        view_group = QGroupBox("Grouped View")
+        view_layout = QVBoxLayout(view_group)
 
-        self._seg_enabled_cb = QCheckBox("Group downloads into sections")
-        self._seg_enabled_cb.setToolTip(
+        self._group_enabled_cb = QCheckBox("Group downloads into sections")
+        self._group_enabled_cb.setToolTip(
             "Splits the table into collapsible sections. Choose what the sections group by "
             "below. The View menu can also toggle this at any time."
         )
-        seg_layout.addWidget(self._seg_enabled_cb)
+        view_layout.addWidget(self._group_enabled_cb)
 
-        self._seg_mode_combo = QComboBox()
-        for mode in SEGREGATED_MODES:
-            self._seg_mode_combo.addItem(SEGREGATED_MODE_LABELS[mode], mode)
-        self._seg_mode_combo.setToolTip(
+        self._group_mode_combo = QComboBox()
+        for mode in GROUPED_MODES:
+            self._group_mode_combo.addItem(GROUPED_MODE_LABELS[mode], mode)
+        self._group_mode_combo.setToolTip(
             "Status groups Active / Seeding / Inactive. Date groups Today / Yesterday / "
             "Last 7 Days / Last 30 Days / Older. File Type groups "
             f"{' / '.join(TYPE_SECTION_TITLES)}. Name groups A-Z alphabetically."
         )
-        seg_layout.addWidget(self._seg_mode_combo)
+        view_layout.addWidget(self._group_mode_combo)
 
         # View strip visibility
-        self._seg_strip_visible_cb = QCheckBox("Show view control strip")
-        self._seg_strip_visible_cb.setToolTip(
+        self._group_strip_visible_cb = QCheckBox("Show view control strip")
+        self._group_strip_visible_cb.setToolTip(
             "Show the strip below the table header with Collapse/Expand All and Group By buttons "
             "when grouped view is enabled."
         )
-        self._seg_strip_visible_cb.setChecked(True)
-        seg_layout.addWidget(self._seg_strip_visible_cb)
+        self._group_strip_visible_cb.setChecked(True)
+        view_layout.addWidget(self._group_strip_visible_cb)
 
-        layout.addWidget(seg_group)
+        layout.addWidget(view_group)
 
         # -- Columns -----------------------------------------------------------
         col_group = QGroupBox("Downloads Table Columns")
@@ -1217,7 +1217,7 @@ class SettingsDialog(QDialog):
         self._col_up_btn.clicked.connect(lambda: self._move_selected_column(-1))
         self._col_down_btn.clicked.connect(lambda: self._move_selected_column(1))
         self._col_reset_btn.clicked.connect(self._reset_columns_to_defaults)
-        self._seg_enabled_cb.toggled.connect(self._sync_seg_controls)
+        self._group_enabled_cb.toggled.connect(self._sync_group_controls)
 
         self._populate_views_tab()
         return tab
@@ -1237,8 +1237,8 @@ class SettingsDialog(QDialog):
             return None
         return table
 
-    def _sync_seg_controls(self, checked: bool | None = None):
-        """Keep the Segregated View controls consistent with the enable checkbox.
+    def _sync_group_controls(self, checked: bool | None = None):
+        """Keep the Grouped View controls consistent with the enable checkbox.
 
         The mode combo (Status / Date / File Type) is only meaningful while the table is actually
         grouped into sections, so it follows the checkbox. Populating the page and clicking the
@@ -1246,17 +1246,17 @@ class SettingsDialog(QDialog):
         cannot disagree - a combo that was enabled-when-off on a freshly opened dialog would
         silently let the user pick a mode that does nothing.
 
-        Mirrors ``MainWindow._sync_segregation_mode_actions``, which does the same job for the View
+        Mirrors ``MainWindow._sync_grouping_mode_actions``, which does the same job for the View
         menu's four actions.
         """
         if checked is None:
-            checked = self._seg_enabled_cb.isChecked()
-        self._seg_mode_combo.setEnabled(bool(checked))
+            checked = self._group_enabled_cb.isChecked()
+        self._group_mode_combo.setEnabled(bool(checked))
 
     def _populate_views_tab(self) -> None:
         from my_idm.download_model import (
-            DEFAULT_SEGREGATED_MODE,
-            SEGREGATED_MODES,
+            DEFAULT_GROUPED_MODE,
+            GROUPED_MODES,
         )
 
         # `_get_db()`, not `self._db`: the raw attribute is still None this early in construction
@@ -1265,16 +1265,16 @@ class SettingsDialog(QDialog):
         # showing "off" for a saved "on", and with it the mode combo's enabled state wrong too.
         db = self._get_db()
         if db is not None:
-            self._seg_enabled_cb.setChecked(bool(db.get_ui_state("segregated_view_enabled", False)))
-            mode = db.get_ui_state("segregated_view_mode", DEFAULT_SEGREGATED_MODE)
-            if mode not in SEGREGATED_MODES:
-                mode = DEFAULT_SEGREGATED_MODE
-            index = self._seg_mode_combo.findData(mode)
-            self._seg_mode_combo.setCurrentIndex(max(0, index))
-            self._seg_strip_visible_cb.setChecked(bool(db.get_ui_state("seg_strip_visible", True)))
+            self._group_enabled_cb.setChecked(bool(db.get_ui_state("grouped_view_enabled", False)))
+            mode = db.get_ui_state("grouped_view_mode", DEFAULT_GROUPED_MODE)
+            if mode not in GROUPED_MODES:
+                mode = DEFAULT_GROUPED_MODE
+            index = self._group_mode_combo.findData(mode)
+            self._group_mode_combo.setCurrentIndex(max(0, index))
+            self._group_strip_visible_cb.setChecked(bool(db.get_ui_state("group_strip_visible", True)))
         # The mode choices are meaningless while grouping is off, so they follow the checkbox -
-        # the same coupling `_seg_enabled_cb.toggled` maintains interactively (see `_build_views_tab`).
-        self._sync_seg_controls()
+        # the same coupling `_group_enabled_cb.toggled` maintains interactively (see `_build_views_tab`).
+        self._sync_group_controls()
 
         # The combo, not the running palette, is the source of truth for what the user
         # picked: reading `current_theme()` back would report the *applied* theme and so
@@ -1350,17 +1350,17 @@ class SettingsDialog(QDialog):
         ``MainWindow._on_reset_view`` documents.
         """
         from my_idm.download_model import (
-            DEFAULT_SEGREGATED_MODE,
-            SEGREGATED_MODES,
+            DEFAULT_GROUPED_MODE,
+            GROUPED_MODES,
             Col,
         )
 
-        enabled = self._seg_enabled_cb.isChecked()
-        mode = self._seg_mode_combo.currentData()
-        if mode not in SEGREGATED_MODES:
-            mode = DEFAULT_SEGREGATED_MODE
+        enabled = self._group_enabled_cb.isChecked()
+        mode = self._group_mode_combo.currentData()
+        if mode not in GROUPED_MODES:
+            mode = DEFAULT_GROUPED_MODE
         theme = normalize_theme(self._theme_combo.currentData())
-        strip_visible = self._seg_strip_visible_cb.isChecked()
+        strip_visible = self._group_strip_visible_cb.isChecked()
 
         # The database write comes first and is unconditional, because the dialog is also
         # constructed standalone (that is how the tests use it) where there is no parent to
@@ -1368,10 +1368,10 @@ class SettingsDialog(QDialog):
         # outright on a construction path that has not resolved the handle yet.
         db = self._get_db()
         if db is not None:
-            db.set_ui_state("segregated_view_enabled", enabled)
-            db.set_ui_state("segregated_view_mode", mode)
+            db.set_ui_state("grouped_view_enabled", enabled)
+            db.set_ui_state("grouped_view_mode", mode)
             db.set_ui_state("theme", theme)
-            db.set_ui_state("seg_strip_visible", strip_visible)
+            db.set_ui_state("group_strip_visible", strip_visible)
 
         parent = self.parent()
         # Applied, not just recorded, so the choice is visible before Save and the combo
@@ -1401,19 +1401,19 @@ class SettingsDialog(QDialog):
                 if visual != slot:
                     header.moveSection(visual, slot)
 
-        # `_on_toggle_segregated_view` is the canonical handler for the enable flag: it
+        # `_on_toggle_grouped_view` is the canonical handler for the enable flag: it
         # applies it to the model, syncs the View-menu checkmark, and owns the
-        # `segregated_view_enabled` DB write. It must run *before* the mode change, because
-        # `_set_segregation_mode` force-enables grouping when it is currently off - the
+        # `grouped_view_enabled` DB write. It must run *before* the mode change, because
+        # `_set_grouping_mode` force-enables grouping when it is currently off - the
         # previous order meant (a) saving with the box unticked silently turned grouping
         # back on and overwrote the `False` just written, and (b) unticking it did nothing
-        # at all until the next restart, because `_set_segregation_mode` was checked first
-        # and the `_on_toggle_segregated_view` branch behind it was unreachable.
+        # at all until the next restart, because `_set_grouping_mode` was checked first
+        # and the `_on_toggle_grouped_view` branch behind it was unreachable.
         parent = self.parent()
-        if hasattr(parent, "_on_toggle_segregated_view"):
-            parent._on_toggle_segregated_view(enabled)
-        if enabled and hasattr(parent, "_set_segregation_mode"):
-            parent._set_segregation_mode(mode)
+        if hasattr(parent, "_on_toggle_grouped_view"):
+            parent._on_toggle_grouped_view(enabled)
+        if enabled and hasattr(parent, "_set_grouping_mode"):
+            parent._set_grouping_mode(mode)
         if hasattr(parent, "_save_ui_state_to_db"):
             parent._save_ui_state_to_db()
 
@@ -1460,14 +1460,14 @@ class SettingsDialog(QDialog):
         perf_layout = QVBoxLayout(perf_group)
         perf_layout.setSpacing(10)
 
-        seg_row = QHBoxLayout()
-        seg_lbl = QLabel("Default parallel connections (segments) for HTTP:")
-        seg_row.addWidget(seg_lbl, 1)
+        segment_row = QHBoxLayout()
+        segment_lbl = QLabel("Default parallel connections (segments) for HTTP:")
+        segment_row.addWidget(segment_lbl, 1)
         self._segments_spin = QSpinBox()
         self._segments_spin.setRange(1, 32)
         self._segments_spin.setToolTip("Number of parallel connection streams per HTTP download")
-        seg_row.addWidget(self._segments_spin)
-        perf_layout.addLayout(seg_row)
+        segment_row.addWidget(self._segments_spin)
+        perf_layout.addLayout(segment_row)
 
         stagger_row = QHBoxLayout()
         stagger_lbl = QLabel("Delay between starting each segment:")
@@ -5261,7 +5261,7 @@ class SettingsDialog(QDialog):
         if self._manager and hasattr(self._manager, "set_scheduler_config"):
             self._manager.set_scheduler_config(self._scheduler_cfg)
 
-        # 8. Apply Views: segregated grouping and table columns. Last, because it writes
+        # 8. Apply Views: grouped grouping and table columns. Last, because it writes
         # straight onto the live table rather than into a config object.
         if hasattr(self, "_apply_views_tab"):
             self._apply_views_tab()
