@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -18,6 +19,76 @@ from my_idm.config import ExternalToolsConfig
 from my_idm.proc import background_kwargs
 
 log = logging.getLogger(__name__)
+
+
+# -- scheduled runs -----------------------------------------------------------
+#
+# The schedule itself lives in DownloadManager (it owns the poll timer and the
+# launch), but *reading* it is a different job: two surfaces have to be able to say
+# when the last run was and when the next one is due, and neither of them should
+# re-derive the rule. These helpers take an ExternalToolsConfig - live or a copy -
+# so they stay pure and testable without an event loop.
+
+def animepahe_next_run_at(config: ExternalToolsConfig, now: Optional[float] = None) -> Optional[float]:
+    """Epoch seconds of the next scheduled run, or ``None`` when it is off.
+
+    ``0.0`` means "due immediately": there is no recorded run yet, so the first scan
+    happens as soon as My-IDM is running rather than a full interval later.
+    """
+    interval_hours = animepahe_interval_hours(config)
+    if interval_hours <= 0:
+        return None
+    last_run_at = float(getattr(config, "animepahe_last_run_at", 0.0) or 0.0)
+    if last_run_at <= 0:
+        return 0.0
+    base = time.time() if now is None else now
+    return last_run_at + interval_hours * 3600.0
+
+
+def animepahe_interval_hours(config: ExternalToolsConfig) -> int:
+    """The configured interval, clamped as the manager clamps it, or ``0`` when off."""
+    if not getattr(config, "animepahe_periodic_run", False):
+        return 0
+    try:
+        interval_hours = int(getattr(config, "animepahe_interval_hours", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(1, interval_hours) if interval_hours > 0 else 0
+
+
+def _format_span(seconds: float) -> str:
+    """Compact duration: '6 h 1 m', '42 m', '40 s'."""
+    seconds = max(0, int(seconds))
+    if seconds >= 3600:
+        hours, rest = divmod(seconds, 3600)
+        return f"{hours} h {rest // 60} m"
+    if seconds >= 60:
+        return f"{seconds // 60} m"
+    return f"{seconds} s"
+
+
+def describe_animepahe_schedule(config: ExternalToolsConfig, now: Optional[float] = None) -> str:
+    """One-line summary of the AnimePahe schedule, for the Settings tab and the console.
+
+    The point is that "every 6 hours" is otherwise invisible: the run happens on a
+    background timer, and a session that was closed across a slot looks identical to a
+    schedule that never fired. This states the clock instead, using the same stamps the
+    manager uses.
+    """
+    interval_hours = animepahe_interval_hours(config)
+    if interval_hours <= 0:
+        return "Scheduled scan: off"
+
+    base = time.time() if now is None else now
+    last_run_at = float(getattr(config, "animepahe_last_run_at", 0.0) or 0.0)
+    if last_run_at <= 0:
+        return "Scheduled scan: not run yet — first scan on next start"
+
+    last_txt = datetime.fromtimestamp(last_run_at).strftime("%d %b %H:%M")
+    due_at = last_run_at + interval_hours * 3600
+    if base >= due_at:
+        return f"Last scan {last_txt} · due now"
+    return f"Last scan {last_txt} · next in {_format_span(due_at - base)} ({datetime.fromtimestamp(due_at):%H:%M})"
 
 
 def find_pythonw_executable() -> str:

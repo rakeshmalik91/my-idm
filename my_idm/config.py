@@ -23,6 +23,9 @@ DEFAULT_YTDLP_PLAYLIST_LIMIT = 10
 MIN_YTDLP_PLAYLIST_LIMIT = 1
 MAX_YTDLP_PLAYLIST_LIMIT = 500
 
+# Scheduled AnimePahe library scan, in hours. Matches the Preferences spin box default.
+DEFAULT_ANIMEPAHE_INTERVAL_HOURS = 6
+
 # Default global hotkeys for the two capture toggles. Both are the Scroll Lock key, and that is
 # the point: a lock key is the one kind of key no application types with, so the hotkey layer is
 # willing to claim it system-wide with no Ctrl/Alt/Win prefix at all.
@@ -105,6 +108,24 @@ def clamp_segment_start_delay(value: Any) -> int:
     except (TypeError, ValueError):
         return DEFAULT_SEGMENT_START_DELAY_MS
     return max(0, min(delay, MAX_SEGMENT_START_DELAY_MS))
+
+
+def _coerce_epoch(value: Any) -> float:
+    """Coerce a stored epoch timestamp into a non-negative float.
+
+    ``None``, ``""`` and anything unparseable become ``0.0`` - "never ran" - rather than
+    raising: a corrupt or empty preference must not stop the app from starting, and treating
+    an unreadable timestamp as "never" makes the next scheduled run due immediately, which
+    is the safe direction for a schedule. Values are clamped to ``>= 0`` so a clock moved
+    backwards cannot make a run due forever.
+    """
+    try:
+        stamp = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if stamp != stamp:  # NaN
+        return 0.0
+    return stamp if stamp > 0 else 0.0
 
 
 DEFAULT_MAX_RETRIES = 5
@@ -719,6 +740,10 @@ class ExternalToolsConfig:
     animepahe_launch_on_startup: bool = False
     animepahe_periodic_run: bool = False
     animepahe_interval_hours: int = 6
+    #: Epoch seconds of the last AnimePahe run (scheduled, startup or manual). ``0`` means
+    #: never, which makes the first scheduled run due immediately: the periodic schedule has
+    #: to survive the app being closed, or a session that missed its slot never catches up.
+    animepahe_last_run_at: float = 0.0
     animepahe_last_url: str = ""
     animepahe_last_title: str = ""
     animepahe_last_episodes: str = ""
@@ -746,6 +771,7 @@ class ExternalToolsConfig:
             "animepahe_launch_on_startup": self.animepahe_launch_on_startup,
             "animepahe_periodic_run": self.animepahe_periodic_run,
             "animepahe_interval_hours": self.animepahe_interval_hours,
+            "animepahe_last_run_at": self.animepahe_last_run_at,
             "animepahe_last_url": self.animepahe_last_url,
             "animepahe_last_title": self.animepahe_last_title,
             "animepahe_last_episodes": self.animepahe_last_episodes,
@@ -774,6 +800,7 @@ class ExternalToolsConfig:
             animepahe_launch_on_startup=bool(data.get("animepahe_launch_on_startup", False)),
             animepahe_periodic_run=bool(data.get("animepahe_periodic_run", False)),
             animepahe_interval_hours=max(1, int(data.get("animepahe_interval_hours", 6) or 6)),
+            animepahe_last_run_at=_coerce_epoch(data.get("animepahe_last_run_at", 0.0)),
             animepahe_last_url=str(data.get("animepahe_last_url", "")),
             animepahe_last_title=str(data.get("animepahe_last_title", "")),
             animepahe_last_episodes=str(data.get("animepahe_last_episodes", "")),
@@ -804,6 +831,7 @@ class ExternalToolsConfig:
         settings.setValue("animepahe_launch_on_startup", self.animepahe_launch_on_startup)
         settings.setValue("animepahe_periodic_run", self.animepahe_periodic_run)
         settings.setValue("animepahe_interval_hours", self.animepahe_interval_hours)
+        settings.setValue("animepahe_last_run_at", float(self.animepahe_last_run_at or 0.0))
         # Don't persist last URL, title, and episode range - only for current session
         # settings.setValue("animepahe_last_url", self.animepahe_last_url)
         # settings.setValue("animepahe_last_title", self.animepahe_last_title)
@@ -836,6 +864,7 @@ class ExternalToolsConfig:
         animepahe_launch_on_startup = settings.value("animepahe_launch_on_startup", False, type=bool)
         animepahe_periodic_run = settings.value("animepahe_periodic_run", False, type=bool)
         animepahe_interval_hours = settings.value("animepahe_interval_hours", 6, type=int)
+        animepahe_last_run_at = _coerce_epoch(settings.value("animepahe_last_run_at", 0.0))
         # Don't persist last URL, title, and episode range - only for current session
         # animepahe_last_url = settings.value("animepahe_last_url", "", type=str)
         # animepahe_last_title = settings.value("animepahe_last_title", "", type=str)
@@ -891,6 +920,7 @@ class ExternalToolsConfig:
             animepahe_launch_on_startup=bool(animepahe_launch_on_startup),
             animepahe_periodic_run=bool(animepahe_periodic_run),
             animepahe_interval_hours=max(1, int(animepahe_interval_hours or 6)),
+            animepahe_last_run_at=_coerce_epoch(animepahe_last_run_at),
             animepahe_last_url=str(animepahe_last_url or ""),
             animepahe_last_title=str(animepahe_last_title or ""),
             animepahe_last_episodes=str(animepahe_last_episodes or ""),

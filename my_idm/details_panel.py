@@ -49,7 +49,12 @@ logger = logging.getLogger("my_idm.details_panel")
 
 from my_idm.database import DEFAULT_QUEUE_ID, DownloadEntry
 from my_idm.download_model import _format_eta, _format_speed, _format_time
-from my_idm.external_tools import embedded_browser_supported, find_chrome_hwnd, launch_animepahe_gui
+from my_idm.external_tools import (
+    describe_animepahe_schedule,
+    embedded_browser_supported,
+    find_chrome_hwnd,
+    launch_animepahe_gui,
+)
 from my_idm.manager import DownloadManager
 from my_idm.styles import Colors, themed, themed_widget
 from my_idm.utils import send_to_trash, to_int, unlock_path
@@ -3160,6 +3165,17 @@ class DetailsPanel(QWidget):
         self._console_info_lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 11px;")
         ctrl_bar.addWidget(self._console_info_lbl)
 
+        # The schedule clock. "Every 6 hours" is otherwise invisible: the run fires on a
+        # background timer, so a session that ran looks exactly like one that never did.
+        self._console_schedule_lbl = QLabel("", widget)
+        self._console_schedule_lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 11px;")
+        self._console_schedule_lbl.setToolTip(
+            "When the scheduled AnimePahe library scan last ran and when it is next due. "
+            "Configure it in Preferences → AnimePahe."
+        )
+        ctrl_bar.addWidget(self._console_schedule_lbl)
+        self._update_console_schedule_label()
+
         ctrl_bar.addStretch(1)
 
         # Filter box
@@ -3443,8 +3459,12 @@ class DetailsPanel(QWidget):
     def _start_log_timer(self):
         if not self._log_timer.isActive():
             self._log_timer.start(250)
-        self._prune_console_log()
+        # Read first, then prune. Pruning first rewrote the file from a snapshot that
+        # predated whatever the scraper had appended since the tab was last open, so a
+        # session that started while the Console tab was closed was deleted on disk.
         self._poll_console_log()
+        self._prune_console_log()
+        self._update_console_schedule_label()
 
     def _stop_log_timer(self):
         if self._log_timer.isActive():
@@ -3458,7 +3478,14 @@ class DetailsPanel(QWidget):
     CONSOLE_LOG_RETENTION_DAYS = 3
 
     def _session_within_retention(self, header_lines) -> bool:
-        """True when a session is inside the retention window (or undated)."""
+        """True when a session is inside the retention window (or undated).
+
+        The banner timestamp is written in **local** time (`datetime.now()` on the
+        scraper side), so it must be attached to the local timezone before comparing
+        against a UTC cutoff. Forcing UTC instead made a session look however many
+        hours the offset is *newer* than it really was, so the log kept more history
+        than the setting promised.
+        """
         if not header_lines:
             return True
         title = self._session_title(header_lines)
@@ -3467,19 +3494,38 @@ class DetailsPanel(QWidget):
         except (TypeError, ValueError):
             return True  # undated preamble: keep it rather than guess
         if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
+            stamp = stamp.astimezone()
         return stamp >= self._retention_cutoff()
 
     @classmethod
     def _retention_cutoff(cls) -> datetime:
         return datetime.now(timezone.utc) - timedelta(days=cls.CONSOLE_LOG_RETENTION_DAYS)
 
+    def _console_log_is_current(self) -> bool:
+        """True when every byte on disk has already been read into the in-memory snapshot.
+
+        An incremental reader is not a safe basis for rewriting the file it reads: if the
+        scraper appended while the tab was closed, the snapshot is behind the file, and the
+        retention pass would write the snapshot over those bytes. Only a snapshot that
+        accounts for exactly as much content as the file holds may be written back.
+        """
+        log_path = self._manager.external_tools_config.get_console_log_path()
+        if not log_path or not log_path.is_file():
+            return False
+        try:
+            return os.path.getsize(log_path) == self._log_offset
+        except OSError as exc:
+            logger.debug("Could not stat the console log: %s", exc)
+            return False
+
     def _prune_console_log(self) -> None:
         """Drop sessions older than the retention window, on disk and in memory.
 
         Rewrites the log file so it stops growing. Only safe while the scraper is
-        idle; a running scraper holds the file open for append, so the on-disk
-        rewrite is skipped in that case and the in-memory drop still applies.
+        idle *and* the snapshot is current; a running scraper holds the file open for
+        append, and a stale snapshot means the rewrite would delete sessions nobody
+        has read yet. In both cases the in-memory drop still applies, so the tabs are
+        correct even when the file is left alone.
         """
         if not self._raw_log_lines:
             return
@@ -3510,6 +3556,29 @@ class DetailsPanel(QWidget):
         log_path = self._manager.external_tools_config.get_console_log_path()
         if not log_path or not log_path.is_file():
             return
+
+        # Bring the snapshot up to date before writing anything back.
+        if not self._console_log_is_current():
+            self._poll_console_log()
+            sessions = self._console_sessions()
+            keep = [s for s in sessions if self._session_within_retention(s[1])]
+            rebuilt = []
+            for _key, header, body in keep:
+                rebuilt.extend(header)
+                rebuilt.extend(body)
+            if not rebuilt:
+                return
+            rebuilt.append("\n")
+            self._raw_log_lines = rebuilt
+        if not self._console_log_is_current():
+            # Still behind (the file is being written faster than it can be read, or it
+            # vanished). Keeping the stale file is better than truncating a live session.
+            logger.warning(
+                "Console log retention: skipped the on-disk rewrite because the log has "
+                "unread bytes; the in-memory drop still applies",
+            )
+            return
+
         try:
             with open(log_path, "w", encoding="utf-8", errors="replace") as fh:
                 fh.write("".join(rebuilt))
@@ -3520,7 +3589,18 @@ class DetailsPanel(QWidget):
         # Refresh the session list so the dropped runs disappear from the tabs.
         self._render_console()
 
+    def _update_console_schedule_label(self) -> None:
+        """Refresh the last-run / next-due line on the console control bar."""
+        label = getattr(self, "_console_schedule_lbl", None)
+        if label is None:
+            return
+        try:
+            label.setText(describe_animepahe_schedule(self._manager.external_tools_config))
+        except Exception as exc:
+            logger.debug("Could not describe the AnimePahe schedule: %s", exc)
+
     def _poll_console_log(self):
+        self._update_console_schedule_label()
         log_path = self._manager.external_tools_config.get_console_log_path()
         if not log_path or not log_path.is_file():
             return

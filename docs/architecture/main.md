@@ -901,6 +901,18 @@ My-IDM allows integration with companion scrapers and download tools (e.g., Anim
    - Web-based tools or automation views can be docked inside an embedded browser subtab.
 3. **Status Bar Indicators**:
    - A dedicated footer badge indicates tool status, allows toggling background execution, and triggers quick log inspection.
+4. **Scheduled Library Scans** (`DownloadManager._animepahe_timer`):
+   - A bounded **poll** (60 s, `manager._ANIMEPAHE_POLL_INTERVAL_MS`) that asks
+     `_animepahe_run_is_due()` whether a run should fire, rather than sleeping for a whole
+     interval. The N-hour spacing is enforced by comparing `animepahe_last_run_at`
+     (`ExternalToolsConfig`, persisted in QSettings under **ExternalTools**) against the
+     configured interval - not by the timer period.
+   - Every launch records that timestamp, so a scheduled run, a launch-on-startup run and one
+     the user starts by hand all share one clock and cannot double-fire.
+   - The catch-up rule: a session that was closed for longer than the interval triggers **one**
+     run on the next start (or first poll), not one per missed interval, and is then on
+     schedule. A failed launch still counts as an attempt, so a missing repo cannot spin the
+     poll into a retry storm.
 
 ---
 

@@ -547,6 +547,12 @@ The settings dialog is organized into fourteen dedicated tabs:
 ### 10. External Tools Tab
 
 - **AnimePahe Auto-Downloader / Scraper**: Repository path, launch-on-startup, periodic execution interval, and embedded console/debug log viewers.
+  - **Periodic run** runs a library scan every N hours, and the schedule is measured from the
+    **last actual run** (scheduled, startup, or the one you started by hand) - not from when the
+    app was opened. So starting a scan yourself pushes the next automatic one out by N hours.
+  - Because the last run time is remembered, a session you missed is caught up rather than lost:
+    if My-IDM was closed for longer than N hours, one scan runs when you next start it, and the
+    schedule then continues normally. Being offline for three days costs you one scan, not three.
 - **🎬 YouTube Downloader (yt-dlp)**:
   - Tool path detection and live status indicators for `yt-dlp` and `ffmpeg`.
   - Version checker and inline **Update yt-dlp** button.

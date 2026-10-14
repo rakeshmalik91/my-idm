@@ -23,7 +23,7 @@ from my_idm.external_tools import (
     open_file_in_default_app,
     show_in_folder,
 )
-from my_idm.manager import DownloadManager
+from my_idm.manager import DownloadManager, _ANIMEPAHE_POLL_INTERVAL_MS
 from my_idm.utils import normalize_path
 
 app = QApplication.instance() or QApplication(sys.argv)
@@ -415,36 +415,134 @@ class TestManagerExternalToolsLifecycle(unittest.TestCase):
 
         mocks["start_animepahe_scraper"].assert_called_once_with()
 
-    def test_manager_periodic_timer_configuration(self):
-        """DownloadManager starts or stops the periodic AnimePahe timer based on config."""
+    @patch.object(ExternalToolsConfig, "save")
+    def test_manager_periodic_timer_configuration(self, _mock_save):
+        """The schedule poll is armed by the flag, and its period is bounded.
+
+        The timer itself is a bounded *poll* now, not a six-hour sleep: the N-hour spacing
+        lives in `_animepahe_run_is_due`, so the poll has to wake often enough to fire near
+        the deadline and never sleep for a whole interval (which is what hid missed runs
+        while the app was closed).
+        """
         cfg_off = ExternalToolsConfig(animepahe_periodic_run=False, animepahe_interval_hours=6)
         self.manager.set_external_tools_config(cfg_off)
         self.assertFalse(self.manager._animepahe_timer.isActive())
 
-        # When enabled, timer starts with configured interval (6 hours = 21,600,000 ms)
+        # When enabled, the timer is active and polls at the fixed bounded cadence.
         cfg_on = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6)
         self.manager.set_external_tools_config(cfg_on)
         self.assertTrue(self.manager._animepahe_timer.isActive())
-        self.assertEqual(self.manager._animepahe_timer.interval(), 6 * 3600 * 1000)
+        self.assertEqual(self.manager._animepahe_timer.interval(), _ANIMEPAHE_POLL_INTERVAL_MS)
+        self.assertLessEqual(self.manager._animepahe_timer.interval(), _ANIMEPAHE_POLL_INTERVAL_MS)
+        self.assertGreater(self.manager._animepahe_timer.interval(), 0)
 
-        # Updating interval adjusts timer
-        cfg_12 = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=12)
-        self.manager.set_external_tools_config(cfg_12)
+        # A short interval must not make the poll spin: the cadence is fixed, and the
+        # N-hour spacing is checked by _animepahe_run_is_due, not by the timer period.
+        cfg_1h = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=1)
+        self.manager.set_external_tools_config(cfg_1h)
         self.assertTrue(self.manager._animepahe_timer.isActive())
-        self.assertEqual(self.manager._animepahe_timer.interval(), 12 * 3600 * 1000)
+        self.assertEqual(self.manager._animepahe_timer.interval(), _ANIMEPAHE_POLL_INTERVAL_MS)
 
-        # Disabling stops timer
+        # Disabling stops the timer
         self.manager.set_external_tools_config(cfg_off)
         self.assertFalse(self.manager._animepahe_timer.isActive())
 
-    def test_manager_periodic_timer_tick_triggers_scraper(self):
-        """_on_animepahe_timer_tick invokes start_animepahe_scraper when periodic run is enabled."""
-        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6)
+    @patch.object(ExternalToolsConfig, "save")
+    def test_manager_periodic_timer_tick_triggers_scraper(self, _mock_save):
+        """The poll launches the scraper, and stamps the run that makes the spacing work."""
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6,
+                                  animepahe_last_run_at=0.0)
         self.manager.set_external_tools_config(cfg)
 
         with patch.object(self.manager, "start_animepahe_scraper") as mock_start:
             self.manager._on_animepahe_timer_tick()
             mock_start.assert_called_once()
+
+        self.assertGreater(
+            self.manager._external_tools_config.animepahe_last_run_at, 0.0,
+            "the tick must record when it ran, or the deadline would never move",
+        )
+
+    @patch.object(ExternalToolsConfig, "save")
+    def test_a_run_inside_the_interval_is_not_triggered(self, _mock_save):
+        """A run N-epsilon hours ago is not due, so the poll does not double-fire."""
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6,
+                                  animepahe_last_run_at=time.time() - 5 * 3600)
+        self.manager.set_external_tools_config(cfg)
+
+        with patch.object(self.manager, "start_animepahe_scraper") as mock_start:
+            self.manager._on_animepahe_timer_tick()
+            mock_start.assert_not_called()
+
+    @patch.object(ExternalToolsConfig, "save")
+    def test_a_run_past_the_deadline_is_triggered_once(self, _mock_save):
+        """The catch-up rule: one run when the last one is older than the interval."""
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6,
+                                  animepahe_last_run_at=time.time() - 25 * 3600)
+        self.manager.set_external_tools_config(cfg)
+
+        with patch.object(self.manager, "start_animepahe_scraper") as mock_start:
+            # Three consecutive polls across one long gap must still be a single run.
+            for _ in range(3):
+                self.manager._on_animepahe_timer_tick()
+            mock_start.assert_called_once()
+
+    @patch.object(ExternalToolsConfig, "save")
+    def test_the_first_ever_run_is_due_immediately(self, _mock_save):
+        """No recorded run yet, so the schedule must not wait a full interval."""
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6,
+                                  animepahe_last_run_at=0.0)
+        self.manager.set_external_tools_config(cfg)
+        self.assertTrue(self.manager._animepahe_run_is_due())
+
+        # And it is inert while the feature is off, whatever the timestamp says.
+        off = ExternalToolsConfig(animepahe_periodic_run=False, animepahe_interval_hours=6,
+                                  animepahe_last_run_at=0.0)
+        self.manager.set_external_tools_config(off)
+        self.assertFalse(self.manager._animepahe_run_is_due())
+
+    @patch("my_idm.manager.launch_animepahe_cli", return_value=(True, "started", MagicMock()))
+    @patch.object(ExternalToolsConfig, "save")
+    def test_a_launched_run_resets_the_deadline(self, _mock_save, _mock_launch):
+        """Startup and manual runs share the schedule, so they cannot double-fire with it.
+
+        The real `_launch_animepahe_task` runs: patching it would skip the very line under
+        test, which is the stamp it writes on success. The mock process is held open until
+        cleanup and the queued backlog signal is drained here, because a monitor thread that
+        outlives the test delivers `process_backlogs` into whatever runs next.
+        """
+        release = threading.Event()
+        self.addCleanup(release.set)
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # already exited
+        mock_proc.wait.side_effect = release.wait
+
+        # Set the schedule explicitly: conftest isolates QSettings, so the manager's
+        # loaded config has periodic run off and this test would otherwise assert
+        # against the developer's live preferences.
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6)
+        self.manager.set_external_tools_config(cfg)
+        self.assertTrue(self.manager._animepahe_run_is_due(),
+                        "no run recorded yet, so the schedule is due")
+
+        with patch("my_idm.manager.launch_animepahe_cli",
+                   return_value=(True, "started", mock_proc)):
+            self.manager.start_animepahe_scraper()
+
+        self.assertFalse(self.manager._animepahe_run_is_due(),
+                         "a run that just started must not also be due")
+        self.assertGreater(self.manager._external_tools_config.animepahe_last_run_at, 0.0)
+
+        # Let the monitor finish and drain the queued signal *inside* this test.
+        # Waiting on `_animepahe_process` would be wrong: the monitor clears it
+        # synchronously, so the check can pass before the queued signal has been
+        # delivered - and the delivery then lands in whatever test runs next.
+        release.set()
+        self.assertTrue(
+            pump_until(lambda: self.mock_process_backlogs.called),
+            "the animepahe monitor never dispatched process_backlogs",
+        )
+        self.mock_process_backlogs.reset_mock()
 
     def test_manager_periodic_timer_tick_is_inert_when_disabled(self):
         """The negative half of the previous test: no config, no launch."""
@@ -832,10 +930,12 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         cfg = ExternalToolsConfig()
         self.assertFalse(cfg.animepahe_periodic_run)
         self.assertEqual(cfg.animepahe_interval_hours, 6)
+        self.assertEqual(cfg.animepahe_last_run_at, 0.0)
 
         d = cfg.to_dict()
         self.assertIn("animepahe_periodic_run", d)
         self.assertIn("animepahe_interval_hours", d)
+        self.assertIn("animepahe_last_run_at", d)
 
         d["animepahe_periodic_run"] = True
         d["animepahe_interval_hours"] = 12
@@ -851,6 +951,36 @@ class TestSettingsDialogAnimePaheEnhancements(unittest.TestCase):
         restored = ExternalToolsConfig.load(settings)
         self.assertTrue(restored.animepahe_periodic_run)
         self.assertEqual(restored.animepahe_interval_hours, 12)
+
+    def test_last_run_timestamp_survives_a_round_trip(self):
+        """The schedule's clock has to outlive the app, or a closed session loses the deadline."""
+        stamp = 1_772_000_000.0
+        ini_file = str(Path(self.tmp_dir.name) / "schedule.ini")
+        settings = QSettings(ini_file, QSettings.Format.IniFormat)
+
+        cfg = ExternalToolsConfig(animepahe_periodic_run=True, animepahe_interval_hours=6,
+                                  animepahe_last_run_at=stamp)
+        cfg.save(settings)
+        self.assertEqual(ExternalToolsConfig.load(settings).animepahe_last_run_at, stamp)
+
+        # The dataclass form, which is how the settings dialog copies the config around.
+        self.assertEqual(
+            ExternalToolsConfig.from_dict(cfg.to_dict()).animepahe_last_run_at, stamp)
+
+    def test_an_unreadable_last_run_timestamp_means_never_ran(self):
+        """Corrupt input must degrade to 'due', never raise, and never pin a future deadline."""
+        for junk in (None, "", "not-a-number", float("nan")):
+            self.assertEqual(
+                ExternalToolsConfig.from_dict({"animepahe_last_run_at": junk}).animepahe_last_run_at,
+                0.0, f"{junk!r} should read as never ran",
+            )
+        self.assertEqual(
+            ExternalToolsConfig.from_dict(
+                {"animepahe_last_run_at": "-5"}).animepahe_last_run_at, 0.0)
+        # A readable value survives verbatim, including one in the future.
+        self.assertEqual(
+            ExternalToolsConfig.from_dict({"animepahe_last_run_at": "1772000000"}).animepahe_last_run_at,
+            1_772_000_000.0)
 
     def test_settings_dialog_periodic_scraper_controls(self):
         """SettingsDialog loads and persists periodic scraper checkbox and interval spinbox."""

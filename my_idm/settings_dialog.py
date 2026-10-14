@@ -86,6 +86,7 @@ from my_idm.download_model import Col, _format_speed
 from my_idm.hotkey import LOCK_KEYS, LOCK_KEY_LABELS
 from my_idm.dialogs import AddQueueDialog
 from my_idm.external_tools import (
+    describe_animepahe_schedule,
     launch_animepahe_cli,
     launch_animepahe_gui,
     open_file_in_default_app,
@@ -2485,8 +2486,19 @@ class SettingsDialog(QDialog):
 
         self._animepahe_periodic_cb.toggled.connect(self._animepahe_interval_spin.setEnabled)
         self._animepahe_periodic_cb.toggled.connect(self._animepahe_interval_lbl.setEnabled)
+        self._animepahe_periodic_cb.toggled.connect(
+            lambda _on=None: self._update_animepahe_schedule_label()
+        )
 
         ap_layout.addLayout(periodic_row)
+
+        # The schedule clock. Without it the only way to tell whether "every 6 hours" is
+        # working is to read the app log, which is exactly how a run that no-ops (site
+        # unreachable) ends up looking like a schedule that never fired.
+        self._animepahe_schedule_lbl = QLabel("")
+        self._animepahe_schedule_lbl.setStyleSheet("color: #8fa0b5; font-size: 11px;")
+        self._animepahe_schedule_lbl.setWordWrap(True)
+        ap_layout.addWidget(self._animepahe_schedule_lbl)
 
         desc_lbl = QLabel(
             "ℹ️ In CLI mode, the scraper performs an automated library check in the background. "
@@ -4199,6 +4211,7 @@ class SettingsDialog(QDialog):
         self._animepahe_interval_spin.setValue(self._external_tools_cfg.animepahe_interval_hours)
         self._animepahe_interval_spin.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_interval_lbl.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
+        self._update_animepahe_schedule_label()
         self._animepahe_url_edit.setText(self._external_tools_cfg.animepahe_last_url)
         self._animepahe_title_edit.setText(self._external_tools_cfg.animepahe_last_title)
         self._animepahe_episodes_edit.setText(self._external_tools_cfg.animepahe_last_episodes)
@@ -4342,6 +4355,25 @@ class SettingsDialog(QDialog):
 
         if not ok:
             QMessageBox.warning(self, "CLI Scraper", msg)
+
+    def _update_animepahe_schedule_label(self):
+        """Describe when the last scheduled scan ran and when the next one is due.
+
+        Read from the dialog's config copy, so the interval shown follows the checkbox and
+        the spinbox while the user is still editing; the last-run stamp is whatever the
+        manager had when this dialog opened. The live copy of the same line is on the
+        Console tab of the details panel.
+        """
+        label = getattr(self, "_animepahe_schedule_lbl", None)
+        if label is None:
+            return
+        cfg = self._external_tools_cfg
+        cfg.animepahe_periodic_run = self._animepahe_periodic_cb.isChecked()
+        cfg.animepahe_interval_hours = self._animepahe_interval_spin.value()
+        try:
+            label.setText(describe_animepahe_schedule(cfg))
+        except Exception as exc:  # a label must never take the dialog down
+            logger.debug("Could not describe the AnimePahe schedule: %s", exc)
 
     def _on_download_animepahe_url(self):
         url = self._animepahe_url_edit.text().strip()

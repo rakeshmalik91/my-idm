@@ -1842,14 +1842,24 @@ class TestDetailsPanel(unittest.TestCase):
         self.addCleanup(panel._log_timer.stop)
         self.addCleanup(panel._browser_monitor_timer.stop)
         self.addCleanup(panel.deleteLater)
-        panel.show_animepahe_console()
+        # Opening the console tab starts the 250 ms log timer, which polls *and* prunes.
+        # Suppress pruning for the build only, so each test drives it explicitly: whether
+        # the panel already compacted the file is exactly what these tests vary, and the
+        # ordering inside _start_log_timer is covered by its own test below.
+        with patch.object(DetailsPanel, "_prune_console_log"):
+            panel.show_animepahe_console()
         panel._log_timer.stop()
         self.assertFalse(panel._log_timer.isActive())
         return panel, log_path
 
     def test_console_log_keeps_only_the_last_three_days(self):
-        """Only sessions inside the retention window survive a prune."""
-        from datetime import datetime, timedelta, timezone
+        """Only sessions inside the retention window survive a prune.
+
+        The banner timestamps are written in **local** time by the scraper, so they are
+        generated in local time here; stamping them UTC is what made the retention window
+        sit however many hours the offset is in the past.
+        """
+        from datetime import datetime, timedelta
 
         rule = "=" * 55
 
@@ -1859,7 +1869,7 @@ class TestDetailsPanel(unittest.TestCase):
                 f"  Command: py scraper.py\n{rule}\n\n"
             )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now()
         old = (now - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
         just_outside = (now - timedelta(days=3, hours=1)).strftime("%Y-%m-%d %H:%M:%S")
         recent = (now - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1873,9 +1883,6 @@ class TestDetailsPanel(unittest.TestCase):
 
         panel, log_path = self._retention_panel(log_text, scraper_running=False)
         panel._poll_console_log()
-        self.assertEqual(panel._console_session_tabs.count(), 3)
-
-        size_before = log_path.stat().st_size
         panel._prune_console_log()
 
         body = "".join(panel._raw_log_lines)
@@ -1897,11 +1904,58 @@ class TestDetailsPanel(unittest.TestCase):
         )
         self.assertTrue(on_disk.endswith("\n"), "the rebuild always ends with a newline")
         self.assertLess(
-            log_path.stat().st_size, size_before,
+            log_path.stat().st_size, len(log_text),
             "the on-disk file must shrink after two sessions are dropped",
         )
-        self.assertLess(log_path.stat().st_size, len(log_text))
         # A second prune is a no-op: nothing is left outside the window.
+        panel._prune_console_log()
+        self.assertEqual(log_path.read_text(encoding="utf-8"), on_disk)
+
+    def test_prune_never_erases_a_session_the_panel_has_not_read(self):
+        """Regression: a session appended while the Console tab was closed.
+
+        Retention used to rewrite console_log.txt from the in-memory snapshot, and the
+        snapshot was taken before whatever the scraper had appended since the tab was last
+        open - so the newest session was deleted from disk. That is how a run that fired
+        on schedule ended up with no trace at all.
+        """
+        from datetime import datetime, timedelta
+
+        rule = "=" * 55
+
+        def banner(ts):
+            return (
+                f"\n{rule}\n  AnimePahe CLI Scraper Session Started: {ts}\n"
+                f"  Command: py scraper.py\n{rule}\n\n"
+            )
+
+        now = datetime.now()
+        old = (now - timedelta(days=9)).strftime("%Y-%m-%d %H:%M:%S")
+        recent = (now - timedelta(hours=6)).strftime("%Y-%m-%d %H:%M:%S")
+        log_text = banner(old) + "OLD\n" + banner(recent) + "RECENT\n"
+
+        panel, log_path = self._retention_panel(log_text, scraper_running=False)
+        # The snapshot now holds one droppable session, so the next prune has work to do.
+        panel._poll_console_log()
+        self.assertEqual(panel._console_session_tabs.count(), 2)
+
+        # The tab is closed; the scraper appends a whole new session nobody has read.
+        fresh = (now - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(banner(fresh) + "UNREAD-LINE\n")
+
+        self.assertFalse(panel._console_log_is_current(),
+                         "the appended bytes must count as unread")
+
+        panel._prune_console_log()
+
+        on_disk = log_path.read_text(encoding="utf-8")
+        self.assertIn("UNREAD-LINE", on_disk,
+                      "a session the panel never read must survive the retention pass")
+        self.assertIn("RECENT", on_disk)
+        self.assertNotIn("OLD", on_disk, "the genuinely expired session is still dropped")
+        # The snapshot is current afterwards, and a second prune changes nothing.
+        self.assertTrue(panel._console_log_is_current())
         panel._prune_console_log()
         self.assertEqual(log_path.read_text(encoding="utf-8"), on_disk)
 

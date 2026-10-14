@@ -72,6 +72,13 @@ log = logging.getLogger(__name__)
 
 DEFAULT_SAVE_PATH = DEFAULT_DOWNLOADS_DIR
 
+#: How often the AnimePahe schedule poll wakes to ask whether a run is due. Bounded, so a
+#: run fires within a minute of its deadline and a short interval still gets a sane cadence;
+#: the configured N hours is enforced by ``_animepahe_run_is_due``, not by the timer period.
+#: The check is two float reads, so polling cheaply and spacing by timestamp is strictly
+#: better than a timer that sleeps for a whole interval and hides time the app was closed.
+_ANIMEPAHE_POLL_INTERVAL_MS = 60_000
+
 
 def _log_coro_failure(future) -> None:
     """Report a background coroutine that ended in an exception.
@@ -620,7 +627,11 @@ class DownloadManager(QObject):
         self._torrent_watch_seen: set[str] = set()
         self._apply_torrent_watch_config()
 
-        # AnimePahe periodic scraper timer
+        # AnimePahe periodic scraper timer. Unlike the other timers this one is a *poll*:
+        # it wakes often and asks whether a run is due, so the schedule survives the app
+        # being closed. A plain 6-hour QTimer only counts time while the window is open,
+        # and a session that was shut down across two slots restarts the count from zero
+        # instead of running once and getting back on schedule.
         self._animepahe_timer = QTimer(self)
         self._animepahe_timer.timeout.connect(self._on_animepahe_timer_tick)
         self._apply_animepahe_timer_config()
@@ -1352,12 +1363,39 @@ class DownloadManager(QObject):
         self._apply_animepahe_timer_config()
         self.external_tools_config_changed.emit(config)
 
-    def _apply_animepahe_timer_config(self):
-        """Configures or starts/stops the periodic AnimePahe scraper timer."""
+    def _animepahe_run_is_due(self, now: Optional[float] = None) -> bool:
+        """True when a scheduled run should fire *now*.
+
+        The rule is the plain one: run every N hours, and if the app was closed for longer
+        than that, run once as soon as it is running again - not once per missed interval. A
+        machine that was off for three days runs once at startup and is then on schedule,
+        instead of firing three back-to-back scans (or, under the old timer, restarting the
+        count and never catching up at all).
+
+        ``animepahe_last_run_at <= 0`` means never run, which is due: nothing else would ever
+        run the first time. A timestamp in the future - a clock that moved backwards - is not
+        due yet rather than due forever.
+        """
         cfg = self._external_tools_config
-        if cfg.animepahe_periodic_run and cfg.animepahe_interval_hours > 0:
-            interval_ms = int(cfg.animepahe_interval_hours * 3600 * 1000)
-            self._animepahe_timer.setInterval(interval_ms)
+        if not cfg.animepahe_periodic_run:
+            return False
+        interval_hours = max(1, int(getattr(cfg, "animepahe_interval_hours", 0) or 0))
+        last_run_at = float(getattr(cfg, "animepahe_last_run_at", 0.0) or 0.0)
+        if last_run_at <= 0:
+            return True
+        now = time.time() if now is None else now
+        return (now - last_run_at) >= interval_hours * 3600
+
+    def _apply_animepahe_timer_config(self):
+        """Arm or disarm the AnimePahe schedule poll.
+
+        Called from construction, from ``start()``, and on every settings save, so the timer
+        tracks the current configuration and a manager that is never started never polls.
+        """
+        cfg = self._external_tools_config
+        if cfg.animepahe_periodic_run and int(getattr(cfg, "animepahe_interval_hours", 0) or 0) > 0:
+            if self._animepahe_timer.interval() != _ANIMEPAHE_POLL_INTERVAL_MS:
+                self._animepahe_timer.setInterval(_ANIMEPAHE_POLL_INTERVAL_MS)
             if not getattr(self, "_stopped", False) and not self._animepahe_timer.isActive():
                 self._animepahe_timer.start()
         else:
@@ -1371,15 +1409,53 @@ class DownloadManager(QObject):
     def _on_animepahe_timer_tick_body(self):
         if getattr(self, "_stopped", False):
             return
-        cfg = self._external_tools_config
-        if not cfg.animepahe_periodic_run:
+        if not self._external_tools_config.animepahe_periodic_run:
             self._animepahe_timer.stop()
             return
+        if not self._animepahe_run_is_due():
+            return
+        self._trigger_animepahe_periodic_run()
+
+    def _trigger_animepahe_periodic_run(self):
+        """Record this run, then launch the scraper.
+
+        The timestamp is written *before* the launch, not by waiting for it to succeed: a run
+        that fails to start - repo moved, script missing - must still count as the attempt,
+        or the next poll (a minute later) retries immediately and the backlog of retries
+        grows as fast as the poll can fire until the user notices.
+        """
+        cfg = self._external_tools_config
+        cfg.animepahe_last_run_at = time.time()
+        self._save_animepahe_timestamp()
         log.info(
             "Triggering scheduled AnimePahe scraper run (interval: every %s hours)",
             cfg.animepahe_interval_hours,
         )
         self.start_animepahe_scraper()
+
+    def _record_animepahe_run(self):
+        """Stamp the last-run time for any launch - scheduled, startup, or user-initiated.
+
+        Every path that actually starts the scraper goes through here, so the schedule has
+        one clock. Two runs that matter: a launch-on-startup run must reset the clock, or
+        the first poll after startup would immediately fire a second run; and a run the
+        user starts from Preferences resets it too, because "every N hours" is measured
+        from the last run, not from the last *scheduled* run.
+        """
+        self._external_tools_config.animepahe_last_run_at = time.time()
+        self._save_animepahe_timestamp()
+
+    def _save_animepahe_timestamp(self):
+        """Persist the last-run timestamp, never raising into the caller.
+
+        This is QSettings, not the downloads database, and losing the write costs the
+        catch-up guarantee rather than the schedule - so it must not be able to stop a run
+        that is otherwise fine.
+        """
+        try:
+            self._external_tools_config.save()
+        except Exception as exc:
+            log.debug("Could not persist AnimePahe last-run time: %s", exc)
 
     def start_animepahe_scraper(
         self,
@@ -1428,6 +1504,7 @@ class DownloadManager(QObject):
             title=title,
         )
         if ok and proc:
+            self._record_animepahe_run()
             self._animepahe_process = proc
             self.animepahe_status_changed.emit(True)
 
