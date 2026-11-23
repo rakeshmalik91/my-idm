@@ -961,6 +961,22 @@ class TestRowAndHandleDisagreement(TransitionTestCase):
             reason="a completed row that turns out to be incomplete",
         )
 
+    def test_file_not_found_row_is_not_repromoted_to_seeding_by_poll(self):
+        """A row in file_not_found status must never be re-promoted to seeding or completed by poll_all."""
+        handle = RecordingHandle(state=SEEDING, done=1000, paused=False, auto_managed=True)
+        self.add("file_not_found", handle)
+        self.poll(times=5)
+
+        self.assertEqual(self.row().status, "file_not_found")
+        self.assertTrue(
+            handle.paused,
+            "a file_not_found row must have its handle paused so it cannot keep uploading",
+        )
+        self.assertFalse(
+            handle.auto_managed,
+            "auto_managed must be cleared for a file_not_found row",
+        )
+
 
 # ===========================================================================
 # HTTP downloads: the same expected-state contract

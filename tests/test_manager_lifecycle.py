@@ -493,6 +493,29 @@ class TestManagerLifecycle(unittest.TestCase):
         self.assertEqual(self.db.get_download("d_startup_missing").status, "file_not_found")
         self.assertTrue(self.manager._verify_completed_timer.isActive())
 
+    def test_verify_completed_downloads_checks_seeding_torrents_and_pauses_handle(self):
+        """verify_completed_downloads transitions missing seeding torrents to file_not_found and pauses handle."""
+        missing_file = Path(self.tmp_dir.name) / "missing_torrent.iso"
+        e = DownloadEntry(
+            id="d_seeding_missing",
+            url="magnet:?xt=urn:btih:abcdef1234567890abcdef1234567890abcdef12",
+            filename="missing_torrent.iso",
+            file_path=str(missing_file),
+            save_path=self.tmp_dir.name,
+            download_type="torrent",
+            status="seeding",
+        )
+        self.db.add_download(e)
+
+        statuses = []
+        self.manager.status_changed.connect(lambda did, st, err: statuses.append((did, st, err)))
+        with patch.object(self.manager._torrent, "pause_handle") as mock_pause_handle:
+            missing_count = self.manager.verify_completed_downloads()
+            self.assertEqual(missing_count, 1)
+            self.assertIn(("d_seeding_missing", "file_not_found", "File not found on disk"), statuses)
+            self.assertEqual(self.db.get_download("d_seeding_missing").status, "file_not_found")
+            mock_pause_handle.assert_called_once_with("d_seeding_missing")
+
     # -- Recheck engine ------------------------------------------------------
 
     def test_recheck_missing_file_resets_progress_to_zero(self):

@@ -3445,13 +3445,23 @@ class DownloadManager(QObject):
         entry.error_message = "File not found on disk"
         self._db.update_status(download_id, "file_not_found", "File not found on disk")
         self.status_changed.emit(download_id, "file_not_found", "File not found on disk")
+        self.progress_updated.emit(
+            download_id, entry.downloaded_size, entry.total_size, 0.0, 0.0, 0, 0, 0.0
+        )
+
+        # If it is a torrent, pause the libtorrent handle so the poll loop does
+        # not continue uploading or re-promote it back to seeding.
+        if entry.download_type == "torrent":
+            self._torrent.pause_handle(download_id)
 
     def verify_completed_downloads(self) -> int:
-        """Verify that completed downloads still exist on disk.
+        """Verify that completed and seeding downloads still exist on disk.
 
-        Checks every entry currently in 'completed' status. If the target file
-        or directory on disk is missing, transitions the entry to 'file_not_found'
-        (giving YouTube entries an opportunity to relocate if sanitised differently).
+        Checks every entry currently in 'completed' or 'seeding' status.
+        If the target file or directory on disk is missing, transitions the
+        entry to 'file_not_found' (giving YouTube entries an opportunity to
+        relocate if sanitised differently). Seeding torrents whose files are
+        missing are also paused so the poll loop cannot re-promote them.
 
         Returns:
             The number of entries transitioned to 'file_not_found'.
@@ -3460,6 +3470,14 @@ class DownloadManager(QObject):
             return 0
 
         completed_entries = self._db.get_completed_downloads()
+        # Also check seeding torrents: their files can be deleted/moved while
+        # seeding, and without this the disappearance is not caught until the
+        # user manually stops seeding — at which point poll_all may immediately
+        # re-promote the entry back to seeding.
+        completed_entries += [
+            e for e in self._db.get_all_downloads()
+            if e.status == "seeding" and e.download_type == "torrent"
+        ]
         missing_count = 0
         for entry in completed_entries:
             file_path = entry.file_path
@@ -4334,7 +4352,7 @@ class DownloadManager(QObject):
     def _on_http_progress(self, download_id: str, downloaded: int,
                           total: int, speed: float, eta: float):
         entry = self._db.get_download(download_id)
-        if entry and entry.status in ("paused", "stopped", "suspended"):
+        if entry and entry.status in ("paused", "stopped", "suspended", "file_not_found"):
             return
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta, 0, 0, 0.0
@@ -4375,7 +4393,7 @@ class DownloadManager(QObject):
                              total: int, speed: float, eta: float,
                              seeds: int, peers: int, upload_speed: float):
         entry = self._db.get_download(download_id)
-        if entry and entry.status in ("paused", "stopped", "suspended"):
+        if entry and entry.status in ("paused", "stopped", "suspended", "file_not_found"):
             return
         self.progress_updated.emit(
             download_id, downloaded, total, speed, eta,
@@ -4393,7 +4411,7 @@ class DownloadManager(QObject):
                            error_msg: str):
         self._starting_downloads.discard(download_id)
         current = self._db.get_download(download_id)
-        if current and current.status in ("paused", "stopped", "suspended") and status in ("queued", "downloading", "fetching_metadata"):
+        if current and current.status in ("paused", "stopped", "suspended", "file_not_found") and status in ("queued", "downloading", "fetching_metadata", "finished", "seeding", "completed"):
             log.debug("Ignoring status %s for %s torrent %s", status, current.status, download_id)
             return
         if status in ("completed", "finished", "seeding") and current and current.total_size > 0:

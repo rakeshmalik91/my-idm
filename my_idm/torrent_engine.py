@@ -902,24 +902,24 @@ class TorrentEngine:
         except Exception:
             pass
 
-        if entry.status == "paused":
+        if entry.status in ("paused", "stopped"):
             try:
                 if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
             except Exception:
                 pass
             handle.pause()
-            self._db.update_status(entry.id, "paused")
+            self._db.update_status(entry.id, entry.status)
             if self._status_cb:
-                self._status_cb(entry.id, "paused", "")
-        elif entry.status == "completed":
+                self._status_cb(entry.id, entry.status, "")
+        elif entry.status in ("completed", "file_not_found"):
             try:
                 if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
             except Exception:
                 pass
             handle.pause()
-            # Preserve completed status — do not switch to fetching_metadata
+            # Preserve completed / file_not_found status — do not switch to fetching_metadata or seeding
         elif entry.status == "seeding":
             # Keep seeding active: clear auto_managed and resume, exactly as the paused and
             # completed branches above do the reverse. Without this a handle restored paused
@@ -974,11 +974,30 @@ class TorrentEngine:
         log.info("Added torrent: %s", entry.filename or url)
         return True
 
+    def pause_handle(self, download_id: str):
+        """Pause a torrent's libtorrent handle without altering its status in the DB."""
+        handle = self._handles.get(download_id)
+        if handle:
+            try:
+                if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
+                    handle.unset_flags(lt.torrent_flags.auto_managed)
+            except Exception as e:
+                log.debug("Could not unset auto_managed flag on pause_handle: %s", e)
+            try:
+                handle.pause()
+            except Exception as e:
+                log.debug("Could not pause handle in pause_handle: %s", e)
+            try:
+                if handle.is_valid():
+                    handle.save_resume_data()
+            except Exception:
+                pass
+
     def pause(self, download_id: str):
         handle = self._handles.get(download_id)
         if handle:
             entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
-            if entry and entry.status == "completed":
+            if entry and entry.status in ("completed", "file_not_found"):
                 return
             is_seeding = (entry and entry.status == "seeding")
 
@@ -1494,8 +1513,12 @@ class TorrentEngine:
 
             self._db.update_download(entry)
 
-            # If download is paused or stopped in DB, make sure torrent handle stays paused and reports 0 speed
-            if entry.status in ("paused", "stopped", "suspended"):
+            # If download is paused, stopped, suspended, or file_not_found in DB,
+            # make sure torrent handle stays paused and reports 0 speed.
+            # file_not_found must be guarded here: without it, the state
+            # transition block below sees a libtorrent state of "finished"/"seeding"
+            # and re-promotes the entry back to seeding, undoing the mark.
+            if entry.status in ("paused", "stopped", "suspended", "file_not_found"):
                 try:
                     s = handle.status()
                     raw_paused = getattr(s, "paused", None)
@@ -1585,7 +1608,7 @@ class TorrentEngine:
             # Check for completion or state transition out of checking
             state = status["state"]
             if state in ("finished", "seeding"):
-                if entry.status != "completed" and entry.status != "seeding":
+                if entry.status != "completed" and entry.status != "seeding" and entry.status != "file_not_found":
                     files = self.get_torrent_files(download_id)
                     if files:
                         entry.metadata["files"] = files
