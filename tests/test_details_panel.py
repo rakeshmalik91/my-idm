@@ -2551,6 +2551,71 @@ class TestDetailsPanel(unittest.TestCase):
         self.assertFalse(panel.is_stats_active())
         self.assertEqual(panel.current_mode(), "details")
 
+    def test_files_tree_retained_on_deselect_and_reselect(self):
+        """Deselecting and re-selecting a torrent download must cleanly rebuild the files tree without RuntimeError or blank view."""
+        files = [
+            {"index": 0, "path": "GameRepack/fg-01.bin", "name": "fg-01.bin", "size": 1000, "progress": 100.0, "downloaded": 1000, "priority": 4, "status": "completed"},
+            {"index": 1, "path": "GameRepack/setup.exe", "name": "setup.exe", "size": 500, "progress": 100.0, "downloaded": 500, "priority": 4, "status": "completed"},
+        ]
+        entry = DownloadEntry(
+            id="test-reselect-files-torrent",
+            url="magnet:?xt=urn:btih:abcdef1234567890",
+            filename="GameRepack",
+            download_type="torrent",
+            status="completed",
+            total_size=1500,
+            downloaded_size=1500,
+            metadata_json=json.dumps({"files": files}),
+        )
+        self._build(entry)
+
+        panel = self.win._details_panel
+        # 1. First selection
+        panel.set_download_id(entry.id)
+        self.assertGreater(panel._tree_files.topLevelItemCount(), 0)
+        self.assertIsNotNone(panel._files_hash)
+
+        # 2. Deselect
+        panel.set_download_id(None)
+        self.assertEqual(panel._tree_files.topLevelItemCount(), 0)
+        self.assertIsNone(panel._files_hash)
+        self.assertEqual(len(panel._folder_items), 0)
+
+        # 3. Re-select: must rebuild the tree and not crash on deleted C++ items
+        panel.set_download_id(entry.id)
+        self.assertGreater(panel._tree_files.topLevelItemCount(), 0)
+        self.assertEqual(panel._tree_files.topLevelItem(0).text(0), "📁 GameRepack")
+
+    def test_completed_torrent_seed_action_enabled_and_live_update(self):
+        """A completed torrent must have Start Seeding action enabled, and stop_all_seeding updates action states."""
+        files = [
+            {"index": 0, "path": "GameRepack/fg-01.bin", "name": "fg-01.bin", "size": 1000, "progress": 100.0, "downloaded": 1000, "priority": 4, "status": "completed"},
+        ]
+        entry = DownloadEntry(
+            id="test-seed-action-torrent",
+            url="magnet:?xt=urn:btih:1111222233334444",
+            filename="GameRepack",
+            download_type="torrent",
+            status="completed",
+            total_size=1000,
+            downloaded_size=1000,
+            metadata_json=json.dumps({"files": files}),
+        )
+        self._build(entry)
+
+        row = self.win._model.row_for_id(entry.id)
+        self.assertIsNotNone(row)
+        self.win._table.selectRow(row)
+
+        self.assertTrue(self.win._act_start_seeding.isEnabled())
+        self.assertFalse(self.win._act_resume.isEnabled())
+        self.assertFalse(self.win._act_pause.isEnabled())
+        self.assertFalse(self.win._act_stop.isEnabled())
+
+        # Calling _on_stop_all_seeding keeps or updates action states consistently
+        self.win._on_stop_all_seeding()
+        self.assertTrue(self.win._act_start_seeding.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()

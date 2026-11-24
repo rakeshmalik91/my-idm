@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -2489,6 +2490,9 @@ class SettingsDialog(QDialog):
         self._animepahe_periodic_cb.toggled.connect(
             lambda _on=None: self._update_animepahe_schedule_label()
         )
+        self._animepahe_interval_spin.valueChanged.connect(
+            lambda _val=None: self._update_animepahe_schedule_label()
+        )
 
         ap_layout.addLayout(periodic_row)
 
@@ -4207,8 +4211,8 @@ class SettingsDialog(QDialog):
         # External Tools tab
         self._animepahe_repo_edit.setText(self._external_tools_cfg.animepahe_repo_path)
         self._animepahe_startup_cb.setChecked(self._external_tools_cfg.animepahe_launch_on_startup)
-        self._animepahe_periodic_cb.setChecked(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_interval_spin.setValue(self._external_tools_cfg.animepahe_interval_hours)
+        self._animepahe_periodic_cb.setChecked(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_interval_spin.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
         self._animepahe_interval_lbl.setEnabled(self._external_tools_cfg.animepahe_periodic_run)
         self._update_animepahe_schedule_label()
@@ -4367,9 +4371,11 @@ class SettingsDialog(QDialog):
         label = getattr(self, "_animepahe_schedule_lbl", None)
         if label is None:
             return
-        cfg = self._external_tools_cfg
-        cfg.animepahe_periodic_run = self._animepahe_periodic_cb.isChecked()
-        cfg.animepahe_interval_hours = self._animepahe_interval_spin.value()
+        cfg = dataclasses.replace(
+            self._external_tools_cfg,
+            animepahe_periodic_run=self._animepahe_periodic_cb.isChecked(),
+            animepahe_interval_hours=self._animepahe_interval_spin.value(),
+        )
         try:
             label.setText(describe_animepahe_schedule(cfg))
         except Exception as exc:  # a label must never take the dialog down

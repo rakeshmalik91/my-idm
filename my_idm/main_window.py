@@ -2818,6 +2818,7 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"Paused {count} download{'s' if count > 1 else ''}")
         else:
             self._status_label.setText("No active downloads to pause")
+        self._update_action_states()
 
     def _on_resume_all_downloads(self):
         count = self._manager.resume_all_downloads()
@@ -2825,15 +2826,18 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"Resumed {count} download{'s' if count > 1 else ''}")
         else:
             self._status_label.setText("No paused downloads to resume")
+        self._update_action_states()
 
     def _on_stop(self):
         ids = self._selected_ids()
         if ids:
             self._manager.stop_downloads(ids)
+            self._update_action_states()
 
     def _on_start_seeding(self):
         for did in self._selected_ids():
             self._manager.start_seeding(did)
+        self._update_action_states()
 
     def _on_stop_all_seeding(self):
         count = self._manager.stop_all_seeding()
@@ -2841,6 +2845,7 @@ class MainWindow(QMainWindow):
             self._status_label.setText(f"Stopped {count} seeding torrent{'s' if count > 1 else ''}")
         else:
             self._status_label.setText("No torrents are currently seeding")
+        self._update_action_states()
 
     def _on_resume(self):
         ids = self._selected_ids()
@@ -4865,7 +4870,10 @@ class MainWindow(QMainWindow):
 
     def _on_table_selection_changed(self, *args):
         entry = self._first_selected_entry()
-        self._details_panel.set_download_id(entry.id if entry else None)
+        try:
+            self._details_panel.set_download_id(entry.id if entry else None)
+        except Exception as exc:
+            log.exception("Error updating details panel on selection change: %s", exc)
         self._update_queue_status(entry)
         self._update_action_states()
         self._update_count_label()

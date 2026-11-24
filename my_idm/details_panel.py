@@ -1913,6 +1913,9 @@ class DetailsPanel(QWidget):
         self._ov_referrer.setText("—")
         self._hide_overview_copy_buttons()
 
+        self._files_hash = None
+        self._file_item_map.clear()
+        self._folder_items.clear()
         self._table_files.setRowCount(0)
         self._table_peers.setRowCount(0)
         self._table_trackers.setRowCount(0)
@@ -2153,7 +2156,7 @@ class DetailsPanel(QWidget):
 
         is_torrent = (entry.download_type == "torrent")
         structure_hash = tuple((f.get("index", i), str(f.get("path", ""))) for i, f in enumerate(files))
-        if self._files_hash != structure_hash:
+        if self._files_hash != structure_hash or self._tree_files.topLevelItemCount() == 0:
             self._files_hash = structure_hash
             self._build_files_tree(files, is_torrent)
 
@@ -2274,17 +2277,27 @@ class DetailsPanel(QWidget):
 
     def _get_descendant_file_items(self, item: QTreeWidgetItem) -> list[QTreeWidgetItem]:
         files = []
-        for i in range(item.childCount()):
-            child = item.child(i)
-            data = child.data(0, Qt.ItemDataRole.UserRole) or {}
-            if data.get("is_folder"):
-                files.extend(self._get_descendant_file_items(child))
-            else:
-                files.append(child)
+        try:
+            count = item.childCount()
+        except RuntimeError:
+            return []
+        for i in range(count):
+            try:
+                child = item.child(i)
+                data = child.data(0, Qt.ItemDataRole.UserRole) or {}
+                if data.get("is_folder"):
+                    files.extend(self._get_descendant_file_items(child))
+                else:
+                    files.append(child)
+            except RuntimeError:
+                continue
         return files
 
     def _refresh_folder_aggregates(self, folder_item: QTreeWidgetItem, is_torrent: bool):
-        descendant_files = self._get_descendant_file_items(folder_item)
+        try:
+            descendant_files = self._get_descendant_file_items(folder_item)
+        except RuntimeError:
+            return
         if not descendant_files:
             return
 
@@ -2411,6 +2424,18 @@ class DetailsPanel(QWidget):
             return None
         return item
 
+    def _live_folder_items(self) -> list[QTreeWidgetItem]:
+        """Return all folder items whose underlying C++ QTreeWidgetItem has not been deleted."""
+        live = []
+        for it in self._folder_items:
+            try:
+                it.data(0, Qt.ItemDataRole.UserRole)
+                live.append(it)
+            except RuntimeError:
+                pass
+        self._folder_items = live
+        return live
+
     def _update_file_values(self, files: list[dict], is_torrent: bool):
         # A refresh must never re-enter _on_tree_item_changed. Writing the file
         # data back into the item (setData, setText, setCheckState ...) emits
@@ -2475,7 +2500,7 @@ class DetailsPanel(QWidget):
         finally:
             self._tree_files.blockSignals(False)
 
-        for folder_item in reversed(self._folder_items):
+        for folder_item in reversed(self._live_folder_items()):
             self._refresh_folder_aggregates(folder_item, is_torrent)
 
     def _is_file_downloaded(self, item: QTreeWidgetItem) -> tuple[bool, Optional[Path]]:
@@ -2657,7 +2682,7 @@ class DetailsPanel(QWidget):
                 if f_idx is not None:
                     self._manager.set_torrent_file_priority(self._download_id, f_idx, prio)
 
-            for fld in reversed(self._folder_items):
+            for fld in reversed(self._live_folder_items()):
                 self._refresh_folder_aggregates(fld, is_torrent=True)
         finally:
             self._tree_updating = False
@@ -2718,7 +2743,7 @@ class DetailsPanel(QWidget):
             if "data" in data and isinstance(data["data"], dict):
                 data["data"]["priority"] = prio_val
             self._manager.set_torrent_file_priority(self._download_id, f_idx, prio_val)
-            for fld in reversed(self._folder_items):
+            for fld in reversed(self._live_folder_items()):
                 self._refresh_folder_aggregates(fld, is_torrent=True)
         finally:
             self._tree_updating = False
@@ -2763,7 +2788,7 @@ class DetailsPanel(QWidget):
                 if f_idx is not None:
                     self._manager.set_torrent_file_priority(self._download_id, f_idx, prio_val)
 
-            for fld in reversed(self._folder_items):
+            for fld in reversed(self._live_folder_items()):
                 self._refresh_folder_aggregates(fld, is_torrent=True)
         finally:
             self._tree_updating = False
@@ -2868,7 +2893,7 @@ class DetailsPanel(QWidget):
                     if f_idx is not None:
                         self._manager.set_torrent_file_priority(self._download_id, f_idx, priority_val)
 
-            for fld in reversed(self._folder_items):
+            for fld in reversed(self._live_folder_items()):
                 self._refresh_folder_aggregates(fld, is_torrent=True)
         finally:
             self._tree_updating = False
