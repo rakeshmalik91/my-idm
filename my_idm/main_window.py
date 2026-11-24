@@ -3798,9 +3798,17 @@ class MainWindow(QMainWindow):
             "paused", "stopped", "queued", "error", "file_not_found", "threat_detected", "stalled", "suspended"
         }
 
-        can_resume = has_selection and any(e.status in resumable_statuses for e in selected_entries)
+        can_resume = has_selection and any(
+            e.status in resumable_statuses
+            or (e.status == "completed" and e.total_size > 0 and e.downloaded_size < e.total_size)
+            for e in selected_entries
+        )
         can_pause = has_selection and any(e.status in pausable_statuses for e in selected_entries)
-        can_stop = has_selection and any(e.status in stoppable_statuses for e in selected_entries)
+        can_stop = has_selection and any(
+            e.status in stoppable_statuses
+            or (e.status == "completed" and e.total_size > 0 and e.downloaded_size < e.total_size)
+            for e in selected_entries
+        )
         can_force_start = has_selection and any(e.status in force_startable_statuses for e in selected_entries)
         can_seed = has_selection and any(
             e.download_type == "torrent" and e.status in ("completed", "paused", "stopped")

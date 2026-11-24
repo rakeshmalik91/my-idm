@@ -503,7 +503,7 @@ class DownloadManager(QObject):
     """Coordinates downloads between HTTP/Torrent engines, DB, and GUI."""
 
     # Signals for the GUI
-    progress_updated = Signal(str, int, int, float, float, int, int, float)
+    progress_updated = Signal(str, "qint64", "qint64", float, float, int, int, float)
     # download_id, downloaded, total, speed, eta, seeds, peers, upload_speed
     status_changed = Signal(str, str, str)
     # download_id, status, error_message
@@ -525,7 +525,7 @@ class DownloadManager(QObject):
     tor_status_changed = Signal(str, str)     # status ("connecting"|"connected"|"disconnecting"|"disconnected"|"error"), message
     tor_availability_changed = Signal(bool)  # a Tor SOCKS5 endpoint is reachable
     _tor_probe_result = Signal(bool)          # private: emitted from the probe thread
-    bandwidth_limits_changed = Signal(int, int)  # download_limit, upload_limit
+    bandwidth_limits_changed = Signal("qint64", "qint64")  # download_limit, upload_limit
     external_tools_config_changed = Signal(object)  # ExternalToolsConfig
     animepahe_status_changed = Signal(bool)  # is_running
     animepahe_queue_changed = Signal(int)    # queue_size
@@ -2575,7 +2575,8 @@ class DownloadManager(QObject):
             return
 
         if entry.status == "completed":
-            return
+            if not (entry.total_size > 0 and entry.downloaded_size < entry.total_size):
+                return
 
         if entry.status == "seeding":
             self._starting_downloads.discard(download_id)
@@ -2649,7 +2650,8 @@ class DownloadManager(QObject):
             return
 
         if entry.status == "completed":
-            return
+            if not (entry.total_size > 0 and entry.downloaded_size < entry.total_size):
+                return
 
         if entry.status == "seeding":
             self._starting_downloads.discard(download_id)
@@ -2814,7 +2816,8 @@ class DownloadManager(QObject):
             return
 
         if entry.status == "completed":
-            return
+            if not (entry.total_size > 0 and entry.downloaded_size < entry.total_size):
+                return
 
         if download_id in self._starting_downloads:
             log.warning("Download %s is already starting, skipping duplicate resume", download_id)

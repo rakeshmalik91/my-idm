@@ -2142,6 +2142,9 @@ class DetailsPanel(QWidget):
     def _update_files(self, entry: DownloadEntry):
         files = self._manager.get_download_files(entry.id, entry=entry)
         if not isinstance(files, list) or not files:
+            # If files are already shown for this entry, don't eagerly wipe them during transient reload
+            if self._download_id == entry.id and self._tree_files.topLevelItemCount() > 0:
+                return
             self._files_hash = None
             self._file_item_map.clear()
             self._folder_items.clear()

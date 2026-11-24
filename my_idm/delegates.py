@@ -134,7 +134,7 @@ class ProgressBarDelegate(QStyledItemDelegate):
             super().paint(painter, option, index)
             return
 
-        progress = raw.get("progress", 0)
+        progress = max(0.0, min(100.0, float(raw.get("progress", 0) or 0)))
         status = raw.get("status", "queued")
         if status in ("completed", "seeding"):
             progress = 100.0

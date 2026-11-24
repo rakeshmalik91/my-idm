@@ -2077,6 +2077,8 @@ class DownloadTableModel(QAbstractTableModel):
                         total_seeds: int = 0, total_peers: int = 0):
         if download_id in self._deleting_ids:
             return
+        downloaded = max(0, downloaded)
+        total = max(0, total)
         # Update canonical entry in _all_entries
         for e in self._all_entries:
             if e.id == download_id:
@@ -2727,7 +2729,7 @@ class DownloadTableModel(QAbstractTableModel):
 
         if col == Col.PROGRESS:
             # Return dict for ProgressBarDelegate
-            prog = 100.0 if entry.status in ("completed", "seeding") else entry.progress
+            prog = 100.0 if entry.status in ("completed", "seeding") else max(0.0, min(100.0, entry.progress))
             return {
                 "progress": prog,
                 "status": "deleting" if entry.id in self._deleting_ids else entry.status,

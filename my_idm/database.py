@@ -686,9 +686,9 @@ class DownloadEntry:
     def progress(self) -> float:
         if self.status in ("completed", "seeding"):
             return 100.0
-        if self.total_size <= 0:
+        if self.total_size <= 0 or self.downloaded_size <= 0:
             return 0.0
-        return min(100.0, (self.downloaded_size / self.total_size) * 100.0)
+        return max(0.0, min(100.0, (self.downloaded_size / self.total_size) * 100.0))
 
     @property
     def metadata(self) -> dict:
@@ -2284,7 +2284,7 @@ CREATE TABLE IF NOT EXISTS segments (
                 entry.downloaded_size = entry.total_size
             elif entry.total_size <= 0 and entry.downloaded_size > 0:
                 entry.total_size = entry.downloaded_size
-            elif entry.total_size <= 0 and entry.file_path:
+            if entry.total_size <= 0 and entry.file_path:
                 try:
                     fp = Path(entry.file_path)
                     if fp.exists() and fp.is_file():
