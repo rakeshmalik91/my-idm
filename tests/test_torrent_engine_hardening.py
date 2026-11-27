@@ -2271,6 +2271,81 @@ class TestConcurrentAccess(EngineTestCase):
             self.engine.poll_all()  # must not raise
 
 
+class TestStalledDetectionAndActiveLimits(unittest.TestCase):
+    """Verify stalled detection resets on resume/pause and never fires for paused handles."""
+
+    def setUp(self):
+        self.db = Database(":memory:")
+        self.db.open()
+        self.engine = TorrentEngine(self.db)
+        self.status_events = []
+        self.engine.set_callbacks(
+            lambda *a: None,
+            lambda did, st, err: self.status_events.append((did, st, err)),
+            lambda *a: None,
+        )
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_resume_resets_stalled_timer_and_paused_handle_never_stalls(self):
+        entry = DownloadEntry(
+            id="st-1",
+            url="magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            download_type="torrent",
+            status="paused",
+            total_size=1000,
+            downloaded_size=100,
+        )
+        self.db.add_download(entry)
+
+        h = MagicMock()
+        s = MagicMock()
+        s.state = "downloading"
+        s.paused = False
+        s.is_paused = False
+        s.is_finished = False
+        s.is_seeding = False
+        s.has_metadata = True
+        s.total_wanted = 1000
+        s.total_wanted_done = 100
+        s.download_rate = 0
+        s.upload_rate = 0
+        s.num_seeds = 0
+        s.num_peers = 0
+        s.list_seeds = 0
+        s.list_peers = 0
+        s.progress = 0.1
+        h.status.return_value = s
+        h.is_valid.return_value = True
+        self.engine._handles["st-1"] = h
+
+        # Simulate stale timestamp from an hour before resume
+        self.engine._last_active_time["st-1"] = time.time() - 3600.0
+        self.engine.resume("st-1")
+        self.engine.poll_all()
+
+        # Must still be downloading, not immediately stalled
+        self.assertEqual(self.db.get_download("st-1").status, "downloading")
+
+        # If handle is paused even with old timestamp, poll_all must never mark it stalled
+        s.paused = True
+        s.is_paused = True
+        self.engine._last_active_time["st-1"] = time.time() - 3600.0
+        self.engine.poll_all()
+        self.assertEqual(self.db.get_download("st-1").status, "downloading")
+
+    def test_apply_all_settings_raises_libtorrent_active_limits(self):
+        mock_sess = MagicMock()
+        mock_sess.get_settings.return_value = {"active_downloads": 3, "active_seeds": 5}
+        self.engine._session = mock_sess
+        self.engine._apply_all_settings()
+
+        applied = mock_sess.apply_settings.call_args[0][0]
+        self.assertGreaterEqual(applied["active_downloads"], 10000)
+        self.assertGreaterEqual(applied["active_seeds"], 10000)
+
+
 if __name__ == "__main__":
     unittest.main()
 

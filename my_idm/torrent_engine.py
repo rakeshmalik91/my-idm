@@ -515,6 +515,11 @@ class TorrentEngine:
                 sett["download_rate_limit"] = int(self._network_config.download_limit or 0)
                 sett["upload_rate_limit"] = int(self._network_config.upload_limit or 0)
 
+            # 4. Let My-IDM's DownloadManager._process_queue() govern concurrency rather
+            # than libtorrent's default active_downloads=3 / active_seeds=5 caps.
+            sett["active_downloads"] = 10000
+            sett["active_seeds"] = 10000
+
             self._session.apply_settings(sett)
         except Exception as exc:
             log.warning("Failed to apply network settings to libtorrent: %s", exc)
@@ -985,6 +990,7 @@ class TorrentEngine:
 
     def pause_handle(self, download_id: str):
         """Pause a torrent's libtorrent handle without altering its status in the DB."""
+        self._last_active_time.pop(download_id, None)
         handle = self._handles.get(download_id)
         if handle:
             try:
@@ -1003,6 +1009,7 @@ class TorrentEngine:
                 pass
 
     def pause(self, download_id: str):
+        self._last_active_time.pop(download_id, None)
         handle = self._handles.get(download_id)
         if handle:
             entry = self._db.get_download(download_id) if hasattr(self, "_db") and self._db else None
@@ -1085,6 +1092,7 @@ class TorrentEngine:
     def resume(self, download_id: str):
         handle = self._handles.get(download_id)
         if handle:
+            self._last_active_time[download_id] = time.time()
             try:
                 if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.set_flags(lt.torrent_flags.auto_managed)
@@ -1135,6 +1143,7 @@ class TorrentEngine:
         """Force start torrent by disabling auto-managed queue limits and resuming immediately."""
         handle = self._handles.get(download_id)
         if handle:
+            self._last_active_time[download_id] = time.time()
             try:
                 if _HAS_LIBTORRENT and hasattr(lt, "torrent_flags"):
                     handle.unset_flags(lt.torrent_flags.auto_managed)
@@ -1180,6 +1189,7 @@ class TorrentEngine:
 
     def remove(self, download_id: str, delete_files: bool = False, keep_torrent_cache: bool = False):
         self._recheck_requested.discard(download_id)
+        self._last_active_time.pop(download_id, None)
         handle = self._handles.pop(download_id, None)
         if handle and self._session:
             if delete_files:
@@ -1827,14 +1837,15 @@ class TorrentEngine:
                     if self._status_cb:
                         self._status_cb(download_id, new_status, "")
 
-            # Stalled torrent detection (speed 0 and seeds 0 for > 45s while downloading)
-            if state == "downloading" and status["speed"] == 0 and status["seeds"] == 0:
+            # Stalled torrent detection (speed 0 and seeds 0 for > 45s while actively downloading)
+            is_handle_paused = self._handle_is_paused(handle)
+            if state == "downloading" and not is_handle_paused and status["speed"] == 0 and status["seeds"] == 0:
                 last_act = self._last_active_time.get(download_id, 0)
                 now = time.time()
                 if last_act == 0:
                     self._last_active_time[download_id] = now
                 elif now - last_act > 45.0:
-                    if entry.status not in ("stalled", "paused", "stopped", "completed", "error", "suspended"):
+                    if entry.status not in ("stalled", "paused", "stopped", "completed", "error", "suspended", "queued", "checking", "fetching_metadata"):
                         self._db.update_status(download_id, "stalled")
                         if self._status_cb:
                             self._status_cb(download_id, "stalled", "")
@@ -1842,7 +1853,7 @@ class TorrentEngine:
                             handle.force_reannounce()
                         except Exception:
                             pass
-            elif state == "downloading" and (status["speed"] > 0 or status["seeds"] > 0):
+            elif state == "downloading" and not is_handle_paused and (status["speed"] > 0 or status["seeds"] > 0):
                 self._last_active_time[download_id] = time.time()
                 if entry.status == "stalled":
                     self._db.update_status(download_id, "downloading")
