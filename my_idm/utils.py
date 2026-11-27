@@ -353,7 +353,7 @@ def check_disk_space(
     return shortfall <= 0, free, max(0, shortfall)
 
 
-def unlock_path(file_path: str | Path) -> None:
+def unlock_path(file_path: str | Path, *, collect_gc: bool = True) -> None:
     """Attempt to unlock a file or directory on disk by clearing read-only/system flags and running GC.
 
     On Windows ``os.chmod`` only toggles the read-only attribute, so writing an absolute mode is
@@ -372,7 +372,8 @@ def unlock_path(file_path: str | Path) -> None:
     import gc
     import os
     import stat
-    gc.collect()
+    if collect_gc:
+        gc.collect()
 
     def _unlock_mode(target: str, is_dir: bool) -> int:
         mode = stat.S_IMODE(os.stat(target).st_mode)
@@ -495,9 +496,9 @@ def robust_move_download_files(src: str | Path, dst: str | Path) -> tuple[bool, 
             moved = False
             for attempt in range(5):
                 try:
-                    unlock_path(src_f)
+                    unlock_path(src_f, collect_gc=(attempt > 0))
                     if dst_f.exists():
-                        unlock_path(dst_f)
+                        unlock_path(dst_f, collect_gc=False)
                         dst_f.unlink()
                     shutil.move(str(src_f), str(dst_f))
                     moved = True

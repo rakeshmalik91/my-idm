@@ -971,8 +971,9 @@ class DownloadTableModel(QAbstractTableModel):
         # Queue ids ticked in the Queue column's header filter; None means no filter. Distinct
         # from _queue_scope, which is the toolbar's single-queue selection.
         self._queue_filter: Optional[Set[str]] = None
-        # Download IDs pending paced batch deletion. Rows in this set are dimmed and disabled.
+        # Download IDs pending paced batch deletion or background file move. Rows in these sets are dimmed and disabled.
         self._deleting_ids: set[str] = set()
+        self._moving_ids: set[str] = set()
         # Cached groups for grouped view: list of (sec_id, title, group_entries, hdr_id)
         self._cached_grouped_groups: Optional[list[tuple[str, str, list[DownloadEntry], str]]] = None
         self._cached_name_groups: Optional[dict[str, list[DownloadEntry]]] = None
@@ -1624,6 +1625,7 @@ class DownloadTableModel(QAbstractTableModel):
 
     def remove_entry(self, download_id: str):
         self._deleting_ids.discard(download_id)
+        self._moving_ids.discard(download_id)
         self._all_entries = [e for e in self._all_entries if e.id != download_id]
         if self._grouped_view:
             self._reapply_filter()
@@ -1636,42 +1638,48 @@ class DownloadTableModel(QAbstractTableModel):
         self._rebuild_index()
         self.endRemoveRows()
 
-    def mark_deleting(self, download_ids: Iterable[str]) -> None:
-        """Mark download entries as pending deletion, dimming and disabling them."""
+    def _emit_row_pending_changed(self, download_id: str) -> None:
+        row = self._id_to_row.get(download_id)
+        if row is not None and 0 <= row < len(self._entries):
+            left = self.index(row, 0)
+            right = self.index(row, Col.COUNT - 1)
+            self.dataChanged.emit(
+                left, right,
+                [
+                    Qt.ItemDataRole.DisplayRole,
+                    Qt.ItemDataRole.ForegroundRole,
+                    Qt.ItemDataRole.ToolTipRole,
+                ],
+            )
+
+    def _mark_pending(self, target_set: set[str], download_ids: Iterable[str]) -> None:
         ids = set(download_ids)
         if not ids:
             return
-        self._deleting_ids.update(ids)
+        target_set.update(ids)
         for did in ids:
-            row = self._id_to_row.get(did)
-            if row is not None and 0 <= row < len(self._entries):
-                left = self.index(row, 0)
-                right = self.index(row, Col.COUNT - 1)
-                self.dataChanged.emit(
-                    left, right,
-                    [
-                        Qt.ItemDataRole.DisplayRole,
-                        Qt.ItemDataRole.ForegroundRole,
-                        Qt.ItemDataRole.ToolTipRole,
-                    ],
-                )
+            self._emit_row_pending_changed(did)
+
+    def _unmark_pending(self, target_set: set[str], download_id: str) -> None:
+        if download_id in target_set:
+            target_set.discard(download_id)
+            self._emit_row_pending_changed(download_id)
+
+    def mark_deleting(self, download_ids: Iterable[str]) -> None:
+        """Mark download entries as pending deletion, dimming and disabling them."""
+        self._mark_pending(self._deleting_ids, download_ids)
 
     def unmark_deleting(self, download_id: str) -> None:
         """Unmark a download entry from pending deletion state."""
-        if download_id in self._deleting_ids:
-            self._deleting_ids.discard(download_id)
-            row = self._id_to_row.get(download_id)
-            if row is not None and 0 <= row < len(self._entries):
-                left = self.index(row, 0)
-                right = self.index(row, Col.COUNT - 1)
-                self.dataChanged.emit(
-                    left, right,
-                    [
-                        Qt.ItemDataRole.DisplayRole,
-                        Qt.ItemDataRole.ForegroundRole,
-                        Qt.ItemDataRole.ToolTipRole,
-                    ],
-                )
+        self._unmark_pending(self._deleting_ids, download_id)
+
+    def mark_moving(self, download_ids: Iterable[str]) -> None:
+        """Mark download entries as pending background move, dimming and disabling them."""
+        self._mark_pending(self._moving_ids, download_ids)
+
+    def unmark_moving(self, download_id: str) -> None:
+        """Unmark a download entry from pending move state."""
+        self._unmark_pending(self._moving_ids, download_id)
 
     def is_deleting(self, download_id: str) -> bool:
         """True when the download is queued for paced batch deletion."""
@@ -1681,6 +1689,27 @@ class DownloadTableModel(QAbstractTableModel):
         """True when the entry at visible *row* is queued for deletion."""
         if 0 <= row < len(self._entries):
             return self._entries[row].id in self._deleting_ids
+        return False
+
+    def is_moving(self, download_id: str) -> bool:
+        """True when the download is currently moving on a background worker."""
+        return download_id in self._moving_ids
+
+    def is_moving_row(self, row: int) -> bool:
+        """True when the entry at visible *row* is currently moving."""
+        if 0 <= row < len(self._entries):
+            return self._entries[row].id in self._moving_ids
+        return False
+
+    def is_pending(self, download_id: str) -> bool:
+        """True when the download is queued for deletion or background move."""
+        return download_id in self._deleting_ids or download_id in self._moving_ids
+
+    def is_pending_row(self, row: int) -> bool:
+        """True when the entry at visible *row* is pending deletion or move."""
+        if 0 <= row < len(self._entries):
+            did = self._entries[row].id
+            return did in self._deleting_ids or did in self._moving_ids
         return False
 
     # -- sorting -------------------------------------------------------------
@@ -2622,7 +2651,7 @@ class DownloadTableModel(QAbstractTableModel):
             return self._display_data(entry, col)
 
         if role == Qt.ItemDataRole.ForegroundRole:
-            if entry.id in self._deleting_ids:
+            if entry.id in self._deleting_ids or entry.id in self._moving_ids:
                 return QColor(Colors.TEXT_DISABLED)
             if col == Col.STATUS:
                 if self.is_tor_active_for(entry):
@@ -2674,7 +2703,7 @@ class DownloadTableModel(QAbstractTableModel):
             entry = self._entries[index.row()]
             if getattr(entry, "is_section_header", False):
                 return Qt.ItemFlag.ItemIsEnabled
-            if entry.id in self._deleting_ids:
+            if entry.id in self._deleting_ids or entry.id in self._moving_ids:
                 return Qt.ItemFlag.NoItemFlags
         return (
             Qt.ItemFlag.ItemIsEnabled
@@ -2701,7 +2730,7 @@ class DownloadTableModel(QAbstractTableModel):
         if col == Col.QUEUE:
             if getattr(entry, "is_section_header", False) or entry.status not in ACTIVE_QUEUE_STATUSES:
                 return ""
-            if entry.id in self._deleting_ids:
+            if entry.id in self._deleting_ids or entry.id in self._moving_ids:
                 return ""
             row = self._id_to_row.get(entry.id)
             if row is None:
@@ -2730,14 +2759,22 @@ class DownloadTableModel(QAbstractTableModel):
         if col == Col.PROGRESS:
             # Return dict for ProgressBarDelegate
             prog = 100.0 if entry.status in ("completed", "seeding") else max(0.0, min(100.0, entry.progress))
+            if entry.id in self._deleting_ids:
+                display_status = "deleting"
+            elif entry.id in self._moving_ids:
+                display_status = "moving"
+            else:
+                display_status = entry.status
             return {
                 "progress": prog,
-                "status": "deleting" if entry.id in self._deleting_ids else entry.status,
+                "status": display_status,
             }
 
         if col == Col.STATUS:
             if entry.id in self._deleting_ids:
                 return "Deleting..."
+            if entry.id in self._moving_ids:
+                return "Moving..."
             if entry.status == "threat_detected":
                 return "Threat Detected ⚠"
             if entry.status == "scanning":
@@ -2760,7 +2797,7 @@ class DownloadTableModel(QAbstractTableModel):
             return s
 
         if col == Col.SPEED:
-            if entry.id in self._deleting_ids:
+            if entry.id in self._deleting_ids or entry.id in self._moving_ids:
                 return "—"
             if entry.download_type == "torrent":
                 if entry.status in ("downloading", "seeding"):
@@ -2773,7 +2810,7 @@ class DownloadTableModel(QAbstractTableModel):
             return "—"
 
         if col == Col.ETA:
-            if entry.id in self._deleting_ids:
+            if entry.id in self._deleting_ids or entry.id in self._moving_ids:
                 return "—"
             if entry.status == "downloading":
                 return _format_eta(entry.eta_seconds)

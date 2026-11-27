@@ -142,7 +142,7 @@ class ProgressBarDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        is_disabled = not bool(option.state & QStyle.StateFlag.State_Enabled) or status == "deleting"
+        is_disabled = not bool(option.state & QStyle.StateFlag.State_Enabled) or status in ("deleting", "moving")
         if is_disabled:
             painter.setOpacity(0.35)
 
@@ -186,6 +186,8 @@ class ProgressBarDelegate(QStyledItemDelegate):
             text = f"{progress:.1f}% (Stalled)"
         elif status == "deleting":
             text = "Deleting..."
+        elif status == "moving":
+            text = "Moving..."
         else:
             text = f"{progress:.1f}%"
         painter.setPen(QPen(QColor(Colors.TEXT)))

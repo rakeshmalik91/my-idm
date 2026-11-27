@@ -1343,6 +1343,30 @@ class TestModelFiltering(unittest.TestCase):
         self.model.mark_deleting(["1"])
         self.assertEqual(self.model.get_aggregate_speeds(), (1500.0, 0.0))
 
+    def test_mark_moving_dims_disables_and_unmarks_cleanly(self):
+        """Marking a download as moving disables its row and shows Moving..., and unmarking restores it."""
+        e1 = _make_entry("1", "huge_archive.iso", status="completed")
+        self.model.load_entries([e1])
+        self.assertFalse(self.model.is_moving("1"))
+        self.assertFalse(self.model.is_pending("1"))
+
+        self.model.mark_moving(["1"])
+        self.assertTrue(self.model.is_moving("1"))
+        self.assertTrue(self.model.is_pending("1"))
+
+        row = self.model.row_for_id("1")
+        idx_status = self.model.index(row, Col.STATUS)
+        idx_prog = self.model.index(row, Col.PROGRESS)
+        self.assertEqual(self.model.flags(idx_status), Qt.ItemFlag.NoItemFlags)
+        self.assertEqual(self.model.data(idx_status, Qt.ItemDataRole.DisplayRole), "Moving...")
+        self.assertEqual(self.model.data(idx_prog, Qt.ItemDataRole.DisplayRole)["status"], "moving")
+
+        self.model.unmark_moving("1")
+        self.assertFalse(self.model.is_moving("1"))
+        self.assertFalse(self.model.is_pending("1"))
+        self.assertNotEqual(self.model.flags(idx_status), Qt.ItemFlag.NoItemFlags)
+        self.assertEqual(self.model.data(idx_status, Qt.ItemDataRole.DisplayRole), "Completed")
+
     def test_multiselect_queue_filter_and_signals(self):
         """Model supports filtering multiple queues and emits queue_filter_changed signal."""
         e1 = _make_entry("1", "one.zip", queue_id="q1")

@@ -1248,6 +1248,52 @@ class TestMainWindowTableAndInteractions(_MainWindowTestCase):
         idx_status = self.win._model.index(row1, Col.STATUS)
         self.assertEqual(self.win._model.data(idx_status, Qt.ItemDataRole.DisplayRole), "Deleting...")
 
+    def test_move_action_marks_moving_and_dispatches_to_background_pool(self):
+        """_on_move marks rows as moving, dispatches to move_downloads, and unmarks on completion/failure."""
+        import tempfile
+        from PySide6.QtWidgets import QDialog
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        src_dir = Path(tmp.name)
+        e1 = DownloadEntry(
+            id="move-1",
+            url="https://example.com/huge100gb.iso",
+            filename="huge100gb.iso",
+            save_path=str(src_dir),
+            file_path=str(src_dir / "huge100gb.iso"),
+            status="completed",
+        )
+        self.db.add_download(e1)
+        self.win._load_history()
+        self.win._table.selectAll()
+        self.assertEqual(self.win._selected_ids(), ["move-1"])
+
+        target_dir = str(src_dir / "moved")
+        with patch("my_idm.main_window.MoveDownloadDialog.exec", return_value=QDialog.DialogCode.Accepted), \
+             patch("my_idm.main_window.MoveDownloadDialog.new_path", new_callable=lambda: property(lambda _s: target_dir)), \
+             patch.object(self.manager, "move_downloads") as mock_move:
+            self.win._on_move()
+            mock_move.assert_called_once_with(["move-1"], target_dir)
+
+        self.assertTrue(self.win._model.is_moving("move-1"))
+        self.assertEqual(len(self.win._selected_ids()), 0)
+        row = self.win._model.row_for_id("move-1")
+        self.assertEqual(self.win._model.flags(self.win._model.index(row, 0)), Qt.ItemFlag.NoItemFlags)
+        self.assertEqual(
+            self.win._model.data(self.win._model.index(row, Col.STATUS), Qt.ItemDataRole.DisplayRole),
+            "Moving...",
+        )
+
+        # Completion unmarks and refreshes
+        self.win._on_download_moved("move-1")
+        self.assertFalse(self.win._model.is_moving("move-1"))
+
+        # Failure unmarks and shows error in status bar
+        self.win._model.mark_moving(["move-1"])
+        self.win._on_download_move_failed("move-1", "Disk full")
+        self.assertFalse(self.win._model.is_moving("move-1"))
+        self.assertIn("Disk full", self.win._status_label.text())
+
     def test_bandwidth_allocation_context_menu_and_action(self):
         """Bandwidth allocation updates entry metadata and calls engine."""
         entry = DownloadEntry(

@@ -1903,6 +1903,60 @@ https://vault-99.owocdn.top/mp4/hash123?file=Raw_Hash.mp4 | {dest} | referer=htt
         # Source directory cleaned up
         self.assertFalse(src_dir.exists())
 
+    def test_move_downloads_runs_in_background_and_emits_signals(self):
+        """move_downloads executes on the move-job-pool thread without blocking caller and emits signals."""
+        import threading
+
+        src_dir = Path(self.tmp_dir.name) / "mv_src"
+        dst_dir = Path(self.tmp_dir.name) / "mv_dst"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        src_file = src_dir / "bigfile.bin"
+        src_file.write_bytes(b"payload")
+
+        entry = DownloadEntry(
+            id="bg_move_1",
+            url="https://example.com/bigfile.bin",
+            filename="bigfile.bin",
+            save_path=str(src_dir),
+            file_path=str(src_file),
+            status="completed",
+            total_size=7,
+            downloaded_size=7,
+        )
+        self.db.add_download(entry)
+
+        moved_ids = []
+        failed_events = []
+        worker_threads = []
+        from PySide6.QtCore import Qt
+        self.manager.download_moved.connect(
+            lambda did: moved_ids.append(did), Qt.ConnectionType.DirectConnection
+        )
+        self.manager.download_move_failed.connect(
+            lambda did, err: failed_events.append((did, err)), Qt.ConnectionType.DirectConnection
+        )
+
+        orig_move = self.manager.move_download
+        def spy_move(did, path):
+            worker_threads.append(threading.current_thread().name)
+            return orig_move(did, path)
+
+        with patch.object(self.manager, "move_download", side_effect=spy_move):
+            self.manager.move_downloads(["bg_move_1"], str(dst_dir))
+            self.assertTrue(self.manager.wait_move_jobs(timeout=5.0))
+
+        self.assertEqual(worker_threads, ["move-job-pool"])
+        self.assertEqual(moved_ids, ["bg_move_1"])
+        self.assertEqual(failed_events, [])
+        self.assertTrue((dst_dir / "bigfile.bin").exists())
+        self.assertFalse(src_file.exists())
+
+        # Failure emits download_move_failed
+        self.manager.move_download("missing-id", str(dst_dir))
+        self.assertEqual(len(failed_events), 1)
+        self.assertEqual(failed_events[0][0], "missing-id")
+
     def test_stop_all_seeding(self):
         """stop_all_seeding stops all active seeding torrents and returns the count."""
         e1 = DownloadEntry(

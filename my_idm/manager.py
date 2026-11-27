@@ -499,6 +499,80 @@ class StatusJobPool:
             log.warning("Unknown status job action: %s", action)
 
 
+class MoveJobPool:
+    """Dedicated background worker for serializing large file/folder moves.
+
+    Runs independently of ``StatusJobPool`` so moving large payloads (e.g. 100 GB
+    across drives) never freezes the GUI thread or blocks pause/resume/delete
+    operations on other downloads.
+    """
+
+    def __init__(self, manager: "DownloadManager"):
+        self._manager = manager
+        self._queue: queue.Queue = queue.Queue()
+        self._pending_lock = threading.Lock()
+        self._pending_ids: set[str] = set()
+        self._stopped = False
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="move-job-pool",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def submit(self, download_id: str, new_save_path: str) -> bool:
+        """Queue *download_id* for background move unless already queued/in-flight."""
+        if self._stopped or not download_id:
+            return False
+        with self._pending_lock:
+            if download_id in self._pending_ids:
+                return False
+            self._pending_ids.add(download_id)
+        self._queue.put((download_id, new_save_path))
+        return True
+
+    def submit_batch(self, download_ids: list[str], new_save_path: str) -> None:
+        """Queue multiple downloads for sequential background move."""
+        for did in download_ids:
+            self.submit(did, new_save_path)
+
+    def wait_idle(self, timeout: float = 5.0) -> bool:
+        """Wait until all queued moves finish."""
+        start = time.time()
+        while not self._queue.empty():
+            if time.time() - start > timeout:
+                return False
+            time.sleep(0.01)
+        self._queue.join()
+        return True
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Signal the worker to stop after the current item."""
+        self._stopped = True
+        if self._worker.is_alive():
+            self._worker.join(timeout=timeout)
+
+    def _worker_loop(self) -> None:
+        while not self._stopped:
+            try:
+                download_id, new_save_path = self._queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            try:
+                self._manager.move_download(download_id, new_save_path)
+            except Exception as exc:
+                log.error("MoveJobPool error moving %s: %s", download_id, exc)
+                try:
+                    self._manager.download_move_failed.emit(download_id, str(exc))
+                except Exception:
+                    pass
+            finally:
+                with self._pending_lock:
+                    self._pending_ids.discard(download_id)
+                self._queue.task_done()
+
+
 class DownloadManager(QObject):
     """Coordinates downloads between HTTP/Torrent engines, DB, and GUI."""
 
@@ -511,6 +585,7 @@ class DownloadManager(QObject):
     download_added = Signal(str)          # download_id
     download_removed = Signal(str)        # download_id
     download_moved = Signal(str)          # download_id
+    download_move_failed = Signal(str, str)  # download_id, error_message
     download_renamed = Signal(str, str)   # download_id, new_filename
     download_url_updated = Signal(str, str)  # download_id, new_url
     general_config_changed = Signal(object)   # GeneralConfig
@@ -668,6 +743,8 @@ class DownloadManager(QObject):
 
         # Status operations worker pool
         self._status_job_pool = StatusJobPool(self)
+        # Dedicated background worker for potentially slow cross-drive file moves
+        self._move_job_pool = MoveJobPool(self)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -845,6 +922,7 @@ class DownloadManager(QObject):
         # the database, so it must be finished before the caller can close it.
         self._torrent_watcher.stop()
         self._status_job_pool.stop()
+        self._move_job_pool.stop()
 
         # A timer callback that was already executing survives .stop(), so a
         # poll can still be mid-write when this method returns. Join it before
@@ -3072,9 +3150,18 @@ class DownloadManager(QObject):
 
     # -- move ----------------------------------------------------------------
 
+    def move_downloads(self, download_ids: list[str], new_save_path: str):
+        """Queue one or more downloads to be moved on a background worker thread."""
+        self._move_job_pool.submit_batch(download_ids, new_save_path)
+
+    def wait_move_jobs(self, timeout: float = 5.0) -> bool:
+        """Wait for all pending background move jobs to finish."""
+        return self._move_job_pool.wait_idle(timeout=timeout)
+
     def move_download(self, download_id: str, new_save_path: str):
         entry = self._db.get_download(download_id)
         if not entry:
+            self.download_move_failed.emit(download_id, "Download not found.")
             return
 
         new_save_path = normalize_path(new_save_path)
@@ -3112,6 +3199,7 @@ class DownloadManager(QObject):
                             handle.resume()
                         except Exception:
                             pass
+                    self.download_move_failed.emit(download_id, err)
                     return
 
             self._torrent.move_storage(download_id, new_save_path)
@@ -3144,6 +3232,7 @@ class DownloadManager(QObject):
                 success, err = robust_move_download_files(old_file_path, new_file_path)
                 if not success:
                     log.error("Failed to move HTTP file for %s: %s", download_id, err)
+                    self.download_move_failed.emit(download_id, err)
                     return
 
             self._db.move_download(

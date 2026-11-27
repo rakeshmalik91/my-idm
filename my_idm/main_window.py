@@ -2468,6 +2468,7 @@ class MainWindow(QMainWindow):
         self._manager.torrent_folder_captured.connect(self._on_watched_folder_torrents)
         self._manager.download_removed.connect(self._on_download_removed)
         self._manager.download_moved.connect(self._on_download_moved)
+        self._manager.download_move_failed.connect(self._on_download_move_failed)
         self._manager.checksum_computed.connect(self._on_checksum_computed)
         self._manager.download_renamed.connect(self._on_download_renamed)
         self._manager.download_url_updated.connect(self._on_download_url_updated)
@@ -2546,7 +2547,7 @@ class MainWindow(QMainWindow):
             sm.clearSelection()
             first_index = None
             for did in wanted:
-                if self._model.is_deleting(did):
+                if self._model.is_pending(did):
                     continue
                 row = self._model.row_for_id(did)
                 if row is None or row < 0:
@@ -2888,10 +2889,19 @@ class MainWindow(QMainWindow):
         entry = self._first_selected_entry()
         if not entry:
             return
+        ids = self._selected_ids()
+        if not ids:
+            return
         dlg = MoveDownloadDialog(entry.save_path, self, self._manager._db)
         if dlg.exec() == MoveDownloadDialog.DialogCode.Accepted:
-            for did in self._selected_ids():
-                self._manager.move_download(did, dlg.new_path)
+            self._model.mark_moving(ids)
+            self._table.clearSelection()
+            self._update_action_states()
+            count = len(ids)
+            self._status_label.setText(
+                f"Moving {count} download{'s' if count > 1 else ''} in background..."
+            )
+            self._manager.move_downloads(ids, dlg.new_path)
 
     def _on_recheck(self):
         ids = self._selected_ids()
@@ -3036,7 +3046,7 @@ class MainWindow(QMainWindow):
                 self._manager.db.set_ui_state(f"grouped_{sec_id}_collapsed", is_col)
             self._apply_table_spans()
             return
-        if self._model.is_deleting_row(index.row()):
+        if self._model.is_pending_row(index.row()):
             return
         self._on_open_file()
 
@@ -3452,7 +3462,7 @@ class MainWindow(QMainWindow):
                 sec_menu.exec(self._table.viewport().mapToGlobal(pos))
                 return
 
-            if self._model.is_deleting_row(idx.row()):
+            if self._model.is_pending_row(idx.row()):
                 return
 
             sm = self._table.selectionModel()
@@ -3951,10 +3961,22 @@ class MainWindow(QMainWindow):
         self._update_action_states()
 
     def _on_download_moved(self, download_id: str):
+        self._model.unmark_moving(download_id)
         entry = self._manager.get_entry(download_id)
         if entry:
             self._model.refresh_entry(download_id, entry)
-            self._update_action_states()
+            self._status_label.setText(f"Moved {entry.filename} to {entry.save_path}")
+        if not self._details_panel.isHidden() and self._details_panel.current_download_id == download_id:
+            self._details_panel.refresh()
+        self._update_action_states()
+
+    def _on_download_move_failed(self, download_id: str, error_msg: str):
+        self._model.unmark_moving(download_id)
+        entry = self._manager.get_entry(download_id)
+        if entry:
+            self._model.refresh_entry(download_id, entry)
+        self._status_label.setText(f"Move failed: {error_msg}")
+        self._update_action_states()
 
     def _on_download_renamed(self, download_id: str, new_filename: str):
         entry = self._manager.get_entry(download_id)
