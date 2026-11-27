@@ -2153,36 +2153,9 @@ class DownloadTableModel(QAbstractTableModel):
         
         row = self._id_to_row.get(download_id)
         
-        # If in grouped view mode, update the section header's progress bar
+        # If in grouped view mode, update the section header's progress bar & counts
         if self._grouped_view and entry_obj:
-            section_id = self._entry_section_id(entry_obj)
-            if section_id:
-                hdr_row = self._find_section_header_row(section_id)
-                if hdr_row is not None:
-                    # Recalculate section active progress from _all_entries (includes collapsed sections)
-                    active_entries = [
-                        e for e in self._all_entries
-                        if self._entry_section_id(e) == section_id and e.status in ACTIVE_QUEUE_STATUSES
-                    ]
-                    # Calculate consolidated progress
-                    if active_entries:
-                        total_size = sum(e.total_size for e in active_entries if e.total_size > 0)
-                        downloaded_size = sum(e.downloaded_size for e in active_entries if e.downloaded_size > 0)
-                        if total_size > 0:
-                            progress = min(100.0, (downloaded_size / total_size) * 100.0)
-                        else:
-                            progress = 0.0
-                    else:
-                        progress = 0.0
-                    
-                    hdr_entry = self._entries[hdr_row]
-                    if hdr_entry.section_id == section_id:
-                        hdr_entry.section_active_progress = progress
-                    
-                    # Emit dataChanged for the section header row
-                    hdr_left = self.index(hdr_row, Col.QUEUE)
-                    hdr_right = self.index(hdr_row, Col.SEEDS_PEERS)
-                    self.dataChanged.emit(hdr_left, hdr_right, [Qt.ItemDataRole.DisplayRole])
+            self._refresh_section_header(self._entry_section_id(entry_obj))
 
         # Emit change for the entry row if visible
         if row is not None:
@@ -2199,6 +2172,37 @@ class DownloadTableModel(QAbstractTableModel):
                 self.index(row, Col.SEEDING_STARTED_AT),
                 [Qt.ItemDataRole.DisplayRole],
             )
+
+    def _refresh_section_header(self, section_id: Optional[str]) -> None:
+        """Recalculate a grouped section header's live counts/progress and emit dataChanged."""
+        if not self._grouped_view or not section_id:
+            return
+        hdr_row = self._find_section_header_row(section_id)
+        if hdr_row is None:
+            return
+        sec_entries = [
+            e for e in self._all_entries
+            if self._entry_section_id(e) == section_id and self._matches_filter(e)
+        ]
+        active_entries = [e for e in sec_entries if e.status in ACTIVE_QUEUE_STATUSES]
+        seeding_count = sum(1 for e in sec_entries if e.status == "seeding")
+        progress = 0.0
+        if active_entries:
+            total_size = sum(e.total_size for e in active_entries if e.total_size > 0)
+            downloaded_size = sum(e.downloaded_size for e in active_entries if e.downloaded_size > 0)
+            if total_size > 0:
+                progress = min(100.0, (downloaded_size / total_size) * 100.0)
+
+        hdr_entry = self._entries[hdr_row]
+        if hdr_entry.section_id == section_id:
+            hdr_entry.section_count = len(sec_entries)
+            hdr_entry.section_active_count = len(active_entries)
+            hdr_entry.section_seeding_count = seeding_count
+            hdr_entry.section_active_progress = progress
+
+        hdr_left = self.index(hdr_row, 0)
+        hdr_right = self.index(hdr_row, Col.COUNT - 1)
+        self.dataChanged.emit(hdr_left, hdr_right, [Qt.ItemDataRole.DisplayRole])
 
     def _entry_section_id(self, entry: Optional[DownloadEntry]) -> Optional[str]:
         if not entry:
@@ -2302,6 +2306,7 @@ class DownloadTableModel(QAbstractTableModel):
                         Qt.ItemDataRole.ToolTipRole,
                     ],
                 )
+            self._refresh_section_header(new_sec)
             return False
 
         row = self._id_to_row.get(download_id)
@@ -2507,6 +2512,7 @@ class DownloadTableModel(QAbstractTableModel):
                         Qt.ItemDataRole.ToolTipRole,
                     ],
                 )
+            self._refresh_section_header(new_sec)
             return False
 
         row = self._id_to_row.get(download_id)

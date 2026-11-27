@@ -1367,6 +1367,38 @@ class TestModelFiltering(unittest.TestCase):
         self.assertNotEqual(self.model.flags(idx_status), Qt.ItemFlag.NoItemFlags)
         self.assertEqual(self.model.data(idx_status, Qt.ItemDataRole.DisplayRole), "Completed")
 
+    def test_grouped_header_seeding_count_updates_on_status_change(self):
+        """In date/type/name grouped modes, stopping seeding updates section_seeding_count on the header."""
+        from datetime import datetime
+        now_iso = datetime.now().astimezone().isoformat()
+        entries = [
+            _make_entry(f"s{i}", f"torrent_{i}.iso", status="seeding", added_at=now_iso)
+            for i in range(4)
+        ]
+        self.model.set_grouped_view(True, mode="date")
+        self.model.load_entries(entries)
+
+        hdr_rows = self.model.get_section_header_row_indices()
+        self.assertTrue(hdr_rows)
+        hdr = self.model.get_section_header(hdr_rows[0])
+        self.assertEqual(hdr.section_seeding_count, 4)
+
+        changed_rows = []
+        self.model.dataChanged.connect(lambda tl, br, _r=None: changed_rows.append((tl.row(), br.row())))
+
+        for i in range(4):
+            self.model.update_status(f"s{i}", "completed")
+
+        hdr = self.model.get_section_header(hdr_rows[0])
+        self.assertEqual(hdr.section_seeding_count, 0)
+        self.assertIn((hdr_rows[0], hdr_rows[0]), changed_rows)
+
+        # Also verify refresh_entry updates section_seeding_count
+        refreshed = _make_entry("s0", "torrent_0.iso", status="seeding", added_at=now_iso)
+        self.model.refresh_entry("s0", refreshed)
+        hdr = self.model.get_section_header(hdr_rows[0])
+        self.assertEqual(hdr.section_seeding_count, 1)
+
     def test_multiselect_queue_filter_and_signals(self):
         """Model supports filtering multiple queues and emits queue_filter_changed signal."""
         e1 = _make_entry("1", "one.zip", queue_id="q1")
