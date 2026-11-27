@@ -2919,6 +2919,7 @@ class TestHeaderViewAndFiltering(_MainWindowTestCase):
         info = captured_dialogs[0].informativeText()
         self.assertIn("Co-authored with", info)
         for credit in (
+            "Gemini 4 Hydrogen",
             "Gemini 3.8 Flash",
             "Space Bunny Alpha",
             "Claude 4.6 Opus",

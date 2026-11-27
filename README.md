@@ -143,11 +143,11 @@ machine while they run.
 
 This project is actively developed with AI:
 - **Models & Assistants:** 
-  - Gemini 3.8 Flash, Claude 4.6 Opus (via Antigravity IDE)
+  - Gemini 4 Hydrogen, Gemini 3.8 Flash, Claude 4.6 Opus (via Antigravity IDE)
   - Spece Bunny Alpha, Nvidia Nemotron 3 Ultra, Poolside Laguna S 2.1, Stepfun Step 5 (via Kilo Code plugin for Antigravity IDE)
 
 ---
 
 ## 📄 License
 
-GPL-3.0-or-later
+This project is licensed under the [MIT License](LICENSE).

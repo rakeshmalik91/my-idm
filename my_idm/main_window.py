@@ -3318,7 +3318,7 @@ class MainWindow(QMainWindow):
             "<p style='color: #8fa0b5; margin-top: 14px; margin-bottom: 0px;'>"
             "<b>Co-authored with</b></p>"
             "<p style='color: #8fa0b5; margin-top: 3px; margin-bottom: 0px; margin-left: 8px;'>"
-            "•&nbsp; Gemini 3.8 Flash, Claude 4.6 Opus "
+            "•&nbsp; Gemini 4 Hydrogen, Gemini 3.8 Flash, Claude 4.6 Opus "
             "<span style='color: #6e7681;'>(via Antigravity IDE)</span></p>"
             "<p style='color: #8fa0b5; margin-top: 3px; margin-bottom: 0px; margin-left: 8px;'>"
             "•&nbsp; Space Bunny Alpha, Nvidia Nemotron 3 Ultra, Poolside Laguna S 2.1, Setpfun Step 5 "
